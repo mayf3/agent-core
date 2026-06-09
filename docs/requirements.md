@@ -425,7 +425,32 @@ It currently covers:
 
 The secret scan is a guardrail, not a complete DLP system.
 
-## 15. Milestones
+## 15. Future External Capabilities
+
+These capabilities are intentionally remembered here, but they must stay outside
+`core` unless this document is explicitly changed.
+
+| Capability | Why it matters | Required shape |
+|---|---|---|
+| Workflow graph | Repeatable multi-step processes | Orchestrator plugin over run/event APIs |
+| Multi-agent coordination | Delegation, review, parallel work | Orchestrator plugin that creates multiple runs |
+| Eval and regression replay | Catch harness and prompt regressions | External service consuming events and artifacts |
+| Dashboard | Inspect runs, approvals, traces, health | External UI over state/query APIs |
+| Long-term memory | Cross-session recall and user preference | Capability plugin with explicit context injection |
+| Session search | Find past runs, messages, tool outputs | External index over state records |
+| Heavy sandbox | Strong isolation and replay | Sandbox adapter, not Docker logic in core |
+| Deployment runner | Ship generated services safely | Capability plugin with approval gates |
+| Browser automation | Web inspection and action | Tool plugin with policy and output limits |
+| Scheduler/cron | Background and recurring work | Transport or orchestrator plugin creating runs |
+| Feishu advanced features | Cards, files, docs, approvals | Feishu plugin extensions, not core fields |
+| Additional chat channels | Telegram, Slack, web chat | Transport plugins normalizing messages |
+| Additional model providers | Vendor and local model support | Provider plugins behind one interface |
+| Knowledge connectors | Docs, repos, databases, SaaS APIs | Capability plugins or external services |
+
+The rule is simple: if the feature composes runs, events, tools, approvals, or
+providers, it belongs outside `core`.
+
+## 16. Milestones
 
 | Phase | Scope | Deliverables |
 |---|---|---|
