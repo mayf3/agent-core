@@ -43,7 +43,7 @@ export async function runTool(input = {}) {
     return requestToolApproval(context, run.runId, tool, input.args, policy, started);
   }
 
-  return executeAllowedTool(context, run.runId, tool, input.args, started);
+  return executeAllowedTool(context, run.runId, tool, input.args, started, input.manageRunStatus !== false);
 }
 
 export async function resumeApproval(input = {}) {
@@ -98,12 +98,14 @@ async function requestToolApproval(context, runId, tool, args, policy, started) 
   });
 }
 
-async function executeAllowedTool(context, runId, tool, args, started) {
+async function executeAllowedTool(context, runId, tool, args, started, manageRunStatus) {
   await appendEvent(context.stateDir, createEvent("tool.called", { runId, toolName: tool.name }));
   try {
     const output = await tool.execute(args, context);
     const event = await appendEvent(context.stateDir, createEvent("tool.completed", { runId, toolName: tool.name }));
-    await updateRunStatus(context.stateDir, runId, "ok", { resultSummary: `${tool.name} completed` });
+    if (manageRunStatus) {
+      await updateRunStatus(context.stateDir, runId, "ok", { resultSummary: `${tool.name} completed` });
+    }
     return okEnvelope({
       runId,
       result: { type: "tool-result", toolName: tool.name, output },

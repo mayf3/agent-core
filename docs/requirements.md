@@ -295,7 +295,26 @@ The kernel records enough to answer:
 Do not store full sensitive content by default. Prefer summaries, hashes, ids,
 and redacted payloads unless debug mode is explicitly enabled.
 
-## 11. Engineering Constraints
+## 11. Harness Self-Modification Path
+
+Agent Core should support MOSS-style harness improvement without making the
+kernel large.
+
+The allowed path is:
+
+```text
+agent identifies harness gap
+  -> proposes or writes workspace code with fs.write
+  -> runs checks with shell.exec
+  -> pauses for approval on writes/exec
+  -> records artifacts, events, model calls, and tool calls
+  -> lands through branch/PR/merge workflow
+```
+
+The agent may modify `agent-core` source, but it must not bypass tool policy,
+approval, checks, or repository workflow.
+
+## 12. Engineering Constraints
 
 Size limits:
 
@@ -342,7 +361,7 @@ Can this be represented as events plus state?
 
 If yes, it stays outside `core`.
 
-## 12. Security and Privacy
+## 13. Security and Privacy
 
 Treat the repository as public by default.
 
@@ -377,7 +396,7 @@ Default logs store summaries, hashes, ids, and redacted previews. Full prompts,
 tool outputs, and external messages require explicit debug mode and must stay
 ignored by git.
 
-## 13. Repository Workflow
+## 14. Repository Workflow
 
 The repository uses PR-first history after bootstrap.
 
@@ -408,7 +427,7 @@ next step
 Direct commits to `main` are acceptable only for local bootstrap before the
 remote exists.
 
-## 14. Checks
+## 15. Checks
 
 The first check command is:
 
@@ -425,7 +444,7 @@ It currently covers:
 
 The secret scan is a guardrail, not a complete DLP system.
 
-## 15. Future External Capabilities
+## 16. Future External Capabilities
 
 These capabilities are intentionally remembered here, but they must stay outside
 `core` unless this document is explicitly changed.
@@ -450,7 +469,7 @@ These capabilities are intentionally remembered here, but they must stay outside
 The rule is simple: if the feature composes runs, events, tools, approvals, or
 providers, it belongs outside `core`.
 
-## 16. Milestones
+## 17. Milestones
 
 | Phase | Scope | Deliverables |
 |---|---|---|

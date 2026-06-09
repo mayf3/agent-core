@@ -1,5 +1,7 @@
 #!/usr/bin/env node
+import { runAgentTurn } from "../../agent/src/index.mjs";
 import { readApprovals, runDoctor } from "../../core/src/index.mjs";
+import { createOpenAiCompatibleProvider } from "../../providers/src/index.mjs";
 import { createToolRegistry, resumeApproval, runTool } from "../../tools/src/index.mjs";
 
 const args = process.argv.slice(2);
@@ -8,6 +10,21 @@ const command = args[0] || "help";
 try {
   if (command === "doctor") {
     const envelope = await runDoctor(parseOptions(args.slice(1)));
+    writeOutput(envelope, args.includes("--json"));
+    process.exit(envelope.ok ? 0 : 1);
+  }
+  if (command === "ask") {
+    const options = parseOptions(args.slice(1));
+    const envelope = await runAgentTurn({
+      text: options.text || positionalText(args.slice(1)),
+      provider: createOpenAiCompatibleProvider(options),
+      stateDir: options.stateDir,
+      workspace: options.workspace,
+      cwd: options.cwd,
+      network: options.network,
+      timeoutMs: options.timeoutMs,
+      maxOutputBytes: options.maxOutputBytes,
+    });
     writeOutput(envelope, args.includes("--json"));
     process.exit(envelope.ok ? 0 : 1);
   }
@@ -89,6 +106,10 @@ function writeOutput(envelope, asJson) {
     console.log(JSON.stringify(envelope.result.output, null, 2));
     return;
   }
+  if (envelope.result?.type === "agent-answer") {
+    console.log(envelope.result.answer);
+    return;
+  }
   if (envelope.status === "needs_approval") {
     console.log(`approval required: ${envelope.result.approval.approvalId}`);
     console.log(envelope.result.approval.reason);
@@ -117,6 +138,7 @@ function printHelp() {
 
 Usage:
   agent-core doctor [--json] [--state-dir <path>]
+  agent-core ask --text <task> [--json] [--state-dir <path>] [--workspace <path>]
   agent-core tools [--json]
   agent-core tool <name> [--json] [--state-dir <path>] [--workspace <path>] [--key <value>]
   agent-core approvals [--json] [--state-dir <path>] [--status pending]
@@ -131,4 +153,17 @@ function toolArgs(options) {
 
 function toCamel(value) {
   return value.replaceAll(/-([a-z])/g, (_, char) => char.toUpperCase());
+}
+
+function positionalText(values) {
+  const parts = [];
+  for (let index = 0; index < values.length; index += 1) {
+    const item = values[index];
+    if (item.startsWith("--")) {
+      index += item === "--json" || item === "--approve" || item === "--reject" ? 0 : 1;
+      continue;
+    }
+    parts.push(item);
+  }
+  return parts.join(" ");
 }
