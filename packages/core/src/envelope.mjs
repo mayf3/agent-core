@@ -29,10 +29,10 @@ export function createRunRecord(input = {}, now = new Date()) {
   };
 }
 
-export function okEnvelope({ runId, result = null, events = [], usage = {} } = {}) {
+export function okEnvelope({ runId, status = "ok", result = null, events = [], usage = {} } = {}) {
   return {
     ok: true,
-    status: "ok",
+    status,
     runId: runId || null,
     result,
     events,

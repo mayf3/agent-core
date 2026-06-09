@@ -258,10 +258,10 @@ search.grep
 shell.exec
 http.fetch
 state.read
-approval.request
 ```
 
-Each tool must declare permission level and output limits.
+Each tool must declare permission level and output limits. Approval is a core API
+used by tool dispatch, not a model-visible built-in tool in M2.
 
 ## 9. Minimal Agent Loop
 
