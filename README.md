@@ -41,7 +41,15 @@ programs that call the kernel through stable APIs.
 ## Documents
 
 - [Requirements and Architecture](docs/requirements.md)
+- [Design Doc](docs/design-doc.html)
 - [Design Review](docs/design-review.html)
+
+## Current Commands
+
+```bash
+pnpm check
+pnpm agent-core doctor --json
+```
 
 ## Key Principle
 

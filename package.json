@@ -5,9 +5,11 @@
   "type": "module",
   "packageManager": "pnpm@10.10.0",
   "scripts": {
-    "check": "node scripts/check-structure.mjs && node scripts/check-local-secret-leaks.mjs",
+    "agent-core": "node packages/cli/src/index.mjs",
+    "check": "node scripts/check-structure.mjs && node scripts/check-local-secret-leaks.mjs && node --test",
     "check:structure": "node scripts/check-structure.mjs",
-    "check:secrets": "node scripts/check-local-secret-leaks.mjs"
+    "check:secrets": "node scripts/check-local-secret-leaks.mjs",
+    "test": "node --test"
   },
   "engines": {
     "node": ">=20.11"

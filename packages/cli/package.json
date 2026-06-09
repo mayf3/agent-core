@@ -1,0 +1,9 @@
+{
+  "name": "@agent-core/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "agent-core": "./src/index.mjs"
+  }
+}
