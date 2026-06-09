@@ -49,6 +49,9 @@ programs that call the kernel through stable APIs.
 ```bash
 pnpm check
 pnpm agent-core doctor --json
+pnpm agent-core tools --json
+pnpm agent-core tool shell.exec --cmd "printf hi" --json
+pnpm agent-core resume <approvalId> --approve --json
 ```
 
 ## Key Principle
