@@ -1,19 +1,18 @@
-# Agent Core Requirements and Architecture
+# Agent Core Requirements
+
+This is the single source of truth for Agent Core requirements, architecture,
+engineering constraints, security rules, and repository workflow.
 
 ## 1. Goal
 
-Build a minimal agent kernel that can run local tasks, expose safe tools, record
-enough harness facts for debugging, and let external capabilities grow around it.
-
-The design follows two ideas from recent agent-harness work:
-
-- Reliability often comes from the harness around the model, not only the model.
-- A harness should stay inspectable and removable. As models and tasks change,
-  external loops should be easy to add, test, replace, or delete.
+Build a minimal local-first agent kernel that can run tasks, expose safe tools,
+record enough harness facts for debugging and replay, and let external
+capabilities grow around it. Most product features should be plugins, external
+services, scripts, or agent-written programs.
 
 ## 2. Product Shape
 
-Agent Core should feel like a local daemon with a thin protocol surface:
+Agent Core behaves like a local daemon with a thin protocol surface:
 
 ```text
 user message
@@ -27,13 +26,13 @@ user message
   -> transport reply
 ```
 
-The first user path is:
+The first user-visible path is Feishu:
 
 ```text
 Feishu message from phone
   -> Feishu plugin
   -> local agent run
-  -> status updates
+  -> progress updates
   -> final Feishu reply
 ```
 
@@ -41,56 +40,31 @@ Feishu message from phone
 
 Do not put these into the kernel:
 
-- multi-agent orchestration
-- workflow DAG engine
-- graphical dashboard
-- long-term memory graph
-- eval platform
-- plugin marketplace
-- automatic deployment pipeline
-- large built-in integration catalog
+- orchestration: multi-agent routing, workflow DAGs, eval platforms
+- product surfaces: dashboards, marketplaces, large integration catalogs
+- heavy infrastructure: deployment pipelines, memory graphs, Docker or remote sandbox orchestration
 
-Each may exist later as a plugin, external service, or agent-written program.
+Each may exist later as a plugin, external adapter, local service, or
+agent-written program.
 
 ## 4. Kernel Primitives
-
-The core package should expose only these primitives.
 
 ### 4.1 Run
 
 A run is one unit of work.
 
-Required fields:
-
 ```text
-runId
-source
-userId
-sessionId
-status
-inputSummary
-createdAt
-updatedAt
-resultSummary
+runId, source, userId, sessionId, status, inputSummary, createdAt, updatedAt, resultSummary
 ```
 
 ### 4.2 Event
 
 Every meaningful action is an append-only event.
 
-Common event types:
-
 ```text
-run.started
-run.completed
-run.failed
-model.called
-model.completed
-tool.called
-tool.completed
-approval.requested
-approval.decided
-artifact.created
+run.started, run.completed, run.failed, model.called, model.completed,
+tool.called, tool.completed, approval.requested, approval.decided,
+artifact.created, plugin.loaded, policy.denied
 ```
 
 ### 4.3 Tool Registry
@@ -98,13 +72,7 @@ artifact.created
 Tools declare:
 
 ```text
-name
-description
-inputSchema
-permission
-timeoutMs
-maxOutputBytes
-handler
+name, description, inputSchema, permission, timeoutMs, maxOutputBytes, handler
 ```
 
 The model only sees tools allowed by policy for the current run.
@@ -117,42 +85,27 @@ Providers implement one interface:
 generate(messages, tools, options) -> assistant message or tool calls
 ```
 
-Version 1 should support OpenAI-compatible APIs through environment config.
+Version 1 supports OpenAI-compatible APIs through local environment config.
 
 ### 4.5 State Store
 
-The first store may be JSONL or SQLite. The required logical records are:
+The first store may be JSONL or SQLite. Required logical records:
 
 ```text
-runs
-events
-model_calls
-tool_calls
-approvals
-artifacts
-context_snapshots
+runs, events, model_calls, tool_calls, approvals, artifacts, context_snapshots
 ```
 
 ### 4.6 Approval Gate
 
 Dangerous, persistent, or high-impact actions pause the run and request approval.
 
-Approval records include:
-
 ```text
-approvalId
-runId
-requestedAction
-riskLevel
-reason
-policyVersion
-decision
-decidedBy
+approvalId, runId, requestedAction, riskLevel, reason, policyVersion, decision, decidedBy
 ```
 
 ### 4.7 Plugin Registry
 
-Plugins declare capabilities in a manifest and register them through a narrow API.
+Plugins declare capabilities in a manifest and register through a narrow API.
 
 Plugin types:
 
@@ -163,60 +116,21 @@ capability     tools, search, browser, deployment, memory
 orchestrator   workflow, multi-agent, planner/evaluator loops
 ```
 
-### 4.8 Execution Boundary and Sandbox
-
-Sandboxing is valuable, but the first version should not start with a large
-container orchestration system inside the kernel.
-
-Version 1 boundary:
-
-```text
-workspace allowlist
-cwd containment
-command timeout
-stdout and stderr cap
-environment redaction
-network policy flag
-approval for write, execute, and dangerous actions
-```
-
-The kernel records enough execution metadata for replay:
-
-```text
-workspace
-cwd
-command
-tool version
-env profile
-timeout
-allowed paths
-policy decision
-exit code
-output hash
-```
-
-Later sandbox adapters can be external capabilities:
-
-```text
-local process sandbox
-Docker sandbox
-remote sandbox service
-ephemeral worktree
-record/replay runner
-```
-
-The kernel should expose a sandbox provider interface, but concrete sandbox
-implementations should live outside `core`.
-
 ## 5. Dynamic External Capability Model
 
-Yes, this architecture can support the MOSS-like pattern where many features are
-implemented outside the kernel and iterated by agents themselves.
+This architecture supports MOSS-like source-level evolution without turning the
+kernel into a large platform.
 
-The key is that dynamic loading does not mean arbitrary unreviewed code inside
-`core`. It means controlled capability discovery and activation.
+Dynamic loading means controlled discovery and activation:
 
-### 5.1 External Loop Contract
+```text
+discover manifest
+  -> validate schema
+  -> show capabilities
+  -> approve or enable
+  -> register
+  -> record event
+```
 
 An external loop can:
 
@@ -236,40 +150,7 @@ An external loop cannot:
 - silently expand model-visible permissions
 - load secrets without explicit config
 
-### 5.2 Plugin Loading Stages
-
-Version 1 should use explicit loading:
-
-```text
-discover manifest
-  -> validate schema
-  -> show capabilities
-  -> require enable or approval
-  -> register tools/providers/transports
-```
-
-Dynamic stages can grow carefully:
-
-```text
-v0: load trusted local plugins at startup
-v1: enable or disable out-of-process plugins without restarting
-v2: hot reload trusted development plugins
-```
-
-Untrusted or multi-language capabilities should run out of process through one of:
-
-```text
-child process protocol
-HTTP local service
-MCP server
-message queue
-```
-
-### 5.3 Agent-Written Extensions
-
-The agent may write scripts, services, workflows, or plugins in the workspace.
-
-Activation flow:
+Agent-written extensions follow this path:
 
 ```text
 agent writes extension
@@ -280,8 +161,14 @@ agent writes extension
   -> capability becomes available
 ```
 
-This gives source-level evolution without turning the kernel into a large
-platform.
+Untrusted or multi-language capabilities should run out of process through:
+
+```text
+child process protocol
+HTTP local service
+MCP server
+message queue
+```
 
 ## 6. Feishu Version 1
 
@@ -308,10 +195,58 @@ Initial commands:
 /runs
 ```
 
-The Feishu plugin should translate Feishu events into generic core events. The
-core should not know Feishu-specific message shapes.
+The Feishu plugin translates Feishu events into generic core events. The core
+must not know Feishu-specific message shapes.
 
-## 7. Built-In Tools
+Feishu secrets stay in local environment variables or a local secret store. They
+must never be committed.
+
+## 7. Sandbox Strategy
+
+Sandboxing is important, but a heavy sandbox system inside the kernel would make
+version 1 too large.
+
+Version 1 uses a lightweight execution boundary:
+
+```text
+workspace allowlist
+cwd containment
+command timeout
+stdout and stderr cap
+environment redaction
+network policy flag
+approval for write, execute, and dangerous actions
+```
+
+The kernel records enough metadata for later replay:
+
+```text
+workspace
+cwd
+command
+tool version
+env profile
+timeout
+allowed paths
+policy decision
+exit code
+output hash
+```
+
+Heavier sandboxes are external adapters:
+
+```text
+local process sandbox
+Docker sandbox
+remote sandbox service
+ephemeral worktree
+record/replay runner
+```
+
+The kernel exposes a sandbox provider interface only when a real adapter needs
+it. Docker orchestration and replay infrastructure stay outside `core`.
+
+## 8. Built-In Tools
 
 Version 1 built-ins:
 
@@ -328,7 +263,7 @@ approval.request
 
 Each tool must declare permission level and output limits.
 
-## 8. Minimal Agent Loop
+## 9. Minimal Agent Loop
 
 Version 1 supports one agent loop:
 
@@ -342,9 +277,9 @@ build context
 ```
 
 No multi-agent orchestration is required in the kernel. A multi-agent system is
-just an orchestrator plugin that creates and observes multiple runs.
+an orchestrator plugin that creates and observes multiple runs.
 
-## 9. Harness Records
+## 10. Harness Records
 
 The kernel records enough to answer:
 
@@ -357,51 +292,146 @@ The kernel records enough to answer:
 - Why did the run fail or pause?
 - What should an external eval or regression test replay?
 
-Do not store full sensitive content by default. Prefer summaries, hashes, and
-redacted payloads unless debug mode is explicitly enabled.
+Do not store full sensitive content by default. Prefer summaries, hashes, ids,
+and redacted payloads unless debug mode is explicitly enabled.
 
-## 10. Milestones
+## 11. Engineering Constraints
 
-### M0: Documentation and Project Skeleton
+Size limits:
 
-- README
-- requirements document
-- engineering constraints
-- pnpm workspace
-- package boundaries
+```text
+single source file: <= 500 lines
+single directory: <= 20 files
+general directory depth: <= 4 levels
+Node.js workspace directory depth: <= 6 levels
+```
 
-### M1: Kernel Records
+Directory rule:
 
-- run store
-- event store
-- envelope
-- state path
-- doctor command
+```text
+each directory represents one concept family
+```
 
-### M2: Tools and Approval
+Planned package responsibilities:
 
-- built-in tools
-- policy decisions
-- approval pause and resume
-- audit records
+```text
+packages/core       run, event, state, envelope, approval, registry
+packages/tools      built-in tools and policy helpers
+packages/agent      single agent loop and context assembly
+packages/providers  model provider adapters
+packages/plugins    transport and capability plugins
+packages/cli        command-line access layer
+```
 
-### M3: Model and Agent Loop
+Dependency rules:
 
-- OpenAI-compatible provider
-- single-agent loop
-- tool call dispatch
-- transcript and context snapshot
+- `core` must not import `cli`, `agent`, or concrete plugins.
+- `agent` must call tools only through the tool registry.
+- plugins must register capabilities through the plugin API.
+- transport plugins must translate external messages into generic core events.
+- provider adapters must not know about Feishu, CLI, or workflow engines.
 
-### M4: Feishu Plugin
+Before adding anything to `core`, ask:
 
-- Feishu receive and send
-- session mapping
-- mobile approval commands
-- progress updates
+```text
+Can this be a plugin?
+Can this be an external process?
+Can this be a tool?
+Can this be represented as events plus state?
+```
 
-### M5: External Extension Loop
+If yes, it stays outside `core`.
 
-- plugin manifest
-- out-of-process capability adapter
-- event subscription
-- agent-written extension approval flow
+## 12. Security and Privacy
+
+Treat the repository as public by default.
+
+Never commit:
+
+- API keys
+- Feishu app secrets
+- access tokens
+- private keys
+- `.env` files
+- local run state
+- logs containing prompts, tool outputs, or user data
+- production config with real credentials
+
+Allowed records:
+
+```text
+FEISHU_APP_ID is configured
+OPENAI_BASE_URL is configured
+provider=openai-compatible
+```
+
+Forbidden records:
+
+```text
+FEISHU_APP_SECRET=...
+OPENAI_API_KEY=...
+Authorization: Bearer ...
+```
+
+Default logs store summaries, hashes, ids, and redacted previews. Full prompts,
+tool outputs, and external messages require explicit debug mode and must stay
+ignored by git.
+
+## 13. Repository Workflow
+
+The repository uses PR-first history after bootstrap.
+
+```text
+create branch
+  -> make changes
+  -> run pnpm check
+  -> commit
+  -> push branch
+  -> open PR
+  -> merge PR
+```
+
+Reviews are optional for now, but PRs are required for traceability once a remote
+repository exists.
+
+Each PR records:
+
+```text
+problem
+decision
+files changed
+checks run
+known risks
+next step
+```
+
+Direct commits to `main` are acceptable only for local bootstrap before the
+remote exists.
+
+## 14. Checks
+
+The first check command is:
+
+```text
+pnpm check
+```
+
+It currently covers:
+
+- file line limits
+- directory file count
+- directory depth
+- basic local secret pattern scan
+
+The secret scan is a guardrail, not a complete DLP system.
+
+## 15. Milestones
+
+| Phase | Scope | Deliverables |
+|---|---|---|
+| M0 | Documentation and skeleton | README, single requirements document, design review HTML, `pnpm check`, git repo |
+| M1 | Kernel records | run store, event store, envelope, state path, doctor command |
+| M2 | Tools, sandbox boundary, approval | built-in tools, lightweight execution boundary, policy decisions, pause/resume, audit records |
+| M3 | Model and agent loop | OpenAI-compatible provider, single-agent loop, tool call dispatch, transcript, context snapshot |
+| M4 | Feishu plugin | receive/send, session mapping, mobile approval commands, progress updates |
+| M5 | External extension loop | plugin manifest, out-of-process adapter, event subscription, agent-written extension approval flow |
