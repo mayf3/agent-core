@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { runAgentTurn } from "../../agent/src/index.mjs";
 import { readApprovals, runDoctor } from "../../core/src/index.mjs";
+import { buildFeishuConfig, describeFeishuReadiness } from "../../feishu/src/index.mjs";
 import { createOpenAiCompatibleProvider } from "../../providers/src/index.mjs";
 import { createToolRegistry, resumeApproval, runTool } from "../../tools/src/index.mjs";
 
@@ -12,6 +13,11 @@ try {
     const envelope = await runDoctor(parseOptions(args.slice(1)));
     writeOutput(envelope, args.includes("--json"));
     process.exit(envelope.ok ? 0 : 1);
+  }
+  if (command === "feishu-doctor") {
+    const config = buildFeishuConfig();
+    writeOutput({ ok: true, status: "ok", result: { type: "feishu-doctor", readiness: describeFeishuReadiness(config) } }, args.includes("--json"));
+    process.exit(0);
   }
   if (command === "ask") {
     const options = parseOptions(args.slice(1));
@@ -139,6 +145,7 @@ function printHelp() {
 Usage:
   agent-core doctor [--json] [--state-dir <path>]
   agent-core ask --text <task> [--json] [--state-dir <path>] [--workspace <path>]
+  agent-core feishu-doctor [--json]
   agent-core tools [--json]
   agent-core tool <name> [--json] [--state-dir <path>] [--workspace <path>] [--key <value>]
   agent-core approvals [--json] [--state-dir <path>] [--status pending]
