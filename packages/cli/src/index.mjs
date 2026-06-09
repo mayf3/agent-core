@@ -4,7 +4,9 @@ import { readApprovals, runDoctor } from "../../core/src/index.mjs";
 import { buildFeishuConfig, describeFeishuReadiness } from "../../feishu/src/index.mjs";
 import { createOpenAiCompatibleProvider } from "../../providers/src/index.mjs";
 import { createToolRegistry, resumeApproval, runTool } from "../../tools/src/index.mjs";
+import { loadLocalEnv } from "./env.mjs";
 
+loadLocalEnv();
 const args = process.argv.slice(2);
 const command = args[0] || "help";
 
