@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Agent Core Design Doc</title>
+  <style>
+    :root{--bg:#f6f7f9;--panel:#fff;--text:#20242a;--muted:#667085;--line:#d8dee8;--blue:#2457d6;--green:#13795b;--amber:#a15c00}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+    .shell{display:grid;grid-template-columns:250px 1fr;min-height:100vh}.nav{position:sticky;top:0;height:100vh;padding:24px 18px;background:#111827;color:#f9fafb;overflow:auto}
+    .nav h1{font-size:18px;margin:0 0 14px}.nav a{display:block;color:#d1d5db;text-decoration:none;padding:7px 8px;border-radius:6px}.nav a:hover{background:#243044;color:#fff}
+    main{padding:28px;max-width:1180px}.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:18px;margin:0 0 18px}
+    h2{font-size:22px;margin:0 0 12px}h3{font-size:16px;margin:18px 0 8px}p{margin:8px 0}.muted{color:var(--muted)}.ok{color:var(--green)}.warn{color:var(--amber)}
+    table{width:100%;border-collapse:collapse;background:#fff}th,td{border:1px solid var(--line);padding:8px;text-align:left;vertical-align:top}th{background:#f1f4f8}
+    .diagram{border:1px solid var(--line);background:#fbfcfe;border-radius:8px;padding:12px;overflow:auto}.row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.box{border:1px solid #b7c2d6;background:#fff;border-radius:7px;padding:9px 11px;min-width:130px;text-align:center}.core{border-color:var(--blue);box-shadow:inset 0 0 0 1px var(--blue)}.arrow{color:var(--muted);font-weight:700}
+    .code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:#f3f4f6;border:1px solid var(--line);border-radius:6px;padding:8px;white-space:pre-wrap}
+    @media(max-width:760px){.shell{grid-template-columns:1fr}.nav{position:relative;height:auto}main{padding:16px}}
+  </style>
+</head>
+<body>
+<div class="shell">
+  <aside class="nav">
+    <h1>Design Doc</h1>
+    <a href="#intent">设计意图</a>
+    <a href="#scope">M1 范围</a>
+    <a href="#architecture">架构</a>
+    <a href="#records">记录模型</a>
+    <a href="#flow">流程</a>
+    <a href="#constraints">约束</a>
+    <a href="#phases">阶段</a>
+    <a href="#review">评审结论</a>
+  </aside>
+  <main>
+    <section id="intent" class="card">
+      <h2>设计意图</h2>
+      <p>Agent Core 是一个薄内核：负责 run、event、state、registry、approval 这些稳定原语。飞书、workflow、多 agent、dashboard、重沙盒、eval 都是外部能力。</p>
+      <p class="muted">目标不是做一个大平台，而是给 Agent 自己写外部程序和服务留下可靠的挂载点。</p>
+    </section>
+
+    <section id="scope" class="card">
+      <h2>M1 范围</h2>
+      <table><tr><th>交付</th><th>说明</th><th>状态</th></tr>
+        <tr><td>envelope</td><td>统一成功、失败、事件、usage 结构</td><td class="ok">本阶段实现</td></tr>
+        <tr><td>state path</td><td>解析本地状态目录，默认 `.agent-core/state`</td><td class="ok">本阶段实现</td></tr>
+        <tr><td>run/event store</td><td>JSONL append-only 记录</td><td class="ok">本阶段实现</td></tr>
+        <tr><td>doctor CLI</td><td>检查 Node、cwd、state、git、结构配置</td><td class="ok">本阶段实现</td></tr>
+        <tr><td>agent/tool/Feishu</td><td>不进入 M1，后续阶段接入</td><td class="warn">外置或后续</td></tr>
+      </table>
+    </section>
+
+    <section id="architecture" class="card">
+      <h2>架构</h2>
+      <p>这个图说明当前实现边界。</p>
+      <div class="diagram row">
+        <div class="box">CLI</div><span class="arrow">-></span><div class="box core">core</div><span class="arrow">-></span><div class="box">state JSONL</div>
+        <div class="box">future Feishu</div><span class="arrow">-></span><div class="box core">core API</div><span class="arrow"><-</span><div class="box">future plugins</div>
+      </div>
+      <p class="muted">依赖方向：`core` 不依赖 CLI、Feishu、agent 或具体插件。</p>
+    </section>
+
+    <section id="records" class="card">
+      <h2>记录模型</h2>
+      <table><tr><th>文件</th><th>内容</th><th>用途</th></tr>
+        <tr><td>runs.jsonl</td><td>runId、status、source、summary、timestamps</td><td>恢复和查询任务</td></tr>
+        <tr><td>events.jsonl</td><td>eventId、runId、type、timestamp、payload</td><td>回放和诊断</td></tr>
+      </table>
+      <div class="code">createRunRecord({ source, sessionId, inputSummary })
+appendEvent(stateDir, createEvent("run.started", { runId }))</div>
+    </section>
+
+    <section id="flow" class="card">
+      <h2>流程</h2>
+      <div class="diagram row">
+        <div class="box">doctor</div><span class="arrow">-></span><div class="box">resolve state dir</div><span class="arrow">-></span><div class="box">ensure dirs</div><span class="arrow">-></span><div class="box">return envelope</div>
+      </div>
+      <p>后续 `run`、`tool`、`approval` 都沿用同样的 envelope 和 event 记录方式。</p>
+    </section>
+
+    <section id="constraints" class="card">
+      <h2>约束</h2>
+      <ul>
+        <li>单个手写文件不超过 500 行。</li>
+        <li>单目录不超过 20 个文件。</li>
+        <li>Node.js workspace 深度不超过 6 层。</li>
+        <li>不要提交 secret、`.env`、本地 state 或原始敏感日志。</li>
+      </ul>
+    </section>
+
+    <section id="phases" class="card">
+      <h2>阶段</h2>
+      <table><tr><th>阶段</th><th>重点</th><th>用户感知</th></tr>
+        <tr><td>M1</td><td>记录和 doctor</td><td>已实现：本地 CLI 可诊断</td></tr>
+        <tr><td>M2</td><td>工具、轻沙盒、审批</td><td>危险动作会暂停</td></tr>
+        <tr><td>M3</td><td>模型和单 agent loop</td><td>自然语言驱动本地任务</td></tr>
+        <tr><td>M4</td><td>飞书插件</td><td>手机上推动 Agent 干活</td></tr>
+      </table>
+    </section>
+
+    <section id="review" class="card">
+      <h2>评审结论</h2>
+      <p><strong>通过开工。</strong> M1 足够小，不会把外部功能塞进内核；记录模型也为后续 Feishu、工具审批、sandbox adapter 和 eval 回放留下了可接入的事实层。</p>
+      <p class="muted">未执行独立 subagent 审查：当前工具规则要求只有用户明确要求委派时才能调用。</p>
+    </section>
+  </main>
+</div>
+</body>
+</html>
