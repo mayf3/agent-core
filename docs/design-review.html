@@ -51,7 +51,7 @@
     <section id="status" class="card">
       <h2>阶段状态</h2>
       <table><tr><th>阶段</th><th>目标</th><th>状态</th><th>用户可感知点</th></tr>
-        <tr><td>M0 文档与治理</td><td>README、需求、约束、安全、PR 流程、HTML 评审</td><td class="ok">进行中</td><td>能看到架构和阶段计划</td></tr>
+        <tr><td>M0 文档与治理</td><td>README、单一需求文档、检查脚本、HTML 评审</td><td class="ok">进行中</td><td>能看到架构和阶段计划</td></tr>
         <tr><td>M1 Kernel Records</td><td>runs、events、envelope、state、doctor</td><td>未开始</td><td>本地能创建和查询 run</td></tr>
         <tr><td>M2 Tools + Approval</td><td>fs/shell/http/state 工具，策略和审批</td><td>未开始</td><td>危险动作会暂停等待确认</td></tr>
         <tr><td>M3 Agent Loop</td><td>OpenAI-compatible provider，单 agent 工具循环</td><td>未开始</td><td>CLI 能让 agent 读写和执行受控任务</td></tr>
@@ -161,11 +161,11 @@
       <h2>目录与行数</h2>
       <p>当前没有超过 500 行的文件；HTML 报告本身也需纳入检查。</p>
       <table><tr><th>路径</th><th>行数</th><th>用途</th><th>评价</th></tr>
-        <tr><td>README.md</td><td>约 55</td><td>入口说明</td><td class="ok">清晰</td></tr>
-        <tr><td>docs/requirements.md</td><td>约 410</td><td>需求和架构</td><td class="warn">接近 450 时拆分</td></tr>
-        <tr><td>docs/engineering-constraints.md</td><td>约 180</td><td>工程约束</td><td class="ok">清晰</td></tr>
-        <tr><td>SECURITY.md</td><td>约 70</td><td>安全隐私</td><td class="ok">必要</td></tr>
-        <tr><td>CONTRIBUTING.md</td><td>约 55</td><td>PR 流程</td><td class="ok">必要</td></tr>
+        <tr><td>README.md</td><td>约 50</td><td>入口说明</td><td class="ok">清晰</td></tr>
+        <tr><td>docs/requirements.md</td><td>437</td><td>需求、架构、约束、安全、PR 流程</td><td class="ok">单一来源，仍低于 450</td></tr>
+        <tr><td>docs/design-review.html</td><td>约 200</td><td>可视化架构评审</td><td class="ok">可直接打开</td></tr>
+        <tr><td>scripts/check-structure.mjs</td><td>约 60</td><td>结构红线检查</td><td class="ok">必要</td></tr>
+        <tr><td>scripts/check-local-secret-leaks.mjs</td><td>约 70</td><td>基础 secret 扫描</td><td class="ok">必要</td></tr>
       </table>
       <p class="muted">目录直接文件数量和深度当前均未触线。`scripts/` 已加入结构检查。</p>
     </section>

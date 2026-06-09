@@ -41,10 +41,7 @@ programs that call the kernel through stable APIs.
 ## Documents
 
 - [Requirements and Architecture](docs/requirements.md)
-- [Engineering Constraints](docs/engineering-constraints.md)
-- [Repository Governance](docs/repository-governance.md)
-- [Security and Privacy](SECURITY.md)
-- [Contributing](CONTRIBUTING.md)
+- [Design Review](docs/design-review.html)
 
 ## Key Principle
 
