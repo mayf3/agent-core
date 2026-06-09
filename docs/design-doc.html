@@ -22,7 +22,7 @@
   <aside class="nav">
     <h1>Design Doc</h1>
     <a href="#intent">设计意图</a>
-    <a href="#scope">M1 范围</a>
+    <a href="#scope">当前范围</a>
     <a href="#architecture">架构</a>
     <a href="#records">记录模型</a>
     <a href="#flow">流程</a>
@@ -38,7 +38,7 @@
     </section>
 
     <section id="scope" class="card">
-      <h2>M1 范围</h2>
+      <h2>当前范围</h2>
       <table><tr><th>交付</th><th>说明</th><th>状态</th></tr>
         <tr><td>envelope</td><td>统一成功、失败、事件、usage 结构</td><td class="ok">本阶段实现</td></tr>
         <tr><td>state path</td><td>解析本地状态目录，默认 `.agent-core/state`</td><td class="ok">本阶段实现</td></tr>
@@ -46,7 +46,8 @@
         <tr><td>doctor CLI</td><td>检查 Node、cwd、state、git、结构配置</td><td class="ok">本阶段实现</td></tr>
         <tr><td>tools/approval</td><td>已进入 M2：内置工具、policy、approval resume</td><td class="ok">已实现</td></tr>
         <tr><td>agent loop</td><td>已进入 M3：provider、tool loop、transcript</td><td class="ok">已实现</td></tr>
-        <tr><td>Feishu</td><td>不进入 M3，后续阶段接入</td><td class="warn">外置或后续</td></tr>
+        <tr><td>Feishu Echo</td><td>标准化、policy、去重、回复注入点</td><td class="ok">已实现</td></tr>
+        <tr><td>Feishu Agent Reply</td><td>chat-only agent loop、友好错误、回复 receipt</td><td class="ok">已实现</td></tr>
       </table>
     </section>
 
@@ -55,7 +56,7 @@
       <p>这个图说明当前实现边界。</p>
       <div class="diagram row">
         <div class="box">CLI</div><span class="arrow">-></span><div class="box core">core</div><span class="arrow">-></span><div class="box">state JSONL</div>
-        <div class="box">future Feishu</div><span class="arrow">-></span><div class="box core">core API</div><span class="arrow"><-</span><div class="box">future plugins</div>
+        <div class="box">Feishu</div><span class="arrow">-></span><div class="box core">agent loop</div><span class="arrow"><-</span><div class="box">future plugins</div>
       </div>
       <p class="muted">依赖方向：`core` 不依赖 CLI、Feishu、agent 或具体插件。</p>
     </section>
@@ -94,13 +95,15 @@ appendEvent(stateDir, createEvent("run.started", { runId }))</div>
         <tr><td>M1</td><td>记录和 doctor</td><td>已实现：本地 CLI 可诊断</td></tr>
         <tr><td>M2</td><td>工具、轻沙盒、审批</td><td>已实现：执行/写入会暂停并可 resume</td></tr>
         <tr><td>M3</td><td>模型和单 agent loop</td><td>已实现：自然语言可驱动受控工具循环</td></tr>
-        <tr><td>M4</td><td>飞书插件</td><td>手机上推动 Agent 干活</td></tr>
+        <tr><td>M4a</td><td>飞书 Echo</td><td>已实现：飞书事件可过滤、去重、回复</td></tr>
+        <tr><td>M4b</td><td>飞书 LLM Reply</td><td>已实现：chat-only 模型回复</td></tr>
+        <tr><td>M4c</td><td>持久飞书运行时</td><td>下一步：inbox/outbox 和恢复</td></tr>
       </table>
     </section>
 
     <section id="review" class="card">
       <h2>评审结论</h2>
-      <p><strong>继续保持薄实现。</strong> M4a Feishu Echo 已完成测试核心；下一阶段接真实飞书长连接和 chat-only LLM reply。</p>
+      <p><strong>继续保持薄实现。</strong> M4b 已完成 chat-only 飞书模型回复；下一阶段补持久 inbox/outbox 和长连接进程。</p>
       <p>长期协议记录在 Architecture RFC；当前实现只做真实阶段已经证明必要的机制。</p>
       <p class="muted">未执行独立 subagent 审查：当前工具规则要求只有用户明确要求委派时才能调用。</p>
     </section>
