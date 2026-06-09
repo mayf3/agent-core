@@ -1,7 +1,8 @@
 #!/usr/bin/env node
+import { readFile } from "node:fs/promises";
 import { runAgentTurn } from "../../agent/src/index.mjs";
 import { readApprovals, runDoctor } from "../../core/src/index.mjs";
-import { buildFeishuConfig, describeFeishuReadiness } from "../../feishu/src/index.mjs";
+import { buildFeishuConfig, describeFeishuReadiness, handleFeishuAgentEvent } from "../../feishu/src/index.mjs";
 import { createOpenAiCompatibleProvider } from "../../providers/src/index.mjs";
 import { createToolRegistry, resumeApproval, runTool } from "../../tools/src/index.mjs";
 import { loadLocalEnv } from "./env.mjs";
@@ -20,6 +21,16 @@ try {
     const config = buildFeishuConfig();
     writeOutput({ ok: true, status: "ok", result: { type: "feishu-doctor", readiness: describeFeishuReadiness(config) } }, args.includes("--json"));
     process.exit(0);
+  }
+  if (command === "feishu-agent") {
+    const options = parseOptions(args.slice(1));
+    const raw = await readJsonFile(options.eventFile);
+    const envelope = await handleFeishuAgentEvent(raw, {
+      ...options,
+      provider: createOpenAiCompatibleProvider(options),
+    });
+    writeOutput(envelope, args.includes("--json"));
+    process.exit(envelope.ok ? 0 : 1);
   }
   if (command === "ask") {
     const options = parseOptions(args.slice(1));
@@ -118,6 +129,10 @@ function writeOutput(envelope, asJson) {
     console.log(envelope.result.answer);
     return;
   }
+  if (envelope.result?.type === "feishu-agent-reply" || envelope.result?.type === "feishu-echo") {
+    console.log(envelope.result.reply.text);
+    return;
+  }
   if (envelope.status === "needs_approval") {
     console.log(`approval required: ${envelope.result.approval.approvalId}`);
     console.log(envelope.result.approval.reason);
@@ -131,6 +146,10 @@ function writeOutput(envelope, asJson) {
     for (const tool of envelope.result.tools) {
       console.log(`${tool.name} (${tool.permission})`);
     }
+    return;
+  }
+  if (envelope.status === "skipped") {
+    console.log(JSON.stringify(envelope.result, null, 2));
     return;
   }
   const checks = envelope.result.checks;
@@ -148,6 +167,7 @@ Usage:
   agent-core doctor [--json] [--state-dir <path>]
   agent-core ask --text <task> [--json] [--state-dir <path>] [--workspace <path>]
   agent-core feishu-doctor [--json]
+  agent-core feishu-agent --event-file <path> [--json] [--state-dir <path>]
   agent-core tools [--json]
   agent-core tool <name> [--json] [--state-dir <path>] [--workspace <path>] [--key <value>]
   agent-core approvals [--json] [--state-dir <path>] [--status pending]
@@ -175,4 +195,11 @@ function positionalText(values) {
     parts.push(item);
   }
   return parts.join(" ");
+}
+
+async function readJsonFile(file) {
+  if (!file) {
+    throw new Error("--event-file is required.");
+  }
+  return JSON.parse(await readFile(file, "utf8"));
 }

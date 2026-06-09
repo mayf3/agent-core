@@ -1,10 +1,12 @@
-import { readFile, readdir } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 
 const root = process.cwd();
-const ignoredDirs = new Set([".git", "node_modules", "dist", "build", "coverage"]);
 const ignoredFiles = new Set(["pnpm-lock.yaml", "package-lock.json"]);
 const findings = [];
+const execFileAsync = promisify(execFile);
 
 const patterns = [
   [/sk-[A-Za-z0-9_-]{20,}/, "possible OpenAI-style API key"],
@@ -15,7 +17,9 @@ const patterns = [
   [/\bAuthorization:\s*Bearer\s+[A-Za-z0-9._~+/\-=]{12,}/i, "possible bearer token"],
 ];
 
-await walk(root);
+for (const file of await candidateFiles()) {
+  await scanFile(path.join(root, file));
+}
 
 if (findings.length) {
   console.error("secret scan failed:");
@@ -26,21 +30,6 @@ if (findings.length) {
 }
 
 console.log("secret scan passed");
-
-async function walk(dir) {
-  const entries = await readdir(dir, { withFileTypes: true });
-  for (const entry of entries) {
-    if (ignoredDirs.has(entry.name)) {
-      continue;
-    }
-    const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) {
-      await walk(full);
-    } else if (entry.isFile()) {
-      await scanFile(full);
-    }
-  }
-}
 
 async function scanFile(file) {
   const rel = path.relative(root, file);
@@ -63,4 +52,13 @@ async function scanFile(file) {
 
 function shouldSkip(rel) {
   return /\.(png|jpg|jpeg|gif|webp|ico|pdf|lock)$/i.test(rel);
+}
+
+async function candidateFiles() {
+  try {
+    const { stdout } = await execFileAsync("git", ["ls-files", "--cached", "--others", "--exclude-standard"], { cwd: root });
+    return stdout.split("\n").filter(Boolean);
+  } catch {
+    return [];
+  }
 }
