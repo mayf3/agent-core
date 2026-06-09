@@ -1,0 +1,30 @@
+.DS_Store
+node_modules/
+dist/
+build/
+coverage/
+.turbo/
+.cache/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+secrets/
+private/
+
+# Runtime state and logs
+.agent-core/
+state/
+logs/
+*.log
+
+# Tool output
+tmp/
+temp/
+artifacts/
