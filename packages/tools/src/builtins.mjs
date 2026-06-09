@@ -12,6 +12,7 @@ export function createBuiltinTools() {
       name: "fs.list",
       description: "List files in the workspace.",
       permission: "read",
+      inputSchema: objectSchema({ path: stringSchema("Directory path relative to workspace.") }),
       async execute(args, context) {
         const target = assertInsideWorkspace(context.workspace, args.path || ".");
         return { entries: await readdir(target) };
@@ -21,6 +22,7 @@ export function createBuiltinTools() {
       name: "fs.read",
       description: "Read a text file in the workspace.",
       permission: "read",
+      inputSchema: objectSchema({ path: stringSchema("File path relative to workspace.") }, ["path"]),
       async execute(args, context) {
         const target = assertInsideWorkspace(context.workspace, args.path);
         const capped = capText(await readFile(target, "utf8"), context.maxOutputBytes);
@@ -31,6 +33,10 @@ export function createBuiltinTools() {
       name: "fs.write",
       description: "Write a text file in the workspace.",
       permission: "write",
+      inputSchema: objectSchema({
+        path: stringSchema("File path relative to workspace."),
+        content: stringSchema("Text content to write."),
+      }, ["path"]),
       async execute(args, context) {
         const target = assertInsideWorkspace(context.workspace, args.path);
         await writeFile(target, String(args.content || ""), "utf8");
@@ -41,6 +47,7 @@ export function createBuiltinTools() {
       name: "search.grep",
       description: "Search text files with ripgrep.",
       permission: "read",
+      inputSchema: objectSchema({ query: stringSchema("Search query.") }, ["query"]),
       async execute(args, context) {
         const query = String(args.query || "");
         const { stdout } = await execAsync(`rg --line-number -- ${shellQuote(query)} ${shellQuote(context.workspace)}`, {
@@ -56,6 +63,7 @@ export function createBuiltinTools() {
       name: "shell.exec",
       description: "Run a shell command inside the workspace.",
       permission: "execute",
+      inputSchema: objectSchema({ cmd: stringSchema("Shell command to execute.") }, ["cmd"]),
       async execute(args, context) {
         const { stdout, stderr } = await execAsync(String(args.cmd || ""), {
           cwd: context.cwd,
@@ -72,6 +80,7 @@ export function createBuiltinTools() {
       name: "http.fetch",
       description: "Fetch a URL with the runtime fetch API.",
       permission: "execute",
+      inputSchema: objectSchema({ url: stringSchema("URL to fetch.") }, ["url"]),
       async execute(args, context) {
         const response = await fetch(String(args.url || ""));
         const capped = capText(await response.text(), context.maxOutputBytes);
@@ -82,6 +91,7 @@ export function createBuiltinTools() {
       name: "state.read",
       description: "Read local run and event state.",
       permission: "read",
+      inputSchema: objectSchema({ runId: stringSchema("Optional run id.") }),
       async execute(args, context) {
         const runId = args.runId ? String(args.runId) : null;
         return {
@@ -95,4 +105,12 @@ export function createBuiltinTools() {
 
 function shellQuote(value) {
   return `'${String(value).replaceAll("'", "'\\''")}'`;
+}
+
+function stringSchema(description) {
+  return { type: "string", description };
+}
+
+function objectSchema(properties, required = []) {
+  return { type: "object", additionalProperties: false, properties, required };
 }

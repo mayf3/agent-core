@@ -45,7 +45,8 @@
         <tr><td>run/event store</td><td>JSONL append-only 记录</td><td class="ok">本阶段实现</td></tr>
         <tr><td>doctor CLI</td><td>检查 Node、cwd、state、git、结构配置</td><td class="ok">本阶段实现</td></tr>
         <tr><td>tools/approval</td><td>已进入 M2：内置工具、policy、approval resume</td><td class="ok">已实现</td></tr>
-        <tr><td>agent/Feishu</td><td>不进入 M2，后续阶段接入</td><td class="warn">外置或后续</td></tr>
+        <tr><td>agent loop</td><td>已进入 M3：provider、tool loop、transcript</td><td class="ok">已实现</td></tr>
+        <tr><td>Feishu</td><td>不进入 M3，后续阶段接入</td><td class="warn">外置或后续</td></tr>
       </table>
     </section>
 
@@ -92,14 +93,15 @@ appendEvent(stateDir, createEvent("run.started", { runId }))</div>
       <table><tr><th>阶段</th><th>重点</th><th>用户感知</th></tr>
         <tr><td>M1</td><td>记录和 doctor</td><td>已实现：本地 CLI 可诊断</td></tr>
         <tr><td>M2</td><td>工具、轻沙盒、审批</td><td>已实现：执行/写入会暂停并可 resume</td></tr>
-        <tr><td>M3</td><td>模型和单 agent loop</td><td>自然语言驱动本地任务</td></tr>
+        <tr><td>M3</td><td>模型和单 agent loop</td><td>已实现：自然语言可驱动受控工具循环</td></tr>
         <tr><td>M4</td><td>飞书插件</td><td>手机上推动 Agent 干活</td></tr>
       </table>
     </section>
 
     <section id="review" class="card">
       <h2>评审结论</h2>
-      <p><strong>通过开工。</strong> M1 足够小，不会把外部功能塞进内核；记录模型也为后续 Feishu、工具审批、sandbox adapter 和 eval 回放留下了可接入的事实层。</p>
+      <p><strong>通过继续开发。</strong> M1/M2/M3 保持了薄内核边界；agent 已能通过受控工具循环读取、写入和执行，具备后续 MOSS 式源码级 harness 改造的基础。</p>
+      <p>自我改造路径必须经过工具 policy、approval、checks、branch/PR/merge 轨迹，不能绕过内核边界。</p>
       <p class="muted">未执行独立 subagent 审查：当前工具规则要求只有用户明确要求委派时才能调用。</p>
     </section>
   </main>
