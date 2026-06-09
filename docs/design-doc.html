@@ -100,8 +100,8 @@ appendEvent(stateDir, createEvent("run.started", { runId }))</div>
 
     <section id="review" class="card">
       <h2>评审结论</h2>
-      <p><strong>通过继续开发。</strong> M1/M2/M3 保持了薄内核边界；agent 已能通过受控工具循环读取、写入和执行，具备后续 MOSS 式源码级 harness 改造的基础。</p>
-      <p>自我改造路径必须经过工具 policy、approval、checks、branch/PR/merge 轨迹，不能绕过内核边界。</p>
+      <p><strong>继续保持薄实现。</strong> M4a Feishu Echo 已完成测试核心；下一阶段接真实飞书长连接和 chat-only LLM reply。</p>
+      <p>长期协议记录在 Architecture RFC；当前实现只做真实阶段已经证明必要的机制。</p>
       <p class="muted">未执行独立 subagent 审查：当前工具规则要求只有用户明确要求委派时才能调用。</p>
     </section>
   </main>

@@ -40,15 +40,16 @@ programs that call the kernel through stable APIs.
 
 ## Documents
 
-- [Requirements and Architecture](docs/requirements.md)
+- [Architecture RFC](docs/architecture-rfc.md)
+- [Milestones](docs/milestones.md)
 - [Design Doc](docs/design-doc.html)
-- [Design Review](docs/design-review.html)
 
 ## Current Commands
 
 ```bash
 pnpm check
 pnpm agent-core doctor --json
+pnpm agent-core feishu-doctor --json
 pnpm agent-core ask --text "summarize this workspace" --json
 pnpm agent-core tools --json
 pnpm agent-core tool shell.exec --cmd "printf hi" --json
