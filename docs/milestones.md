@@ -12,7 +12,8 @@ This file is the施工单. It deliberately excludes long-term protocol detail; s
 | M2 Tools + Approval | Done | built-in tools, policy, approval pause/resume |
 | M3 Model + Agent Loop | Done | OpenAI-compatible provider, single agent loop |
 | M4a Feishu Echo | Done | receive/normalize/filter/dedupe/reply echo core |
-| M4b Feishu LLM Reply | Next | chat-only Feishu entry into agent loop |
+| M4b Feishu LLM Reply | Done | chat-only Feishu entry into agent loop |
+| M4c Durable Feishu Runtime | Next | inbox/runs/outbox, idempotent reply, recovery |
 
 ## Stage Plan
 
@@ -61,6 +62,15 @@ Scope:
 - friendly model errors
 - response length limit
 - reply receipt record
+
+Status: implemented as a core handler plus CLI bridge:
+
+```text
+Feishu event JSON -> policy -> dedupe -> chat-only agent loop -> reply client
+```
+
+The real long-connection process should call the same handler instead of owning
+agent logic.
 
 ### M4c: Durable Feishu Runtime
 

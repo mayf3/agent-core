@@ -3,8 +3,13 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { readEvents } from "../../core/src/index.mjs";
-import { createMemoryFeishuClient, handleFeishuEchoEvent } from "../src/index.mjs";
+import { readEvents, readStateRecords } from "../../core/src/index.mjs";
+import {
+  createFeishuRestClient,
+  createMemoryFeishuClient,
+  handleFeishuAgentEvent,
+  handleFeishuEchoEvent,
+} from "../src/index.mjs";
 
 test("feishu echo replies to allowed private text", async () => {
   const env = await tempEnv();
@@ -83,6 +88,96 @@ test("feishu policy accepts mentioned group messages", async () => {
   }
 });
 
+test("feishu agent replies through a chat-only model turn", async () => {
+  const env = await tempEnv();
+  try {
+    const client = createMemoryFeishuClient();
+    const provider = fakeProvider((input) => {
+      assert.equal(input.tools.length, 0);
+      return { ok: true, text: "你好，我在。", toolCalls: [] };
+    });
+    const result = await handleFeishuAgentEvent(sampleEvent(), {
+      stateDir: env.stateDir,
+      client,
+      provider,
+      config: { allowedOpenIds: ["ou_user"] },
+    });
+    const replies = await readStateRecords(env.stateDir, "feishu_replies.jsonl");
+    const snapshots = await readStateRecords(env.stateDir, "context_snapshots.jsonl");
+
+    assert.equal(result.ok, true);
+    assert.equal(result.result.reply.text, "你好，我在。");
+    assert.equal(client.replies.length, 1);
+    assert.equal(replies[0].status, "sent");
+    assert.deepEqual(snapshots[0].toolNames, []);
+  } finally {
+    await rm(env.root, { recursive: true, force: true });
+  }
+});
+
+test("feishu agent sends friendly model config errors", async () => {
+  const env = await tempEnv();
+  try {
+    const client = createMemoryFeishuClient();
+    const provider = fakeProvider(() => ({
+      ok: false,
+      status: "needs_config",
+      error: { code: "model_config_required", message: "missing model" },
+    }));
+    const result = await handleFeishuAgentEvent(sampleEvent(), {
+      stateDir: env.stateDir,
+      client,
+      provider,
+      config: { allowedOpenIds: ["ou_user"] },
+    });
+
+    assert.equal(result.ok, true);
+    assert.match(result.result.reply.text, /模型还没有配置好/);
+    assert.equal(client.replies.length, 1);
+  } finally {
+    await rm(env.root, { recursive: true, force: true });
+  }
+});
+
+test("feishu agent limits long replies", async () => {
+  const env = await tempEnv();
+  try {
+    const client = createMemoryFeishuClient();
+    const provider = fakeProvider(() => ({ ok: true, text: "很".repeat(80), toolCalls: [] }));
+    const result = await handleFeishuAgentEvent(sampleEvent(), {
+      stateDir: env.stateDir,
+      client,
+      provider,
+      config: { allowedOpenIds: ["ou_user"], maxReplyChars: 32 },
+    });
+
+    assert.equal(result.result.reply.text.length, 32);
+    assert.match(result.result.reply.text, /已截断/);
+  } finally {
+    await rm(env.root, { recursive: true, force: true });
+  }
+});
+
+test("feishu rest client obtains a token and replies to a message", async () => {
+  const requests = [];
+  const client = createFeishuRestClient({
+    appId: "app-test",
+    appSecret: "redacted",
+    fetchImpl: async (url, init) => {
+      requests.push({ url, init });
+      if (url.endsWith("/tenant_access_token/internal")) {
+        return jsonResponse({ code: 0, tenant_access_token: "tok", expire: 3600 });
+      }
+      return jsonResponse({ code: 0, data: { message_id: "om_reply" } });
+    },
+  });
+  const receipt = await client.replyText({ messageId: "om_msg", chatId: "oc_chat", text: "hi" });
+
+  assert.equal(receipt.messageId, "om_reply");
+  assert.equal(requests.length, 2);
+  assert.equal(JSON.parse(requests[1].init.body).msg_type, "text");
+});
+
 function sampleEvent(patch = {}) {
   return {
     header: { event_id: "evt_1" },
@@ -106,4 +201,24 @@ function sampleEvent(patch = {}) {
 async function tempEnv() {
   const root = await mkdtemp(path.join(os.tmpdir(), "agent-core-feishu-"));
   return { root, stateDir: path.join(root, "state") };
+}
+
+function fakeProvider(handler) {
+  return {
+    name: "fake",
+    model: "fake-model",
+    async generate(input) {
+      return handler(input);
+    },
+  };
+}
+
+function jsonResponse(body, status = 200) {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    async json() {
+      return body;
+    },
+  };
 }

@@ -50,6 +50,7 @@ programs that call the kernel through stable APIs.
 pnpm check
 pnpm agent-core doctor --json
 pnpm agent-core feishu-doctor --json
+pnpm agent-core feishu-agent --event-file ./event.json --json
 pnpm agent-core ask --text "summarize this workspace" --json
 pnpm agent-core tools --json
 pnpm agent-core tool shell.exec --cmd "printf hi" --json
