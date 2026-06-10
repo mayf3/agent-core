@@ -5,7 +5,7 @@ const root = process.cwd();
 const maxLines = 500;
 const maxFilesPerDir = 20;
 const maxDepth = 6;
-const ignored = new Set([".git", "node_modules", "dist", "build", "coverage"]);
+const ignored = new Set([".git", "node_modules", "dist", "build", "coverage", "target", ".agent-core"]);
 const generated = new Set([]);
 const failures = [];
 
