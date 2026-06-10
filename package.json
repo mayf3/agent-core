@@ -5,11 +5,12 @@
   "type": "module",
   "packageManager": "pnpm@10.10.0",
   "scripts": {
-    "agent-core": "node packages/cli/src/index.mjs",
-    "check": "node scripts/check-structure.mjs && node scripts/check-local-secret-leaks.mjs && node --test",
+    "agent-core": "cargo run --",
+    "check": "node scripts/check-structure.mjs && node scripts/check-local-secret-leaks.mjs && cargo test",
     "check:structure": "node scripts/check-structure.mjs",
     "check:secrets": "node scripts/check-local-secret-leaks.mjs",
-    "test": "node --test"
+    "test": "cargo test",
+    "test:node-prototype": "node --test"
   },
   "engines": {
     "node": ">=20.11"

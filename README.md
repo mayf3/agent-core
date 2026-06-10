@@ -42,20 +42,20 @@ programs that call the kernel through stable APIs.
 
 - [Architecture RFC](docs/architecture-rfc.md)
 - [Milestones](docs/milestones.md)
+- [Phase 0 Plan](docs/phase0-plan.md)
 - [Design Doc](docs/design-doc.html)
 
 ## Current Commands
 
 ```bash
 pnpm check
-pnpm agent-core doctor --json
-pnpm agent-core feishu-doctor --json
-pnpm agent-core feishu-agent --event-file ./event.json --json
-pnpm agent-core ask --text "summarize this workspace" --json
-pnpm agent-core tools --json
-pnpm agent-core tool shell.exec --cmd "printf hi" --json
-pnpm agent-core resume <approvalId> --approve --json
+pnpm agent-core run --text "hello" --json
+cargo test
 ```
+
+The official Runtime is now the Rust Kernel. Existing Node packages are prototype
+reference code for later TypeScript Feishu Connector extraction; they are not
+the active Runtime, Gateway, or Journal.
 
 ## Key Principle
 
