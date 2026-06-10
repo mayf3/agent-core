@@ -2,6 +2,7 @@ import http from "node:http";
 import type { ConnectorConfig } from "./config.js";
 
 export function startExecuteServer(config: ConnectorConfig, client: any) {
+  const executions = new Map<string, Promise<unknown>>();
   const server = http.createServer(async (req, res) => {
     try {
       if (req.method !== "POST" || req.url !== "/v1/execute") {
@@ -12,8 +13,20 @@ export function startExecuteServer(config: ConnectorConfig, client: any) {
       }
       const body = await readJson(req);
       validateExecute(body);
+      const idempotencyKey = String(body.idempotency_key);
+      const existing = executions.get(idempotencyKey);
+      if (existing) {
+        console.log(`execute replayed idempotency_key=${shortId(idempotencyKey)} invocation=${shortId(body.invocation_id)}`);
+        const receipt = await existing;
+        return json(res, 200, { ok: true, receipt, replayed: true });
+      }
       console.log(`execute approved operation=${body.operation} invocation=${shortId(body.invocation_id)} msg=${shortId(body.arguments.message_id)}`);
-      const receipt = await sendReply(client, body.arguments.message_id, body.arguments.text);
+      const pending = sendReply(client, body.arguments.message_id, body.arguments.text).catch((error) => {
+        executions.delete(idempotencyKey);
+        throw error;
+      });
+      executions.set(idempotencyKey, pending);
+      const receipt = await pending;
       console.log(`execute sent status=${receipt.status} reply=${shortId(receipt.message_id || "")}`);
       return json(res, 200, { ok: true, receipt });
     } catch (error) {
@@ -34,7 +47,7 @@ function validateExecute(body: any) {
   if (body.operation !== "feishu.send_message") {
     throw new Error("operation_not_allowed");
   }
-  if (!body.invocation_id || !body.decision_id || !body.arguments?.message_id || !body.arguments?.text) {
+  if (!body.invocation_id || !body.decision_id || !body.idempotency_key || !body.arguments?.message_id || !body.arguments?.text) {
     throw new Error("invalid execute payload");
   }
 }
