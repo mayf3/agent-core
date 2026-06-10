@@ -5,3 +5,4 @@ pub mod gateway;
 pub mod journal;
 pub mod llm;
 pub mod runtime;
+pub mod server;

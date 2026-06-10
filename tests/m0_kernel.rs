@@ -1,4 +1,4 @@
-use agent_core_kernel::adapters::StdoutAdapter;
+use agent_core_kernel::adapters::{InvocationAdapter, StdoutAdapter};
 use agent_core_kernel::config::KernelConfig;
 use agent_core_kernel::domain::*;
 use agent_core_kernel::gateway::Gateway;
@@ -103,11 +103,59 @@ fn hash_chain_detects_tampering() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn feishu_echo_creates_send_message_invocation() -> Result<()> {
+    let mut config = test_config();
+    config.feishu_allowed_open_ids = vec!["ou_user".to_string()];
+    let journal = JournalStore::in_memory()?;
+    let gateway = Gateway::new(config.clone());
+    let runtime = Runtime::new(config, LocalEchoLlm, RecordingAdapter);
+    let event = gateway.validate_ingress(&journal, feishu_envelope("evt_1", "p2p", true)?)?;
+    let outcome = runtime.deliver_echo(&journal, &gateway, event)?;
+    let events = journal.events()?;
+
+    assert_eq!(outcome.output, "收到：你好");
+    assert!(events.iter().any(|event| {
+        event.kind == JournalEventKind::InvocationApproved
+            && event
+                .payload
+                .get("operation")
+                .and_then(|value| value.as_str())
+                == Some("feishu.send_message")
+    }));
+    assert!(journal.verify_hash_chain()?);
+    Ok(())
+}
+
+#[test]
+fn feishu_group_requires_mention() -> Result<()> {
+    let mut config = test_config();
+    config.feishu_allowed_chat_ids = vec!["oc_chat".to_string()];
+    config.feishu_require_group_mention = true;
+    let journal = JournalStore::in_memory()?;
+    let gateway = Gateway::new(config);
+    let result = gateway.validate_ingress(&journal, feishu_envelope("evt_2", "group", false)?);
+
+    assert!(result.is_err());
+    assert!(result
+        .err()
+        .unwrap()
+        .to_string()
+        .contains("bot_not_mentioned"));
+    Ok(())
+}
+
 fn test_config() -> KernelConfig {
     KernelConfig {
         db_path: PathBuf::from(":memory:"),
         agent_id: AgentId("main".to_string()),
         root_dir: PathBuf::from("."),
+        kernel_port: 4130,
+        connector_execute_url: "http://127.0.0.1:4131/v1/execute".to_string(),
+        ipc_token: "test-token".to_string(),
+        feishu_allowed_open_ids: vec![],
+        feishu_allowed_chat_ids: vec![],
+        feishu_require_group_mention: true,
     }
 }
 
@@ -121,5 +169,42 @@ fn cli_principal() -> RunPrincipal {
             scope: "current_session".to_string(),
         }],
         requester_id: Some("cli:local".to_string()),
+    }
+}
+
+fn feishu_envelope(event_id: &str, chat_type: &str, mentioned: bool) -> Result<IngressEnvelope> {
+    Ok(IngressEnvelope {
+        protocol_version: "v1".to_string(),
+        source: ExternalSource::Feishu,
+        external_event_id: event_id.to_string(),
+        received_at: Utc::now(),
+        payload: json!({
+            "sender_open_id": "ou_user",
+            "sender_type": "user",
+            "chat_id": "oc_chat",
+            "chat_type": chat_type,
+            "message_id": "om_msg",
+            "message_type": "text",
+            "text": "你好",
+            "mentions": if mentioned { json!([{ "open_id": "ou_bot" }]) } else { json!([]) },
+        }),
+        auth_context: AuthContext {
+            authenticated: true,
+        },
+        routing_hint: None,
+    })
+}
+
+struct RecordingAdapter;
+
+impl InvocationAdapter for RecordingAdapter {
+    fn execute(&self, invocation: &ApprovedInvocation) -> Result<Receipt> {
+        Ok(Receipt {
+            invocation_id: invocation.intent().invocation_id.clone(),
+            status: ReceiptStatus::Succeeded,
+            external_ref: Some("om_reply".to_string()),
+            output: json!({ "message_id": "om_reply" }),
+            occurred_at: Utc::now(),
+        })
     }
 }
