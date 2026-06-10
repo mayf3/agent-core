@@ -323,6 +323,11 @@ where
         chat_id: Option<String>,
     ) -> InvocationIntent {
         if session.channel == ChannelKind::Feishu {
+            let reply_key = message_id
+                .as_deref()
+                .filter(|value| !value.is_empty())
+                .map(|value| format!("feishu:reply:{value}"))
+                .unwrap_or_else(|| format!("{}:feishu", run.id.0));
             InvocationIntent {
                 invocation_id: InvocationId::new(),
                 run_id: run.id.clone(),
@@ -333,7 +338,7 @@ where
                     "chat_id": chat_id.unwrap_or_default(),
                     "text": text,
                 }),
-                idempotency_key: Some(format!("{}:feishu", run.id.0)),
+                idempotency_key: Some(reply_key),
             }
         } else {
             InvocationIntent {

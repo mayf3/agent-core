@@ -191,7 +191,8 @@ impl Gateway {
             bail!("skip:bot_not_mentioned");
         }
         let event_id = EventId::new();
-        if !journal.reserve_ingress("feishu", &envelope.external_event_id, &event_id)? {
+        let dedupe_id = format!("message:{message_id}");
+        if !journal.reserve_ingress("feishu", &dedupe_id, &event_id)? {
             bail!("skip:duplicate_ingress");
         }
         let conversation_key = if chat_type == "p2p" {
@@ -222,7 +223,7 @@ impl Gateway {
                 message_id: Some(message_id.clone()),
                 chat_id: Some(chat_id.clone()),
             },
-            dedupe_key: format!("feishu:{}", envelope.external_event_id),
+            dedupe_key: format!("feishu:{dedupe_id}"),
             occurred_at: envelope.received_at,
         };
         journal.append_event(
@@ -233,6 +234,7 @@ impl Gateway {
             json!({
                 "source": "feishu",
                 "external_event_id": envelope.external_event_id,
+                "dedupe_id": dedupe_id,
                 "event_id": event_id.0,
                 "sender_open_id": sender_open_id,
                 "chat_id": chat_id,

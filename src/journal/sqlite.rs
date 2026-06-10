@@ -241,6 +241,7 @@ impl JournalStore {
             .lock()
             .map_err(|_| anyhow!("journal mutex poisoned"))?;
         conn.execute_batch(include_str!("../../migrations/0001_init.sql"))?;
+        backfill_feishu_message_dedup(&conn)?;
         Ok(())
     }
 
@@ -279,6 +280,45 @@ impl JournalStore {
         .optional()
         .map_err(Into::into)
     }
+}
+
+fn backfill_feishu_message_dedup(conn: &Connection) -> Result<()> {
+    let rows = {
+        let mut stmt = conn.prepare(
+            "SELECT event_id, payload_json, created_at
+             FROM journal_events
+             WHERE kind = 'IngressAccepted'",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()?
+    };
+    for (event_id, payload_json, created_at) in rows {
+        let Ok(payload) = serde_json::from_str::<Value>(&payload_json) else {
+            continue;
+        };
+        if payload.get("source").and_then(Value::as_str) != Some("feishu") {
+            continue;
+        }
+        let Some(message_id) = payload
+            .get("message_id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        conn.execute(
+            "INSERT OR IGNORE INTO ingress_dedup (source, external_event_id, event_id, first_seen_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params!["feishu", format!("message:{message_id}"), event_id, created_at],
+        )?;
+    }
+    Ok(())
 }
 
 fn row_to_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<JournalEvent> {
