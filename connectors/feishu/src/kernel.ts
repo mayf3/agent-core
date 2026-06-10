@@ -3,6 +3,7 @@ import type { ConnectorConfig } from "./config.js";
 
 export async function postIngress(config: ConnectorConfig, event: unknown) {
   const normalized = normalizeMessageEvent(event);
+  console.log(`feishu event received type=${normalized.payload.message_type} chat=${normalized.payload.chat_type} msg=${shortId(normalized.payload.message_id)}`);
   const body = {
     protocol_version: "v1",
     source: "Feishu",
@@ -25,7 +26,10 @@ export async function postIngress(config: ConnectorConfig, event: unknown) {
     });
     if (!response.ok) {
       console.error(`kernel ingress failed: HTTP ${response.status}`);
+      return;
     }
+    const result = await response.json().catch(() => ({}));
+    console.log(`kernel ingress result status=${result.status || "unknown"} run=${shortId(result.run_id || "")}`);
   } finally {
     clearTimeout(timer);
   }
@@ -72,4 +76,11 @@ function normalizeMentions(values: any[]) {
     open_id: mention.id?.open_id || mention.open_id || "",
     name: mention.name || mention.id?.name || "",
   }));
+}
+
+function shortId(value: string) {
+  if (!value) {
+    return "-";
+  }
+  return value.length <= 10 ? value : `${value.slice(0, 4)}...${value.slice(-4)}`;
 }
