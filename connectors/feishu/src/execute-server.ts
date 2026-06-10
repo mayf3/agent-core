@@ -12,7 +12,9 @@ export function startExecuteServer(config: ConnectorConfig, client: any) {
       }
       const body = await readJson(req);
       validateExecute(body);
+      console.log(`execute approved operation=${body.operation} invocation=${shortId(body.invocation_id)} msg=${shortId(body.arguments.message_id)}`);
       const receipt = await sendReply(client, body.arguments.message_id, body.arguments.text);
+      console.log(`execute sent status=${receipt.status} reply=${shortId(receipt.message_id || "")}`);
       return json(res, 200, { ok: true, receipt });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -67,4 +69,11 @@ function json(res: http.ServerResponse, status: number, body: unknown) {
     "content-length": Buffer.byteLength(payload),
   });
   res.end(payload);
+}
+
+function shortId(value: string) {
+  if (!value) {
+    return "-";
+  }
+  return value.length <= 10 ? value : `${value.slice(0, 4)}...${value.slice(-4)}`;
 }
