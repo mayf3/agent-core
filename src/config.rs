@@ -12,6 +12,10 @@ pub struct KernelConfig {
     pub feishu_allowed_open_ids: Vec<String>,
     pub feishu_allowed_chat_ids: Vec<String>,
     pub feishu_require_group_mention: bool,
+    pub openai_base_url: String,
+    pub openai_api_key: String,
+    pub model: String,
+    pub model_timeout_ms: u64,
 }
 
 impl KernelConfig {
@@ -33,6 +37,12 @@ impl KernelConfig {
             feishu_allowed_open_ids: env_list("AGENT_CORE_FEISHU_ALLOWED_OPEN_IDS"),
             feishu_allowed_chat_ids: env_list("AGENT_CORE_FEISHU_ALLOWED_CHAT_IDS"),
             feishu_require_group_mention: env_bool("AGENT_CORE_FEISHU_REQUIRE_GROUP_MENTION", true),
+            openai_base_url: env_string("AGENT_CORE_OPENAI_BASE_URL", "https://api.openai.com/v1")
+                .trim_end_matches('/')
+                .to_string(),
+            openai_api_key: env_string("AGENT_CORE_OPENAI_API_KEY", ""),
+            model: env_string("AGENT_CORE_MODEL", ""),
+            model_timeout_ms: env_u64("AGENT_CORE_MODEL_TIMEOUT_MS", 30_000),
         }
     }
 }
@@ -79,6 +89,13 @@ fn env_bool(key: &str, fallback: bool) -> bool {
 }
 
 fn env_u16(key: &str, fallback: u16) -> u16 {
+    std::env::var(key)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(fallback)
+}
+
+fn env_u64(key: &str, fallback: u64) -> u64 {
     std::env::var(key)
         .ok()
         .and_then(|value| value.parse().ok())
