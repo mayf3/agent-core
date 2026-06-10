@@ -12,7 +12,7 @@ export async function postIngress(config: ConnectorConfig, event: unknown) {
     routing_hint: {},
   };
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 2500);
+  const timer = setTimeout(() => controller.abort(), config.kernelIngressTimeoutMs);
   try {
     const response = await fetch(config.kernelUrl, {
       method: "POST",
