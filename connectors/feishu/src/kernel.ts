@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import type { ConnectorConfig } from "./config.js";
 
 export async function postIngress(config: ConnectorConfig, event: unknown) {
@@ -42,9 +41,11 @@ function normalizeMessageEvent(raw: any) {
   const sender = event?.sender || {};
   const content = parseContent(message.content);
   const messageId = message.message_id || raw?.message_id || "";
+  const providerEventId = header.event_id || raw?.event_id || "";
   return {
-    external_event_id: header.event_id || raw?.event_id || messageId || `feishu_${randomUUID()}`,
+    external_event_id: messageId ? `message:${messageId}` : providerEventId || "missing_event_id",
     payload: {
+      provider_event_id: providerEventId,
       sender_open_id: sender.sender_id?.open_id || raw?.open_id || "",
       sender_type: sender.sender_type || raw?.sender_type || "user",
       chat_id: message.chat_id || raw?.chat_id || "",

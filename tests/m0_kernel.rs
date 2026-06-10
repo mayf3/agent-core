@@ -128,6 +128,64 @@ fn feishu_echo_creates_send_message_invocation() -> Result<()> {
 }
 
 #[test]
+fn feishu_deduplicates_by_message_id_across_event_ids() -> Result<()> {
+    let mut config = test_config();
+    config.feishu_allowed_open_ids = vec!["ou_user".to_string()];
+    let journal = JournalStore::in_memory()?;
+    let gateway = Gateway::new(config);
+
+    assert!(gateway
+        .validate_ingress(
+            &journal,
+            feishu_envelope_with_message("evt_first", "om_same", "p2p", true)?,
+        )
+        .is_ok());
+    let duplicate = gateway.validate_ingress(
+        &journal,
+        feishu_envelope_with_message("evt_redelivered", "om_same", "p2p", true)?,
+    );
+
+    assert!(duplicate.is_err());
+    assert!(duplicate
+        .err()
+        .unwrap()
+        .to_string()
+        .contains("duplicate_ingress"));
+    let accepted = journal
+        .events()?
+        .into_iter()
+        .filter(|event| event.kind == JournalEventKind::IngressAccepted)
+        .count();
+    assert_eq!(accepted, 1);
+    Ok(())
+}
+
+#[test]
+fn feishu_reply_idempotency_key_uses_message_id() -> Result<()> {
+    let mut config = test_config();
+    config.feishu_allowed_open_ids = vec!["ou_user".to_string()];
+    let journal = JournalStore::in_memory()?;
+    let gateway = Gateway::new(config.clone());
+    let runtime = Runtime::new(config, LocalEchoLlm, RecordingAdapter);
+    let event = gateway.validate_ingress(
+        &journal,
+        feishu_envelope_with_message("evt_1", "om_reply_once", "p2p", true)?,
+    )?;
+
+    runtime.deliver_echo(&journal, &gateway, event)?;
+
+    assert!(journal.events()?.iter().any(|event| {
+        event.kind == JournalEventKind::InvocationProposed
+            && event
+                .payload
+                .get("idempotency_key")
+                .and_then(|value| value.as_str())
+                == Some("feishu:reply:om_reply_once")
+    }));
+    Ok(())
+}
+
+#[test]
 fn feishu_group_requires_mention() -> Result<()> {
     let mut config = test_config();
     config.feishu_allowed_chat_ids = vec!["oc_chat".to_string()];
@@ -173,6 +231,15 @@ fn cli_principal() -> RunPrincipal {
 }
 
 fn feishu_envelope(event_id: &str, chat_type: &str, mentioned: bool) -> Result<IngressEnvelope> {
+    feishu_envelope_with_message(event_id, "om_msg", chat_type, mentioned)
+}
+
+fn feishu_envelope_with_message(
+    event_id: &str,
+    message_id: &str,
+    chat_type: &str,
+    mentioned: bool,
+) -> Result<IngressEnvelope> {
     Ok(IngressEnvelope {
         protocol_version: "v1".to_string(),
         source: ExternalSource::Feishu,
@@ -183,7 +250,7 @@ fn feishu_envelope(event_id: &str, chat_type: &str, mentioned: bool) -> Result<I
             "sender_type": "user",
             "chat_id": "oc_chat",
             "chat_type": chat_type,
-            "message_id": "om_msg",
+            "message_id": message_id,
             "message_type": "text",
             "text": "你好",
             "mentions": if mentioned { json!([{ "open_id": "ou_bot" }]) } else { json!([]) },
