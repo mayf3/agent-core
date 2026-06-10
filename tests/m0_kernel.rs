@@ -3,7 +3,7 @@ use agent_core_kernel::config::KernelConfig;
 use agent_core_kernel::domain::*;
 use agent_core_kernel::gateway::Gateway;
 use agent_core_kernel::journal::JournalStore;
-use agent_core_kernel::llm::LocalEchoLlm;
+use agent_core_kernel::llm::{LlmClient, LlmInput, LocalEchoLlm, OpenAiCompatibleLlm};
 use agent_core_kernel::runtime::Runtime;
 use anyhow::Result;
 use chrono::Utc;
@@ -186,6 +186,58 @@ fn feishu_reply_idempotency_key_uses_message_id() -> Result<()> {
 }
 
 #[test]
+fn feishu_deliver_wraps_llm_output_as_send_message() -> Result<()> {
+    let mut config = test_config();
+    config.feishu_allowed_open_ids = vec!["ou_user".to_string()];
+    let journal = JournalStore::in_memory()?;
+    let gateway = Gateway::new(config.clone());
+    let runtime = Runtime::new(config, LocalEchoLlm, RecordingAdapter);
+    let event = gateway.validate_ingress(
+        &journal,
+        feishu_envelope_with_message("evt_llm", "om_llm", "p2p", true)?,
+    )?;
+
+    let outcome = runtime.deliver(&journal, &gateway, event)?;
+
+    assert_eq!(outcome.output, "");
+    assert!(journal.events()?.iter().any(|event| {
+        event.kind == JournalEventKind::InvocationProposed
+            && event
+                .payload
+                .get("operation")
+                .and_then(|value| value.as_str())
+                == Some("feishu.send_message")
+    }));
+    Ok(())
+}
+
+#[test]
+fn openai_compatible_llm_missing_config_returns_friendly_output() -> Result<()> {
+    let llm = OpenAiCompatibleLlm::new(
+        "https://example.invalid/v1".to_string(),
+        String::new(),
+        String::new(),
+        100,
+    );
+
+    let output = llm.complete(LlmInput {
+        blocks: vec![],
+        user_text: "hello".to_string(),
+    })?;
+
+    assert_eq!(output.provider, "openai-compatible");
+    assert_eq!(
+        output
+            .journal_payload
+            .get("error_category")
+            .and_then(|value| value.as_str()),
+        Some("model_config_required")
+    );
+    assert!(output.content.contains("AGENT_CORE_OPENAI_API_KEY"));
+    Ok(())
+}
+
+#[test]
 fn feishu_group_requires_mention() -> Result<()> {
     let mut config = test_config();
     config.feishu_allowed_chat_ids = vec!["oc_chat".to_string()];
@@ -214,6 +266,10 @@ fn test_config() -> KernelConfig {
         feishu_allowed_open_ids: vec![],
         feishu_allowed_chat_ids: vec![],
         feishu_require_group_mention: true,
+        openai_base_url: "https://example.invalid/v1".to_string(),
+        openai_api_key: String::new(),
+        model: String::new(),
+        model_timeout_ms: 100,
     }
 }
 

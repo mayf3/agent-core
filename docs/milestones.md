@@ -16,6 +16,7 @@ This file is the施工单. It deliberately excludes long-term protocol detail; s
 | M4c Durable Feishu Runtime | Next | inbox/runs/outbox, idempotent reply, recovery |
 | Rust Phase 0 M0 | Done | Rust Kernel CLI vertical slice with SQLite Journal |
 | Rust Phase 0 M1 | Done | TS Feishu long-connection connector + Rust Echo |
+| Rust Phase 0 M2 | Done | Feishu text now uses Rust OpenAI-compatible LLM path |
 
 ## Stage Plan
 
