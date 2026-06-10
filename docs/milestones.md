@@ -14,6 +14,7 @@ This file is the施工单. It deliberately excludes long-term protocol detail; s
 | M4a Feishu Echo | Done | receive/normalize/filter/dedupe/reply echo core |
 | M4b Feishu LLM Reply | Done | chat-only Feishu entry into agent loop |
 | M4c Durable Feishu Runtime | Next | inbox/runs/outbox, idempotent reply, recovery |
+| Rust Phase 0 M0 | Next | Rust Kernel CLI vertical slice with SQLite Journal |
 
 ## Stage Plan
 
@@ -141,3 +142,12 @@ Scope:
 
 Do not add general hook runtime, skill runtime, external system registry, or heavy
 sandbox before M4 and M5 prove the repeated shapes.
+
+## Rust Kernel Reset
+
+The implementation direction is now frozen as TypeScript Feishu Connector plus
+Rust Kernel. The existing Node packages are prototype/reference code for Feishu
+connector extraction, not the future Runtime. New Runtime, Gateway, Journal,
+Session, Run, Context, and Invocation approval work goes into the Rust Kernel.
+
+See [Phase 0 Construction Plan](./phase0-plan.md).
