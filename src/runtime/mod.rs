@@ -1,0 +1,235 @@
+use crate::adapters::InvocationAdapter;
+use crate::config::KernelConfig;
+use crate::domain::*;
+use crate::gateway::Gateway;
+use crate::journal::JournalStore;
+use crate::llm::{LlmClient, LlmInput};
+use anyhow::Result;
+use chrono::Utc;
+use serde_json::json;
+
+pub struct Runtime<L, A> {
+    config: KernelConfig,
+    llm: L,
+    adapter: A,
+}
+
+pub struct RuntimeOutcome {
+    pub run_id: RunId,
+    pub session_id: SessionId,
+    pub output: String,
+}
+
+impl<L, A> Runtime<L, A>
+where
+    L: LlmClient,
+    A: InvocationAdapter,
+{
+    pub fn new(config: KernelConfig, llm: L, adapter: A) -> Self {
+        Self {
+            config,
+            llm,
+            adapter,
+        }
+    }
+
+    pub fn deliver(
+        &self,
+        journal: &JournalStore,
+        gateway: &Gateway,
+        event: ValidatedEvent,
+    ) -> Result<RuntimeOutcome> {
+        let session = journal.get_or_create_session(&event.session_target)?;
+        journal.append_event(
+            JournalEventKind::SessionReady,
+            None,
+            Some(&session.id),
+            Some(&event.event_id.0),
+            json!({
+                "session_id": session.id.0,
+                "agent_id": session.agent_id.0,
+                "channel": format!("{:?}", session.channel),
+                "conversation_key": session.conversation_key,
+            }),
+        )?;
+        let run = self.create_run(&session, &event);
+        journal.insert_run(&run)?;
+        journal.append_event(
+            JournalEventKind::RunStarted,
+            Some(&run.id),
+            Some(&session.id),
+            Some(&event.event_id.0),
+            json!({
+                "run_id": run.id.0,
+                "trigger_event_id": run.trigger_event_id.0,
+                "principal_id": run.principal.principal_id.0,
+            }),
+        )?;
+
+        let RuntimeEventPayload::UserMessage { text, .. } = event.payload.clone();
+        let blocks = self.context_blocks(&event, &text);
+        journal.append_event(
+            JournalEventKind::ContextBuilt,
+            Some(&run.id),
+            Some(&session.id),
+            None,
+            json!({
+                "block_count": blocks.len(),
+                "kinds": blocks.iter().map(|block| format!("{:?}", block.kind)).collect::<Vec<_>>(),
+            }),
+        )?;
+        let llm = self.llm.complete(LlmInput {
+            blocks,
+            user_text: text,
+        })?;
+        journal.append_event(
+            JournalEventKind::LlmCompleted,
+            Some(&run.id),
+            Some(&session.id),
+            None,
+            llm.journal_payload,
+        )?;
+
+        let intent = InvocationIntent {
+            invocation_id: InvocationId::new(),
+            run_id: run.id.clone(),
+            operation: "stdout.send_text".to_string(),
+            arguments: json!({
+                "session_id": session.id.0,
+                "text": llm.content,
+            }),
+            idempotency_key: Some(format!("{}:stdout", run.id.0)),
+        };
+        let correlation_id = intent.invocation_id.0.clone();
+        journal.append_event(
+            JournalEventKind::InvocationProposed,
+            Some(&run.id),
+            Some(&session.id),
+            Some(&correlation_id),
+            json!({
+                "operation": intent.operation,
+                "idempotency_key": intent.idempotency_key,
+            }),
+        )?;
+        let approved = gateway.approve_invocation(intent, &run, &session)?;
+        journal.append_event(
+            JournalEventKind::InvocationApproved,
+            Some(&run.id),
+            Some(&session.id),
+            Some(&correlation_id),
+            json!({
+                "decision_id": approved.decision_id,
+                "operation": approved.intent().operation,
+            }),
+        )?;
+        journal.append_event(
+            JournalEventKind::DispatchStarted,
+            Some(&run.id),
+            Some(&session.id),
+            Some(&correlation_id),
+            json!({ "operation": approved.intent().operation }),
+        )?;
+        let receipt = self.adapter.execute(&approved)?;
+        let output = receipt
+            .output
+            .get("text")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .to_string();
+        journal.append_event(
+            JournalEventKind::ReceiptReceived,
+            Some(&run.id),
+            Some(&session.id),
+            Some(&correlation_id),
+            json!({
+                "status": format!("{:?}", receipt.status),
+                "external_ref": receipt.external_ref,
+                "output_kind": "text",
+            }),
+        )?;
+        journal.complete_run(&run.id)?;
+        journal.append_event(
+            JournalEventKind::RunCompleted,
+            Some(&run.id),
+            Some(&session.id),
+            None,
+            json!({ "status": "Completed" }),
+        )?;
+        Ok(RuntimeOutcome {
+            run_id: run.id,
+            session_id: session.id,
+            output,
+        })
+    }
+
+    fn create_run(&self, session: &Session, event: &ValidatedEvent) -> Run {
+        let now = Utc::now();
+        Run {
+            id: RunId::new(),
+            session_id: session.id.clone(),
+            agent_id: self.config.agent_id.clone(),
+            trigger_event_id: event.event_id.clone(),
+            principal: event.principal.clone(),
+            parent_run_id: None,
+            delegated_by: None,
+            status: RunStatus::Running,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn context_blocks(&self, event: &ValidatedEvent, text: &str) -> Vec<ContextBlock> {
+        vec![
+            block(
+                ContextBlockKind::RootSystem,
+                "You are the main Agent Core assistant.",
+                Compressibility::Never,
+                "system/root.md",
+            ),
+            block(
+                ContextBlockKind::RuntimeContract,
+                "Use the kernel boundary. External actions require approved invocations.",
+                Compressibility::Never,
+                "system/runtime.md",
+            ),
+            block(
+                ContextBlockKind::AgentProfile,
+                "Main agent. Phase 0 chat-only profile.",
+                Compressibility::Never,
+                "agents/main/AGENT.md",
+            ),
+            block(
+                ContextBlockKind::SkillCatalog,
+                "chat: basic conversation skill",
+                Compressibility::DropWhole,
+                "skills/chat/SKILL.md",
+            ),
+            block(
+                ContextBlockKind::ActiveSkill,
+                "Reply clearly and briefly to the current user message.",
+                Compressibility::DropWhole,
+                "skills/chat/SKILL.md",
+            ),
+            block(
+                ContextBlockKind::UserMessage,
+                text,
+                Compressibility::Truncate,
+                &event.event_id.0,
+            ),
+        ]
+    }
+}
+
+fn block(
+    kind: ContextBlockKind,
+    content: &str,
+    compressibility: Compressibility,
+    source_ref: &str,
+) -> ContextBlock {
+    ContextBlock {
+        kind,
+        content: content.to_string(),
+        compressibility,
+        source_ref: Some(source_ref.to_string()),
+    }
+}
