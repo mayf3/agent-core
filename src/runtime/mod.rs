@@ -66,7 +66,11 @@ where
             }),
         )?;
 
-        let RuntimeEventPayload::UserMessage { text, .. } = event.payload.clone();
+        let RuntimeEventPayload::UserMessage {
+            text,
+            message_id,
+            chat_id,
+        } = event.payload.clone();
         let blocks = self.context_blocks(&event, &text);
         journal.append_event(
             JournalEventKind::ContextBuilt,
@@ -90,16 +94,7 @@ where
             llm.journal_payload,
         )?;
 
-        let intent = InvocationIntent {
-            invocation_id: InvocationId::new(),
-            run_id: run.id.clone(),
-            operation: "stdout.send_text".to_string(),
-            arguments: json!({
-                "session_id": session.id.0,
-                "text": llm.content,
-            }),
-            idempotency_key: Some(format!("{}:stdout", run.id.0)),
-        };
+        let intent = self.reply_intent(&run, &session, &llm.content, message_id, chat_id);
         let correlation_id = intent.invocation_id.0.clone();
         journal.append_event(
             JournalEventKind::InvocationProposed,

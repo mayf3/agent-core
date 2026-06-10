@@ -229,6 +229,17 @@ Implementation status: done. M1 keeps the Connector as an edge adapter:
 Replace fixed reply with real Context + LLM. Reply still uses
 `InvocationIntent -> ApprovedInvocation -> Adapter`.
 
+Implementation status: done. M2 keeps the small-kernel boundary:
+
+- Rust Kernel owns the OpenAI-compatible model call;
+- Context uses the fixed Phase 0 blocks: root, runtime contract, main agent,
+  skill catalog, active chat skill, and current user message;
+- Model output is final reply text only;
+- Runtime wraps that text into a current-session `feishu.send_message` intent;
+- Gateway still verifies capability and target session before dispatch;
+- LLM journal payload records provider, model, status, usage, and error
+  category only, never prompts, API keys, or HTTP headers.
+
 ### M3: Reliability
 
 - recent messages;
