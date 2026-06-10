@@ -2,7 +2,7 @@ use crate::adapters::HttpConnectorAdapter;
 use crate::config::KernelConfig;
 use crate::gateway::Gateway;
 use crate::journal::JournalStore;
-use crate::llm::LocalEchoLlm;
+use crate::llm::OpenAiCompatibleLlm;
 use crate::runtime::Runtime;
 use anyhow::{bail, Result};
 use serde_json::{json, Value};
@@ -80,8 +80,14 @@ fn handle_connection(
         config.connector_execute_url.clone(),
         config.ipc_token.clone(),
     );
-    let runtime = Runtime::new(config.clone(), LocalEchoLlm, adapter);
-    let outcome = runtime.deliver_echo(journal, gateway, validated)?;
+    let llm = Box::new(OpenAiCompatibleLlm::new(
+        config.openai_base_url.clone(),
+        config.openai_api_key.clone(),
+        config.model.clone(),
+        config.model_timeout_ms,
+    ));
+    let runtime = Runtime::new(config.clone(), llm, adapter);
+    let outcome = runtime.deliver(journal, gateway, validated)?;
     write_json(
         stream,
         200,
