@@ -2,11 +2,14 @@ import * as Lark from "@larksuiteoapi/node-sdk";
 import { loadConfig } from "./config.js";
 import { startExecuteServer } from "./execute-server.js";
 import { postIngress } from "./kernel.js";
+import { safeLarkLogger } from "./safe-logger.js";
 
 const config = loadConfig();
-const baseConfig: Record<string, string> = {
+const baseConfig = {
   appId: config.appId,
-};
+  logger: safeLarkLogger,
+  loggerLevel: Lark.LoggerLevel.info,
+} as any;
 baseConfig["app" + "Secret"] = config.appSecret;
 
 const client = new Lark.Client(baseConfig);
