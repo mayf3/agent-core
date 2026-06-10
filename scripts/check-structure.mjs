@@ -57,5 +57,5 @@ async function checkLines(file) {
 }
 
 function shouldSkipLineCheck(rel) {
-  return /\.(png|jpg|jpeg|gif|webp|ico|pdf|lock)$/i.test(rel);
+  return /\.(png|jpg|jpeg|gif|webp|ico|pdf|lock)$/i.test(rel) || rel.endsWith("-lock.yaml");
 }

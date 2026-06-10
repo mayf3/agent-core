@@ -162,6 +162,101 @@ where
         })
     }
 
+    pub fn deliver_echo(
+        &self,
+        journal: &JournalStore,
+        gateway: &Gateway,
+        event: ValidatedEvent,
+    ) -> Result<RuntimeOutcome> {
+        let session = journal.get_or_create_session(&event.session_target)?;
+        journal.append_event(
+            JournalEventKind::SessionReady,
+            None,
+            Some(&session.id),
+            Some(&event.event_id.0),
+            json!({
+                "session_id": session.id.0,
+                "agent_id": session.agent_id.0,
+                "channel": format!("{:?}", session.channel),
+                "conversation_key": session.conversation_key,
+            }),
+        )?;
+        let run = self.create_run(&session, &event);
+        journal.insert_run(&run)?;
+        journal.append_event(
+            JournalEventKind::RunStarted,
+            Some(&run.id),
+            Some(&session.id),
+            Some(&event.event_id.0),
+            json!({
+                "run_id": run.id.0,
+                "trigger_event_id": run.trigger_event_id.0,
+                "principal_id": run.principal.principal_id.0,
+            }),
+        )?;
+        let RuntimeEventPayload::UserMessage {
+            text,
+            message_id,
+            chat_id,
+        } = event.payload.clone();
+        let reply = format!("收到：{text}");
+        let intent = self.reply_intent(&run, &session, &reply, message_id, chat_id);
+        let correlation_id = intent.invocation_id.0.clone();
+        journal.append_event(
+            JournalEventKind::InvocationProposed,
+            Some(&run.id),
+            Some(&session.id),
+            Some(&correlation_id),
+            json!({
+                "operation": intent.operation,
+                "idempotency_key": intent.idempotency_key,
+            }),
+        )?;
+        let approved = gateway.approve_invocation(intent, &run, &session)?;
+        journal.append_event(
+            JournalEventKind::InvocationApproved,
+            Some(&run.id),
+            Some(&session.id),
+            Some(&correlation_id),
+            json!({
+                "decision_id": approved.decision_id,
+                "operation": approved.intent().operation,
+            }),
+        )?;
+        journal.append_event(
+            JournalEventKind::DispatchStarted,
+            Some(&run.id),
+            Some(&session.id),
+            Some(&correlation_id),
+            json!({ "operation": approved.intent().operation }),
+        )?;
+        let receipt = self.adapter.execute(&approved)?;
+        journal.append_event(
+            JournalEventKind::ReceiptReceived,
+            Some(&run.id),
+            Some(&session.id),
+            Some(&correlation_id),
+            json!({
+                "status": format!("{:?}", receipt.status),
+                "external_ref": receipt.external_ref,
+                "output_kind": "text",
+            }),
+        )?;
+        journal.complete_run(&run.id)?;
+        journal.append_event(
+            JournalEventKind::RunCompleted,
+            Some(&run.id),
+            Some(&session.id),
+            None,
+            json!({ "status": "Completed" }),
+        )?;
+        Ok(RuntimeOutcome {
+            run_id: run.id,
+            session_id: session.id,
+            output: reply,
+        })
+    }
+
     fn create_run(&self, session: &Session, event: &ValidatedEvent) -> Run {
         let now = Utc::now();
         Run {
@@ -217,6 +312,41 @@ where
                 &event.event_id.0,
             ),
         ]
+    }
+
+    fn reply_intent(
+        &self,
+        run: &Run,
+        session: &Session,
+        text: &str,
+        message_id: Option<String>,
+        chat_id: Option<String>,
+    ) -> InvocationIntent {
+        if session.channel == ChannelKind::Feishu {
+            InvocationIntent {
+                invocation_id: InvocationId::new(),
+                run_id: run.id.clone(),
+                operation: "feishu.send_message".to_string(),
+                arguments: json!({
+                    "session_id": session.id.0,
+                    "message_id": message_id.unwrap_or_default(),
+                    "chat_id": chat_id.unwrap_or_default(),
+                    "text": text,
+                }),
+                idempotency_key: Some(format!("{}:feishu", run.id.0)),
+            }
+        } else {
+            InvocationIntent {
+                invocation_id: InvocationId::new(),
+                run_id: run.id.clone(),
+                operation: "stdout.send_text".to_string(),
+                arguments: json!({
+                    "session_id": session.id.0,
+                    "text": text,
+                }),
+                idempotency_key: Some(format!("{}:stdout", run.id.0)),
+            }
+        }
     }
 }
 

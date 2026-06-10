@@ -47,7 +47,7 @@ impl Gateway {
         }
         match envelope.source {
             ExternalSource::Cli => self.validate_cli_ingress(journal, envelope),
-            ExternalSource::Feishu => bail!("feishu ingress is not enabled in M0"),
+            ExternalSource::Feishu => self.validate_feishu_ingress(journal, envelope),
         }
     }
 
@@ -65,12 +65,17 @@ impl Gateway {
         if !has_grant {
             bail!("capability_not_enabled: {}", intent.operation);
         }
-        if intent.operation != "stdout.send_text" {
+        if intent.operation != "stdout.send_text" && intent.operation != "feishu.send_message" {
             bail!("operation_not_allowed: {}", intent.operation);
         }
         let target_session = string_arg(&intent.arguments, "session_id")?;
         if target_session != session.id.0 {
             bail!("target_session_mismatch");
+        }
+        if intent.operation == "feishu.send_message" {
+            string_arg(&intent.arguments, "message_id")?;
+            string_arg(&intent.arguments, "chat_id")?;
+            string_arg(&intent.arguments, "text")?;
         }
         Ok(ApprovedInvocation::new(
             intent,
@@ -110,6 +115,7 @@ impl Gateway {
             payload: RuntimeEventPayload::UserMessage {
                 text,
                 message_id: None,
+                chat_id: None,
             },
             dedupe_key: format!("{source}:{}", envelope.external_event_id),
             occurred_at: envelope.received_at,
@@ -123,6 +129,116 @@ impl Gateway {
                 "source": source,
                 "external_event_id": envelope.external_event_id,
                 "event_id": event_id.0,
+                "payload_hash": payload_hash(&envelope.payload),
+            }),
+        )?;
+        Ok(event)
+    }
+
+    fn validate_feishu_ingress(
+        &self,
+        journal: &JournalStore,
+        envelope: IngressEnvelope,
+    ) -> Result<ValidatedEvent> {
+        let text = string_arg(&envelope.payload, "text")?;
+        let message_id = string_arg(&envelope.payload, "message_id")?;
+        let chat_id = string_arg(&envelope.payload, "chat_id")?;
+        let chat_type = string_arg(&envelope.payload, "chat_type")?;
+        let sender_open_id = string_arg(&envelope.payload, "sender_open_id")?;
+        let sender_type = envelope
+            .payload
+            .get("sender_type")
+            .and_then(Value::as_str)
+            .unwrap_or("user");
+        let message_type = envelope
+            .payload
+            .get("message_type")
+            .and_then(Value::as_str)
+            .unwrap_or("text");
+        if sender_type == "app" {
+            bail!("skip:bot_sender");
+        }
+        if message_type != "text" {
+            bail!("skip:unsupported_message_type");
+        }
+        if text.trim().is_empty() {
+            bail!("skip:empty_text");
+        }
+        if chat_type == "p2p"
+            && !self.config.feishu_allowed_open_ids.is_empty()
+            && !self
+                .config
+                .feishu_allowed_open_ids
+                .iter()
+                .any(|id| id == &sender_open_id)
+        {
+            bail!("skip:sender_not_allowed");
+        }
+        if chat_type != "p2p"
+            && !self.config.feishu_allowed_chat_ids.is_empty()
+            && !self
+                .config
+                .feishu_allowed_chat_ids
+                .iter()
+                .any(|id| id == &chat_id)
+        {
+            bail!("skip:chat_not_allowed");
+        }
+        if chat_type != "p2p"
+            && self.config.feishu_require_group_mention
+            && !has_mention(&envelope.payload)
+        {
+            bail!("skip:bot_not_mentioned");
+        }
+        let event_id = EventId::new();
+        if !journal.reserve_ingress("feishu", &envelope.external_event_id, &event_id)? {
+            bail!("skip:duplicate_ingress");
+        }
+        let conversation_key = if chat_type == "p2p" {
+            format!("feishu:open_id:{sender_open_id}")
+        } else {
+            format!("feishu:chat_id:{chat_id}")
+        };
+        let event = ValidatedEvent {
+            event_id: event_id.clone(),
+            source: EventSource::Feishu,
+            principal: RunPrincipal {
+                principal_id: PrincipalId(format!("feishu:open_id:{sender_open_id}")),
+                subject: PrincipalSubject::FeishuOpenId(sender_open_id.clone()),
+                source: PrincipalSource::Feishu,
+                grants: vec![CapabilityGrant {
+                    operation: "feishu.send_message".to_string(),
+                    scope: "current_session".to_string(),
+                }],
+                requester_id: Some(format!("feishu:open_id:{sender_open_id}")),
+            },
+            session_target: SessionTarget {
+                agent_id: self.config.agent_id.clone(),
+                channel: ChannelKind::Feishu,
+                conversation_key,
+            },
+            payload: RuntimeEventPayload::UserMessage {
+                text,
+                message_id: Some(message_id.clone()),
+                chat_id: Some(chat_id.clone()),
+            },
+            dedupe_key: format!("feishu:{}", envelope.external_event_id),
+            occurred_at: envelope.received_at,
+        };
+        journal.append_event(
+            JournalEventKind::IngressAccepted,
+            None,
+            None,
+            Some(&event.dedupe_key),
+            json!({
+                "source": "feishu",
+                "external_event_id": envelope.external_event_id,
+                "event_id": event_id.0,
+                "sender_open_id": sender_open_id,
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "message_type": message_type,
+                "text": normalized_text(&envelope.payload),
                 "payload_hash": payload_hash(&envelope.payload),
             }),
         )?;
@@ -145,4 +261,22 @@ fn payload_hash(value: &Value) -> String {
     let mut hasher = Sha256::new();
     hasher.update(serde_json::to_string(value).unwrap_or_default().as_bytes());
     hex::encode(hasher.finalize())
+}
+
+fn has_mention(value: &Value) -> bool {
+    value
+        .get("mentions")
+        .and_then(Value::as_array)
+        .map(|mentions| !mentions.is_empty())
+        .unwrap_or(false)
+}
+
+fn normalized_text(value: &Value) -> String {
+    value
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .chars()
+        .take(500)
+        .collect()
 }

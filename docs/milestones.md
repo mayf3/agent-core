@@ -14,7 +14,8 @@ This file is the施工单. It deliberately excludes long-term protocol detail; s
 | M4a Feishu Echo | Done | receive/normalize/filter/dedupe/reply echo core |
 | M4b Feishu LLM Reply | Done | chat-only Feishu entry into agent loop |
 | M4c Durable Feishu Runtime | Next | inbox/runs/outbox, idempotent reply, recovery |
-| Rust Phase 0 M0 | Next | Rust Kernel CLI vertical slice with SQLite Journal |
+| Rust Phase 0 M0 | Done | Rust Kernel CLI vertical slice with SQLite Journal |
+| Rust Phase 0 M1 | Done | TS Feishu long-connection connector + Rust Echo |
 
 ## Stage Plan
 

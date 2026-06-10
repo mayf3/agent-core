@@ -6,11 +6,19 @@
   "packageManager": "pnpm@10.10.0",
   "scripts": {
     "agent-core": "cargo run --",
-    "check": "node scripts/check-structure.mjs && node scripts/check-local-secret-leaks.mjs && cargo test",
+    "feishu-connector": "tsx connectors/feishu/src/index.ts",
+    "check": "node scripts/check-structure.mjs && node scripts/check-local-secret-leaks.mjs && cargo test && pnpm check:connector",
     "check:structure": "node scripts/check-structure.mjs",
     "check:secrets": "node scripts/check-local-secret-leaks.mjs",
+    "check:connector": "tsx -e \"Promise.all([import('./connectors/feishu/src/config.ts'), import('./connectors/feishu/src/kernel.ts'), import('./connectors/feishu/src/execute-server.ts')]).then(() => console.log('connector modules ok'))\"",
     "test": "cargo test",
     "test:node-prototype": "node --test"
+  },
+  "dependencies": {
+    "@larksuiteoapi/node-sdk": "^1.60.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.20.6"
   },
   "engines": {
     "node": ">=20.11"

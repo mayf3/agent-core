@@ -50,12 +50,35 @@ programs that call the kernel through stable APIs.
 ```bash
 pnpm check
 pnpm agent-core run --text "hello" --json
+pnpm agent-core serve
+pnpm feishu-connector
 cargo test
 ```
 
 The official Runtime is now the Rust Kernel. Existing Node packages are prototype
 reference code for later TypeScript Feishu Connector extraction; they are not
 the active Runtime, Gateway, or Journal.
+
+## Feishu M1
+
+M1 uses local IPC:
+
+```text
+Feishu long connection
+-> TypeScript Connector
+-> Rust Kernel /v1/ingress
+-> fixed echo Invocation
+-> Connector /v1/execute
+-> Feishu reply
+```
+
+Both local services bind to `127.0.0.1` and require `AGENT_CORE_IPC_TOKEN`.
+Start the Rust Kernel first, then the connector:
+
+```bash
+pnpm agent-core serve
+pnpm feishu-connector
+```
 
 ## Key Principle
 
