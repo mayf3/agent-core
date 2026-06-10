@@ -216,6 +216,14 @@ Feishu long connection
 -> Feishu
 ```
 
+Implementation status: done. M1 keeps the Connector as an edge adapter:
+
+- Feishu long connection uses `@larksuiteoapi/node-sdk` `WSClient`;
+- Connector normalizes `im.message.receive_v1` into `/v1/ingress`;
+- Connector returns quickly from the Feishu event callback;
+- Rust Kernel owns Gateway, Session, Run, Journal, and echo intent creation;
+- Connector `/v1/execute` only accepts `feishu.send_message`.
+
 ### M2: Feishu LLM Reply
 
 Replace fixed reply with real Context + LLM. Reply still uses

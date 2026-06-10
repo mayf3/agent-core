@@ -175,6 +175,7 @@ pub enum RuntimeEventPayload {
     UserMessage {
         text: String,
         message_id: Option<String>,
+        chat_id: Option<String>,
     },
 }
 

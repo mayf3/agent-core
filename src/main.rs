@@ -4,16 +4,24 @@ use agent_core_kernel::gateway::Gateway;
 use agent_core_kernel::journal::JournalStore;
 use agent_core_kernel::llm::LocalEchoLlm;
 use agent_core_kernel::runtime::Runtime;
+use agent_core_kernel::server::serve;
 use anyhow::{bail, Result};
 use serde_json::json;
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.first().map(String::as_str) != Some("run") {
-        print_help();
-        return Ok(());
+    match args.first().map(String::as_str) {
+        Some("run") => run_cli(&args[1..]),
+        Some("serve") => serve_cli(&args[1..]),
+        _ => {
+            print_help();
+            Ok(())
+        }
     }
-    let options = CliOptions::parse(&args[1..])?;
+}
+
+fn run_cli(args: &[String]) -> Result<()> {
+    let options = CliOptions::parse(args)?;
     let config = KernelConfig::from_cli(options.db_path);
     let journal = JournalStore::open(&config.db_path)?;
     let gateway = Gateway::new(config.clone());
@@ -35,6 +43,15 @@ fn main() -> Result<()> {
         println!("{}", outcome.output);
     }
     Ok(())
+}
+
+fn serve_cli(args: &[String]) -> Result<()> {
+    let options = ServeOptions::parse(args)?;
+    let mut config = KernelConfig::from_cli(options.db_path);
+    if let Some(port) = options.port {
+        config.kernel_port = port;
+    }
+    serve(config)
 }
 
 struct CliOptions {
@@ -73,6 +90,35 @@ impl CliOptions {
     }
 }
 
+struct ServeOptions {
+    db_path: Option<String>,
+    port: Option<u16>,
+}
+
+impl ServeOptions {
+    fn parse(args: &[String]) -> Result<Self> {
+        let mut db_path = None;
+        let mut port = None;
+        let mut index = 0;
+        while index < args.len() {
+            match args[index].as_str() {
+                "--db" => {
+                    index += 1;
+                    db_path = args.get(index).cloned();
+                }
+                "--port" => {
+                    index += 1;
+                    port = args.get(index).and_then(|value| value.parse().ok());
+                }
+                other => bail!("unknown argument: {other}"),
+            }
+            index += 1;
+        }
+        Ok(Self { db_path, port })
+    }
+}
+
 fn print_help() {
     println!("agent-core-kernel run --text <message> [--db <path>] [--json]");
+    println!("agent-core-kernel serve [--db <path>] [--port <port>]");
 }
