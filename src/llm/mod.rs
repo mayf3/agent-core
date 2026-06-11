@@ -44,39 +44,79 @@ impl LlmClient for LocalEchoLlm {
 }
 
 pub struct OpenAiCompatibleLlm {
-    base_url: String,
-    api_key: String,
-    model: String,
+    primary: ModelEndpoint,
+    fallback: Option<ModelEndpoint>,
     timeout: Duration,
 }
 
 impl OpenAiCompatibleLlm {
     pub fn new(base_url: String, api_key: String, model: String, timeout_ms: u64) -> Self {
-        let normalized_model = normalize_model_name(&base_url, &model);
         Self {
-            base_url: base_url.trim_end_matches('/').to_string(),
-            api_key,
-            model: normalized_model,
+            primary: ModelEndpoint::new(base_url, api_key, model),
+            fallback: None,
             timeout: Duration::from_millis(timeout_ms),
         }
     }
 
-    fn endpoint(&self) -> String {
-        if self.base_url.ends_with("/chat/completions") {
-            self.base_url.clone()
-        } else {
-            format!("{}/chat/completions", self.base_url)
+    pub fn with_fallback(mut self, base_url: String, api_key: String, model: String) -> Self {
+        let endpoint = ModelEndpoint::new(base_url, api_key, model);
+        if endpoint.is_configured() {
+            self.fallback = Some(endpoint);
         }
+        self
     }
 }
 
 impl LlmClient for OpenAiCompatibleLlm {
     fn complete(&self, input: LlmInput) -> Result<LlmOutput> {
-        if self.api_key.trim().is_empty() || self.model.trim().is_empty() {
-            return Ok(config_required_output(&self.model, input.blocks.len()));
+        if !self.primary.is_configured() {
+            return match self.try_fallback(&input, "model_config_required") {
+                Some(output) => Ok(output),
+                None => Ok(config_required_output(
+                    &self.primary.model,
+                    input.blocks.len(),
+                )),
+            };
         }
+        match self.request_endpoint(&self.primary, &input) {
+            Ok(value) => Ok(success_output(
+                &self.primary.model,
+                input.blocks.len(),
+                value,
+            )),
+            Err(error) => {
+                if let Some(output) = self.try_fallback(&input, error.as_str()) {
+                    return Ok(output);
+                }
+                Ok(request_failed_output(
+                    &self.primary.model,
+                    input.blocks.len(),
+                    error.as_str(),
+                ))
+            }
+        }
+    }
+}
+
+impl OpenAiCompatibleLlm {
+    fn try_fallback(&self, input: &LlmInput, primary_error: &str) -> Option<LlmOutput> {
+        let fallback = self.fallback.as_ref()?;
+        let output = match self.request_endpoint(fallback, input) {
+            Ok(value) => success_output(&fallback.model, input.blocks.len(), value),
+            Err(error) => {
+                request_failed_output(&fallback.model, input.blocks.len(), error.as_str())
+            }
+        };
+        Some(mark_fallback(output, &self.primary.model, primary_error))
+    }
+
+    fn request_endpoint(
+        &self,
+        endpoint: &ModelEndpoint,
+        input: &LlmInput,
+    ) -> std::result::Result<Value, String> {
         let body = json!({
-            "model": self.model,
+            "model": endpoint.model,
             "messages": [
                 {
                     "role": "system",
@@ -89,26 +129,13 @@ impl LlmClient for OpenAiCompatibleLlm {
             ],
             "temperature": 0.2,
         });
-        match self.request(body) {
-            Ok(value) => Ok(success_output(&self.model, input.blocks.len(), value)),
-            Err(error) => Ok(request_failed_output(
-                &self.model,
-                input.blocks.len(),
-                error.as_str(),
-            )),
-        }
-    }
-}
-
-impl OpenAiCompatibleLlm {
-    fn request(&self, body: Value) -> std::result::Result<Value, String> {
         let agent = ureq::Agent::config_builder()
             .timeout_global(Some(self.timeout))
             .build()
             .new_agent();
         let response = agent
-            .post(&self.endpoint())
-            .header("authorization", &format!("Bearer {}", self.api_key))
+            .post(&endpoint.chat_completions_url())
+            .header("authorization", &format!("Bearer {}", endpoint.api_key))
             .header("content-type", "application/json")
             .send_json(body);
         match response {
@@ -119,6 +146,37 @@ impl OpenAiCompatibleLlm {
             Err(ureq::Error::StatusCode(code)) => Err(format!("model_http_{code}")),
             Err(ureq::Error::Timeout(_)) => Err("model_timeout".to_string()),
             Err(_) => Err("model_request_failed".to_string()),
+        }
+    }
+}
+
+struct ModelEndpoint {
+    base_url: String,
+    api_key: String,
+    model: String,
+}
+
+impl ModelEndpoint {
+    fn new(base_url: String, api_key: String, model: String) -> Self {
+        let normalized_model = normalize_model_name(&base_url, &model);
+        Self {
+            base_url: base_url.trim_end_matches('/').to_string(),
+            api_key,
+            model: normalized_model,
+        }
+    }
+
+    fn is_configured(&self) -> bool {
+        !self.base_url.trim().is_empty()
+            && !self.api_key.trim().is_empty()
+            && !self.model.trim().is_empty()
+    }
+
+    fn chat_completions_url(&self) -> String {
+        if self.base_url.ends_with("/chat/completions") {
+            self.base_url.clone()
+        } else {
+            format!("{}/chat/completions", self.base_url)
         }
     }
 }
@@ -174,6 +232,20 @@ fn success_output(model: &str, context_blocks: usize, value: Value) -> LlmOutput
             "usage": sanitize_usage(value.get("usage")),
         }),
     }
+}
+
+fn mark_fallback(mut output: LlmOutput, primary_model: &str, primary_error: &str) -> LlmOutput {
+    if let Some(payload) = output.journal_payload.as_object_mut() {
+        payload.insert(
+            "fallback".to_string(),
+            json!({
+                "used": true,
+                "primary_model": empty_to_null(primary_model),
+                "primary_error_category": primary_error,
+            }),
+        );
+    }
+    output
 }
 
 fn serialize_system_context(blocks: &[ContextBlock]) -> String {
