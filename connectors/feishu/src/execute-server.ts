@@ -1,7 +1,8 @@
 import http from "node:http";
 import type { ConnectorConfig } from "./config.js";
+import type { ReactionTracker } from "./reactions.js";
 
-export function startExecuteServer(config: ConnectorConfig, client: any) {
+export function startExecuteServer(config: ConnectorConfig, client: any, reactions?: ReactionTracker) {
   const executions = new Map<string, Promise<unknown>>();
   const server = http.createServer(async (req, res) => {
     try {
@@ -21,10 +22,16 @@ export function startExecuteServer(config: ConnectorConfig, client: any) {
         return json(res, 200, { ok: true, receipt, replayed: true });
       }
       console.log(`execute approved operation=${body.operation} invocation=${shortId(body.invocation_id)} msg=${shortId(body.arguments.message_id)}`);
-      const pending = sendReply(client, body.arguments.message_id, body.arguments.text).catch((error) => {
-        executions.delete(idempotencyKey);
-        throw error;
-      });
+      const pending = sendReply(client, body.arguments.message_id, body.arguments.text)
+        .then((receipt) => {
+          void reactions?.markSucceeded(body.arguments.message_id);
+          return receipt;
+        })
+        .catch((error) => {
+          executions.delete(idempotencyKey);
+          void reactions?.markFailed(body.arguments.message_id);
+          throw error;
+        });
       executions.set(idempotencyKey, pending);
       const receipt = await pending;
       console.log(`execute sent status=${receipt.status} reply=${shortId(receipt.message_id || "")}`);

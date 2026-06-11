@@ -238,6 +238,13 @@ Implementation status: done. M1 keeps the Connector as an edge adapter:
 - Connector returns quickly from the Feishu event callback;
 - Rust Kernel owns Gateway, Session, Run, Journal, and echo intent creation;
 - Connector `/v1/execute` only accepts `feishu.send_message`.
+- Connector may add one best-effort processing reaction on the source message
+  and remove it after `feishu.send_message` succeeds. This is connector-local
+  UX state, tracked in memory by `message_id -> reaction_id`. It is not a model
+  tool, workflow state, or Core Journal fact.
+- Processing reactions must never run as a keepalive loop. Feishu reactions are
+  persistent, so one add and one delete per handled message is the intended
+  upper bound.
 
 ### M2: Feishu LLM Reply
 
