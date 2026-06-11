@@ -1,8 +1,10 @@
 import type { ConnectorConfig } from "./config.js";
+import type { ReactionTracker } from "./reactions.js";
 
-export async function postIngress(config: ConnectorConfig, event: unknown) {
+export async function postIngress(config: ConnectorConfig, event: unknown, reactions?: ReactionTracker) {
   const normalized = normalizeMessageEvent(event);
   console.log(`feishu event received type=${normalized.payload.message_type} chat=${normalized.payload.chat_type} msg=${shortId(normalized.payload.message_id)}`);
+  await reactions?.markProcessing(normalized.payload.message_id);
   const body = {
     protocol_version: "v1",
     source: "Feishu",
@@ -25,10 +27,14 @@ export async function postIngress(config: ConnectorConfig, event: unknown) {
     });
     if (!response.ok) {
       console.error(`kernel ingress failed: HTTP ${response.status}`);
+      await reactions?.markFailed(normalized.payload.message_id);
       return;
     }
     const result = await response.json().catch(() => ({}));
     console.log(`kernel ingress result status=${result.status || "unknown"} run=${shortId(result.run_id || "")}`);
+    if (result.status === "skipped") {
+      await reactions?.clearProcessing(normalized.payload.message_id);
+    }
   } finally {
     clearTimeout(timer);
   }

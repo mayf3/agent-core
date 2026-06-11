@@ -7,6 +7,7 @@ export interface ConnectorConfig {
   kernelIngressTimeoutMs: number;
   connectorPort: number;
   ipcToken: string;
+  processingReactionEmoji: string;
 }
 
 export function loadConfig(): ConnectorConfig {
@@ -19,6 +20,7 @@ export function loadConfig(): ConnectorConfig {
     kernelIngressTimeoutMs: Number(process.env.AGENT_CORE_KERNEL_INGRESS_TIMEOUT_MS || 45_000),
     connectorPort: Number(process.env.AGENT_CORE_CONNECTOR_PORT || 4131),
     ipcToken: required("AGENT_CORE_IPC_TOKEN"),
+    processingReactionEmoji: optionalReaction("AGENT_CORE_FEISHU_PROCESSING_REACTION", "OK"),
   };
 }
 
@@ -26,6 +28,14 @@ function required(key: string): string {
   const value = String(process.env[key] || "").trim();
   if (!value) {
     throw new Error(`${key} is required`);
+  }
+  return value;
+}
+
+function optionalReaction(key: string, fallback: string): string {
+  const value = String(process.env[key] ?? fallback).trim().toUpperCase();
+  if (value === "0" || value === "FALSE" || value === "OFF" || value === "NONE") {
+    return "";
   }
   return value;
 }

@@ -10,7 +10,7 @@
     "check": "node scripts/check-structure.mjs && node scripts/check-local-secret-leaks.mjs && cargo test && pnpm check:connector",
     "check:structure": "node scripts/check-structure.mjs",
     "check:secrets": "node scripts/check-local-secret-leaks.mjs",
-    "check:connector": "tsx -e \"Promise.all([import('./connectors/feishu/src/config.ts'), import('./connectors/feishu/src/kernel.ts'), import('./connectors/feishu/src/execute-server.ts'), import('./connectors/feishu/src/safe-logger.ts')]).then(() => console.log('connector modules ok'))\"",
+    "check:connector": "tsx --test connectors/feishu/src/*.test.ts && tsx -e \"Promise.all([import('./connectors/feishu/src/config.ts'), import('./connectors/feishu/src/kernel.ts'), import('./connectors/feishu/src/execute-server.ts'), import('./connectors/feishu/src/reactions.ts'), import('./connectors/feishu/src/safe-logger.ts')]).then(() => console.log('connector modules ok'))\"",
     "test": "cargo test"
   },
   "dependencies": {
