@@ -339,6 +339,49 @@ fn openai_compatible_llm_missing_config_returns_friendly_output() -> Result<()> 
 }
 
 #[test]
+fn zai_model_prefix_is_normalized_for_zai_endpoint() -> Result<()> {
+    let llm = OpenAiCompatibleLlm::new(
+        "https://api.z.ai/api/paas/v4".to_string(),
+        String::new(),
+        "zai/glm-5.1".to_string(),
+        100,
+    );
+
+    let output = llm.complete(LlmInput {
+        blocks: vec![],
+        user_text: "hello".to_string(),
+    })?;
+
+    assert_eq!(output.model, "glm-5.1");
+    assert_eq!(
+        output
+            .journal_payload
+            .get("model")
+            .and_then(|value| value.as_str()),
+        Some("glm-5.1")
+    );
+    Ok(())
+}
+
+#[test]
+fn provider_model_prefix_is_preserved_for_generic_endpoint() -> Result<()> {
+    let llm = OpenAiCompatibleLlm::new(
+        "https://openrouter.ai/api/v1".to_string(),
+        String::new(),
+        "zai/glm-5.1".to_string(),
+        100,
+    );
+
+    let output = llm.complete(LlmInput {
+        blocks: vec![],
+        user_text: "hello".to_string(),
+    })?;
+
+    assert_eq!(output.model, "zai/glm-5.1");
+    Ok(())
+}
+
+#[test]
 fn feishu_group_requires_mention() -> Result<()> {
     let mut config = test_config();
     config.feishu_allowed_chat_ids = vec!["oc_chat".to_string()];

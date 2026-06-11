@@ -32,12 +32,14 @@ programs.
 ## 2. Current Kernel Modules
 
 ```text
-packages/core       run, event, state, envelope, approval records
-packages/tools      tool contracts, policy, lightweight execution boundary
-packages/providers  model provider adapters
-packages/agent      single agent loop
-packages/feishu     Feishu transport normalization, policy, echo runtime
-packages/cli        local command entry
+src/domain.rs          durable domain types and ID newtypes
+src/gateway            ingress validation and invocation approval
+src/runtime            single-agent event delivery loop
+src/journal            SQLite journal, hash chain, recovery scans
+src/context.rs         Phase 0 file-backed context assembly
+src/llm                OpenAI-compatible provider adapter
+src/server             localhost HTTP kernel API and health
+connectors/feishu      TypeScript Feishu edge adapter only
 ```
 
 Future modules may be added only when repeated behavior proves a boundary.
@@ -270,13 +272,13 @@ modifying `agent-core`.
 
 ## 9. Storage Direction
 
-JSONL is acceptable for bootstrap. Durable Feishu processing should introduce the
-smallest useful SQLite surface:
+SQLite is used from the first CLI message. The smallest durable surface is:
 
 ```text
-inbox   received external messages and idempotency keys
-runs    processing state
-outbox  pending/sent replies and receipts
+sessions        conversation state
+runs            processing state
+ingress_dedup   external event/message idempotency
+journal_events  append-only facts with hash chain and correlation IDs
 ```
 
 Do not promise strict exactly-once delivery across Feishu and local storage.
