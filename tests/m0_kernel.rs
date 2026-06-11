@@ -130,6 +130,42 @@ fn journal_scans_unknown_invocations() -> Result<()> {
 }
 
 #[test]
+fn journal_recovery_marks_unknown_invocations() -> Result<()> {
+    let journal = JournalStore::in_memory()?;
+    let run_id = RunId::new();
+    let session_id = SessionId("session_recovery".to_string());
+    let run = Run {
+        id: run_id.clone(),
+        session_id: session_id.clone(),
+        agent_id: AgentId("main".to_string()),
+        trigger_event_id: EventId::new(),
+        principal: cli_principal(),
+        parent_run_id: None,
+        delegated_by: None,
+        status: RunStatus::Running,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+    journal.insert_run(&run)?;
+    journal.append_event(
+        JournalEventKind::DispatchStarted,
+        Some(&run_id),
+        Some(&session_id),
+        Some("invocation_recovery"),
+        json!({ "operation": "feishu.send_message" }),
+    )?;
+
+    assert_eq!(journal.recover_unknown_invocations()?, 1);
+    assert!(journal.unknown_invocations()?.is_empty());
+    assert!(journal.events()?.iter().any(|event| {
+        event.kind == JournalEventKind::ReceiptReceived
+            && event.correlation_id.as_deref() == Some("invocation_recovery")
+            && event.payload.get("status").and_then(|value| value.as_str()) == Some("Unknown")
+    }));
+    Ok(())
+}
+
+#[test]
 fn health_snapshot_reports_hash_and_unknowns() -> Result<()> {
     let journal = JournalStore::in_memory()?;
     journal.append_event(
