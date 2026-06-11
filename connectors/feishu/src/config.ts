@@ -8,6 +8,7 @@ export interface ConnectorConfig {
   connectorPort: number;
   ipcToken: string;
   processingReactionEmoji: string;
+  failedReactionEmoji: string;
 }
 
 export function loadConfig(): ConnectorConfig {
@@ -21,6 +22,7 @@ export function loadConfig(): ConnectorConfig {
     connectorPort: Number(process.env.AGENT_CORE_CONNECTOR_PORT || 4131),
     ipcToken: required("AGENT_CORE_IPC_TOKEN"),
     processingReactionEmoji: optionalReaction("AGENT_CORE_FEISHU_PROCESSING_REACTION", "OK"),
+    failedReactionEmoji: optionalReaction("AGENT_CORE_FEISHU_FAILED_REACTION", "ERROR"),
   };
 }
 
