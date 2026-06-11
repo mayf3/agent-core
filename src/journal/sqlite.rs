@@ -203,6 +203,45 @@ impl JournalStore {
             .map_err(Into::into)
     }
 
+    pub fn event_count(&self) -> Result<i64> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow!("journal mutex poisoned"))?;
+        conn.query_row("SELECT COUNT(*) FROM journal_events", [], |row| row.get(0))
+            .map_err(Into::into)
+    }
+
+    pub fn unknown_invocations(&self) -> Result<Vec<UnknownInvocation>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow!("journal mutex poisoned"))?;
+        let mut stmt = conn.prepare(
+            "SELECT d.correlation_id, d.run_id, d.session_id, MIN(d.created_at)
+             FROM journal_events d
+             WHERE d.kind = 'DispatchStarted'
+               AND d.correlation_id IS NOT NULL
+               AND NOT EXISTS (
+                 SELECT 1 FROM journal_events r
+                 WHERE r.kind = 'ReceiptReceived'
+                   AND r.correlation_id = d.correlation_id
+               )
+             GROUP BY d.correlation_id, d.run_id, d.session_id
+             ORDER BY MIN(d.sequence)",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(UnknownInvocation {
+                invocation_id: row.get(0)?,
+                run_id: row.get::<_, Option<String>>(1)?.map(RunId),
+                session_id: row.get::<_, Option<String>>(2)?.map(SessionId),
+                first_dispatch_at: parse_time(row.get::<_, String>(3)?)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
     pub fn verify_hash_chain(&self) -> Result<bool> {
         let events = self.events()?;
         let mut previous_hash: Option<String> = None;

@@ -4,7 +4,8 @@ use agent_core_kernel::domain::*;
 use agent_core_kernel::gateway::Gateway;
 use agent_core_kernel::journal::JournalStore;
 use agent_core_kernel::llm::{LlmClient, LlmInput, LocalEchoLlm, OpenAiCompatibleLlm};
-use agent_core_kernel::runtime::Runtime;
+use agent_core_kernel::runtime::{run_yield, session_spawn, Runtime};
+use agent_core_kernel::server::health_snapshot;
 use anyhow::Result;
 use chrono::Utc;
 use serde_json::json;
@@ -101,6 +102,70 @@ fn hash_chain_detects_tampering() -> Result<()> {
     journal.tamper_first_event_for_test()?;
     assert!(!journal.verify_hash_chain()?);
     Ok(())
+}
+
+#[test]
+fn journal_scans_unknown_invocations() -> Result<()> {
+    let journal = JournalStore::in_memory()?;
+    let correlation_id = "invocation_unknown";
+    journal.append_event(
+        JournalEventKind::DispatchStarted,
+        None,
+        None,
+        Some(correlation_id),
+        json!({ "operation": "feishu.send_message" }),
+    )?;
+
+    assert_eq!(journal.unknown_invocations()?.len(), 1);
+
+    journal.append_event(
+        JournalEventKind::ReceiptReceived,
+        None,
+        None,
+        Some(correlation_id),
+        json!({ "status": "Succeeded" }),
+    )?;
+    assert!(journal.unknown_invocations()?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn health_snapshot_reports_hash_and_unknowns() -> Result<()> {
+    let journal = JournalStore::in_memory()?;
+    journal.append_event(
+        JournalEventKind::DispatchStarted,
+        None,
+        None,
+        Some("invocation_unknown"),
+        json!({ "operation": "feishu.send_message" }),
+    )?;
+
+    let snapshot = health_snapshot(&journal)?;
+
+    assert_eq!(
+        snapshot.get("ok").and_then(|value| value.as_bool()),
+        Some(true)
+    );
+    assert_eq!(
+        snapshot
+            .get("unknown_invocation_count")
+            .and_then(|value| value.as_u64()),
+        Some(1)
+    );
+    assert_eq!(
+        snapshot.get("status").and_then(|value| value.as_str()),
+        Some("degraded")
+    );
+    Ok(())
+}
+
+#[test]
+fn disabled_phase0_runtime_abis_return_not_enabled() {
+    assert!(session_spawn()
+        .unwrap_err()
+        .to_string()
+        .contains("not_enabled"));
+    assert!(run_yield().unwrap_err().to_string().contains("not_enabled"));
 }
 
 #[test]

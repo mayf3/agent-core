@@ -4,7 +4,7 @@ use crate::domain::*;
 use crate::gateway::Gateway;
 use crate::journal::JournalStore;
 use crate::llm::{LlmClient, LlmInput};
-use anyhow::Result;
+use anyhow::{bail, Result};
 use chrono::Utc;
 use serde_json::json;
 
@@ -18,6 +18,14 @@ pub struct RuntimeOutcome {
     pub run_id: RunId,
     pub session_id: SessionId,
     pub output: String,
+}
+
+pub fn session_spawn() -> Result<()> {
+    bail!("not_enabled:session.spawn")
+}
+
+pub fn run_yield() -> Result<()> {
+    bail!("not_enabled:run.yield")
 }
 
 impl<L, A> Runtime<L, A>
