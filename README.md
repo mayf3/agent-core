@@ -6,11 +6,13 @@ load, and improve external capabilities around it.
 
 ## Direction
 
-- Runtime: Node.js, TypeScript, ESM, pnpm workspace.
-- Kernel style: small core with explicit extension points.
+- Runtime: Rust kernel plus a small TypeScript Feishu connector.
+- Kernel style: small core with explicit, non-bypassable boundaries.
 - First usable channel: Feishu, so mobile messages can start and steer local runs.
 - First model interface: OpenAI-compatible provider.
-- First tools: filesystem, shell, HTTP, state, and approval.
+- First tool surface: reply to the current session only. Shell, filesystem tools,
+  multi-agent orchestration, workflow graphs, and dynamic hooks are later external
+  capabilities.
 
 ## Core Boundary
 
@@ -18,12 +20,10 @@ The kernel owns only:
 
 - run lifecycle
 - append-only event log
-- state store
-- tool registry and dispatch
+- SQLite-backed session, run, ingress, and journal records
 - model provider interface
-- plugin registry
-- approval gate
-- minimal audit records
+- invocation intent approval and adapter dispatch
+- minimal audit records and health signals
 
 The kernel does not own:
 
@@ -37,6 +37,10 @@ The kernel does not own:
 
 Those features should live as plugins, external services, scripts, or agent-written
 programs that call the kernel through stable APIs.
+
+The TypeScript side is only the Feishu edge adapter: long-connection auth,
+event normalization, and `feishu.send_message` execution. It must not grow a
+second Session, Context, Policy, LLM, Agent Loop, Gateway, or Journal.
 
 ## Documents
 
@@ -55,9 +59,9 @@ pnpm feishu-connector
 cargo test
 ```
 
-The official Runtime is now the Rust Kernel. Existing Node packages are prototype
-reference code for later TypeScript Feishu Connector extraction; they are not
-the active Runtime, Gateway, or Journal.
+Runtime data defaults to `~/.agent-core`. The source repository owns code and
+bootstrap defaults; local agent documents and `kernel.sqlite` live outside the
+checkout by default.
 
 ## Feishu M1
 
@@ -67,7 +71,7 @@ M1 uses local IPC:
 Feishu long connection
 -> TypeScript Connector
 -> Rust Kernel /v1/ingress
--> fixed echo Invocation
+-> Runtime + LLM
 -> Connector /v1/execute
 -> Feishu reply
 ```
