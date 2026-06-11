@@ -42,6 +42,10 @@ TypeScript Connector is only the Feishu edge adapter. It may handle Feishu long
 connection, auth, event parsing, and sending, but it must not own Session, LLM,
 Context, Policy, Agent Loop, or Journal.
 
+The Feishu connector is colocated in this repository only for Phase 0 delivery
+speed. Its target shape is an external plugin or independently developed
+connector that talks to the Rust Kernel through the same IPC contract.
+
 Phase 0 uses local HTTP JSON IPC:
 
 - `POST http://127.0.0.1:{kernel_port}/v1/ingress`

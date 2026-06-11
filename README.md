@@ -41,6 +41,9 @@ programs that call the kernel through stable APIs.
 The TypeScript side is only the Feishu edge adapter: long-connection auth,
 event normalization, and `feishu.send_message` execution. It must not grow a
 second Session, Context, Policy, LLM, Agent Loop, Gateway, or Journal.
+It is kept in this repository for Phase 0 delivery speed, but its long-term
+shape is an external plugin or independently developed connector that speaks the
+kernel IPC contract.
 
 ## Documents
 
