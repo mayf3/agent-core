@@ -242,6 +242,8 @@ Implementation status: done. M1 keeps the Connector as an edge adapter:
   and remove it after `feishu.send_message` succeeds. This is connector-local
   UX state, tracked in memory by `message_id -> reaction_id`. It is not a model
   tool, workflow state, or Core Journal fact.
+- If an accepted run or reply dispatch fails, Connector may replace the
+  processing reaction with a configured failed reaction.
 - Processing reactions must never run as a keepalive loop. Feishu reactions are
   persistent, so one add and one delete per handled message is the intended
   upper bound.
