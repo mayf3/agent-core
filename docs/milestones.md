@@ -20,6 +20,7 @@ This file is the施工单. It deliberately excludes long-term protocol detail; s
 | Rust Phase 0 M3a | Done | health probe, unknown scan, disabled spawn/yield ABI |
 | Rust Phase 0 M3b | Done | file-backed context, skill catalog, recent messages, truncation |
 | Rust Phase 0 M3c | Done | startup recovery marks unknown dispatches without mutating history |
+| Rust Phase 0 M3d | Done | SIGINT/SIGTERM stops accepting new kernel connections gracefully |
 
 ## Stage Plan
 

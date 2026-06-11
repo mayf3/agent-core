@@ -242,7 +242,7 @@ Implementation status: done. M2 keeps the small-kernel boundary:
 
 ### M3: Reliability
 
-Implementation status: in progress.
+Implementation status: done.
 
 Done:
 
@@ -258,10 +258,8 @@ Done:
 - truncation applies to compressible ContextBlocks.
 - restart recovery marks old dispatched invocations without receipts as
   `ReceiptReceived` with `Unknown` status and fails the run.
-
-Remaining:
-
-- graceful shutdown;
+- graceful shutdown stops accepting new connections on SIGINT/SIGTERM and exits
+  after the current request finishes.
 
 ## Phase 0 Non-Goals
 
