@@ -107,12 +107,18 @@ fn handle_connection(
         config.connector_execute_url.clone(),
         config.ipc_token.clone(),
     );
-    let llm = Box::new(OpenAiCompatibleLlm::new(
+    let llm = OpenAiCompatibleLlm::new(
         config.openai_base_url.clone(),
         config.openai_api_key.clone(),
         config.model.clone(),
         config.model_timeout_ms,
-    ));
+    )
+    .with_fallback(
+        config.fallback_openai_base_url.clone(),
+        config.fallback_openai_api_key.clone(),
+        config.fallback_model.clone(),
+    );
+    let llm = Box::new(llm);
     let runtime = Runtime::new(config.clone(), llm, adapter);
     let outcome = runtime.deliver(journal, gateway, validated)?;
     write_json(
