@@ -20,6 +20,10 @@ pub fn serve(config: KernelConfig) -> Result<()> {
         config.kernel_port
     );
     let journal = JournalStore::open(&config.db_path)?;
+    let recovered = journal.recover_unknown_invocations()?;
+    if recovered > 0 {
+        println!("agent-core recovered {recovered} unknown invocation(s)");
+    }
     let gateway = Gateway::new(config.clone());
     for stream in listener.incoming() {
         match stream {

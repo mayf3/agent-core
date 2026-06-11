@@ -19,6 +19,7 @@ This file is the施工单. It deliberately excludes long-term protocol detail; s
 | Rust Phase 0 M2 | Done | Feishu text now uses Rust OpenAI-compatible LLM path |
 | Rust Phase 0 M3a | Done | health probe, unknown scan, disabled spawn/yield ABI |
 | Rust Phase 0 M3b | Done | file-backed context, skill catalog, recent messages, truncation |
+| Rust Phase 0 M3c | Done | startup recovery marks unknown dispatches without mutating history |
 
 ## Stage Plan
 
