@@ -359,6 +359,7 @@ fn feishu_group_requires_mention() -> Result<()> {
 fn test_config() -> KernelConfig {
     KernelConfig {
         db_path: PathBuf::from(":memory:"),
+        data_dir: PathBuf::from(".agent-core-test"),
         agent_id: AgentId("main".to_string()),
         root_dir: PathBuf::from("."),
         kernel_port: 4130,
