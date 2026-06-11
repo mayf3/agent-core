@@ -1,9 +1,11 @@
+use crate::data_dir::{copy_legacy_db_if_needed, default_data_dir, ensure_data_files, expand_home};
 use crate::domain::AgentId;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
 pub struct KernelConfig {
     pub db_path: PathBuf,
+    pub data_dir: PathBuf,
     pub agent_id: AgentId,
     pub root_dir: PathBuf,
     pub kernel_port: u16,
@@ -23,11 +25,22 @@ pub struct KernelConfig {
 impl KernelConfig {
     pub fn from_cli(db_path: Option<String>) -> Self {
         load_local_env();
-        let root_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let workspace_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let data_dir = std::env::var("AGENT_CORE_DATA_DIR")
+            .map(|value| expand_home(value.trim()))
+            .unwrap_or_else(|_| default_data_dir());
+        let root_dir = std::env::var("AGENT_CORE_CONTEXT_DIR")
+            .map(|value| expand_home(value.trim()))
+            .unwrap_or_else(|_| data_dir.clone());
+        let default_db_path = data_dir.join("kernel.sqlite");
+        let legacy_db_path = workspace_dir.join(".agent-core/kernel.sqlite");
+        if db_path.is_none() {
+            let _ = copy_legacy_db_if_needed(&legacy_db_path, &default_db_path);
+        }
+        let _ = ensure_data_files(&data_dir);
         Self {
-            db_path: db_path
-                .map(PathBuf::from)
-                .unwrap_or_else(|| root_dir.join(".agent-core/kernel.sqlite")),
+            db_path: db_path.map(PathBuf::from).unwrap_or(default_db_path),
+            data_dir,
             agent_id: AgentId("main".to_string()),
             root_dir,
             kernel_port: env_u16("AGENT_CORE_KERNEL_PORT", 4130),
