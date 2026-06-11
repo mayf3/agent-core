@@ -242,15 +242,23 @@ Implementation status: done. M2 keeps the small-kernel boundary:
 
 ### M3: Reliability
 
+Implementation status: in progress.
+
+Done:
+
+- health probe at `GET /health`;
+- hash chain verify in health snapshot;
+- unknown invocation scan from `DispatchStarted` without matching
+  `ReceiptReceived`;
+- `session.spawn` and `run.yield` return `not_enabled`.
+
+Remaining:
+
 - recent messages;
 - context truncation;
-- skill catalog;
-- health probe;
+- skill catalog from installed skill files;
 - graceful shutdown;
-- unknown invocation scan;
-- restart recovery;
-- hash chain verify;
-- `session.spawn` and `run.yield` return `not_enabled`.
+- restart recovery.
 
 ## Phase 0 Non-Goals
 

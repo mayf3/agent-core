@@ -47,6 +47,9 @@ fn handle_connection(
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     stream.set_write_timeout(Some(Duration::from_secs(10)))?;
     let request = read_request(stream)?;
+    if request.method == "GET" && request.path == "/health" {
+        return write_json(stream, 200, health_snapshot(journal)?);
+    }
     if request.method != "POST" || request.path != "/v1/ingress" {
         return write_json(stream, 404, json!({ "ok": false, "error": "not_found" }));
     }
@@ -98,6 +101,33 @@ fn handle_connection(
             "session_id": outcome.session_id.0,
         }),
     )
+}
+
+pub fn health_snapshot(journal: &JournalStore) -> Result<Value> {
+    let hash_chain_ok = journal.verify_hash_chain()?;
+    let unknown_invocations = journal.unknown_invocations()?;
+    let status = if !hash_chain_ok {
+        "corrupt"
+    } else if unknown_invocations.is_empty() {
+        "ok"
+    } else {
+        "degraded"
+    };
+    Ok(json!({
+        "ok": hash_chain_ok,
+        "status": status,
+        "hash_chain_ok": hash_chain_ok,
+        "journal_event_count": journal.event_count()?,
+        "unknown_invocation_count": unknown_invocations.len(),
+        "unknown_invocations": unknown_invocations.iter().map(|invocation| {
+            json!({
+                "invocation_id": invocation.invocation_id,
+                "run_id": invocation.run_id.as_ref().map(|id| id.0.as_str()),
+                "session_id": invocation.session_id.as_ref().map(|id| id.0.as_str()),
+                "first_dispatch_at": invocation.first_dispatch_at.to_rfc3339(),
+            })
+        }).collect::<Vec<_>>(),
+    }))
 }
 
 struct HttpRequest {
