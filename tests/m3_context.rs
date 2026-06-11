@@ -149,6 +149,7 @@ fn validated_event(event_id: &str, text: &str) -> ValidatedEvent {
 fn test_config(root_dir: PathBuf) -> KernelConfig {
     KernelConfig {
         db_path: PathBuf::from(":memory:"),
+        data_dir: root_dir.clone(),
         agent_id: AgentId("main".to_string()),
         root_dir,
         kernel_port: 4130,

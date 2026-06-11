@@ -66,6 +66,10 @@ out of scope.
 M0 uses SQLite from the first CLI message. SQLite is not a later reliability
 feature; it is part of the kernel.
 
+Runtime data defaults to `~/.agent-core`, not the source checkout. The kernel
+creates missing default Agent documents there on startup and never overwrites
+user edits. The source repository owns code and bootstrap defaults only.
+
 Tables:
 
 - `sessions`
@@ -252,7 +256,7 @@ Done:
   `ReceiptReceived`;
 - `session.spawn` and `run.yield` return `not_enabled`.
 - context loads `system/root.md`, `system/runtime.md`, `agents/main/AGENT.md`,
-  and active `skills/chat/SKILL.md`;
+  and active `skills/chat/SKILL.md` from the runtime data dir;
 - skill catalog is derived from installed `skills/*/SKILL.md` files;
 - recent user messages are reconstructed from Journal for the current Session;
 - truncation applies to compressible ContextBlocks.
