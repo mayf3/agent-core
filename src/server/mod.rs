@@ -27,16 +27,21 @@ pub fn serve(config: KernelConfig) -> Result<()> {
     listener.set_nonblocking(true)?;
     let running = Arc::new(AtomicBool::new(true));
     install_shutdown_handler(&running)?;
-    let journal = JournalStore::open(&config.db_path)?;
+    let journal = Arc::new(JournalStore::open(&config.db_path)?);
     let recovered = journal.recover_unknown_invocations()?;
     if recovered > 0 {
         println!("agent-core recovered {recovered} unknown invocation(s)");
     }
-    let gateway = Gateway::new(config.clone());
+    let gateway = Arc::new(Gateway::new(config.clone()));
     while running.load(Ordering::SeqCst) {
         match listener.accept() {
             Ok((mut stream, _)) => {
-                if let Err(error) = handle_connection(&mut stream, &config, &journal, &gateway) {
+                if let Err(error) = handle_connection(
+                    &mut stream,
+                    &config,
+                    Arc::clone(&journal),
+                    Arc::clone(&gateway),
+                ) {
                     let _ = write_json(
                         &mut stream,
                         500,
@@ -65,14 +70,14 @@ fn install_shutdown_handler(running: &Arc<AtomicBool>) -> Result<()> {
 fn handle_connection(
     stream: &mut TcpStream,
     config: &KernelConfig,
-    journal: &JournalStore,
-    gateway: &Gateway,
+    journal: Arc<JournalStore>,
+    gateway: Arc<Gateway>,
 ) -> Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     stream.set_write_timeout(Some(Duration::from_secs(10)))?;
     let request = read_request(stream)?;
     if request.method == "GET" && request.path == "/health" {
-        return write_json(stream, 200, health_snapshot(journal)?);
+        return write_json(stream, 200, health_snapshot(&journal)?);
     }
     if request.method != "POST" || request.path != "/v1/ingress" {
         return write_json(stream, 404, json!({ "ok": false, "error": "not_found" }));
@@ -90,7 +95,7 @@ fn handle_connection(
         "auth_context": { "authenticated": true },
         "routing_hint": body.get("routing_hint").cloned(),
     }))?;
-    let validated = match gateway.validate_ingress(journal, envelope) {
+    let validated = match gateway.validate_ingress(&journal, envelope) {
         Ok(event) => event,
         Err(error) if error.to_string().starts_with("skip:") => {
             return write_json(stream, 200, json!({ "ok": true, "status": "skipped" }));
@@ -103,6 +108,54 @@ fn handle_connection(
             )
         }
     };
+    let kernel_event_id = validated.event_id.0.clone();
+    spawn_delivery(config.clone(), journal, gateway, validated);
+    write_json(
+        stream,
+        200,
+        json!({
+            "ok": true,
+            "status": "accepted",
+            "kernel_event_id": kernel_event_id,
+        }),
+    )
+}
+
+fn spawn_delivery(
+    config: KernelConfig,
+    journal: Arc<JournalStore>,
+    gateway: Arc<Gateway>,
+    event: crate::domain::ValidatedEvent,
+) {
+    let event_id = event.event_id.0.clone();
+    thread::spawn(move || {
+        if let Err(error) = deliver_event(config, &journal, &gateway, event) {
+            eprintln!(
+                "kernel async delivery failed event={} category={}",
+                short_id(&event_id),
+                error_category(&error)
+            );
+            let _ = journal.append_event(
+                crate::domain::JournalEventKind::RunCompleted,
+                None,
+                None,
+                Some(&event_id),
+                json!({
+                    "status": "Failed",
+                    "reason": "async_delivery_failed",
+                    "error_category": error_category(&error),
+                }),
+            );
+        }
+    });
+}
+
+fn deliver_event(
+    config: KernelConfig,
+    journal: &JournalStore,
+    gateway: &Gateway,
+    validated: crate::domain::ValidatedEvent,
+) -> Result<()> {
     let adapter = HttpConnectorAdapter::new(
         config.connector_execute_url.clone(),
         config.ipc_token.clone(),
@@ -120,17 +173,8 @@ fn handle_connection(
     );
     let llm = Box::new(llm);
     let runtime = Runtime::new(config.clone(), llm, adapter);
-    let outcome = runtime.deliver(journal, gateway, validated)?;
-    write_json(
-        stream,
-        200,
-        json!({
-            "ok": true,
-            "status": "accepted",
-            "run_id": outcome.run_id.0,
-            "session_id": outcome.session_id.0,
-        }),
-    )
+    runtime.deliver(journal, gateway, validated)?;
+    Ok(())
 }
 
 pub fn health_snapshot(journal: &JournalStore) -> Result<Value> {
@@ -258,4 +302,25 @@ fn content_length(head: &str) -> usize {
         }
     }
     0
+}
+
+fn error_category(error: &anyhow::Error) -> String {
+    let message = error.to_string().to_ascii_lowercase();
+    if message.contains("timeout") {
+        "timeout".to_string()
+    } else if message.contains("connector execute failed") {
+        "connector_execute_failed".to_string()
+    } else if message.contains("target_session") {
+        "target_session_mismatch".to_string()
+    } else {
+        "runtime_failed".to_string()
+    }
+}
+
+fn short_id(value: &str) -> String {
+    if value.len() <= 10 {
+        value.to_string()
+    } else {
+        format!("{}...{}", &value[..4], &value[value.len() - 4..])
+    }
 }

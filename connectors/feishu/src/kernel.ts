@@ -31,7 +31,8 @@ export async function postIngress(config: ConnectorConfig, event: unknown, react
       return;
     }
     const result = await response.json().catch(() => ({}));
-    console.log(`kernel ingress result status=${result.status || "unknown"} run=${shortId(result.run_id || "")}`);
+    const acceptedId = result.run_id || result.kernel_event_id || "";
+    console.log(`kernel ingress result status=${result.status || "unknown"} id=${shortId(acceptedId)}`);
     if (result.status === "skipped") {
       await reactions?.clearProcessing(normalized.payload.message_id);
     }
