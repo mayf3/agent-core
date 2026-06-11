@@ -10,10 +10,12 @@ use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 use std::thread;
 use std::time::Duration;
+
+type DeliveryThreads = Arc<Mutex<Vec<thread::JoinHandle<()>>>>;
 
 pub fn serve(config: KernelConfig) -> Result<()> {
     if config.ipc_token.is_empty() {
@@ -26,6 +28,7 @@ pub fn serve(config: KernelConfig) -> Result<()> {
     );
     listener.set_nonblocking(true)?;
     let running = Arc::new(AtomicBool::new(true));
+    let deliveries = Arc::new(Mutex::new(Vec::new()));
     install_shutdown_handler(&running)?;
     let journal = Arc::new(JournalStore::open(&config.db_path)?);
     let recovered = journal.recover_unknown_invocations()?;
@@ -33,8 +36,12 @@ pub fn serve(config: KernelConfig) -> Result<()> {
         println!("agent-core recovered {recovered} unknown invocation(s)");
     }
     let gateway = Arc::new(Gateway::new(config.clone()));
-    let recovered_ingress =
-        recover_undelivered_ingress(config.clone(), Arc::clone(&journal), Arc::clone(&gateway))?;
+    let recovered_ingress = recover_undelivered_ingress(
+        config.clone(),
+        Arc::clone(&journal),
+        Arc::clone(&gateway),
+        Arc::clone(&deliveries),
+    )?;
     if recovered_ingress > 0 {
         println!("agent-core queued {recovered_ingress} undelivered ingress event(s)");
     }
@@ -46,6 +53,7 @@ pub fn serve(config: KernelConfig) -> Result<()> {
                     &config,
                     Arc::clone(&journal),
                     Arc::clone(&gateway),
+                    Arc::clone(&deliveries),
                 ) {
                     let _ = write_json(
                         &mut stream,
@@ -53,6 +61,7 @@ pub fn serve(config: KernelConfig) -> Result<()> {
                         json!({ "ok": false, "error": error.to_string() }),
                     );
                 }
+                prune_finished_deliveries(&deliveries);
             }
             Err(error) if error.kind() == ErrorKind::WouldBlock => {
                 thread::sleep(Duration::from_millis(100));
@@ -60,6 +69,7 @@ pub fn serve(config: KernelConfig) -> Result<()> {
             Err(error) => eprintln!("kernel accept failed: {error}"),
         }
     }
+    drain_delivery_threads(&deliveries);
     println!("agent-core kernel stopped gracefully");
     Ok(())
 }
@@ -77,6 +87,7 @@ fn handle_connection(
     config: &KernelConfig,
     journal: Arc<JournalStore>,
     gateway: Arc<Gateway>,
+    deliveries: DeliveryThreads,
 ) -> Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     stream.set_write_timeout(Some(Duration::from_secs(10)))?;
@@ -114,7 +125,7 @@ fn handle_connection(
         }
     };
     let kernel_event_id = validated.event_id.0.clone();
-    spawn_delivery(config.clone(), journal, gateway, validated);
+    spawn_delivery(config.clone(), journal, gateway, validated, deliveries);
     write_json(
         stream,
         200,
@@ -131,9 +142,10 @@ fn spawn_delivery(
     journal: Arc<JournalStore>,
     gateway: Arc<Gateway>,
     event: crate::domain::ValidatedEvent,
+    deliveries: DeliveryThreads,
 ) {
     let event_id = event.event_id.0.clone();
-    thread::spawn(move || {
+    let handle = thread::spawn(move || {
         if let Err(error) = deliver_event(config, &journal, &gateway, event) {
             eprintln!(
                 "kernel async delivery failed event={} category={}",
@@ -153,12 +165,58 @@ fn spawn_delivery(
             );
         }
     });
+    match deliveries.lock() {
+        Ok(mut handles) => handles.push(handle),
+        Err(_) => {
+            eprintln!("kernel delivery tracker unavailable; waiting for delivery inline");
+            let _ = handle.join();
+        }
+    }
+}
+
+fn prune_finished_deliveries(deliveries: &DeliveryThreads) {
+    let mut finished = Vec::new();
+    if let Ok(mut handles) = deliveries.lock() {
+        let mut pending = Vec::with_capacity(handles.len());
+        for handle in handles.drain(..) {
+            if handle.is_finished() {
+                finished.push(handle);
+            } else {
+                pending.push(handle);
+            }
+        }
+        *handles = pending;
+    }
+    for handle in finished {
+        if handle.join().is_err() {
+            eprintln!("kernel delivery thread panicked");
+        }
+    }
+}
+
+fn drain_delivery_threads(deliveries: &DeliveryThreads) {
+    let handles = match deliveries.lock() {
+        Ok(mut handles) => handles.drain(..).collect::<Vec<_>>(),
+        Err(_) => {
+            eprintln!("kernel delivery tracker unavailable during shutdown");
+            return;
+        }
+    };
+    if !handles.is_empty() {
+        println!("agent-core draining {} delivery thread(s)", handles.len());
+    }
+    for handle in handles {
+        if handle.join().is_err() {
+            eprintln!("kernel delivery thread panicked");
+        }
+    }
 }
 
 fn recover_undelivered_ingress(
     config: KernelConfig,
     journal: Arc<JournalStore>,
     gateway: Arc<Gateway>,
+    deliveries: DeliveryThreads,
 ) -> Result<usize> {
     let events = journal.undelivered_ingress_events()?;
     let mut recovered = 0;
@@ -171,6 +229,7 @@ fn recover_undelivered_ingress(
                     Arc::clone(&journal),
                     Arc::clone(&gateway),
                     validated,
+                    Arc::clone(&deliveries),
                 );
             }
             Err(error) => {

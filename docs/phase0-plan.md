@@ -301,12 +301,13 @@ Done:
   `SessionReady`/`RunStarted`/`RunCompleted` correlation and requeues the ones
   that can be reconstructed from whitelisted Journal fields;
 - Feishu reaction cleanup remains bound to `/v1/execute` success, so it still
-  works when ingress returns early.
+  works when ingress returns early;
+- graceful shutdown stops accepting new kernel connections and drains delivery
+  threads that have already started.
 
 Not done:
 
 - separate worker queue table;
-- graceful shutdown draining for background delivery workers;
 - durable connector UX outbox for reaction retry.
 
 ## Phase 0 Non-Goals
