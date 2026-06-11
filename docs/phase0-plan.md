@@ -256,11 +256,12 @@ Done:
 - skill catalog is derived from installed `skills/*/SKILL.md` files;
 - recent user messages are reconstructed from Journal for the current Session;
 - truncation applies to compressible ContextBlocks.
+- restart recovery marks old dispatched invocations without receipts as
+  `ReceiptReceived` with `Unknown` status and fails the run.
 
 Remaining:
 
 - graceful shutdown;
-- restart recovery.
 
 ## Phase 0 Non-Goals
 

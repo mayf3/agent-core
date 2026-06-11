@@ -190,6 +190,18 @@ impl JournalStore {
         Ok(())
     }
 
+    pub fn fail_run(&self, run_id: &RunId) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow!("journal mutex poisoned"))?;
+        conn.execute(
+            "UPDATE runs SET status = 'Failed', updated_at = ?1 WHERE id = ?2",
+            params![Utc::now().to_rfc3339(), run_id.0],
+        )?;
+        Ok(())
+    }
+
     pub fn events(&self) -> Result<Vec<JournalEvent>> {
         let conn = self
             .conn
@@ -282,6 +294,35 @@ impl JournalStore {
         }
         let start = messages.len().saturating_sub(limit);
         Ok(messages[start..].to_vec())
+    }
+
+    pub fn recover_unknown_invocations(&self) -> Result<usize> {
+        let unknown = self.unknown_invocations()?;
+        for invocation in &unknown {
+            self.append_event(
+                JournalEventKind::ReceiptReceived,
+                invocation.run_id.as_ref(),
+                invocation.session_id.as_ref(),
+                Some(&invocation.invocation_id),
+                json!({
+                    "status": "Unknown",
+                    "external_ref": null,
+                    "output_kind": "unknown",
+                    "recovered": true,
+                }),
+            )?;
+            if let Some(run_id) = &invocation.run_id {
+                self.fail_run(run_id)?;
+                self.append_event(
+                    JournalEventKind::RunCompleted,
+                    Some(run_id),
+                    invocation.session_id.as_ref(),
+                    None,
+                    json!({ "status": "Failed", "reason": "unknown_invocation_recovered" }),
+                )?;
+            }
+        }
+        Ok(unknown.len())
     }
 
     pub fn verify_hash_chain(&self) -> Result<bool> {
