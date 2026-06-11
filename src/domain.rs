@@ -263,6 +263,14 @@ pub struct JournalEvent {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnknownInvocation {
+    pub invocation_id: String,
+    pub run_id: Option<RunId>,
+    pub session_id: Option<SessionId>,
+    pub first_dispatch_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum JournalEventKind {
     IngressAccepted,
