@@ -282,8 +282,26 @@ Done:
 - truncation applies to compressible ContextBlocks.
 - restart recovery marks old dispatched invocations without receipts as
   `ReceiptReceived` with `Unknown` status and fails the run.
-- graceful shutdown stops accepting new connections on SIGINT/SIGTERM and exits
-  after the current request finishes.
+- graceful shutdown stops accepting new connections on SIGINT/SIGTERM.
+
+### M4: Async Ingress
+
+Implementation status: minimal in-process slice.
+
+Done:
+
+- `/v1/ingress` validates, deduplicates, records `IngressAccepted`, and returns
+  `accepted` with `kernel_event_id` before model execution finishes;
+- actual `Runtime.event.deliver` runs on a background thread;
+- Feishu reaction cleanup remains bound to `/v1/execute` success, so it still
+  works when ingress returns early.
+
+Not done:
+
+- durable worker queue;
+- restart recovery for accepted events that were not yet delivered;
+- graceful shutdown draining for background delivery workers;
+- durable connector UX outbox for reaction retry.
 
 ## Phase 0 Non-Goals
 
