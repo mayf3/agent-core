@@ -335,6 +335,8 @@ fn test_config() -> KernelConfig {
         openai_api_key: String::new(),
         model: String::new(),
         model_timeout_ms: 100,
+        context_recent_messages: 6,
+        context_max_block_chars: 4_000,
     }
 }
 
