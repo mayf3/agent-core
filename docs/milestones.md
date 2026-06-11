@@ -15,6 +15,7 @@ This file is the施工单. It deliberately excludes long-term protocol detail; s
 | Rust Phase 0 M3c | Done | startup recovery marks unknown dispatches without mutating history |
 | Rust Phase 0 M3d | Done | SIGINT/SIGTERM stops accepting new kernel connections gracefully |
 | Cleanup | Done | legacy Node agent runtime packages removed |
+| Rust Phase 0 M4a | Done | `/v1/ingress` returns accepted before background delivery finishes |
 
 ## Stage Plan
 
@@ -63,6 +64,13 @@ Status: done.
 - graceful shutdown.
 
 ### Next: M4 Invocation Gateway Hardening
+
+Before hardening broader invocation semantics, finish the remaining reliability
+slice:
+
+- durable worker queue for accepted events;
+- durable outbox for connector dispatch;
+- connector-local reaction outbox.
 
 Scope:
 
