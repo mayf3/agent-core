@@ -2,7 +2,7 @@ use crate::config::KernelConfig;
 use crate::domain::*;
 use crate::journal::JournalStore;
 use anyhow::{bail, Result};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -83,6 +83,22 @@ impl Gateway {
         ))
     }
 
+    pub fn recover_validated_event(&self, event: &JournalEvent) -> Result<ValidatedEvent> {
+        let source = string_arg(&event.payload, "source")?;
+        let event_id = EventId(string_arg(&event.payload, "event_id")?);
+        let dedupe_key = event
+            .correlation_id
+            .clone()
+            .unwrap_or_else(|| string_arg(&event.payload, "dedupe_key").unwrap_or_default());
+        match source.as_str() {
+            "cli" => self.recover_cli_event(event_id, dedupe_key, &event.payload, event.created_at),
+            "feishu" => {
+                self.recover_feishu_event(event_id, dedupe_key, &event.payload, event.created_at)
+            }
+            _ => bail!("unsupported_recovery_source:{source}"),
+        }
+    }
+
     fn validate_cli_ingress(
         &self,
         journal: &JournalStore,
@@ -113,7 +129,7 @@ impl Gateway {
                 conversation_key: "local".to_string(),
             },
             payload: RuntimeEventPayload::UserMessage {
-                text,
+                text: text.clone(),
                 message_id: None,
                 chat_id: None,
             },
@@ -128,7 +144,9 @@ impl Gateway {
             json!({
                 "source": source,
                 "external_event_id": envelope.external_event_id,
+                "dedupe_key": event.dedupe_key.clone(),
                 "event_id": event_id.0,
+                "text": text,
                 "payload_hash": payload_hash(&envelope.payload),
             }),
         )?;
@@ -216,7 +234,7 @@ impl Gateway {
             session_target: SessionTarget {
                 agent_id: self.config.agent_id.clone(),
                 channel: ChannelKind::Feishu,
-                conversation_key,
+                conversation_key: conversation_key.clone(),
             },
             payload: RuntimeEventPayload::UserMessage {
                 text,
@@ -235,9 +253,12 @@ impl Gateway {
                 "source": "feishu",
                 "external_event_id": envelope.external_event_id,
                 "dedupe_id": dedupe_id,
+                "dedupe_key": event.dedupe_key.clone(),
                 "event_id": event_id.0,
                 "sender_open_id": sender_open_id,
                 "chat_id": chat_id,
+                "chat_type": chat_type,
+                "conversation_key": conversation_key,
                 "message_id": message_id,
                 "message_type": message_type,
                 "text": normalized_text(&envelope.payload),
@@ -245,6 +266,83 @@ impl Gateway {
             }),
         )?;
         Ok(event)
+    }
+
+    fn recover_cli_event(
+        &self,
+        event_id: EventId,
+        dedupe_key: String,
+        payload: &Value,
+        occurred_at: DateTime<Utc>,
+    ) -> Result<ValidatedEvent> {
+        Ok(ValidatedEvent {
+            event_id,
+            source: EventSource::Cli,
+            principal: cli_principal(),
+            session_target: SessionTarget {
+                agent_id: self.config.agent_id.clone(),
+                channel: ChannelKind::Cli,
+                conversation_key: "local".to_string(),
+            },
+            payload: RuntimeEventPayload::UserMessage {
+                text: string_arg(payload, "text")?,
+                message_id: None,
+                chat_id: None,
+            },
+            dedupe_key,
+            occurred_at,
+        })
+    }
+
+    fn recover_feishu_event(
+        &self,
+        event_id: EventId,
+        dedupe_key: String,
+        payload: &Value,
+        occurred_at: DateTime<Utc>,
+    ) -> Result<ValidatedEvent> {
+        let sender_open_id = string_arg(payload, "sender_open_id")?;
+        let chat_id = string_arg(payload, "chat_id")?;
+        let conversation_key = string_arg(payload, "conversation_key")?;
+        Ok(ValidatedEvent {
+            event_id,
+            source: EventSource::Feishu,
+            principal: RunPrincipal {
+                principal_id: PrincipalId(format!("feishu:open_id:{sender_open_id}")),
+                subject: PrincipalSubject::FeishuOpenId(sender_open_id.clone()),
+                source: PrincipalSource::Feishu,
+                grants: vec![CapabilityGrant {
+                    operation: "feishu.send_message".to_string(),
+                    scope: "current_session".to_string(),
+                }],
+                requester_id: Some(format!("feishu:open_id:{sender_open_id}")),
+            },
+            session_target: SessionTarget {
+                agent_id: self.config.agent_id.clone(),
+                channel: ChannelKind::Feishu,
+                conversation_key,
+            },
+            payload: RuntimeEventPayload::UserMessage {
+                text: string_arg(payload, "text")?,
+                message_id: Some(string_arg(payload, "message_id")?),
+                chat_id: Some(chat_id),
+            },
+            dedupe_key,
+            occurred_at,
+        })
+    }
+}
+
+fn cli_principal() -> RunPrincipal {
+    RunPrincipal {
+        principal_id: PrincipalId("cli:local".to_string()),
+        subject: PrincipalSubject::LocalUser,
+        source: PrincipalSource::Cli,
+        grants: vec![CapabilityGrant {
+            operation: "stdout.send_text".to_string(),
+            scope: "current_session".to_string(),
+        }],
+        requester_id: Some("cli:local".to_string()),
     }
 }
 
