@@ -16,6 +16,8 @@ pub struct KernelConfig {
     pub openai_api_key: String,
     pub model: String,
     pub model_timeout_ms: u64,
+    pub context_recent_messages: usize,
+    pub context_max_block_chars: usize,
 }
 
 impl KernelConfig {
@@ -43,6 +45,8 @@ impl KernelConfig {
             openai_api_key: env_string("AGENT_CORE_OPENAI_API_KEY", ""),
             model: env_string("AGENT_CORE_MODEL", ""),
             model_timeout_ms: env_u64("AGENT_CORE_MODEL_TIMEOUT_MS", 30_000),
+            context_recent_messages: env_usize("AGENT_CORE_CONTEXT_RECENT_MESSAGES", 6),
+            context_max_block_chars: env_usize("AGENT_CORE_CONTEXT_MAX_BLOCK_CHARS", 4_000),
         }
     }
 }
@@ -96,6 +100,13 @@ fn env_u16(key: &str, fallback: u16) -> u16 {
 }
 
 fn env_u64(key: &str, fallback: u64) -> u64 {
+    std::env::var(key)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(fallback)
+}
+
+fn env_usize(key: &str, fallback: usize) -> usize {
     std::env::var(key)
         .ok()
         .and_then(|value| value.parse().ok())
