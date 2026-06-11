@@ -6,8 +6,13 @@ use crate::llm::OpenAiCompatibleLlm;
 use crate::runtime::Runtime;
 use anyhow::{bail, Result};
 use serde_json::{json, Value};
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use std::thread;
 use std::time::Duration;
 
 pub fn serve(config: KernelConfig) -> Result<()> {
@@ -19,15 +24,18 @@ pub fn serve(config: KernelConfig) -> Result<()> {
         "agent-core kernel listening on 127.0.0.1:{}",
         config.kernel_port
     );
+    listener.set_nonblocking(true)?;
+    let running = Arc::new(AtomicBool::new(true));
+    install_shutdown_handler(&running)?;
     let journal = JournalStore::open(&config.db_path)?;
     let recovered = journal.recover_unknown_invocations()?;
     if recovered > 0 {
         println!("agent-core recovered {recovered} unknown invocation(s)");
     }
     let gateway = Gateway::new(config.clone());
-    for stream in listener.incoming() {
-        match stream {
-            Ok(mut stream) => {
+    while running.load(Ordering::SeqCst) {
+        match listener.accept() {
+            Ok((mut stream, _)) => {
                 if let Err(error) = handle_connection(&mut stream, &config, &journal, &gateway) {
                     let _ = write_json(
                         &mut stream,
@@ -36,10 +44,22 @@ pub fn serve(config: KernelConfig) -> Result<()> {
                     );
                 }
             }
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(100));
+            }
             Err(error) => eprintln!("kernel accept failed: {error}"),
         }
     }
+    println!("agent-core kernel stopped gracefully");
     Ok(())
+}
+
+fn install_shutdown_handler(running: &Arc<AtomicBool>) -> Result<()> {
+    let signal = Arc::clone(running);
+    ctrlc::set_handler(move || {
+        signal.store(false, Ordering::SeqCst);
+    })
+    .map_err(|error| anyhow::anyhow!("failed to install shutdown handler: {error}"))
 }
 
 fn handle_connection(
