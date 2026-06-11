@@ -251,12 +251,14 @@ Done:
 - unknown invocation scan from `DispatchStarted` without matching
   `ReceiptReceived`;
 - `session.spawn` and `run.yield` return `not_enabled`.
+- context loads `system/root.md`, `system/runtime.md`, `agents/main/AGENT.md`,
+  and active `skills/chat/SKILL.md`;
+- skill catalog is derived from installed `skills/*/SKILL.md` files;
+- recent user messages are reconstructed from Journal for the current Session;
+- truncation applies to compressible ContextBlocks.
 
 Remaining:
 
-- recent messages;
-- context truncation;
-- skill catalog from installed skill files;
 - graceful shutdown;
 - restart recovery.
 

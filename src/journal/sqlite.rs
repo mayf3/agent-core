@@ -4,6 +4,7 @@ use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -240,6 +241,47 @@ impl JournalStore {
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
+    }
+
+    pub fn recent_user_messages(
+        &self,
+        session_id: &SessionId,
+        limit: usize,
+    ) -> Result<Vec<(String, String)>> {
+        if limit == 0 {
+            return Ok(vec![]);
+        }
+        let events = self.events()?;
+        let mut ingress_text_by_event = HashMap::new();
+        for event in &events {
+            if event.kind != JournalEventKind::IngressAccepted {
+                continue;
+            }
+            let Some(event_id) = event.payload.get("event_id").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(text) = event.payload.get("text").and_then(Value::as_str) else {
+                continue;
+            };
+            ingress_text_by_event.insert(event_id.to_string(), text.to_string());
+        }
+        let mut messages = vec![];
+        for event in events {
+            if event.kind != JournalEventKind::SessionReady
+                || event.session_id.as_ref() != Some(session_id)
+            {
+                continue;
+            }
+            let Some(event_id) = event.correlation_id else {
+                continue;
+            };
+            let Some(text) = ingress_text_by_event.get(&event_id) else {
+                continue;
+            };
+            messages.push((event_id, text.clone()));
+        }
+        let start = messages.len().saturating_sub(limit);
+        Ok(messages[start..].to_vec())
     }
 
     pub fn verify_hash_chain(&self) -> Result<bool> {

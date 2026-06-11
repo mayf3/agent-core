@@ -1,5 +1,6 @@
 use crate::adapters::InvocationAdapter;
 use crate::config::KernelConfig;
+use crate::context::ContextAssembler;
 use crate::domain::*;
 use crate::gateway::Gateway;
 use crate::journal::JournalStore;
@@ -79,7 +80,8 @@ where
             message_id,
             chat_id,
         } = event.payload.clone();
-        let blocks = self.context_blocks(&event, &text);
+        let blocks =
+            ContextAssembler::from_config(&self.config).build(journal, &session, &event, &text)?;
         journal.append_event(
             JournalEventKind::ContextBuilt,
             Some(&run.id),
@@ -276,47 +278,6 @@ where
         }
     }
 
-    fn context_blocks(&self, event: &ValidatedEvent, text: &str) -> Vec<ContextBlock> {
-        vec![
-            block(
-                ContextBlockKind::RootSystem,
-                "You are the main Agent Core assistant.",
-                Compressibility::Never,
-                "system/root.md",
-            ),
-            block(
-                ContextBlockKind::RuntimeContract,
-                "Use the kernel boundary. External actions require approved invocations.",
-                Compressibility::Never,
-                "system/runtime.md",
-            ),
-            block(
-                ContextBlockKind::AgentProfile,
-                "Main agent. Phase 0 chat-only profile.",
-                Compressibility::Never,
-                "agents/main/AGENT.md",
-            ),
-            block(
-                ContextBlockKind::SkillCatalog,
-                "chat: basic conversation skill",
-                Compressibility::DropWhole,
-                "skills/chat/SKILL.md",
-            ),
-            block(
-                ContextBlockKind::ActiveSkill,
-                "Reply clearly and briefly to the current user message.",
-                Compressibility::DropWhole,
-                "skills/chat/SKILL.md",
-            ),
-            block(
-                ContextBlockKind::UserMessage,
-                text,
-                Compressibility::Truncate,
-                &event.event_id.0,
-            ),
-        ]
-    }
-
     fn reply_intent(
         &self,
         run: &Run,
@@ -355,19 +316,5 @@ where
                 idempotency_key: Some(format!("{}:stdout", run.id.0)),
             }
         }
-    }
-}
-
-fn block(
-    kind: ContextBlockKind,
-    content: &str,
-    compressibility: Compressibility,
-    source_ref: &str,
-) -> ContextBlock {
-    ContextBlock {
-        kind,
-        content: content.to_string(),
-        compressibility,
-        source_ref: Some(source_ref.to_string()),
     }
 }
