@@ -11,8 +11,7 @@
     "check:structure": "node scripts/check-structure.mjs",
     "check:secrets": "node scripts/check-local-secret-leaks.mjs",
     "check:connector": "tsx -e \"Promise.all([import('./connectors/feishu/src/config.ts'), import('./connectors/feishu/src/kernel.ts'), import('./connectors/feishu/src/execute-server.ts'), import('./connectors/feishu/src/safe-logger.ts')]).then(() => console.log('connector modules ok'))\"",
-    "test": "cargo test",
-    "test:node-prototype": "node --test"
+    "test": "cargo test"
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.60.0"

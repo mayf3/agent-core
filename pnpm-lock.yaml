@@ -16,18 +16,6 @@ importers:
         specifier: ^4.20.6
         version: 4.22.4
 
-  packages/agent: {}
-
-  packages/cli: {}
-
-  packages/core: {}
-
-  packages/feishu: {}
-
-  packages/providers: {}
-
-  packages/tools: {}
-
 packages:
 
   '@esbuild/aix-ppc64@0.28.0':

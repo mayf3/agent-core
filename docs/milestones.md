@@ -7,13 +7,6 @@ This file is the施工单. It deliberately excludes long-term protocol detail; s
 
 | Milestone | Status | Notes |
 |---|---|---|
-| M0 Bootstrap | Done | repo, checks, docs, PR-like merge history |
-| M1 Kernel Records | Done | runs/events/state/envelope/doctor |
-| M2 Tools + Approval | Done | built-in tools, policy, approval pause/resume |
-| M3 Model + Agent Loop | Done | OpenAI-compatible provider, single agent loop |
-| M4a Feishu Echo | Done | receive/normalize/filter/dedupe/reply echo core |
-| M4b Feishu LLM Reply | Done | chat-only Feishu entry into agent loop |
-| M4c Durable Feishu Runtime | Next | inbox/runs/outbox, idempotent reply, recovery |
 | Rust Phase 0 M0 | Done | Rust Kernel CLI vertical slice with SQLite Journal |
 | Rust Phase 0 M1 | Done | TS Feishu long-connection connector + Rust Echo |
 | Rust Phase 0 M2 | Done | Feishu text now uses Rust OpenAI-compatible LLM path |
@@ -21,111 +14,73 @@ This file is the施工单. It deliberately excludes long-term protocol detail; s
 | Rust Phase 0 M3b | Done | file-backed context, skill catalog, recent messages, truncation |
 | Rust Phase 0 M3c | Done | startup recovery marks unknown dispatches without mutating history |
 | Rust Phase 0 M3d | Done | SIGINT/SIGTERM stops accepting new kernel connections gracefully |
+| Cleanup | Done | legacy Node agent runtime packages removed |
 
 ## Stage Plan
 
-### M4a: Feishu Echo
+### Phase 0 M0: Rust CLI Vertical Slice
 
 Goal:
 
 ```text
-Feishu message -> normalize -> policy -> dedupe -> echo reply
+CLI text -> Gateway -> Runtime -> stdout Invocation -> Receipt -> Journal
 ```
 
-Scope:
+Status: done.
 
-- Feishu config loader
-- normalized inbound message type
-- allowlist policy
-- group mention policy
-- bot self-message filter
-- message id dedupe
-- echo reply runtime
-- tests with fake Feishu client
-
-Out of scope:
-
-- real LLM reply
-- tool exposure from Feishu
-- SQLite recovery
-- cards, files, images, voice
-- dynamic hook registry
-
-Status: implemented as a testable transport core with fake client. Real Feishu
-SDK connection is intentionally separate.
-
-### M4b: Feishu LLM Reply
+### Phase 0 M1: Feishu Echo
 
 Goal:
 
 ```text
-Feishu text -> main agent -> model provider -> reply original message
+Feishu long connection -> TS Connector -> Rust Kernel -> echo reply
 ```
 
-Scope:
+Status: done. The connector is only an edge adapter. Rust owns Gateway,
+Session, Run, Journal, and intent creation.
 
-- chat-only execution profile
-- no filesystem or shell tools visible by default
-- friendly model errors
-- response length limit
-- reply receipt record
-
-Status: implemented as a core handler plus CLI bridge:
-
-```text
-Feishu event JSON -> policy -> dedupe -> chat-only agent loop -> reply client
-```
-
-The real long-connection process should call the same handler instead of owning
-agent logic.
-
-### M4c: Durable Feishu Runtime
+### Phase 0 M2: Feishu LLM Reply
 
 Goal:
 
 ```text
-inbox/runs/outbox -> queue -> idempotent reply -> restart recovery
+Feishu text -> Context -> OpenAI-compatible provider -> reply original message
 ```
 
-Scope:
+Status: done. The model chooses final text only; Runtime wraps it into a
+current-session `feishu.send_message` intent and Gateway checks the target.
 
-- minimal SQLite or equivalent durable store
-- inbox idempotency
-- outbox receipt tracking
-- pending run recovery
+### Phase 0 M3: Reliability
 
-### M5: Context Modules
+Status: done.
 
-Scope:
+- health probe;
+- hash-chain verification;
+- unknown invocation scan and startup recovery;
+- file-backed context from `~/.agent-core`;
+- skill catalog and active chat skill loading;
+- recent-message context;
+- graceful shutdown.
 
-- `system/root.md`
-- `system/runtime.md`
-- `agents/main/AGENT.md`
-- basic context contributor shape
-- context snapshots with source refs and hashes
-
-Skill remains a plain context module until repeated use proves a real registry is
-needed.
-
-### M6: Invocation Gateway RFC Implementation
+### Next: M4 Invocation Gateway Hardening
 
 Scope:
 
-- rename and harden tool execution around intent -> policy -> adapter -> receipt
 - run principal
 - per-channel execution profiles
 - final system guard for approval resume
+- clearer adapter timeout/error receipts
 
-### M7: Plugin Registries
+### Later: Plugin Registries
 
 Scope:
 
-- context contributor registry
-- trusted hook registry
-- external system manifests
-- out-of-process adapters
+- context contributor registry;
+- trusted hook registry;
+- external system manifests;
+- out-of-process adapters.
 
-### M8: Multi-Agent and Workflow
+### Later: Multi-Agent and Workflow
 
 Scope:
 
@@ -134,7 +89,7 @@ Scope:
 - external workflow source of truth
 - command/query/event/receipt integration
 
-### M9: Bounded Self-Evolution
+### Later: Bounded Self-Evolution
 
 Scope:
 
@@ -152,8 +107,8 @@ sandbox before M4 and M5 prove the repeated shapes.
 ## Rust Kernel Reset
 
 The implementation direction is now frozen as TypeScript Feishu Connector plus
-Rust Kernel. The existing Node packages are prototype/reference code for Feishu
-connector extraction, not the future Runtime. New Runtime, Gateway, Journal,
-Session, Run, Context, and Invocation approval work goes into the Rust Kernel.
+Rust Kernel. The legacy Node runtime packages have been removed. New Runtime,
+Gateway, Journal, Session, Run, Context, and Invocation approval work goes into
+the Rust Kernel. TypeScript remains only for the Feishu edge connector.
 
 See [Phase 0 Construction Plan](./phase0-plan.md).
