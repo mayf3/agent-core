@@ -52,10 +52,11 @@ pub struct OpenAiCompatibleLlm {
 
 impl OpenAiCompatibleLlm {
     pub fn new(base_url: String, api_key: String, model: String, timeout_ms: u64) -> Self {
+        let normalized_model = normalize_model_name(&base_url, &model);
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key,
-            model,
+            model: normalized_model,
             timeout: Duration::from_millis(timeout_ms),
         }
     }
@@ -201,4 +202,21 @@ fn empty_to_null(value: &str) -> Value {
     } else {
         json!(value)
     }
+}
+
+fn normalize_model_name(base_url: &str, model: &str) -> String {
+    let trimmed = model.trim();
+    if is_zai_endpoint(base_url) {
+        return trimmed
+            .strip_prefix("zai/")
+            .or_else(|| trimmed.strip_prefix("z.ai/"))
+            .unwrap_or(trimmed)
+            .to_string();
+    }
+    trimmed.to_string()
+}
+
+fn is_zai_endpoint(base_url: &str) -> bool {
+    let lower = base_url.to_ascii_lowercase();
+    lower.contains("z.ai") || lower.contains("bigmodel.cn")
 }

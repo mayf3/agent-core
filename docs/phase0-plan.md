@@ -186,6 +186,11 @@ sanitized messages.
 
 LLM errors may record provider, model, status, request ID, and error category.
 
+Provider-specific model aliases may be normalized before sending the request.
+For the Z.AI endpoint, `zai/glm-5.1` and `z.ai/glm-5.1` are normalized to
+`glm-5.1`; generic OpenAI-compatible endpoints keep slash-prefixed model names
+unchanged because providers such as aggregators may require them.
+
 ## Milestones
 
 ### M0: Rust CLI Vertical Slice
