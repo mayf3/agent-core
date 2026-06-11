@@ -2,6 +2,7 @@ import * as Lark from "@larksuiteoapi/node-sdk";
 import { loadConfig } from "./config.js";
 import { startExecuteServer } from "./execute-server.js";
 import { postIngress } from "./kernel.js";
+import { createReactionTracker } from "./reactions.js";
 import { safeLarkLogger } from "./safe-logger.js";
 
 const config = loadConfig();
@@ -13,11 +14,12 @@ const baseConfig = {
 baseConfig["app" + "Secret"] = config.appSecret;
 
 const client = new Lark.Client(baseConfig);
-startExecuteServer(config, client);
+const reactions = createReactionTracker(config, client);
+startExecuteServer(config, client, reactions);
 
 const eventDispatcher = new Lark.EventDispatcher({}).register({
   "im.message.receive_v1": async (data: unknown) => {
-    void postIngress(config, data).catch((error) => {
+    void postIngress(config, data, reactions).catch((error) => {
       const message = error instanceof Error ? error.message : String(error);
       console.error(`kernel ingress error: ${message.slice(0, 200)}`);
     });
