@@ -33,6 +33,11 @@ pub fn serve(config: KernelConfig) -> Result<()> {
         println!("agent-core recovered {recovered} unknown invocation(s)");
     }
     let gateway = Arc::new(Gateway::new(config.clone()));
+    let recovered_ingress =
+        recover_undelivered_ingress(config.clone(), Arc::clone(&journal), Arc::clone(&gateway))?;
+    if recovered_ingress > 0 {
+        println!("agent-core queued {recovered_ingress} undelivered ingress event(s)");
+    }
     while running.load(Ordering::SeqCst) {
         match listener.accept() {
             Ok((mut stream, _)) => {
@@ -148,6 +153,42 @@ fn spawn_delivery(
             );
         }
     });
+}
+
+fn recover_undelivered_ingress(
+    config: KernelConfig,
+    journal: Arc<JournalStore>,
+    gateway: Arc<Gateway>,
+) -> Result<usize> {
+    let events = journal.undelivered_ingress_events()?;
+    let mut recovered = 0;
+    for event in events {
+        match gateway.recover_validated_event(&event) {
+            Ok(validated) => {
+                recovered += 1;
+                spawn_delivery(
+                    config.clone(),
+                    Arc::clone(&journal),
+                    Arc::clone(&gateway),
+                    validated,
+                );
+            }
+            Err(error) => {
+                journal.append_event(
+                    crate::domain::JournalEventKind::RunCompleted,
+                    None,
+                    None,
+                    event.payload.get("event_id").and_then(Value::as_str),
+                    json!({
+                        "status": "Failed",
+                        "reason": "undelivered_ingress_recovery_failed",
+                        "error_category": error_category(&error),
+                    }),
+                )?;
+            }
+        }
+    }
+    Ok(recovered)
 }
 
 fn deliver_event(

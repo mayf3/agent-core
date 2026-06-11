@@ -293,13 +293,15 @@ Done:
 - `/v1/ingress` validates, deduplicates, records `IngressAccepted`, and returns
   `accepted` with `kernel_event_id` before model execution finishes;
 - actual `Runtime.event.deliver` runs on a background thread;
+- startup scans `IngressAccepted` events that have no matching
+  `SessionReady`/`RunStarted`/`RunCompleted` correlation and requeues the ones
+  that can be reconstructed from whitelisted Journal fields;
 - Feishu reaction cleanup remains bound to `/v1/execute` success, so it still
   works when ingress returns early.
 
 Not done:
 
-- durable worker queue;
-- restart recovery for accepted events that were not yet delivered;
+- separate worker queue table;
 - graceful shutdown draining for background delivery workers;
 - durable connector UX outbox for reaction retry.
 
