@@ -17,6 +17,7 @@ This file is the施工单. It deliberately excludes long-term protocol detail; s
 | Cleanup | Done | legacy Node agent runtime packages removed |
 | Rust Phase 0 M4a | Done | `/v1/ingress` returns accepted before background delivery finishes |
 | Rust Phase 0 M4b | Done | restart requeues reconstructable accepted ingress events |
+| Rust Phase 0 M4c | Done | graceful shutdown drains started background delivery threads |
 
 ## Stage Plan
 
