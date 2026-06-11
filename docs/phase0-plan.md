@@ -191,6 +191,12 @@ For the Z.AI endpoint, `zai/glm-5.1` and `z.ai/glm-5.1` are normalized to
 `glm-5.1`; generic OpenAI-compatible endpoints keep slash-prefixed model names
 unchanged because providers such as aggregators may require them.
 
+Phase 0 supports one optional OpenAI-compatible fallback endpoint through
+`AGENT_CORE_FALLBACK_OPENAI_BASE_URL`, `AGENT_CORE_FALLBACK_OPENAI_API_KEY`, and
+`AGENT_CORE_FALLBACK_MODEL`. Fallback is attempted once when the primary model
+request fails or is not configured. This is not a provider registry or model
+router.
+
 ## Milestones
 
 ### M0: Rust CLI Vertical Slice

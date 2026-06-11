@@ -17,6 +17,9 @@ pub struct KernelConfig {
     pub openai_base_url: String,
     pub openai_api_key: String,
     pub model: String,
+    pub fallback_openai_base_url: String,
+    pub fallback_openai_api_key: String,
+    pub fallback_model: String,
     pub model_timeout_ms: u64,
     pub context_recent_messages: usize,
     pub context_max_block_chars: usize,
@@ -57,6 +60,11 @@ impl KernelConfig {
                 .to_string(),
             openai_api_key: env_string("AGENT_CORE_OPENAI_API_KEY", ""),
             model: env_string("AGENT_CORE_MODEL", ""),
+            fallback_openai_base_url: env_string("AGENT_CORE_FALLBACK_OPENAI_BASE_URL", "")
+                .trim_end_matches('/')
+                .to_string(),
+            fallback_openai_api_key: env_string("AGENT_CORE_FALLBACK_OPENAI_API_KEY", ""),
+            fallback_model: env_string("AGENT_CORE_FALLBACK_MODEL", ""),
             model_timeout_ms: env_u64("AGENT_CORE_MODEL_TIMEOUT_MS", 30_000),
             context_recent_messages: env_usize("AGENT_CORE_CONTEXT_RECENT_MESSAGES", 6),
             context_max_block_chars: env_usize("AGENT_CORE_CONTEXT_MAX_BLOCK_CHARS", 4_000),
