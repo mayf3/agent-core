@@ -63,8 +63,47 @@ pub fn migrate(conn: &Connection) -> Result<()> {
 }
 
 impl JournalStore {
+    pub fn accept_ingress_with_worker_job(
+        &self,
+        event: &ValidatedEvent,
+        payload: Value,
+    ) -> Result<String> {
+        let job_id = worker_job_id(&event.event_id);
+        let now = Utc::now().to_rfc3339();
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow!("journal mutex poisoned"))?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        append_event_tx(
+            &tx,
+            JournalEventKind::IngressAccepted,
+            None,
+            None,
+            Some(&event.dedupe_key),
+            payload,
+        )?;
+        let changed = tx.execute(
+            "INSERT OR IGNORE INTO worker_jobs
+             (job_id, job_type, source_event_id, status, attempts, available_at, created_at, updated_at)
+             VALUES (?1, 'deliver_event', ?2, 'queued', 0, ?3, ?3, ?3)",
+            params![job_id.as_str(), event.event_id.0.as_str(), now.as_str()],
+        )?;
+        if changed == 1 {
+            append_worker_event_tx(
+                &tx,
+                JournalEventKind::WorkerJobQueued,
+                &job_id,
+                &event.event_id,
+                json!({ "status": "queued" }),
+            )?;
+        }
+        tx.commit()?;
+        Ok(job_id)
+    }
+
     pub fn enqueue_worker_job(&self, source_event_id: &EventId) -> Result<String> {
-        let job_id = format!("job:deliver:{}", source_event_id.0);
+        let job_id = worker_job_id(source_event_id);
         let now = Utc::now().to_rfc3339();
         let mut conn = self
             .conn
@@ -78,18 +117,12 @@ impl JournalStore {
             params![job_id.as_str(), source_event_id.0.as_str(), now.as_str()],
         )?;
         if changed == 1 {
-            append_event_tx(
+            append_worker_event_tx(
                 &tx,
                 JournalEventKind::WorkerJobQueued,
-                None,
-                None,
-                Some(&job_id),
-                json!({
-                    "job_id": job_id,
-                    "job_type": "deliver_event",
-                    "source_event_id": source_event_id.0.as_str(),
-                    "status": "queued",
-                }),
+                &job_id,
+                source_event_id,
+                json!({ "status": "queued" }),
             )?;
         }
         tx.commit()?;
@@ -108,6 +141,37 @@ impl JournalStore {
         )
         .optional()
         .map_err(Into::into)
+    }
+
+    pub fn start_worker_job(&self, source_event_id: &EventId) -> Result<()> {
+        self.update_worker_job(
+            source_event_id,
+            "running",
+            JournalEventKind::WorkerJobStarted,
+            json!({ "status": "running" }),
+        )
+    }
+
+    pub fn succeed_worker_job(&self, source_event_id: &EventId) -> Result<()> {
+        self.update_worker_job(
+            source_event_id,
+            "succeeded",
+            JournalEventKind::WorkerJobSucceeded,
+            json!({ "status": "succeeded" }),
+        )
+    }
+
+    pub fn fail_worker_job(
+        &self,
+        source_event_id: &EventId,
+        error_category: &str,
+    ) -> Result<()> {
+        self.update_worker_job(
+            source_event_id,
+            "failed",
+            JournalEventKind::WorkerJobFailed,
+            json!({ "status": "failed", "error_category": error_category }),
+        )
     }
 
     pub fn queue_outbox_dispatch(
@@ -177,6 +241,75 @@ impl JournalStore {
         .optional()
         .map_err(Into::into)
     }
+
+    fn update_worker_job(
+        &self,
+        source_event_id: &EventId,
+        status: &str,
+        event_kind: JournalEventKind,
+        mut payload: Value,
+    ) -> Result<()> {
+        let job_id = worker_job_id(source_event_id);
+        let now = Utc::now().to_rfc3339();
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow!("journal mutex poisoned"))?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let changed = if status == "running" {
+            tx.execute(
+                "UPDATE worker_jobs
+                 SET status = ?1, attempts = attempts + 1, updated_at = ?2
+                 WHERE job_id = ?3 AND status != 'succeeded'",
+                params![status, now, job_id.as_str()],
+            )?
+        } else {
+            tx.execute(
+                "UPDATE worker_jobs
+                 SET status = ?1, last_error = ?2, updated_at = ?3
+                 WHERE job_id = ?4 AND status != 'succeeded'",
+                params![
+                    status,
+                    payload
+                        .get("error_category")
+                        .and_then(Value::as_str)
+                        .unwrap_or(""),
+                    now,
+                    job_id.as_str(),
+                ],
+            )?
+        };
+        if changed > 0 {
+            payload["attempted_at"] = json!(now);
+            append_worker_event_tx(&tx, event_kind, &job_id, source_event_id, payload)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+}
+
+fn worker_job_id(source_event_id: &EventId) -> String {
+    format!("job:deliver:{}", source_event_id.0)
+}
+
+fn append_worker_event_tx(
+    tx: &Transaction<'_>,
+    kind: JournalEventKind,
+    job_id: &str,
+    source_event_id: &EventId,
+    extra_payload: Value,
+) -> Result<JournalEvent> {
+    let mut payload = json!({
+        "job_id": job_id,
+        "job_type": "deliver_event",
+        "source_event_id": source_event_id.0.as_str(),
+    });
+    if let (Some(base), Some(extra)) = (payload.as_object_mut(), extra_payload.as_object()) {
+        for (key, value) in extra {
+            base.insert(key.clone(), value.clone());
+        }
+    }
+    append_event_tx(&tx, kind, None, None, Some(job_id), payload)
 }
 
 fn append_event_tx(
