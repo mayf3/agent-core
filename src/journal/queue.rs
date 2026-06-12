@@ -161,11 +161,7 @@ impl JournalStore {
         )
     }
 
-    pub fn fail_worker_job(
-        &self,
-        source_event_id: &EventId,
-        error_category: &str,
-    ) -> Result<()> {
+    pub fn fail_worker_job(&self, source_event_id: &EventId, error_category: &str) -> Result<()> {
         self.update_worker_job(
             source_event_id,
             "failed",
@@ -376,7 +372,7 @@ fn append_worker_event_tx(
     append_event_tx(&tx, kind, None, None, Some(job_id), payload)
 }
 
-fn append_event_tx(
+pub(crate) fn append_event_tx(
     tx: &Transaction<'_>,
     kind: JournalEventKind,
     run_id: Option<&RunId>,

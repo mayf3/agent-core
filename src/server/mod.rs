@@ -3,17 +3,14 @@ use crate::gateway::Gateway;
 use crate::journal::JournalStore;
 mod delivery;
 
-use delivery::{
-    drain_delivery_threads, prune_finished_deliveries, recover_undelivered_ingress, spawn_delivery,
-    DeliveryThreads,
-};
 use anyhow::{bail, Result};
+use delivery::{recover_undelivered_ingress, start_worker_loop};
 use serde_json::{json, Value};
 use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
+    Arc,
 };
 use std::thread;
 use std::time::Duration;
@@ -29,7 +26,6 @@ pub fn serve(config: KernelConfig) -> Result<()> {
     );
     listener.set_nonblocking(true)?;
     let running = Arc::new(AtomicBool::new(true));
-    let deliveries = Arc::new(Mutex::new(Vec::new()));
     install_shutdown_handler(&running)?;
     let journal = Arc::new(JournalStore::open(&config.db_path)?);
     let recovered = journal.recover_unknown_invocations()?;
@@ -37,15 +33,16 @@ pub fn serve(config: KernelConfig) -> Result<()> {
         println!("agent-core recovered {recovered} unknown invocation(s)");
     }
     let gateway = Arc::new(Gateway::new(config.clone()));
-    let recovered_ingress = recover_undelivered_ingress(
-        config.clone(),
-        Arc::clone(&journal),
-        Arc::clone(&gateway),
-        Arc::clone(&deliveries),
-    )?;
+    let recovered_ingress = recover_undelivered_ingress(Arc::clone(&journal))?;
     if recovered_ingress > 0 {
         println!("agent-core queued {recovered_ingress} undelivered ingress event(s)");
     }
+    let worker = start_worker_loop(
+        config.clone(),
+        Arc::clone(&journal),
+        Arc::clone(&gateway),
+        Arc::clone(&running),
+    );
     while running.load(Ordering::SeqCst) {
         match listener.accept() {
             Ok((mut stream, _)) => {
@@ -54,7 +51,6 @@ pub fn serve(config: KernelConfig) -> Result<()> {
                     &config,
                     Arc::clone(&journal),
                     Arc::clone(&gateway),
-                    Arc::clone(&deliveries),
                 ) {
                     let _ = write_json(
                         &mut stream,
@@ -62,7 +58,6 @@ pub fn serve(config: KernelConfig) -> Result<()> {
                         json!({ "ok": false, "error": error.to_string() }),
                     );
                 }
-                prune_finished_deliveries(&deliveries);
             }
             Err(error) if error.kind() == ErrorKind::WouldBlock => {
                 thread::sleep(Duration::from_millis(100));
@@ -70,7 +65,9 @@ pub fn serve(config: KernelConfig) -> Result<()> {
             Err(error) => eprintln!("kernel accept failed: {error}"),
         }
     }
-    drain_delivery_threads(&deliveries);
+    if worker.join().is_err() {
+        eprintln!("kernel worker thread panicked");
+    }
     println!("agent-core kernel stopped gracefully");
     Ok(())
 }
@@ -88,7 +85,6 @@ fn handle_connection(
     config: &KernelConfig,
     journal: Arc<JournalStore>,
     gateway: Arc<Gateway>,
-    deliveries: DeliveryThreads,
 ) -> Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     stream.set_write_timeout(Some(Duration::from_secs(10)))?;
@@ -126,7 +122,6 @@ fn handle_connection(
         }
     };
     let kernel_event_id = validated.event_id.0.clone();
-    spawn_delivery(config.clone(), journal, gateway, validated, deliveries);
     write_json(
         stream,
         200,

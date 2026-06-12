@@ -19,7 +19,9 @@ impl JournalStore {
         let mut stmt = conn.prepare(&format!(
             "SELECT status, COUNT(*) FROM {table} GROUP BY status ORDER BY status"
         ))?;
-        let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
         rows.collect::<std::result::Result<BTreeMap<_, _>, _>>()
             .map_err(Into::into)
     }
