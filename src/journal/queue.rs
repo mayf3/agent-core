@@ -242,6 +242,70 @@ impl JournalStore {
         .map_err(Into::into)
     }
 
+    pub fn start_outbox_dispatch(
+        &self,
+        approved: &ApprovedInvocation,
+        session_id: Option<&SessionId>,
+    ) -> Result<()> {
+        let intent = approved.intent();
+        let now = Utc::now().to_rfc3339();
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow!("journal mutex poisoned"))?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute(
+            "UPDATE outbox_dispatches
+             SET status = 'dispatching', attempts = attempts + 1, updated_at = ?1
+             WHERE invocation_id = ?2 AND status != 'succeeded'",
+            params![now.as_str(), intent.invocation_id.0.as_str()],
+        )?;
+        append_event_tx(
+            &tx,
+            JournalEventKind::DispatchStarted,
+            Some(&intent.run_id),
+            session_id,
+            Some(&intent.invocation_id.0),
+            json!({ "operation": intent.operation.as_str() }),
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn succeed_outbox_dispatch(
+        &self,
+        receipt: &Receipt,
+        run_id: &RunId,
+        session_id: Option<&SessionId>,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow!("journal mutex poisoned"))?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute(
+            "UPDATE outbox_dispatches
+             SET status = 'succeeded', updated_at = ?1
+             WHERE invocation_id = ?2",
+            params![now.as_str(), receipt.invocation_id.0.as_str()],
+        )?;
+        append_event_tx(
+            &tx,
+            JournalEventKind::ReceiptReceived,
+            Some(run_id),
+            session_id,
+            Some(&receipt.invocation_id.0),
+            json!({
+                "status": format!("{:?}", receipt.status),
+                "external_ref": receipt.external_ref,
+                "output_kind": "text",
+            }),
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     fn update_worker_job(
         &self,
         source_event_id: &EventId,
