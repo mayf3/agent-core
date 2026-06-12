@@ -2,6 +2,7 @@ use agent_core_kernel::config::KernelConfig;
 use agent_core_kernel::domain::*;
 use agent_core_kernel::gateway::Gateway;
 use agent_core_kernel::journal::JournalStore;
+use agent_core_kernel::server::health_snapshot;
 use anyhow::Result;
 use chrono::Utc;
 use serde_json::json;
@@ -67,6 +68,36 @@ fn outbox_dispatch_lifecycle_updates_projection_and_journal() -> Result<()> {
         .iter()
         .any(|event| event.kind == JournalEventKind::ReceiptReceived));
     assert!(journal.verify_hash_chain()?);
+    Ok(())
+}
+
+#[test]
+fn health_reports_queue_projection_counts() -> Result<()> {
+    let config = test_config();
+    let gateway = Gateway::new(config.clone());
+    let journal = JournalStore::in_memory()?;
+    let session = test_session(&config);
+    let run = test_run(&config, &session);
+    let approved = approved_stdout_invocation(&gateway, &run, &session)?;
+
+    journal.enqueue_worker_job(&EventId("event_health".to_string()))?;
+    journal.queue_outbox_dispatch(&approved, Some(&session.id))?;
+    let snapshot = health_snapshot(&journal)?;
+
+    assert_eq!(
+        snapshot
+            .get("worker_jobs")
+            .and_then(|value| value.get("queued"))
+            .and_then(|value| value.as_u64()),
+        Some(1)
+    );
+    assert_eq!(
+        snapshot
+            .get("outbox_dispatches")
+            .and_then(|value| value.get("pending"))
+            .and_then(|value| value.as_u64()),
+        Some(1)
+    );
     Ok(())
 }
 
