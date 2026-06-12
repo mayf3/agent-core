@@ -339,6 +339,8 @@ Done:
   `failed` projection status;
 - a single in-process worker loop leases queued `worker_jobs` after
   `/v1/ingress` returns;
+- worker job leases set `locked_by` and `locked_until`, and expired running jobs
+  may be reclaimed by a later lease;
 - current Runtime dispatch updates outbox `pending`, `dispatching`, and
   `succeeded` projection status in the same transactions as `OutboxQueued`,
   `DispatchStarted`, and `ReceiptReceived`;
@@ -347,7 +349,7 @@ Done:
 
 Not done:
 
-- stale `running` worker jobs are not yet reclaimed by lease timeout;
+- stale `running` worker job recovery still needs crash-test coverage;
 - Runtime still sends approved invocations synchronously instead of letting a
   separate dispatcher poll `outbox_dispatches`;
 - `unknown` outbox rows are not yet modeled in the dispatcher path.

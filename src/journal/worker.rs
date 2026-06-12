@@ -2,7 +2,7 @@ use super::queue::append_event_tx;
 use super::sqlite::JournalStore;
 use crate::domain::{EventId, JournalEventKind};
 use anyhow::{anyhow, Result};
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use rusqlite::{params, OptionalExtension};
 use serde_json::json;
 
@@ -13,14 +13,20 @@ impl JournalStore {
             .lock()
             .map_err(|_| anyhow!("journal mutex poisoned"))?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let now = Utc::now();
+        let now_text = now.to_rfc3339();
         let row = tx
             .query_row(
                 "SELECT job_id, source_event_id
                  FROM worker_jobs
-                 WHERE status = 'queued' AND available_at <= ?1
+                 WHERE available_at <= ?1
+                   AND (
+                     status = 'queued'
+                     OR (status = 'running' AND (locked_until IS NULL OR locked_until <= ?1))
+                   )
                  ORDER BY available_at, created_at
                  LIMIT 1",
-                params![Utc::now().to_rfc3339()],
+                params![now_text.as_str()],
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
             )
             .optional()?;
@@ -28,12 +34,20 @@ impl JournalStore {
             tx.commit()?;
             return Ok(None);
         };
-        let now = Utc::now().to_rfc3339();
+        let locked_until = (now + Duration::minutes(5)).to_rfc3339();
         let changed = tx.execute(
             "UPDATE worker_jobs
-             SET status = 'running', attempts = attempts + 1, updated_at = ?1
-             WHERE job_id = ?2 AND status = 'queued'",
-            params![now.as_str(), job_id.as_str()],
+             SET status = 'running',
+                 attempts = attempts + 1,
+                 locked_by = 'kernel-worker',
+                 locked_until = ?1,
+                 updated_at = ?2
+             WHERE job_id = ?3
+               AND (
+                 status = 'queued'
+                 OR (status = 'running' AND (locked_until IS NULL OR locked_until <= ?2))
+               )",
+            params![locked_until.as_str(), now_text.as_str(), job_id.as_str()],
         )?;
         if changed == 0 {
             tx.commit()?;
@@ -50,7 +64,8 @@ impl JournalStore {
                 "job_type": "deliver_event",
                 "source_event_id": source_event_id,
                 "status": "running",
-                "attempted_at": now,
+                "attempted_at": now_text,
+                "locked_until": locked_until,
             }),
         )?;
         tx.commit()?;

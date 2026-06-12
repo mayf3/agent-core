@@ -326,7 +326,11 @@ impl JournalStore {
         } else {
             tx.execute(
                 "UPDATE worker_jobs
-                 SET status = ?1, last_error = ?2, updated_at = ?3
+                 SET status = ?1,
+                     last_error = ?2,
+                     locked_by = NULL,
+                     locked_until = NULL,
+                     updated_at = ?3
                  WHERE job_id = ?4 AND status != 'succeeded'",
                 params![
                     status,
