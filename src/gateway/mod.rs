@@ -136,11 +136,8 @@ impl Gateway {
             dedupe_key: format!("{source}:{}", envelope.external_event_id),
             occurred_at: envelope.received_at,
         };
-        journal.append_event(
-            JournalEventKind::IngressAccepted,
-            None,
-            None,
-            Some(&event.dedupe_key),
+        journal.accept_ingress_with_worker_job(
+            &event,
             json!({
                 "source": source,
                 "external_event_id": envelope.external_event_id,
@@ -244,11 +241,8 @@ impl Gateway {
             dedupe_key: format!("feishu:{dedupe_id}"),
             occurred_at: envelope.received_at,
         };
-        journal.append_event(
-            JournalEventKind::IngressAccepted,
-            None,
-            None,
-            Some(&event.dedupe_key),
+        journal.accept_ingress_with_worker_job(
+            &event,
             json!({
                 "source": "feishu",
                 "external_event_id": envelope.external_event_id,

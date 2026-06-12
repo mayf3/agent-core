@@ -146,12 +146,22 @@ fn spawn_delivery(
 ) {
     let event_id = event.event_id.0.clone();
     let handle = thread::spawn(move || {
-        if let Err(error) = deliver_event(config, &journal, &gateway, event) {
+        let source_event_id = crate::domain::EventId(event_id.clone());
+        if let Err(error) = journal.start_worker_job(&source_event_id) {
             eprintln!(
-                "kernel async delivery failed event={} category={}",
+                "kernel worker job start failed event={} category={}",
                 short_id(&event_id),
                 error_category(&error)
             );
+        }
+        if let Err(error) = deliver_event(config, &journal, &gateway, event) {
+            let category = error_category(&error);
+            eprintln!(
+                "kernel async delivery failed event={} category={}",
+                short_id(&event_id),
+                category
+            );
+            let _ = journal.fail_worker_job(&source_event_id, &category);
             let _ = journal.append_event(
                 crate::domain::JournalEventKind::RunCompleted,
                 None,
@@ -160,8 +170,14 @@ fn spawn_delivery(
                 json!({
                     "status": "Failed",
                     "reason": "async_delivery_failed",
-                    "error_category": error_category(&error),
+                    "error_category": category,
                 }),
+            );
+        } else if let Err(error) = journal.succeed_worker_job(&source_event_id) {
+            eprintln!(
+                "kernel worker job success update failed event={} category={}",
+                short_id(&event_id),
+                error_category(&error)
             );
         }
     });
