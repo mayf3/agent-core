@@ -17,7 +17,10 @@ fn worker_job_queue_is_idempotent_and_journaled() -> Result<()> {
     let second = journal.enqueue_worker_job(&source_event_id)?;
 
     assert_eq!(first, second);
-    assert_eq!(journal.worker_job_status(&first)?.as_deref(), Some("queued"));
+    assert_eq!(
+        journal.worker_job_status(&first)?.as_deref(),
+        Some("queued")
+    );
     let queued_events = journal
         .events()?
         .into_iter()
@@ -148,6 +151,26 @@ fn worker_job_lifecycle_updates_projection_and_journal() -> Result<()> {
         .iter()
         .any(|event| event.kind == JournalEventKind::WorkerJobSucceeded));
     assert!(journal.verify_hash_chain()?);
+    Ok(())
+}
+
+#[test]
+fn worker_job_lease_marks_running_and_returns_event() -> Result<()> {
+    let journal = JournalStore::in_memory()?;
+    let source_event_id = EventId("event_lease".to_string());
+    let job_id = journal.enqueue_worker_job(&source_event_id)?;
+
+    let leased = journal.lease_next_worker_job()?;
+
+    assert_eq!(leased, Some(source_event_id));
+    assert_eq!(
+        journal.worker_job_status(&job_id)?.as_deref(),
+        Some("running")
+    );
+    assert!(journal.events()?.iter().any(|event| {
+        event.kind == JournalEventKind::WorkerJobStarted
+            && event.correlation_id.as_deref() == Some(job_id.as_str())
+    }));
     Ok(())
 }
 

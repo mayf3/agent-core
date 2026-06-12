@@ -25,6 +25,7 @@ This file is the施工单. It deliberately excludes long-term protocol detail; s
 | Rust Phase 0 M5b | Done | accepted ingress records worker job lifecycle in projection |
 | Rust Phase 0 M5c | Done | current dispatch path records outbox lifecycle in projection |
 | Rust Phase 0 M5d | Done | health reports worker/outbox projection status counts |
+| Rust Phase 0 M5e | Done | single worker loop leases queued ingress jobs |
 
 ## Stage Plan
 
@@ -85,12 +86,14 @@ Done:
   worker job started/succeeded/failed status;
 - current Runtime dispatch records outbox queued/dispatching/succeeded status
   while preserving the existing synchronous send path;
-- `/health` reports worker/outbox status counts for manual testing.
+- `/health` reports worker/outbox status counts for manual testing;
+- `/v1/ingress` returns after queueing and a single in-process worker loop
+  leases queued `worker_jobs`.
 
 Remaining:
 
-- move delivery work from ad hoc threads to a single worker loop;
 - dispatch pending outbox rows;
+- lease timeout and stale running job recovery;
 - mark `DispatchStarted` without `ReceiptReceived` as `unknown` and do not
   auto-resend;
 - connector-local reaction retry scheduling.

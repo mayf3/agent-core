@@ -337,6 +337,8 @@ Done:
 - duplicate queue calls are idempotent and do not append duplicate queued facts;
 - current delivery threads update worker job `running`, `succeeded`, or
   `failed` projection status;
+- a single in-process worker loop leases queued `worker_jobs` after
+  `/v1/ingress` returns;
 - current Runtime dispatch updates outbox `pending`, `dispatching`, and
   `succeeded` projection status in the same transactions as `OutboxQueued`,
   `DispatchStarted`, and `ReceiptReceived`;
@@ -345,7 +347,7 @@ Done:
 
 Not done:
 
-- delivery still runs in an in-process background thread;
+- stale `running` worker jobs are not yet reclaimed by lease timeout;
 - Runtime still sends approved invocations synchronously instead of letting a
   separate dispatcher poll `outbox_dispatches`;
 - `unknown` outbox rows are not yet modeled in the dispatcher path.
