@@ -34,7 +34,7 @@ fn m0_cli_vertical_slice_writes_journal_and_receipt() -> Result<()> {
         .correlation_id
         .as_deref()
         .unwrap_or("")
-        .starts_with("invocation_")));
+        .starts_with("reply:run_")));
     Ok(())
 }
 
@@ -262,7 +262,7 @@ fn feishu_deduplicates_by_message_id_across_event_ids() -> Result<()> {
 }
 
 #[test]
-fn feishu_reply_idempotency_key_uses_message_id() -> Result<()> {
+fn feishu_reply_invocation_is_deterministic_for_run() -> Result<()> {
     let mut config = test_config();
     config.feishu_allowed_open_ids = vec!["ou_user".to_string()];
     let journal = JournalStore::in_memory()?;
@@ -273,15 +273,18 @@ fn feishu_reply_idempotency_key_uses_message_id() -> Result<()> {
         feishu_envelope_with_message("evt_1", "om_reply_once", "p2p", true)?,
     )?;
 
-    runtime.deliver_echo(&journal, &gateway, event)?;
+    let outcome = runtime.deliver_echo(&journal, &gateway, event)?;
+    let expected_invocation_id = format!("reply:{}", outcome.run_id.0);
+    let expected_key = format!("feishu-reply:{}", outcome.run_id.0);
 
     assert!(journal.events()?.iter().any(|event| {
         event.kind == JournalEventKind::InvocationProposed
+            && event.correlation_id.as_deref() == Some(expected_invocation_id.as_str())
             && event
                 .payload
                 .get("idempotency_key")
                 .and_then(|value| value.as_str())
-                == Some("feishu:reply:om_reply_once")
+                == Some(expected_key.as_str())
     }));
     Ok(())
 }
