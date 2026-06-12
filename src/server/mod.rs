@@ -297,6 +297,8 @@ pub fn health_snapshot(journal: &JournalStore) -> Result<Value> {
     let hash_chain_ok = journal.verify_hash_chain()?;
     let unknown_invocations = journal.unknown_invocations()?;
     let undelivered_ingress_count = journal.undelivered_ingress_events()?.len();
+    let worker_job_counts = journal.worker_job_status_counts()?;
+    let outbox_dispatch_counts = journal.outbox_dispatch_status_counts()?;
     let status = if !hash_chain_ok {
         "corrupt"
     } else if unknown_invocations.is_empty() {
@@ -310,6 +312,8 @@ pub fn health_snapshot(journal: &JournalStore) -> Result<Value> {
         "hash_chain_ok": hash_chain_ok,
         "journal_event_count": journal.event_count()?,
         "undelivered_ingress_count": undelivered_ingress_count,
+        "worker_jobs": worker_job_counts,
+        "outbox_dispatches": outbox_dispatch_counts,
         "unknown_invocation_count": unknown_invocations.len(),
         "unknown_invocations": unknown_invocations.iter().map(|invocation| {
             json!({

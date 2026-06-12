@@ -24,6 +24,7 @@ This file is the施工单. It deliberately excludes long-term protocol detail; s
 | Rust Phase 0 M5a | Done | worker/outbox projection tables and idempotent queue methods |
 | Rust Phase 0 M5b | Done | accepted ingress records worker job lifecycle in projection |
 | Rust Phase 0 M5c | Done | current dispatch path records outbox lifecycle in projection |
+| Rust Phase 0 M5d | Done | health reports worker/outbox projection status counts |
 
 ## Stage Plan
 
@@ -83,7 +84,8 @@ Done:
 - accepted ingress queues `worker_jobs`, and current delivery threads update
   worker job started/succeeded/failed status;
 - current Runtime dispatch records outbox queued/dispatching/succeeded status
-  while preserving the existing synchronous send path.
+  while preserving the existing synchronous send path;
+- `/health` reports worker/outbox status counts for manual testing.
 
 Remaining:
 
