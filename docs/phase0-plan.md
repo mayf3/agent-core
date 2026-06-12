@@ -244,8 +244,8 @@ Implementation status: done. M1 keeps the Connector as an edge adapter:
 - Connector `/v1/execute` only accepts `feishu.send_message`.
 - Connector may add one best-effort processing reaction on the source message
   and remove it after `feishu.send_message` succeeds. This is connector-local
-  UX state, tracked in memory by `message_id -> reaction_id`. It is not a model
-  tool, workflow state, or Core Journal fact.
+  UX state, tracked in a local JSONL state file by `message_id -> reaction_id`.
+  It is not a model tool, workflow state, or Core Journal fact.
 - If an accepted run or reply dispatch fails, Connector may replace the
   processing reaction with a configured failed reaction.
 - Processing reactions must never run as a keepalive loop. Feishu reactions are
@@ -308,7 +308,7 @@ Done:
 Not done:
 
 - separate worker queue table;
-- durable connector UX outbox for reaction retry.
+- durable connector UX outbox for retry scheduling and compaction.
 
 ## Phase 0 Non-Goals
 

@@ -63,8 +63,8 @@ cargo test
 ```
 
 Runtime data defaults to `~/.agent-core`. The source repository owns code and
-bootstrap defaults; local agent documents and `kernel.sqlite` live outside the
-checkout by default.
+bootstrap defaults; local agent documents, `kernel.sqlite`, and connector-local
+reaction state live outside the checkout by default.
 
 ## Feishu M1
 
