@@ -303,6 +303,8 @@ Done:
 
 - `/v1/ingress` validates, deduplicates, records `IngressAccepted`, and returns
   `accepted` with `kernel_event_id` before model execution finishes;
+- accepted ingress also queues a `worker_jobs` projection row in the same
+  SQLite transaction as `IngressAccepted`;
 - health reports `undelivered_ingress_count` for accepted events that do not yet
   have delivery correlation;
 - actual `Runtime.event.deliver` runs on a background thread;
@@ -331,11 +333,12 @@ Done:
   state;
 - queue helpers append `WorkerJobQueued` or `OutboxQueued` and update projection
   tables in the same SQLite transaction;
-- duplicate queue calls are idempotent and do not append duplicate queued facts.
+- duplicate queue calls are idempotent and do not append duplicate queued facts;
+- current delivery threads update worker job `running`, `succeeded`, or
+  `failed` projection status.
 
 Not done:
 
-- `/v1/ingress` does not yet enqueue `worker_jobs`;
 - delivery still runs in an in-process background thread;
 - Runtime still dispatches approved invocations directly instead of queueing
   outbox rows;

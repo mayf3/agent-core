@@ -22,6 +22,7 @@ This file is the施工单. It deliberately excludes long-term protocol detail; s
 | Rust Phase 0 M4c | Done | graceful shutdown drains started background delivery threads |
 | Rust Phase 0 M4d | Done | health reports undelivered ingress backlog count |
 | Rust Phase 0 M5a | Done | worker/outbox projection tables and idempotent queue methods |
+| Rust Phase 0 M5b | Done | accepted ingress records worker job lifecycle in projection |
 
 ## Stage Plan
 
@@ -77,11 +78,12 @@ Done:
 
 - `worker_jobs` and `outbox_dispatches` projection tables;
 - idempotent queue methods that append Journal facts and update projections in
-  one transaction.
+  one transaction;
+- accepted ingress queues `worker_jobs`, and current delivery threads update
+  worker job started/succeeded/failed status.
 
 Remaining:
 
-- enqueue accepted ingress into `worker_jobs`;
 - move delivery work from ad hoc threads to a single worker loop;
 - queue approved replies into `outbox_dispatches`;
 - dispatch pending outbox rows;
