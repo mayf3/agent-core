@@ -175,6 +175,23 @@ fn worker_job_lease_marks_running_and_returns_event() -> Result<()> {
 }
 
 #[test]
+fn worker_job_lease_does_not_retake_active_running_job() -> Result<()> {
+    let journal = JournalStore::in_memory()?;
+    let source_event_id = EventId("event_active_lease".to_string());
+    journal.enqueue_worker_job(&source_event_id)?;
+
+    assert_eq!(journal.lease_next_worker_job()?, Some(source_event_id));
+    assert_eq!(journal.lease_next_worker_job()?, None);
+    let started_events = journal
+        .events()?
+        .into_iter()
+        .filter(|event| event.kind == JournalEventKind::WorkerJobStarted)
+        .count();
+    assert_eq!(started_events, 1);
+    Ok(())
+}
+
+#[test]
 fn outbox_queue_is_idempotent_and_journaled() -> Result<()> {
     let config = test_config();
     let gateway = Gateway::new(config.clone());
