@@ -287,13 +287,8 @@ where
         chat_id: Option<String>,
     ) -> InvocationIntent {
         if session.channel == ChannelKind::Feishu {
-            let reply_key = message_id
-                .as_deref()
-                .filter(|value| !value.is_empty())
-                .map(|value| format!("feishu:reply:{value}"))
-                .unwrap_or_else(|| format!("{}:feishu", run.id.0));
             InvocationIntent {
-                invocation_id: InvocationId::new(),
+                invocation_id: InvocationId(format!("reply:{}", run.id.0)),
                 run_id: run.id.clone(),
                 operation: "feishu.send_message".to_string(),
                 arguments: json!({
@@ -302,18 +297,18 @@ where
                     "chat_id": chat_id.unwrap_or_default(),
                     "text": text,
                 }),
-                idempotency_key: Some(reply_key),
+                idempotency_key: Some(format!("feishu-reply:{}", run.id.0)),
             }
         } else {
             InvocationIntent {
-                invocation_id: InvocationId::new(),
+                invocation_id: InvocationId(format!("reply:{}", run.id.0)),
                 run_id: run.id.clone(),
                 operation: "stdout.send_text".to_string(),
                 arguments: json!({
                     "session_id": session.id.0,
                     "text": text,
                 }),
-                idempotency_key: Some(format!("{}:stdout", run.id.0)),
+                idempotency_key: Some(format!("stdout-reply:{}", run.id.0)),
             }
         }
     }
