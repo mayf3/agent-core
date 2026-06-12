@@ -21,6 +21,7 @@ This file is the施工单. It deliberately excludes long-term protocol detail; s
 | Rust Phase 0 M4b | Done | restart requeues reconstructable accepted ingress events |
 | Rust Phase 0 M4c | Done | graceful shutdown drains started background delivery threads |
 | Rust Phase 0 M4d | Done | health reports undelivered ingress backlog count |
+| Rust Phase 0 M5a | Done | worker/outbox projection tables and idempotent queue methods |
 
 ## Stage Plan
 
@@ -68,14 +69,27 @@ Status: done.
 - recent-message context;
 - graceful shutdown.
 
-### Next: M4 Invocation Gateway Hardening
+### Next: M5 Minimal Durable Worker / Outbox
 
-Before hardening broader invocation semantics, finish the remaining reliability
-slice:
+Build the smallest durable async runtime slice without adding workflow semantics.
 
-- durable worker queue for accepted events;
-- durable outbox for connector dispatch;
-- connector-local reaction outbox.
+Done:
+
+- `worker_jobs` and `outbox_dispatches` projection tables;
+- idempotent queue methods that append Journal facts and update projections in
+  one transaction.
+
+Remaining:
+
+- enqueue accepted ingress into `worker_jobs`;
+- move delivery work from ad hoc threads to a single worker loop;
+- queue approved replies into `outbox_dispatches`;
+- dispatch pending outbox rows;
+- mark `DispatchStarted` without `ReceiptReceived` as `unknown` and do not
+  auto-resend;
+- connector-local reaction retry scheduling.
+
+### Later: Invocation Gateway Hardening
 
 Scope:
 

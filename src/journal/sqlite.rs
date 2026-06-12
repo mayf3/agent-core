@@ -9,7 +9,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 pub struct JournalStore {
-    conn: Mutex<Connection>,
+    pub(crate) conn: Mutex<Connection>,
 }
 
 impl JournalStore {
@@ -363,6 +363,7 @@ impl JournalStore {
             .lock()
             .map_err(|_| anyhow!("journal mutex poisoned"))?;
         conn.execute_batch(include_str!("../../migrations/0001_init.sql"))?;
+        super::queue::migrate(&conn)?;
         backfill_feishu_message_dedup(&conn)?;
         Ok(())
     }
@@ -469,6 +470,13 @@ fn parse_kind(value: &str) -> JournalEventKind {
         "LlmCompleted" => JournalEventKind::LlmCompleted,
         "InvocationProposed" => JournalEventKind::InvocationProposed,
         "InvocationApproved" => JournalEventKind::InvocationApproved,
+        "WorkerJobQueued" => JournalEventKind::WorkerJobQueued,
+        "WorkerJobStarted" => JournalEventKind::WorkerJobStarted,
+        "WorkerJobSucceeded" => JournalEventKind::WorkerJobSucceeded,
+        "WorkerJobFailed" => JournalEventKind::WorkerJobFailed,
+        "OutboxQueued" => JournalEventKind::OutboxQueued,
+        "OutboxDispatchFailed" => JournalEventKind::OutboxDispatchFailed,
+        "OutboxDispatchUnknown" => JournalEventKind::OutboxDispatchUnknown,
         "DispatchStarted" => JournalEventKind::DispatchStarted,
         "ReceiptReceived" => JournalEventKind::ReceiptReceived,
         _ => JournalEventKind::RunCompleted,
