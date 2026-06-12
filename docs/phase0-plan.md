@@ -307,6 +307,7 @@ Done:
   SQLite transaction as `IngressAccepted`;
 - health reports `undelivered_ingress_count` for accepted events that do not yet
   have delivery correlation;
+- health reports `worker_jobs` and `outbox_dispatches` status counts;
 - actual `Runtime.event.deliver` runs on a background thread;
 - startup scans `IngressAccepted` events that have no matching
   `SessionReady`/`RunStarted`/`RunCompleted` correlation and requeues the ones
@@ -338,7 +339,9 @@ Done:
   `failed` projection status;
 - current Runtime dispatch updates outbox `pending`, `dispatching`, and
   `succeeded` projection status in the same transactions as `OutboxQueued`,
-  `DispatchStarted`, and `ReceiptReceived`.
+  `DispatchStarted`, and `ReceiptReceived`;
+- health exposes worker/outbox projection counts for lightweight manual
+  verification.
 
 Not done:
 
