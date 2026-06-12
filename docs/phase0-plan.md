@@ -335,13 +335,16 @@ Done:
   tables in the same SQLite transaction;
 - duplicate queue calls are idempotent and do not append duplicate queued facts;
 - current delivery threads update worker job `running`, `succeeded`, or
-  `failed` projection status.
+  `failed` projection status;
+- current Runtime dispatch updates outbox `pending`, `dispatching`, and
+  `succeeded` projection status in the same transactions as `OutboxQueued`,
+  `DispatchStarted`, and `ReceiptReceived`.
 
 Not done:
 
 - delivery still runs in an in-process background thread;
-- Runtime still dispatches approved invocations directly instead of queueing
-  outbox rows;
+- Runtime still sends approved invocations synchronously instead of letting a
+  separate dispatcher poll `outbox_dispatches`;
 - `unknown` outbox rows are not yet modeled in the dispatcher path.
 
 ## Phase 0 Non-Goals

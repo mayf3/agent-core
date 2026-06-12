@@ -127,13 +127,8 @@ where
                 "operation": approved.intent().operation,
             }),
         )?;
-        journal.append_event(
-            JournalEventKind::DispatchStarted,
-            Some(&run.id),
-            Some(&session.id),
-            Some(&correlation_id),
-            json!({ "operation": approved.intent().operation }),
-        )?;
+        journal.queue_outbox_dispatch(&approved, Some(&session.id))?;
+        journal.start_outbox_dispatch(&approved, Some(&session.id))?;
         let receipt = self.adapter.execute(&approved)?;
         let output = receipt
             .output
@@ -141,17 +136,7 @@ where
             .and_then(|value| value.as_str())
             .unwrap_or("")
             .to_string();
-        journal.append_event(
-            JournalEventKind::ReceiptReceived,
-            Some(&run.id),
-            Some(&session.id),
-            Some(&correlation_id),
-            json!({
-                "status": format!("{:?}", receipt.status),
-                "external_ref": receipt.external_ref,
-                "output_kind": "text",
-            }),
-        )?;
+        journal.succeed_outbox_dispatch(&receipt, &run.id, Some(&session.id))?;
         journal.complete_run(&run.id)?;
         journal.append_event(
             JournalEventKind::RunCompleted,
@@ -228,25 +213,10 @@ where
                 "operation": approved.intent().operation,
             }),
         )?;
-        journal.append_event(
-            JournalEventKind::DispatchStarted,
-            Some(&run.id),
-            Some(&session.id),
-            Some(&correlation_id),
-            json!({ "operation": approved.intent().operation }),
-        )?;
+        journal.queue_outbox_dispatch(&approved, Some(&session.id))?;
+        journal.start_outbox_dispatch(&approved, Some(&session.id))?;
         let receipt = self.adapter.execute(&approved)?;
-        journal.append_event(
-            JournalEventKind::ReceiptReceived,
-            Some(&run.id),
-            Some(&session.id),
-            Some(&correlation_id),
-            json!({
-                "status": format!("{:?}", receipt.status),
-                "external_ref": receipt.external_ref,
-                "output_kind": "text",
-            }),
-        )?;
+        journal.succeed_outbox_dispatch(&receipt, &run.id, Some(&session.id))?;
         journal.complete_run(&run.id)?;
         journal.append_event(
             JournalEventKind::RunCompleted,

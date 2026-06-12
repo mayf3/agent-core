@@ -28,6 +28,49 @@ fn worker_job_queue_is_idempotent_and_journaled() -> Result<()> {
 }
 
 #[test]
+fn outbox_dispatch_lifecycle_updates_projection_and_journal() -> Result<()> {
+    let config = test_config();
+    let gateway = Gateway::new(config.clone());
+    let journal = JournalStore::in_memory()?;
+    let session = test_session(&config);
+    let run = test_run(&config, &session);
+    let approved = approved_stdout_invocation(&gateway, &run, &session)?;
+    let invocation_id = approved.intent().invocation_id.clone();
+
+    journal.queue_outbox_dispatch(&approved, Some(&session.id))?;
+    journal.start_outbox_dispatch(&approved, Some(&session.id))?;
+    assert_eq!(
+        journal.outbox_dispatch_status(&invocation_id)?.as_deref(),
+        Some("dispatching")
+    );
+    journal.succeed_outbox_dispatch(
+        &Receipt {
+            invocation_id: invocation_id.clone(),
+            status: ReceiptStatus::Succeeded,
+            external_ref: Some("stdout".to_string()),
+            output: json!({ "text": "hello" }),
+            occurred_at: Utc::now(),
+        },
+        &run.id,
+        Some(&session.id),
+    )?;
+
+    assert_eq!(
+        journal.outbox_dispatch_status(&invocation_id)?.as_deref(),
+        Some("succeeded")
+    );
+    let events = journal.events()?;
+    assert!(events
+        .iter()
+        .any(|event| event.kind == JournalEventKind::DispatchStarted));
+    assert!(events
+        .iter()
+        .any(|event| event.kind == JournalEventKind::ReceiptReceived));
+    assert!(journal.verify_hash_chain()?);
+    Ok(())
+}
+
+#[test]
 fn ingress_acceptance_queues_worker_job() -> Result<()> {
     let config = test_config();
     let journal = JournalStore::in_memory()?;
@@ -176,4 +219,25 @@ fn test_run(config: &KernelConfig, session: &Session) -> Run {
         created_at: Utc::now(),
         updated_at: Utc::now(),
     }
+}
+
+fn approved_stdout_invocation(
+    gateway: &Gateway,
+    run: &Run,
+    session: &Session,
+) -> Result<ApprovedInvocation> {
+    gateway.approve_invocation(
+        InvocationIntent {
+            invocation_id: InvocationId("reply:run_test".to_string()),
+            run_id: run.id.clone(),
+            operation: "stdout.send_text".to_string(),
+            arguments: json!({
+                "session_id": session.id.0,
+                "text": "hello",
+            }),
+            idempotency_key: Some("stdout-reply:run_test".to_string()),
+        },
+        run,
+        session,
+    )
 }
