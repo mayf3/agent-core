@@ -19,6 +19,7 @@ This file is the施工单. It deliberately excludes long-term protocol detail; s
 | Rust Phase 0 M4a | Done | `/v1/ingress` returns accepted before background delivery finishes |
 | Rust Phase 0 M4b | Done | restart requeues reconstructable accepted ingress events |
 | Rust Phase 0 M4c | Done | graceful shutdown drains started background delivery threads |
+| Rust Phase 0 M4d | Done | health reports undelivered ingress backlog count |
 
 ## Stage Plan
 
