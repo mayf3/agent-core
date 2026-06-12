@@ -2,6 +2,7 @@ use agent_core_kernel::config::KernelConfig;
 use agent_core_kernel::domain::*;
 use agent_core_kernel::gateway::Gateway;
 use agent_core_kernel::journal::JournalStore;
+use agent_core_kernel::server::health_snapshot;
 use anyhow::Result;
 use chrono::Utc;
 use serde_json::json;
@@ -61,6 +62,36 @@ fn gateway_recovers_feishu_event_from_ingress_journal_payload() -> Result<()> {
     assert_eq!(text, "你好");
     assert_eq!(message_id.as_deref(), Some("om_2"));
     assert_eq!(chat_id.as_deref(), Some("oc_chat"));
+    Ok(())
+}
+
+#[test]
+fn health_reports_undelivered_ingress_count() -> Result<()> {
+    let mut config = test_config();
+    config.feishu_allowed_open_ids = vec!["ou_user".to_string()];
+    let journal = JournalStore::in_memory()?;
+    let gateway = Gateway::new(config);
+    let accepted = gateway.validate_ingress(&journal, feishu_envelope("evt_3", "om_3")?)?;
+
+    assert_eq!(
+        health_snapshot(&journal)?
+            .get("undelivered_ingress_count")
+            .and_then(|value| value.as_u64()),
+        Some(1)
+    );
+    journal.append_event(
+        JournalEventKind::RunStarted,
+        None,
+        None,
+        Some(&accepted.event_id.0),
+        json!({ "run_id": "run_test" }),
+    )?;
+    assert_eq!(
+        health_snapshot(&journal)?
+            .get("undelivered_ingress_count")
+            .and_then(|value| value.as_u64()),
+        Some(0)
+    );
     Ok(())
 }
 
