@@ -80,9 +80,15 @@ Tables:
 - `runs`
 - `journal_events`
 - `ingress_dedup`
+- `worker_jobs`
+- `outbox_dispatches`
 
 `journal_events` includes `correlation_id` so invocation status can be derived
 without parsing every payload.
+
+`worker_jobs` and `outbox_dispatches` are operational projections, not facts.
+The append-only Journal remains the source of truth. Projection rows may be
+rebuilt from Journal events in a later repair command.
 
 Journal append is serialized with a single writer and `BEGIN IMMEDIATE`:
 
@@ -310,8 +316,30 @@ Done:
 
 Not done:
 
-- separate worker queue table;
+- worker loop reads from `worker_jobs`;
+- outbox dispatcher reads from `outbox_dispatches`;
 - durable connector UX outbox for retry scheduling.
+
+### M5: Minimal Durable Worker / Outbox
+
+Implementation status: projection foundation.
+
+Done:
+
+- `worker_jobs` tracks accepted ingress work as operational queue state;
+- `outbox_dispatches` tracks approved external dispatches as operational queue
+  state;
+- queue helpers append `WorkerJobQueued` or `OutboxQueued` and update projection
+  tables in the same SQLite transaction;
+- duplicate queue calls are idempotent and do not append duplicate queued facts.
+
+Not done:
+
+- `/v1/ingress` does not yet enqueue `worker_jobs`;
+- delivery still runs in an in-process background thread;
+- Runtime still dispatches approved invocations directly instead of queueing
+  outbox rows;
+- `unknown` outbox rows are not yet modeled in the dispatcher path.
 
 ## Phase 0 Non-Goals
 
