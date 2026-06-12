@@ -296,6 +296,8 @@ Done:
 
 - `/v1/ingress` validates, deduplicates, records `IngressAccepted`, and returns
   `accepted` with `kernel_event_id` before model execution finishes;
+- health reports `undelivered_ingress_count` for accepted events that do not yet
+  have delivery correlation;
 - actual `Runtime.event.deliver` runs on a background thread;
 - startup scans `IngressAccepted` events that have no matching
   `SessionReady`/`RunStarted`/`RunCompleted` correlation and requeues the ones
