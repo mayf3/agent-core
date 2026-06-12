@@ -1,4 +1,6 @@
 import { readFileSync, existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 export interface ConnectorConfig {
   appId: string;
@@ -9,6 +11,7 @@ export interface ConnectorConfig {
   ipcToken: string;
   processingReactionEmoji: string;
   failedReactionEmoji: string;
+  reactionStatePath: string;
 }
 
 export function loadConfig(): ConnectorConfig {
@@ -23,6 +26,7 @@ export function loadConfig(): ConnectorConfig {
     ipcToken: required("AGENT_CORE_IPC_TOKEN"),
     processingReactionEmoji: optionalReaction("AGENT_CORE_FEISHU_PROCESSING_REACTION", "OK"),
     failedReactionEmoji: optionalReaction("AGENT_CORE_FEISHU_FAILED_REACTION", "ERROR"),
+    reactionStatePath: reactionStatePath(),
   };
 }
 
@@ -40,6 +44,17 @@ function optionalReaction(key: string, fallback: string): string {
     return "";
   }
   return value;
+}
+
+function reactionStatePath(): string {
+  return expandHome(
+    process.env.AGENT_CORE_FEISHU_REACTION_STATE_PATH ||
+      join(defaultDataDir(), "feishu-reactions.jsonl"),
+  );
+}
+
+function defaultDataDir(): string {
+  return expandHome(process.env.AGENT_CORE_DATA_DIR || join(homedir(), ".agent-core"));
 }
 
 function loadLocalEnv() {
@@ -67,6 +82,16 @@ function loadLocalEnv() {
 function unquote(value: string): string {
   if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
     return value.slice(1, -1);
+  }
+  return value;
+}
+
+function expandHome(value: string): string {
+  if (value === "~") {
+    return homedir();
+  }
+  if (value.startsWith("~/")) {
+    return join(homedir(), value.slice(2));
   }
   return value;
 }
