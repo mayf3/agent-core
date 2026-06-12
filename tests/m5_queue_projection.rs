@@ -28,6 +28,56 @@ fn worker_job_queue_is_idempotent_and_journaled() -> Result<()> {
 }
 
 #[test]
+fn ingress_acceptance_queues_worker_job() -> Result<()> {
+    let config = test_config();
+    let journal = JournalStore::in_memory()?;
+    let gateway = Gateway::new(config);
+    let event = gateway.validate_ingress(&journal, gateway.cli_ingress("queue me".to_string())?)?;
+    let job_id = format!("job:deliver:{}", event.event_id.0);
+
+    assert_eq!(
+        journal.worker_job_status(&job_id)?.as_deref(),
+        Some("queued")
+    );
+    let events = journal.events()?;
+    assert!(events
+        .iter()
+        .any(|event| event.kind == JournalEventKind::IngressAccepted));
+    assert!(events
+        .iter()
+        .any(|event| event.kind == JournalEventKind::WorkerJobQueued));
+    assert!(journal.verify_hash_chain()?);
+    Ok(())
+}
+
+#[test]
+fn worker_job_lifecycle_updates_projection_and_journal() -> Result<()> {
+    let journal = JournalStore::in_memory()?;
+    let source_event_id = EventId("event_lifecycle".to_string());
+    let job_id = journal.enqueue_worker_job(&source_event_id)?;
+
+    journal.start_worker_job(&source_event_id)?;
+    assert_eq!(
+        journal.worker_job_status(&job_id)?.as_deref(),
+        Some("running")
+    );
+    journal.succeed_worker_job(&source_event_id)?;
+    assert_eq!(
+        journal.worker_job_status(&job_id)?.as_deref(),
+        Some("succeeded")
+    );
+    let events = journal.events()?;
+    assert!(events
+        .iter()
+        .any(|event| event.kind == JournalEventKind::WorkerJobStarted));
+    assert!(events
+        .iter()
+        .any(|event| event.kind == JournalEventKind::WorkerJobSucceeded));
+    assert!(journal.verify_hash_chain()?);
+    Ok(())
+}
+
+#[test]
 fn outbox_queue_is_idempotent_and_journaled() -> Result<()> {
     let config = test_config();
     let gateway = Gateway::new(config.clone());
