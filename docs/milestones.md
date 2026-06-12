@@ -9,6 +9,7 @@ This file is the施工单. It deliberately excludes long-term protocol detail; s
 |---|---|---|
 | Rust Phase 0 M0 | Done | Rust Kernel CLI vertical slice with SQLite Journal |
 | Rust Phase 0 M1 | Done | TS Feishu long-connection connector + Rust Echo |
+| Rust Phase 0 M1a | Done | Connector-local reaction state survives connector restart |
 | Rust Phase 0 M2 | Done | Feishu text now uses Rust OpenAI-compatible LLM path |
 | Rust Phase 0 M3a | Done | health probe, unknown scan, disabled spawn/yield ABI |
 | Rust Phase 0 M3b | Done | file-backed context, skill catalog, recent messages, truncation |
