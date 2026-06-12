@@ -7,138 +7,98 @@ use crate::llm::OpenAiCompatibleLlm;
 use crate::runtime::Runtime;
 use anyhow::Result;
 use serde_json::{json, Value};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::thread;
+use std::time::Duration;
 
-pub(crate) type DeliveryThreads = Arc<Mutex<Vec<thread::JoinHandle<()>>>>;
-
-pub(crate) fn spawn_delivery(
+pub(crate) fn start_worker_loop(
     config: KernelConfig,
     journal: Arc<JournalStore>,
     gateway: Arc<Gateway>,
-    event: ValidatedEvent,
-    deliveries: DeliveryThreads,
-) {
-    let event_id = event.event_id.0.clone();
-    let handle = thread::spawn(move || {
-        let source_event_id = EventId(event_id.clone());
-        if let Err(error) = journal.start_worker_job(&source_event_id) {
-            eprintln!(
-                "kernel worker job start failed event={} category={}",
-                short_id(&event_id),
-                error_category(&error)
-            );
-        }
-        if let Err(error) = deliver_event(config, &journal, &gateway, event) {
-            let category = error_category(&error);
-            eprintln!(
-                "kernel async delivery failed event={} category={}",
-                short_id(&event_id),
-                category
-            );
-            let _ = journal.fail_worker_job(&source_event_id, &category);
-            let _ = journal.append_event(
-                JournalEventKind::RunCompleted,
-                None,
-                None,
-                Some(&event_id),
-                json!({
-                    "status": "Failed",
-                    "reason": "async_delivery_failed",
-                    "error_category": category,
-                }),
-            );
-        } else if let Err(error) = journal.succeed_worker_job(&source_event_id) {
-            eprintln!(
-                "kernel worker job success update failed event={} category={}",
-                short_id(&event_id),
-                error_category(&error)
-            );
-        }
-    });
-    match deliveries.lock() {
-        Ok(mut handles) => handles.push(handle),
-        Err(_) => {
-            eprintln!("kernel delivery tracker unavailable; waiting for delivery inline");
-            let _ = handle.join();
-        }
-    }
-}
-
-pub(crate) fn prune_finished_deliveries(deliveries: &DeliveryThreads) {
-    let mut finished = Vec::new();
-    if let Ok(mut handles) = deliveries.lock() {
-        let mut pending = Vec::with_capacity(handles.len());
-        for handle in handles.drain(..) {
-            if handle.is_finished() {
-                finished.push(handle);
-            } else {
-                pending.push(handle);
+    running: Arc<AtomicBool>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        while running.load(Ordering::SeqCst) {
+            match process_next_worker_job(&config, &journal, &gateway) {
+                Ok(true) => {}
+                Ok(false) => thread::sleep(Duration::from_millis(100)),
+                Err(error) => {
+                    eprintln!(
+                        "kernel worker loop failed category={}",
+                        error_category(&error)
+                    );
+                    thread::sleep(Duration::from_millis(250));
+                }
             }
         }
-        *handles = pending;
-    }
-    for handle in finished {
-        if handle.join().is_err() {
-            eprintln!("kernel delivery thread panicked");
-        }
-    }
+    })
 }
 
-pub(crate) fn drain_delivery_threads(deliveries: &DeliveryThreads) {
-    let handles = match deliveries.lock() {
-        Ok(mut handles) => handles.drain(..).collect::<Vec<_>>(),
-        Err(_) => {
-            eprintln!("kernel delivery tracker unavailable during shutdown");
-            return;
-        }
-    };
-    if !handles.is_empty() {
-        println!("agent-core draining {} delivery thread(s)", handles.len());
-    }
-    for handle in handles {
-        if handle.join().is_err() {
-            eprintln!("kernel delivery thread panicked");
-        }
-    }
-}
-
-pub(crate) fn recover_undelivered_ingress(
-    config: KernelConfig,
-    journal: Arc<JournalStore>,
-    gateway: Arc<Gateway>,
-    deliveries: DeliveryThreads,
-) -> Result<usize> {
+pub(crate) fn recover_undelivered_ingress(journal: Arc<JournalStore>) -> Result<usize> {
     let events = journal.undelivered_ingress_events()?;
     let mut recovered = 0;
     for event in events {
-        match gateway.recover_validated_event(&event) {
-            Ok(validated) => {
-                recovered += 1;
-                spawn_delivery(
-                    config.clone(),
-                    Arc::clone(&journal),
-                    Arc::clone(&gateway),
-                    validated,
-                    Arc::clone(&deliveries),
-                );
-            }
-            Err(error) => {
-                journal.append_event(
-                    JournalEventKind::RunCompleted,
-                    None,
-                    None,
-                    event.payload.get("event_id").and_then(Value::as_str),
-                    json!({
-                        "status": "Failed",
-                        "reason": "undelivered_ingress_recovery_failed",
-                        "error_category": error_category(&error),
-                    }),
-                )?;
-            }
+        if let Some(event_id) = event.payload.get("event_id").and_then(Value::as_str) {
+            recovered += 1;
+            journal.enqueue_worker_job(&EventId(event_id.to_string()))?;
         }
     }
     Ok(recovered)
+}
+
+fn process_next_worker_job(
+    config: &KernelConfig,
+    journal: &JournalStore,
+    gateway: &Gateway,
+) -> Result<bool> {
+    let Some(source_event_id) = journal.lease_next_worker_job()? else {
+        return Ok(false);
+    };
+    let event_id = source_event_id.0.clone();
+    let result = deliver_worker_event(config.clone(), journal, gateway, &source_event_id);
+    if let Err(error) = result {
+        let category = error_category(&error);
+        eprintln!(
+            "kernel worker delivery failed event={} category={}",
+            short_id(&event_id),
+            category
+        );
+        let _ = journal.fail_worker_job(&source_event_id, &category);
+        let _ = journal.append_event(
+            JournalEventKind::RunCompleted,
+            None,
+            None,
+            Some(&event_id),
+            json!({
+                "status": "Failed",
+                "reason": "worker_delivery_failed",
+                "error_category": category,
+            }),
+        );
+    } else if let Err(error) = journal.succeed_worker_job(&source_event_id) {
+        eprintln!(
+            "kernel worker job success update failed event={} category={}",
+            short_id(&event_id),
+            error_category(&error)
+        );
+    }
+    Ok(true)
+}
+
+fn deliver_worker_event(
+    config: KernelConfig,
+    journal: &JournalStore,
+    gateway: &Gateway,
+    source_event_id: &EventId,
+) -> Result<()> {
+    let event = journal
+        .ingress_event_by_event_id(&source_event_id.0)?
+        .ok_or_else(|| anyhow::anyhow!("missing_ingress_event"))?;
+    let validated = gateway.recover_validated_event(&event)?;
+    deliver_event(config, journal, gateway, validated)
 }
 
 fn deliver_event(

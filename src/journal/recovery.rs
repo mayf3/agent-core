@@ -4,6 +4,17 @@ use anyhow::Result;
 use std::collections::HashSet;
 
 impl JournalStore {
+    pub fn ingress_event_by_event_id(&self, event_id: &str) -> Result<Option<JournalEvent>> {
+        Ok(self.events()?.into_iter().find(|event| {
+            event.kind == JournalEventKind::IngressAccepted
+                && event
+                    .payload
+                    .get("event_id")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(event_id)
+        }))
+    }
+
     pub fn undelivered_ingress_events(&self) -> Result<Vec<JournalEvent>> {
         let events = self.events()?;
         let mut delivered = HashSet::new();
