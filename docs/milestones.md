@@ -28,6 +28,7 @@ This file is the施工单. It deliberately excludes long-term protocol detail; s
 | Rust Phase 0 M5e | Done | single worker loop leases queued ingress jobs |
 | Rust Phase 0 M5f | Done | worker job leases use timeout locks |
 | Rust Phase 0 M5g | Done | unknown dispatch recovery updates outbox projection and blocks auto resend |
+| Rust Phase 0 M5h | Done | stale running worker job crash-test coverage |
 
 ## Stage Plan
 
@@ -99,7 +100,6 @@ Done:
 Remaining:
 
 - dispatch pending outbox rows;
-- stale running job crash test coverage;
 - connector-local reaction retry scheduling.
 
 ### Later: Invocation Gateway Hardening

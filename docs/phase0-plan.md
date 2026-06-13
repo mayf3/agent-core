@@ -341,6 +341,8 @@ Done:
   `/v1/ingress` returns;
 - worker job leases set `locked_by` and `locked_until`, and expired running jobs
   may be reclaimed by a later lease;
+- tests cover both expired running job reclaim and active running job
+  non-reclaim behavior;
 - current Runtime dispatch updates outbox `pending`, `dispatching`, and
   `succeeded` projection status in the same transactions as `OutboxQueued`,
   `DispatchStarted`, and `ReceiptReceived`;
@@ -352,7 +354,6 @@ Done:
 
 Not done:
 
-- stale `running` worker job recovery still needs crash-test coverage;
 - Runtime still sends approved invocations synchronously instead of letting a
   separate dispatcher poll `outbox_dispatches`;
 - connector-local reaction retry scheduling.
