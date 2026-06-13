@@ -17,7 +17,7 @@ impl JournalStore {
         let now_text = now.to_rfc3339();
         let row = tx
             .query_row(
-                "SELECT invocation_id, run_id, session_id, operation, arguments_json, idempotency_key
+                "SELECT invocation_id, run_id, session_id, operation, arguments_json, idempotency_key, decision_id
                  FROM outbox_dispatches
                  WHERE status = 'pending' AND available_at <= ?1
                  ORDER BY available_at, created_at
@@ -31,12 +31,20 @@ impl JournalStore {
                         row.get::<_, String>(3)?,
                         row.get::<_, String>(4)?,
                         row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
                     ))
                 },
             )
             .optional()?;
-        let Some((invocation_id, run_id, session_id, operation, arguments_json, idempotency_key)) =
-            row
+        let Some((
+            invocation_id,
+            run_id,
+            session_id,
+            operation,
+            arguments_json,
+            idempotency_key,
+            decision_id,
+        )) = row
         else {
             tx.commit()?;
             return Ok(None);
@@ -83,6 +91,7 @@ impl JournalStore {
             operation,
             arguments,
             idempotency_key,
+            decision_id,
         }))
     }
 }
@@ -122,6 +131,7 @@ mod tests {
         assert_eq!(leased.operation, "lease_test");
         assert_eq!(leased.arguments, json!({"test": true}));
         assert_eq!(leased.idempotency_key, "idem_lease_test");
+        assert_eq!(leased.decision_id, approved.decision_id);
 
         let events = journal.events()?;
         let started: Vec<_> = events

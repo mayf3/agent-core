@@ -272,6 +272,7 @@ pub struct LeasedOutboxDispatch {
     pub operation: String,
     pub arguments: Value,
     pub idempotency_key: String,
+    pub decision_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
