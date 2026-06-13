@@ -29,6 +29,7 @@ This file is the施工单. It deliberately excludes long-term protocol detail; s
 | Rust Phase 0 M5f | Done | worker job leases use timeout locks |
 | Rust Phase 0 M5g | Done | unknown dispatch recovery updates outbox projection and blocks auto resend |
 | Rust Phase 0 M5h | Done | stale running worker job crash-test coverage |
+| Rust Phase 0 M5i | Done | `JournalStore::lease_next_outbox_dispatch()` leases pending outbox rows with lock fields and appends `DispatchStarted` |
 
 ## Stage Plan
 
@@ -96,10 +97,12 @@ Done:
   running jobs.
 - startup unknown recovery marks dispatches without receipts as `unknown` in
   `outbox_dispatches` and does not auto-resend them.
+- `JournalStore::lease_next_outbox_dispatch()` can lease one pending outbox
+  row, set lock fields, and append `DispatchStarted` in one transaction.
 
 Remaining:
 
-- dispatch pending outbox rows;
+- separate outbox dispatcher polls `lease_next_outbox_dispatch()` instead of sending synchronously from Runtime;
 - connector-local reaction retry scheduling.
 
 ### Later: Invocation Gateway Hardening
