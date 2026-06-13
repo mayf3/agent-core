@@ -349,13 +349,16 @@ Done:
 - startup unknown recovery marks `DispatchStarted` without `ReceiptReceived`
   as `unknown` in `outbox_dispatches`, clears its lease, and does not
   auto-resend it;
+- `lease_next_outbox_dispatch` can lease one pending outbox row for a future
+  dispatcher, update lock fields, and append `DispatchStarted` in the same
+  transaction;
 - health exposes worker/outbox projection counts for lightweight manual
   verification.
 
 Not done:
 
 - Runtime still sends approved invocations synchronously instead of letting a
-  separate dispatcher poll `outbox_dispatches`;
+  separate dispatcher poll `outbox_dispatches`.
 - connector-local reaction retry scheduling.
 
 ## Phase 0 Non-Goals
