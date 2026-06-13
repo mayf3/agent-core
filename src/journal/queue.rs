@@ -250,12 +250,16 @@ impl JournalStore {
             .lock()
             .map_err(|_| anyhow!("journal mutex poisoned"))?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        tx.execute(
+        let changed = tx.execute(
             "UPDATE outbox_dispatches
              SET status = 'dispatching', attempts = attempts + 1, updated_at = ?1
-             WHERE invocation_id = ?2 AND status != 'succeeded'",
+             WHERE invocation_id = ?2 AND status = 'pending'",
             params![now.as_str(), intent.invocation_id.0.as_str()],
         )?;
+        if changed == 0 {
+            tx.commit()?;
+            return Err(anyhow!("outbox_dispatch_not_startable"));
+        }
         append_event_tx(
             &tx,
             JournalEventKind::DispatchStarted,

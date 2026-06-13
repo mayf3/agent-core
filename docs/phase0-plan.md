@@ -344,6 +344,9 @@ Done:
 - current Runtime dispatch updates outbox `pending`, `dispatching`, and
   `succeeded` projection status in the same transactions as `OutboxQueued`,
   `DispatchStarted`, and `ReceiptReceived`;
+- startup unknown recovery marks `DispatchStarted` without `ReceiptReceived`
+  as `unknown` in `outbox_dispatches`, clears its lease, and does not
+  auto-resend it;
 - health exposes worker/outbox projection counts for lightweight manual
   verification.
 
@@ -352,7 +355,7 @@ Not done:
 - stale `running` worker job recovery still needs crash-test coverage;
 - Runtime still sends approved invocations synchronously instead of letting a
   separate dispatcher poll `outbox_dispatches`;
-- `unknown` outbox rows are not yet modeled in the dispatcher path.
+- connector-local reaction retry scheduling.
 
 ## Phase 0 Non-Goals
 
