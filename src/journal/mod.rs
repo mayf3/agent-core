@@ -1,4 +1,5 @@
 mod hash_chain;
+mod outbox;
 mod queue;
 mod queue_health;
 mod recovery;
