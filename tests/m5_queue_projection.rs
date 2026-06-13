@@ -292,6 +292,110 @@ fn test_run(config: &KernelConfig, session: &Session) -> Run {
     }
 }
 
+#[test]
+fn unknown_recovery_updates_outbox_projection_from_dispatching() -> Result<()> {
+    let config = test_config();
+    let gateway = Gateway::new(config.clone());
+    let journal = JournalStore::in_memory()?;
+    let session = test_session(&config);
+    let run = test_run(&config, &session);
+    let approved = approved_stdout_invocation(&gateway, &run, &session)?;
+    let invocation_id = approved.intent().invocation_id.clone();
+
+    journal.queue_outbox_dispatch(&approved, Some(&session.id))?;
+    journal.start_outbox_dispatch(&approved, Some(&session.id))?;
+    assert_eq!(
+        journal.outbox_dispatch_status(&invocation_id)?.as_deref(),
+        Some("dispatching")
+    );
+
+    let recovered = journal.recover_unknown_invocations()?;
+    assert_eq!(recovered, 1);
+
+    assert_eq!(
+        journal.outbox_dispatch_status(&invocation_id)?.as_deref(),
+        Some("unknown")
+    );
+
+    let restart = journal.start_outbox_dispatch(&approved, Some(&session.id));
+    assert!(restart
+        .unwrap_err()
+        .to_string()
+        .contains("outbox_dispatch_not_startable"));
+    assert_eq!(
+        journal.outbox_dispatch_status(&invocation_id)?.as_deref(),
+        Some("unknown")
+    );
+
+    assert!(journal.events()?.iter().any(|event| {
+        event.kind == JournalEventKind::ReceiptReceived
+            && event.correlation_id.as_deref() == Some(invocation_id.0.as_str())
+            && event.payload.get("status").and_then(|v| v.as_str()) == Some("Unknown")
+    }));
+    let dispatch_starts = journal
+        .events()?
+        .iter()
+        .filter(|event| {
+            event.kind == JournalEventKind::DispatchStarted
+                && event.correlation_id.as_deref() == Some(invocation_id.0.as_str())
+        })
+        .count();
+    assert_eq!(dispatch_starts, 1);
+    assert!(journal.verify_hash_chain()?);
+    Ok(())
+}
+
+#[test]
+fn unknown_recovery_still_writes_receipt_for_journal_only_dispatch() -> Result<()> {
+    let journal = JournalStore::in_memory()?;
+    let run_id = RunId::new();
+    let session_id = SessionId("session_unknown_outbox".to_string());
+    let run = Run {
+        id: run_id.clone(),
+        session_id: session_id.clone(),
+        agent_id: AgentId("main".to_string()),
+        trigger_event_id: EventId::new(),
+        principal: cli_principal(),
+        parent_run_id: None,
+        delegated_by: None,
+        status: RunStatus::Running,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+    journal.insert_run(&run)?;
+    journal.append_event(
+        JournalEventKind::DispatchStarted,
+        Some(&run_id),
+        Some(&session_id),
+        Some("invocation_no_projection"),
+        json!({ "operation": "stdout.send_text" }),
+    )?;
+
+    let recovered = journal.recover_unknown_invocations()?;
+    assert_eq!(recovered, 1);
+
+    assert!(journal.events()?.iter().any(|event| {
+        event.kind == JournalEventKind::ReceiptReceived
+            && event.correlation_id.as_deref() == Some("invocation_no_projection")
+            && event.payload.get("status").and_then(|v| v.as_str()) == Some("Unknown")
+    }));
+    assert!(journal.verify_hash_chain()?);
+    Ok(())
+}
+
+fn cli_principal() -> RunPrincipal {
+    RunPrincipal {
+        principal_id: PrincipalId("cli:local".to_string()),
+        subject: PrincipalSubject::LocalUser,
+        source: PrincipalSource::Cli,
+        grants: vec![CapabilityGrant {
+            operation: "stdout.send_text".to_string(),
+            scope: "current_session".to_string(),
+        }],
+        requester_id: Some("cli:local".to_string()),
+    }
+}
+
 fn approved_stdout_invocation(
     gateway: &Gateway,
     run: &Run,
