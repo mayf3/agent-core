@@ -265,6 +265,16 @@ pub struct JournalEvent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LeasedOutboxDispatch {
+    pub invocation_id: InvocationId,
+    pub run_id: RunId,
+    pub session_id: Option<SessionId>,
+    pub operation: String,
+    pub arguments: Value,
+    pub idempotency_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UnknownInvocation {
     pub invocation_id: String,
     pub run_id: Option<RunId>,
