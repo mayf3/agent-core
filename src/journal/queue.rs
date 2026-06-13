@@ -42,6 +42,7 @@ pub fn migrate(conn: &Connection) -> Result<()> {
           operation TEXT NOT NULL,
           arguments_json TEXT NOT NULL,
           idempotency_key TEXT NOT NULL,
+          decision_id TEXT NOT NULL DEFAULT '',
           status TEXT NOT NULL,
           attempts INTEGER NOT NULL DEFAULT 0,
           available_at TEXT NOT NULL,
@@ -58,6 +59,22 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_outbox_run_id
         ON outbox_dispatches(run_id);
         ",
+    )?;
+
+    ensure_outbox_decision_id_column(conn)?;
+    Ok(())
+}
+
+fn ensure_outbox_decision_id_column(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(outbox_dispatches)")?;
+    let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for column in columns {
+        if column? == "decision_id" {
+            return Ok(());
+        }
+    }
+    conn.execute_batch(
+        "ALTER TABLE outbox_dispatches ADD COLUMN decision_id TEXT NOT NULL DEFAULT '';",
     )?;
     Ok(())
 }
@@ -191,8 +208,8 @@ impl JournalStore {
         let changed = tx.execute(
             "INSERT OR IGNORE INTO outbox_dispatches
              (dispatch_id, invocation_id, run_id, session_id, operation, arguments_json,
-              idempotency_key, status, attempts, available_at, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending', 0, ?8, ?8, ?8)",
+              idempotency_key, decision_id, status, attempts, available_at, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', 0, ?9, ?9, ?9)",
             params![
                 dispatch_id.as_str(),
                 intent.invocation_id.0.as_str(),
@@ -201,6 +218,7 @@ impl JournalStore {
                 intent.operation.as_str(),
                 arguments_json.as_str(),
                 idempotency_key.as_str(),
+                approved.decision_id.as_str(),
                 now.as_str(),
             ],
         )?;
@@ -214,6 +232,7 @@ impl JournalStore {
                 json!({
                     "dispatch_id": dispatch_id,
                     "invocation_id": intent.invocation_id.0.as_str(),
+                    "decision_id": approved.decision_id.as_str(),
                     "operation": intent.operation.as_str(),
                     "idempotency_key": idempotency_key,
                     "status": "pending",

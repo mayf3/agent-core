@@ -352,6 +352,8 @@ Done:
 - `lease_next_outbox_dispatch` can lease one pending outbox row for a future
   dispatcher, update lock fields, and append `DispatchStarted` in the same
   transaction;
+- outbox projection rows store the original approval `decision_id` so a future
+  dispatcher does not need to invent one;
 - health exposes worker/outbox projection counts for lightweight manual
   verification.
 
