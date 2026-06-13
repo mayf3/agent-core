@@ -72,3 +72,91 @@ impl JournalStore {
         Ok(Some(EventId(source_event_id)))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::*;
+    use anyhow::Result;
+    use rusqlite::params;
+
+    #[test]
+    fn lease_reclaims_stale_running_job() -> Result<()> {
+        let journal = JournalStore::in_memory()?;
+        let source_event_id = EventId("event_stale".to_string());
+        let job_id = journal.enqueue_worker_job(&source_event_id)?;
+
+        // First lease makes it running with locked_until = now + 5min.
+        assert_eq!(
+            journal.lease_next_worker_job()?,
+            Some(source_event_id.clone())
+        );
+
+        // Manually expire the lease to simulate a worker crash.
+        let past = (Utc::now() - Duration::hours(1)).to_rfc3339();
+        {
+            let conn = journal.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE worker_jobs SET locked_until = ?1 WHERE job_id = ?2",
+                params![past, job_id],
+            )?;
+        }
+
+        // Second lease should reclaim the stale running job.
+        assert_eq!(journal.lease_next_worker_job()?, Some(source_event_id));
+
+        // Status stays 'running'.
+        assert_eq!(
+            journal.worker_job_status(&job_id)?.as_deref(),
+            Some("running")
+        );
+
+        // A new WorkerJobStarted event was appended by the second lease.
+        let started_events = journal
+            .events()?
+            .into_iter()
+            .filter(|e| e.kind == JournalEventKind::WorkerJobStarted)
+            .count();
+        assert_eq!(started_events, 2);
+
+        assert!(journal.verify_hash_chain()?);
+        Ok(())
+    }
+
+    #[test]
+    fn lease_does_not_reclaim_active_running_job() -> Result<()> {
+        let journal = JournalStore::in_memory()?;
+        let source_event_id = EventId("event_active".to_string());
+        let job_id = journal.enqueue_worker_job(&source_event_id)?;
+
+        // First lease makes it running.
+        assert_eq!(
+            journal.lease_next_worker_job()?,
+            Some(source_event_id.clone())
+        );
+
+        // Extend locked_until far into the future to simulate a busy worker.
+        let far_future = (Utc::now() + Duration::days(30)).to_rfc3339();
+        {
+            let conn = journal.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE worker_jobs SET locked_until = ?1 WHERE job_id = ?2",
+                params![far_future, job_id],
+            )?;
+        }
+
+        // Second lease should not reclaim while locked_until is still in the future.
+        assert_eq!(journal.lease_next_worker_job()?, None);
+
+        // Still only one WorkerJobStarted event.
+        let started_events = journal
+            .events()?
+            .into_iter()
+            .filter(|e| e.kind == JournalEventKind::WorkerJobStarted)
+            .count();
+        assert_eq!(started_events, 1);
+
+        assert!(journal.verify_hash_chain()?);
+        Ok(())
+    }
+}
