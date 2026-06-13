@@ -30,6 +30,7 @@ This file is the施工单. It deliberately excludes long-term protocol detail; s
 | Rust Phase 0 M5g | Done | unknown dispatch recovery updates outbox projection and blocks auto resend |
 | Rust Phase 0 M5h | Done | stale running worker job crash-test coverage |
 | Rust Phase 0 M5i | Done | `JournalStore::lease_next_outbox_dispatch()` leases pending outbox rows with lock fields and appends `DispatchStarted` |
+| Rust Phase 0 M5j | Done | outbox projection stores approval decision IDs for future dispatcher use |
 
 ## Stage Plan
 
@@ -99,6 +100,8 @@ Done:
   `outbox_dispatches` and does not auto-resend them.
 - `JournalStore::lease_next_outbox_dispatch()` can lease one pending outbox
   row, set lock fields, and append `DispatchStarted` in one transaction.
+- outbox projection rows carry the original approval `decision_id` for future
+  dispatcher calls.
 
 Remaining:
 
