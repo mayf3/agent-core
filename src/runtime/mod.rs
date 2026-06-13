@@ -9,6 +9,8 @@ use anyhow::{bail, Result};
 use chrono::Utc;
 use serde_json::json;
 
+pub mod outbox_dispatcher;
+
 pub struct Runtime<L, A> {
     config: KernelConfig,
     llm: L,

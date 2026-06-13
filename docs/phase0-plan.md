@@ -360,7 +360,9 @@ Done:
 Not done:
 
 - Runtime still sends approved invocations synchronously instead of letting a
-  separate dispatcher poll `outbox_dispatches`.
+  separate dispatcher poll `outbox_dispatches` (the `dispatch_once` helper
+  exists in `src/runtime/outbox_dispatcher.rs` but is not wired into server
+  startup).
 - connector-local reaction retry scheduling.
 
 ## Phase 0 Non-Goals
