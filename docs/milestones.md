@@ -102,10 +102,11 @@ Done:
   row, set lock fields, and append `DispatchStarted` in one transaction.
 - outbox projection rows carry the original approval `decision_id` for future
   dispatcher calls.
+- `dispatch_once()` helper in `src/runtime/outbox_dispatcher.rs` leases one pending outbox row, executes it through the adapter, and marks it succeeded.
 
 Remaining:
 
-- separate outbox dispatcher polls `lease_next_outbox_dispatch()` instead of sending synchronously from Runtime;
+- wire the `dispatch_once` loop into server startup (still synchronous in Runtime);
 - connector-local reaction retry scheduling.
 
 ### Later: Invocation Gateway Hardening
