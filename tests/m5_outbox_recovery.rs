@@ -224,6 +224,172 @@ fn stale_dispatching_unknown_never_returns_to_pending() -> Result<()> {
 }
 
 #[test]
+fn stale_dispatching_with_receipt_succeeded_routes_to_succeeded() -> Result<()> {
+    let config = common::test_config();
+    let gateway = Gateway::new(config.clone());
+    let journal = JournalStore::in_memory()?;
+    let session = common::test_session(&config);
+    let run = common::test_run(&config, &session);
+    let approved = common::approved_stdout_invocation(&gateway, &run, &session)?;
+    let invocation_id = approved.intent().invocation_id.clone();
+
+    journal.queue_outbox_dispatch(&approved, Some(&session.id))?;
+    journal.start_outbox_dispatch(&approved, Some(&session.id))?;
+    // Simulate the adapter returning Succeeded + the run transition landing in
+    // the Journal, but the outbox projection update being lost on restart.
+    journal.append_event(
+        JournalEventKind::ReceiptReceived,
+        Some(&run.id),
+        Some(&session.id),
+        Some(&invocation_id.0),
+        json!({
+            "status": "Succeeded",
+            "external_ref": null,
+            "output_kind": "text",
+        }),
+    )?;
+    journal.expire_outbox_lease_for_test(&invocation_id)?;
+    assert_eq!(
+        journal.outbox_dispatch_status(&invocation_id)?.as_ref(),
+        Some(&OutboxDispatchStatus::Dispatching)
+    );
+
+    let recovered = journal.recover_unknown_invocations()?;
+    assert_eq!(recovered, 1);
+    assert_eq!(
+        journal.outbox_dispatch_status(&invocation_id)?.as_ref(),
+        Some(&OutboxDispatchStatus::Succeeded)
+    );
+    // No duplicate journal event: exactly one ReceiptReceived.
+    let receipts = journal
+        .events()?
+        .iter()
+        .filter(|event| {
+            event.kind == JournalEventKind::ReceiptReceived
+                && event.correlation_id.as_deref() == Some(invocation_id.0.as_str())
+        })
+        .count();
+    assert_eq!(receipts, 1);
+    assert!(journal.verify_hash_chain()?);
+    Ok(())
+}
+
+#[test]
+fn stale_dispatching_with_receipt_failed_routes_to_failed() -> Result<()> {
+    let config = common::test_config();
+    let gateway = Gateway::new(config.clone());
+    let journal = JournalStore::in_memory()?;
+    let session = common::test_session(&config);
+    let run = common::test_run(&config, &session);
+    let approved = common::approved_stdout_invocation(&gateway, &run, &session)?;
+    let invocation_id = approved.intent().invocation_id.clone();
+
+    journal.queue_outbox_dispatch(&approved, Some(&session.id))?;
+    journal.start_outbox_dispatch(&approved, Some(&session.id))?;
+    // Definite business failure landed in the Journal; projection stayed
+    // dispatching across a restart.
+    journal.append_event(
+        JournalEventKind::ReceiptReceived,
+        Some(&run.id),
+        Some(&session.id),
+        Some(&invocation_id.0),
+        json!({
+            "status": "Failed",
+            "error": "connector_rejected",
+            "output_kind": "error",
+        }),
+    )?;
+    journal.expire_outbox_lease_for_test(&invocation_id)?;
+
+    let recovered = journal.recover_unknown_invocations()?;
+    assert_eq!(recovered, 1);
+    assert_eq!(
+        journal.outbox_dispatch_status(&invocation_id)?.as_ref(),
+        Some(&OutboxDispatchStatus::Failed)
+    );
+    // No duplicate journal event.
+    let receipts = journal
+        .events()?
+        .iter()
+        .filter(|event| {
+            event.kind == JournalEventKind::ReceiptReceived
+                && event.correlation_id.as_deref() == Some(invocation_id.0.as_str())
+        })
+        .count();
+    assert_eq!(receipts, 1);
+    assert!(journal.verify_hash_chain()?);
+    Ok(())
+}
+
+#[test]
+fn stale_dispatching_routes_by_terminal_fact_not_all_unknown() -> Result<()> {
+    // Three rows, three different terminal facts in the Journal, all stale
+    // dispatching. Recovery must route each projection to its matching
+    // terminal state rather than collapsing all to unknown.
+    let config = common::test_config();
+    let gateway = Gateway::new(config.clone());
+    let journal = JournalStore::in_memory()?;
+    let session = common::test_session(&config);
+    let run = common::test_run(&config, &session);
+
+    let cases = [
+        ("reply:succeeded", JournalEventKind::ReceiptReceived, json!({ "status": "Succeeded", "output_kind": "text" })),
+        ("reply:failed", JournalEventKind::ReceiptReceived, json!({ "status": "Failed", "output_kind": "error" })),
+        ("reply:unknown", JournalEventKind::OutboxDispatchUnknown, json!({ "error": "previous_recovery_incomplete" })),
+    ];
+    let mut invocation_ids = Vec::new();
+    for (suffix, _kind, _payload) in &cases {
+        let approved = gateway.approve_invocation(
+            InvocationIntent {
+                invocation_id: InvocationId((*suffix).to_string()),
+                run_id: run.id.clone(),
+                operation: "stdout.send_text".to_string(),
+                arguments: json!({ "session_id": session.id.0, "text": "hello" }),
+                idempotency_key: Some(format!("stdout-{suffix}")),
+            },
+            &run,
+            &session,
+        )?;
+        invocation_ids.push(approved.intent().invocation_id.clone());
+        journal.queue_outbox_dispatch(&approved, Some(&session.id))?;
+        journal.start_outbox_dispatch(&approved, Some(&session.id))?;
+    }
+    let succeeded_id = &invocation_ids[0];
+    let failed_id = &invocation_ids[1];
+    let unknown_id = &invocation_ids[2];
+
+    for (idx, (_suffix, kind, payload)) in cases.iter().enumerate() {
+        journal.append_event(
+            kind.clone(),
+            Some(&run.id),
+            Some(&session.id),
+            Some(&invocation_ids[idx].0),
+            payload.clone(),
+        )?;
+    }
+    for id in &invocation_ids {
+        journal.expire_outbox_lease_for_test(id)?;
+    }
+
+    let recovered = journal.recover_unknown_invocations()?;
+    assert_eq!(recovered, 3);
+    assert_eq!(
+        journal.outbox_dispatch_status(succeeded_id)?.as_ref(),
+        Some(&OutboxDispatchStatus::Succeeded)
+    );
+    assert_eq!(
+        journal.outbox_dispatch_status(failed_id)?.as_ref(),
+        Some(&OutboxDispatchStatus::Failed)
+    );
+    assert_eq!(
+        journal.outbox_dispatch_status(unknown_id)?.as_ref(),
+        Some(&OutboxDispatchStatus::Unknown)
+    );
+    assert!(journal.verify_hash_chain()?);
+    Ok(())
+}
+
+#[test]
 fn health_fields_expose_dispatcher_state() -> Result<()> {
     let config = common::test_config();
     let gateway = Gateway::new(config.clone());
