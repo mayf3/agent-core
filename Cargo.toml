@@ -3,6 +3,13 @@ name = "agent-core-kernel"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+# Exposes the `_for_test` helpers on `JournalStore`. Production builds must
+# never enable this; it is pulled in automatically by `cargo test` via the
+# self dev-dependency below. See HANDOVER §4.1.
+default = []
+test-helpers = []
+
 [dependencies]
 anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
@@ -14,3 +21,9 @@ serde_json = "1"
 sha2 = "0.10"
 ureq = { version = "3.3.0", features = ["json"] }
 uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+# Self-reference so `cargo test` (integration tests + doctests) builds the
+# library with the `test-helpers` feature unified in. Production `cargo build`
+# does not enable it.
+agent-core-kernel = { path = ".", features = ["test-helpers"] }
