@@ -5,6 +5,7 @@ mod queue;
 mod queue_health;
 mod recovery;
 mod sqlite;
+#[cfg(any(test, feature = "test-helpers"))]
 mod test_helpers;
 mod unknown;
 mod worker;
