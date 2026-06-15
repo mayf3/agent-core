@@ -165,8 +165,17 @@ cases:
    projection row is still `dispatching` with `locked_until <= now` while the
    journal already has `OutboxDispatchUnknown` or `ReceiptReceived`. This can
    happen if a previous recovery commit landed between the journal append and
-   the projection update. The recovery only updates the projection to
-   `unknown` without appending a duplicate journal event.
+   the projection update. The recovery reconciles the projection to match the
+   terminal fact **without appending a duplicate journal event**:
+
+   | Journal terminal fact | Projection target |
+   |---|---|
+   | `ReceiptReceived` with `status = Succeeded` | `succeeded` |
+   | `ReceiptReceived` with `status = Failed` | `failed` |
+   | `OutboxDispatchUnknown` (or a receipt whose status cannot be parsed) | `unknown` |
+
+   The classifier never promotes an ambiguous receipt to `succeeded`; any
+   unrecognized status defaults to `unknown`.
 
 Recovery never:
 - calls `adapter.execute()` or `dispatch_once()`
@@ -206,7 +215,11 @@ Both functions **must not** select:
 
 ### Stale lease recovery
 
-- Stale `dispatching` (outbox) → **must become `unknown`**, never `retryable_failed`.
+- Stale `dispatching` (outbox) → **reconciled to match the Journal terminal
+  fact** (`succeeded` / `failed` / `unknown` per the matrix above), never
+  `retryable_failed`. A stale `dispatching` row with no terminal Journal fact
+  is handled by Task 4.1, which appends `OutboxDispatchUnknown` and sets the
+  projection to `unknown`.
 - Stale `running` (worker) → can become `retryable_failed` or `queued`.
 
 ---
@@ -243,7 +256,9 @@ Recovery paths do not go through these helpers:
   updates the projection directly via SQL (candidates are journal-only
   DispatchStarted rows whose projection may be in any non-terminal state).
 - step B uses an explicit `status = 'dispatching'` WHERE clause so it only
-  repairs stale `dispatching` rows whose journal is already terminal.
+  repairs stale `dispatching` rows whose journal is already terminal. The
+  projection target is derived from the terminal fact (`ReceiptReceived`
+  status → `succeeded` / `failed`, `OutboxDispatchUnknown` → `unknown`).
 
 ### Pre-DispatchStarted failures
 
