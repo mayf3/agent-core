@@ -54,6 +54,8 @@ def main() -> int:
     must_exist("src/journal/outbox.rs")
     must_exist("src/server/mod.rs")
     must_exist("src/server/delivery.rs")
+    must_exist("src/server/delivery_tests.rs")
+    must_exist("src/server/dispatcher_metrics.rs")
     must_exist("src/runtime/outbox_dispatcher.rs")
 
     # Anchor: RunFailed event kind
@@ -94,6 +96,13 @@ def main() -> int:
         "src/server/mod.rs",
         "outbox_dispatching_count",
     )
+
+    # Anchor: dispatcher observability fields (HANDOVER §4.4)
+    must_contain("src/server/mod.rs", "outbox_dispatcher_running")
+    must_contain("src/server/mod.rs", "last_dispatch_tick_at")
+    must_contain("src/server/mod.rs", "last_dispatch_error_category")
+    must_contain("src/server/dispatcher_metrics.rs", "pub struct DispatcherMetrics")
+    must_contain("src/server/dispatcher_metrics.rs", "pub struct LoopGuard")
 
     # Anchor: queue_health exposes single-status counter
     must_contain(
