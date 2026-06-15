@@ -74,7 +74,7 @@ fn health_reports_undelivered_ingress_count() -> Result<()> {
     let accepted = gateway.validate_ingress(&journal, feishu_envelope("evt_3", "om_3")?)?;
 
     assert_eq!(
-        health_snapshot(&journal)?
+        health_snapshot(&journal, false)?
             .get("undelivered_ingress_count")
             .and_then(|value| value.as_u64()),
         Some(1)
@@ -87,10 +87,10 @@ fn health_reports_undelivered_ingress_count() -> Result<()> {
         json!({ "run_id": "run_test" }),
     )?;
     assert_eq!(
-        health_snapshot(&journal)?
+        health_snapshot(&journal, false)?
             .get("undelivered_ingress_count")
             .and_then(|value| value.as_u64()),
-        Some(0)
+            Some(0)
     );
     Ok(())
 }
@@ -139,5 +139,7 @@ fn test_config() -> KernelConfig {
         model_timeout_ms: 100,
         context_recent_messages: 6,
         context_max_block_chars: 4_000,
+            outbox_dispatcher_enabled: false,
+            outbox_dispatcher_poll_interval_ms: 100,
     }
 }

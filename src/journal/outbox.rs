@@ -19,10 +19,15 @@ impl JournalStore {
             .query_row(
                 "SELECT invocation_id, run_id, session_id, operation, arguments_json, idempotency_key, decision_id
                  FROM outbox_dispatches
-                 WHERE status = 'pending' AND available_at <= ?1
+                 WHERE (status = ?1 OR (status = ?2 AND available_at <= ?3))
+                   AND available_at <= ?3
                  ORDER BY available_at, created_at
                  LIMIT 1",
-                params![now_text.as_str()],
+                params![
+                    OutboxDispatchStatus::Pending.as_str(),
+                    OutboxDispatchStatus::RetryableFailed.as_str(),
+                    now_text.as_str(),
+                ],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
@@ -53,16 +58,20 @@ impl JournalStore {
         let locked_until = (now + Duration::minutes(5)).to_rfc3339();
         let changed = tx.execute(
             "UPDATE outbox_dispatches
-             SET status = 'dispatching',
-                 attempts = attempts + 1,
-                 locked_by = 'kernel-outbox',
-                 locked_until = ?1,
-                 updated_at = ?2
-             WHERE invocation_id = ?3 AND status = 'pending'",
+             SET status = ?4,
+                  attempts = attempts + 1,
+                  locked_by = 'kernel-outbox',
+                  locked_until = ?1,
+                  updated_at = ?2
+             WHERE invocation_id = ?3
+               AND (status = ?5 OR (status = ?6 AND available_at <= ?2))",
             params![
                 locked_until.as_str(),
                 now_text.as_str(),
-                invocation_id.as_str()
+                invocation_id.as_str(),
+                OutboxDispatchStatus::Dispatching.as_str(),
+                OutboxDispatchStatus::Pending.as_str(),
+                OutboxDispatchStatus::RetryableFailed.as_str(),
             ],
         )?;
         if changed == 0 {
@@ -147,8 +156,8 @@ mod tests {
         assert_eq!(
             journal
                 .outbox_dispatch_status(&approved.intent().invocation_id)?
-                .as_deref(),
-            Some("dispatching")
+                .as_ref(),
+            Some(&OutboxDispatchStatus::Dispatching)
         );
 
         {
@@ -196,8 +205,8 @@ mod tests {
         {
             let conn = journal.conn.lock().unwrap();
             conn.execute(
-                "UPDATE outbox_dispatches SET status = 'unknown' WHERE invocation_id = ?1",
-                params![a_unknown.intent().invocation_id.0],
+                "UPDATE outbox_dispatches SET status = ?1 WHERE invocation_id = ?2",
+                params![OutboxDispatchStatus::Unknown.as_str(), a_unknown.intent().invocation_id.0],
             )?;
         }
 

@@ -14,6 +14,7 @@ pub mod outbox_dispatcher;
 pub struct Runtime<L, A> {
     config: KernelConfig,
     llm: L,
+    #[allow(dead_code)]
     adapter: A,
 }
 
@@ -130,27 +131,11 @@ where
             }),
         )?;
         journal.queue_outbox_dispatch(&approved, Some(&session.id))?;
-        journal.start_outbox_dispatch(&approved, Some(&session.id))?;
-        let receipt = self.adapter.execute(&approved)?;
-        let output = receipt
-            .output
-            .get("text")
-            .and_then(|value| value.as_str())
-            .unwrap_or("")
-            .to_string();
-        journal.succeed_outbox_dispatch(&receipt, &run.id, Some(&session.id))?;
-        journal.complete_run(&run.id)?;
-        journal.append_event(
-            JournalEventKind::RunCompleted,
-            Some(&run.id),
-            Some(&session.id),
-            None,
-            json!({ "status": "Completed" }),
-        )?;
+        journal.update_run_status(&run.id, "WaitingDispatch")?;
         Ok(RuntimeOutcome {
             run_id: run.id,
             session_id: session.id,
-            output,
+            output: llm.content,
         })
     }
 
@@ -216,17 +201,7 @@ where
             }),
         )?;
         journal.queue_outbox_dispatch(&approved, Some(&session.id))?;
-        journal.start_outbox_dispatch(&approved, Some(&session.id))?;
-        let receipt = self.adapter.execute(&approved)?;
-        journal.succeed_outbox_dispatch(&receipt, &run.id, Some(&session.id))?;
-        journal.complete_run(&run.id)?;
-        journal.append_event(
-            JournalEventKind::RunCompleted,
-            Some(&run.id),
-            Some(&session.id),
-            None,
-            json!({ "status": "Completed" }),
-        )?;
+        journal.update_run_status(&run.id, "WaitingDispatch")?;
         Ok(RuntimeOutcome {
             run_id: run.id,
             session_id: session.id,

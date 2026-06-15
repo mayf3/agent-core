@@ -4,6 +4,11 @@ use serde_json::Value;
 use std::path::PathBuf;
 use uuid::Uuid;
 
+pub mod status;
+pub mod retry;
+pub use status::*;
+pub use retry::*;
+
 macro_rules! id_type {
     ($name:ident, $prefix:literal) => {
         #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -115,6 +120,7 @@ pub struct Run {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RunStatus {
     Running,
+    WaitingDispatch,
     Completed,
     Failed,
 }
@@ -243,11 +249,47 @@ pub struct Receipt {
     pub occurred_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReceiptStatus {
     Succeeded,
     Failed,
     Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DispatchErrorCategory {
+    AdapterTimeout,
+    ConnectorExecuteFailed,
+    AdapterFailed,
+    InvalidApprovedInvocation,
+    UnsupportedOperation,
+    UnknownTransportError,
+}
+
+impl DispatchErrorCategory {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DispatchErrorCategory::AdapterTimeout => "adapter_timeout",
+            DispatchErrorCategory::ConnectorExecuteFailed => "connector_execute_failed",
+            DispatchErrorCategory::AdapterFailed => "adapter_failed",
+            DispatchErrorCategory::InvalidApprovedInvocation => "invalid_approved_invocation",
+            DispatchErrorCategory::UnsupportedOperation => "unsupported_operation",
+            DispatchErrorCategory::UnknownTransportError => "unknown_transport_error",
+        }
+    }
+
+    pub fn from_error(error: &anyhow::Error) -> Self {
+        let msg = error.to_string().to_ascii_lowercase();
+        if msg.contains("timeout") {
+            DispatchErrorCategory::AdapterTimeout
+        } else if msg.contains("connector execute failed") {
+            DispatchErrorCategory::ConnectorExecuteFailed
+        } else if msg.contains("adapter") || msg.contains("execute") {
+            DispatchErrorCategory::AdapterFailed
+        } else {
+            DispatchErrorCategory::UnknownTransportError
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -264,7 +306,7 @@ pub struct JournalEvent {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LeasedOutboxDispatch {
     pub invocation_id: InvocationId,
     pub run_id: RunId,
@@ -299,7 +341,10 @@ pub enum JournalEventKind {
     OutboxQueued,
     OutboxDispatchFailed,
     OutboxDispatchUnknown,
+    OutboxDispatchDead,
     DispatchStarted,
     ReceiptReceived,
+    WorkerJobDead,
     RunCompleted,
+    RunFailed,
 }
