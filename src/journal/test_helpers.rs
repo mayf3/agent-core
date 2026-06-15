@@ -1,6 +1,11 @@
 //! Test-only helpers exposed on `JournalStore` so integration tests can drive
-//! projection state without touching private connection fields. Production
-//! code must never call any of these.
+//! projection state without touching private connection fields.
+//!
+//! This entire module is compiled out unless `cfg(test)` or the `test-helpers`
+//! Cargo feature is enabled (HANDOVER §4.1). Production builds (`cargo build`)
+//! never enable the feature, so these symbols are absent from release
+//! artifacts. `cargo test` enables it via the self dev-dependency in
+//! `Cargo.toml`.
 
 use super::sqlite::JournalStore;
 use crate::domain::{InvocationId, OutboxDispatchStatus};
