@@ -5,7 +5,9 @@ use crate::gateway::Gateway;
 use crate::journal::JournalStore;
 use crate::llm::OpenAiCompatibleLlm;
 use crate::runtime::{outbox_dispatcher::dispatch_once, Runtime};
+use crate::server::dispatcher_metrics::{DispatcherMetrics, LoopGuard};
 use anyhow::Result;
+use chrono::Utc;
 use serde_json::{json, Value};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -150,290 +152,14 @@ fn short_id(value: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::domain::*;
-    use chrono::Utc;
-    use serde_json::json;
-    struct OkAdapter;
-    impl InvocationAdapter for OkAdapter {
-        fn execute(&self, invocation: &ApprovedInvocation) -> Result<Receipt> {
-            Ok(Receipt {
-                invocation_id: invocation.intent().invocation_id.clone(),
-                status: ReceiptStatus::Succeeded,
-                external_ref: Some("test".into()),
-                output: json!({"text": "ok"}),
-                occurred_at: Utc::now(),
-            })
-        }
-    }
-
-    #[test]
-    fn run_dispatcher_sends_pending_outbox() -> Result<()> {
-        let journal = Arc::new(JournalStore::in_memory()?);
-        let running = Arc::new(AtomicBool::new(true));
-        let running_stop = Arc::clone(&running);
-
-        let approved = ApprovedInvocation::new(
-            InvocationIntent {
-                invocation_id: InvocationId::new(),
-                run_id: RunId::new(),
-                operation: "stdout.send_text".into(),
-                arguments: json!({"text": "hello"}),
-                idempotency_key: Some("idem_dispatch".into()),
-            },
-            "decision_dispatch".into(),
-        );
-        let invocation_id = approved.intent().invocation_id.clone();
-        journal.queue_outbox_dispatch(&approved, None)?;
-
-        let journal_ref = Arc::clone(&journal);
-        let handle = thread::spawn(move || {
-            run_dispatcher(&journal_ref, &OkAdapter, running, 10);
-        });
-
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        running_stop.store(false, std::sync::atomic::Ordering::SeqCst);
-        let _ = handle.join();
-
-        assert_eq!(
-            journal.outbox_dispatch_status(&invocation_id)?.as_ref(),
-            Some(&OutboxDispatchStatus::Succeeded)
-        );
-        assert!(journal.events()?.iter().any(|e| e.kind == JournalEventKind::ReceiptReceived));
-        assert!(journal.events()?.iter().any(|e| e.kind == JournalEventKind::DispatchStarted));
-        assert!(journal.verify_hash_chain()?);
-        Ok(())
-    }
-
-    #[test]
-    fn run_dispatcher_skips_unknown_outbox() -> Result<()> {
-        let journal = Arc::new(JournalStore::in_memory()?);
-        let running = Arc::new(AtomicBool::new(true));
-        let running_stop = Arc::clone(&running);
-
-        let approved = ApprovedInvocation::new(
-            InvocationIntent {
-                invocation_id: InvocationId::new(),
-                run_id: RunId::new(),
-                operation: "stdout.send_text".into(),
-                arguments: json!({"text": "hello"}),
-                idempotency_key: Some("idem_unknown".into()),
-            },
-            "decision_unknown".into(),
-        );
-        let invocation_id = approved.intent().invocation_id.clone();
-        journal.queue_outbox_dispatch(&approved, None)?;
-        {
-            let conn = journal.conn.lock().unwrap();
-            conn.execute(
-                "UPDATE outbox_dispatches SET status = ?1 WHERE invocation_id = ?2",
-                rusqlite::params![OutboxDispatchStatus::Unknown.as_str(), invocation_id.0],
-            )?;
-        }
-
-        let journal_ref = Arc::clone(&journal);
-        let handle = thread::spawn(move || {
-            run_dispatcher(&journal_ref, &OkAdapter, running, 10);
-        });
-
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        running_stop.store(false, std::sync::atomic::Ordering::SeqCst);
-        let _ = handle.join();
-
-        assert_eq!(
-            journal.outbox_dispatch_status(&invocation_id)?.as_ref(),
-            Some(&OutboxDispatchStatus::Unknown)
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn run_dispatcher_stops_on_shutdown() -> Result<()> {
-        let journal = Arc::new(JournalStore::in_memory()?);
-        let running = Arc::new(AtomicBool::new(true));
-        let running_stop = Arc::clone(&running);
-
-        let journal_ref = Arc::clone(&journal);
-        let handle = thread::spawn(move || {
-            run_dispatcher(&journal_ref, &OkAdapter, running, 10);
-        });
-
-        running_stop.store(false, std::sync::atomic::Ordering::SeqCst);
-        let _ = handle.join();
-        Ok(())
-    }
-
-    #[test]
-    fn disabled_dispatcher_loop_returns_without_draining_outbox() -> Result<()> {
-        use crate::config::KernelConfig;
-        use std::path::PathBuf;
-
-        let config = KernelConfig {
-            db_path: PathBuf::from(":memory:"),
-            data_dir: PathBuf::from(".agent-core-test"),
-            agent_id: crate::domain::AgentId("main".to_string()),
-            root_dir: PathBuf::from("."),
-            kernel_port: 4130,
-            connector_execute_url: "http://127.0.0.1:4131/v1/execute".to_string(),
-            ipc_token: "test-token".to_string(),
-            feishu_allowed_open_ids: vec![],
-            feishu_allowed_chat_ids: vec![],
-            feishu_require_group_mention: true,
-            openai_base_url: String::new(),
-            openai_api_key: String::new(),
-            model: String::new(),
-            fallback_openai_base_url: String::new(),
-            fallback_openai_api_key: String::new(),
-            fallback_model: String::new(),
-            model_timeout_ms: 100,
-            context_recent_messages: 6,
-            context_max_block_chars: 4_000,
-            outbox_dispatcher_enabled: false,
-            outbox_dispatcher_poll_interval_ms: 10,
-        };
-
-        let journal = Arc::new(JournalStore::in_memory()?);
-        let approved = ApprovedInvocation::new(
-            InvocationIntent {
-                invocation_id: InvocationId::new(),
-                run_id: RunId::new(),
-                operation: "stdout.send_text".into(),
-                arguments: json!({"text": "hello"}),
-                idempotency_key: Some("idem_disabled".into()),
-            },
-            "decision_disabled".into(),
-        );
-        let invocation_id = approved.intent().invocation_id.clone();
-        journal.queue_outbox_dispatch(&approved, None)?;
-
-        let handle = start_outbox_dispatcher_loop(
-            config,
-            Arc::clone(&journal),
-            Arc::new(AtomicBool::new(true)),
-        );
-        let finished = handle
-            .join()
-            .map_err(|_| anyhow::anyhow!("dispatcher thread panicked"))?;
-        assert_eq!(finished, ());
-
-        assert_eq!(
-            journal
-                .outbox_dispatch_status(&invocation_id)?
-                .as_ref(),
-            Some(&OutboxDispatchStatus::Pending),
-            "disabled dispatcher must not consume pending outbox"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn run_dispatcher_drains_multiple_pending_rows() -> Result<()> {
-        use std::sync::Mutex;
-
-        struct CountingAdapter(Arc<Mutex<Vec<InvocationId>>>);
-        impl InvocationAdapter for CountingAdapter {
-            fn execute(&self, invocation: &ApprovedInvocation) -> Result<Receipt> {
-                self.0
-                    .lock()
-                    .unwrap()
-                    .push(invocation.intent().invocation_id.clone());
-                Ok(Receipt {
-                    invocation_id: invocation.intent().invocation_id.clone(),
-                    status: ReceiptStatus::Succeeded,
-                    external_ref: Some("test".into()),
-                    output: json!({"text": "ok"}),
-                    occurred_at: Utc::now(),
-                })
-            }
-        }
-
-        let journal = Arc::new(JournalStore::in_memory()?);
-        let running = Arc::new(AtomicBool::new(true));
-        let running_stop = Arc::clone(&running);
-
-        let calls = Arc::new(Mutex::new(vec![]));
-        let mut invocation_ids = vec![];
-        for idx in 0..3 {
-            let approved = ApprovedInvocation::new(
-                InvocationIntent {
-                    invocation_id: InvocationId(format!("reply:multi_{idx}")),
-                    run_id: RunId(format!("run_multi_{idx}")),
-                    operation: "stdout.send_text".into(),
-                    arguments: json!({"text": "hello"}),
-                    idempotency_key: Some(format!("idem_multi_{idx}")),
-                },
-                format!("decision_multi_{idx}"),
-            );
-            invocation_ids.push(approved.intent().invocation_id.clone());
-            journal.queue_outbox_dispatch(&approved, None)?;
-        }
-
-        let journal_ref = Arc::clone(&journal);
-        let calls_ref = Arc::clone(&calls);
-        let handle = thread::spawn(move || {
-            run_dispatcher(
-                &journal_ref,
-                &CountingAdapter(calls_ref),
-                running,
-                5,
-            );
-        });
-
-        // Drive a bounded number of polls: 3 dispatches + at least one extra
-        // tick so the loop sees an empty queue. 200ms @ 5ms poll >= 40 ticks.
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        running_stop.store(false, std::sync::atomic::Ordering::SeqCst);
-        let _ = handle.join();
-
-        let pushed = calls.lock().unwrap().clone();
-        assert_eq!(
-            pushed.len(),
-            invocation_ids.len(),
-            "every pending row must be dispatched exactly once"
-        );
-        for invocation_id in &invocation_ids {
-            assert!(
-                pushed.iter().any(|id| id == invocation_id),
-                "invocation {invocation_id:?} must have been dispatched"
-            );
-            assert_eq!(
-                journal
-                    .outbox_dispatch_status(invocation_id)?
-                    .as_ref(),
-                Some(&OutboxDispatchStatus::Succeeded),
-                "invocation {invocation_id:?} must be succeeded"
-            );
-            let dispatch_started = journal
-                .events()?
-                .iter()
-                .filter(|event| {
-                    event.kind == JournalEventKind::DispatchStarted
-                        && event.correlation_id.as_deref()
-                            == Some(invocation_id.0.as_str())
-                })
-                .count();
-            assert_eq!(dispatch_started, 1);
-            let receipt = journal
-                .events()?
-                .iter()
-                .filter(|event| {
-                    event.kind == JournalEventKind::ReceiptReceived
-                        && event.correlation_id.as_deref()
-                            == Some(invocation_id.0.as_str())
-                })
-                .count();
-            assert_eq!(receipt, 1);
-        }
-        assert!(journal.verify_hash_chain()?);
-        Ok(())
-    }
-}
+#[path = "delivery_tests.rs"]
+mod tests;
 
 pub(crate) fn start_outbox_dispatcher_loop(
     config: KernelConfig,
     journal: Arc<JournalStore>,
     running: Arc<AtomicBool>,
+    metrics: Arc<DispatcherMetrics>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         if !config.outbox_dispatcher_enabled {
@@ -443,7 +169,13 @@ pub(crate) fn start_outbox_dispatcher_loop(
             config.connector_execute_url.clone(),
             config.ipc_token.clone(),
         );
-        run_dispatcher(&journal, &adapter, running, config.outbox_dispatcher_poll_interval_ms)
+        run_dispatcher(
+            &journal,
+            &adapter,
+            running,
+            config.outbox_dispatcher_poll_interval_ms,
+            &metrics,
+        )
     })
 }
 
@@ -452,17 +184,27 @@ fn run_dispatcher(
     adapter: &impl InvocationAdapter,
     running: Arc<AtomicBool>,
     poll_interval_ms: u64,
+    metrics: &DispatcherMetrics,
 ) {
+    // LoopGuard marks the metrics running=true on construction and clears it
+    // on drop, including if the loop panics. This is what feeds
+    // `outbox_dispatcher_running` in /health.
+    let _guard = LoopGuard::new(metrics);
     let poll = Duration::from_millis(poll_interval_ms);
     while running.load(Ordering::SeqCst) {
         match dispatch_once(journal, adapter) {
-            Ok(true) => {}
-            Ok(false) => thread::sleep(poll),
+            Ok(true) => {
+                metrics.record_tick(Utc::now().to_rfc3339());
+            }
+            Ok(false) => {
+                metrics.record_tick(Utc::now().to_rfc3339());
+                thread::sleep(poll);
+            }
             Err(error) => {
-                eprintln!(
-                    "kernel outbox dispatcher failed category={}",
-                    error_category(&error)
-                );
+                let category = error_category(&error);
+                eprintln!("kernel outbox dispatcher failed category={category}");
+                metrics.record_tick(Utc::now().to_rfc3339());
+                metrics.record_error_category(category);
                 thread::sleep(poll);
             }
         }
