@@ -2,7 +2,7 @@ use agent_core_kernel::config::KernelConfig;
 use agent_core_kernel::domain::*;
 use agent_core_kernel::gateway::Gateway;
 use agent_core_kernel::journal::JournalStore;
-use agent_core_kernel::server::health_snapshot;
+use agent_core_kernel::server::{health_snapshot, DispatcherMetrics};
 use anyhow::Result;
 use chrono::Utc;
 use serde_json::json;
@@ -88,7 +88,7 @@ fn health_reports_queue_projection_counts() -> Result<()> {
 
     journal.enqueue_worker_job(&EventId("event_health".to_string()))?;
     journal.queue_outbox_dispatch(&approved, Some(&session.id))?;
-    let snapshot = health_snapshot(&journal, false)?;
+    let snapshot = health_snapshot(&journal, false, &DispatcherMetrics::new())?;
 
     assert_eq!(
         snapshot

@@ -333,10 +333,29 @@ Note: `lease_timeout_ms` (30s) is the canonical value in `RetryPolicy`. Worker a
   "outbox_pending_count": <i64>,
   "outbox_unknown_count": <i64>,
   "outbox_dispatching_count": <i64>,
+  "outbox_dispatcher_running": <bool>,
+  "last_dispatch_tick_at": "<rfc3339> | null",
+  "last_dispatch_error_category": "<category> | null",
   "unknown_invocation_count": <i64>,
   "unknown_invocations": [ { "invocation_id": "...", "run_id": "...", "session_id": "...", "first_dispatch_at": "..." } ]
 }
 ```
+
+The three dispatcher-observability fields are backed by a shared
+`DispatcherMetrics` handle (`src/server/dispatcher_metrics.rs`) handed to the
+loop thread:
+
+- `outbox_dispatcher_running` -- true while the loop thread is alive. Set on
+  entry, cleared on exit via an RAII `LoopGuard` (so it is cleared even if the
+  loop panics).
+- `last_dispatch_tick_at` -- RFC3339 timestamp of the last completed poll
+  cycle, or `null` before the first tick.
+- `last_dispatch_error_category` -- sanitized category of the last loop-level
+  error (e.g. `timeout`, `connector_execute_failed`, `runtime_failed`), or
+  `null`. This tracks loop-level failures (when `dispatch_once` itself returns
+  `Err`). Per-dispatch adapter failures are already captured per-row in
+  `outbox_dispatches.last_error` via `unknown_outbox_dispatch`; the raw error
+  string is never surfaced.
 
 ---
 
