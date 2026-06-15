@@ -5,7 +5,7 @@ mod common;
 use agent_core_kernel::domain::*;
 use agent_core_kernel::gateway::Gateway;
 use agent_core_kernel::journal::JournalStore;
-use agent_core_kernel::server::health_snapshot;
+use agent_core_kernel::server::{health_snapshot, DispatcherMetrics};
 use anyhow::Result;
 use serde_json::json;
 
@@ -399,7 +399,7 @@ fn health_fields_expose_dispatcher_state() -> Result<()> {
     let approved = common::approved_stdout_invocation(&gateway, &run, &session)?;
 
     journal.queue_outbox_dispatch(&approved, Some(&session.id))?;
-    let snapshot_disabled = health_snapshot(&journal, false)?;
+    let snapshot_disabled = health_snapshot(&journal, false, &DispatcherMetrics::new())?;
     assert_eq!(
         snapshot_disabled
             .get("outbox_dispatcher_enabled")
@@ -424,13 +424,73 @@ fn health_fields_expose_dispatcher_state() -> Result<()> {
             .and_then(|v| v.as_u64()),
         Some(0)
     );
+    // The three observability fields (HANDOVER §4.4) are present. With a fresh
+    // metrics handle the loop is not running and no tick/error is recorded.
+    assert_eq!(
+        snapshot_disabled
+            .get("outbox_dispatcher_running")
+            .and_then(|v| v.as_bool()),
+        Some(false)
+    );
+    assert!(
+        snapshot_disabled
+            .get("last_dispatch_tick_at")
+            .map(|v| v.is_null())
+            .unwrap_or(true),
+        "last_dispatch_tick_at must be null when the loop has not ticked"
+    );
+    assert!(
+        snapshot_disabled
+            .get("last_dispatch_error_category")
+            .map(|v| v.is_null())
+            .unwrap_or(true),
+        "last_dispatch_error_category must be null when no error recorded"
+    );
 
-    let snapshot_enabled = health_snapshot(&journal, true)?;
+    let snapshot_enabled = health_snapshot(&journal, true, &DispatcherMetrics::new())?;
     assert_eq!(
         snapshot_enabled
             .get("outbox_dispatcher_enabled")
             .and_then(|v| v.as_bool()),
         Some(true)
+    );
+    Ok(())
+}
+
+#[test]
+fn health_fields_reflect_populated_dispatcher_metrics() -> Result<()> {
+    // A metrics handle written to by the loop must surface its state in
+    // /health: running flag, last tick timestamp, last error category.
+    let config = common::test_config();
+    let gateway = Gateway::new(config.clone());
+    let journal = JournalStore::in_memory()?;
+    let session = common::test_session(&config);
+    let run = common::test_run(&config, &session);
+    let _approved = common::approved_stdout_invocation(&gateway, &run, &session)?;
+
+    let metrics = DispatcherMetrics::new();
+    metrics.record_tick("2026-06-15T12:00:00Z".to_string());
+    metrics.record_error_category("timeout".to_string());
+    metrics.mark_started();
+
+    let snapshot = health_snapshot(&journal, true, &metrics)?;
+    assert_eq!(
+        snapshot
+            .get("outbox_dispatcher_running")
+            .and_then(|v| v.as_bool()),
+        Some(true)
+    );
+    assert_eq!(
+        snapshot
+            .get("last_dispatch_tick_at")
+            .and_then(|v| v.as_str()),
+        Some("2026-06-15T12:00:00Z")
+    );
+    assert_eq!(
+        snapshot
+            .get("last_dispatch_error_category")
+            .and_then(|v| v.as_str()),
+        Some("timeout")
     );
     Ok(())
 }

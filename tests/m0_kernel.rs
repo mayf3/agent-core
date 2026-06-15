@@ -5,7 +5,7 @@ use agent_core_kernel::gateway::Gateway;
 use agent_core_kernel::journal::JournalStore;
 use agent_core_kernel::llm::{LlmClient, LlmInput, LocalEchoLlm, OpenAiCompatibleLlm};
 use agent_core_kernel::runtime::{run_yield, session_spawn, Runtime};
-use agent_core_kernel::server::health_snapshot;
+use agent_core_kernel::server::{health_snapshot, DispatcherMetrics};
 use anyhow::Result;
 use chrono::Utc;
 use serde_json::json;
@@ -187,7 +187,7 @@ fn health_snapshot_reports_hash_and_unknowns() -> Result<()> {
         Some("invocation_unknown"),
         json!({ "operation": "feishu.send_message" }),
     )?;
-    let snapshot = health_snapshot(&journal, false)?;
+    let snapshot = health_snapshot(&journal, false, &DispatcherMetrics::new())?;
     assert_eq!(
         snapshot.get("ok").and_then(|value| value.as_bool()),
         Some(true)

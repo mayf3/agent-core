@@ -2,7 +2,7 @@ use agent_core_kernel::config::KernelConfig;
 use agent_core_kernel::domain::*;
 use agent_core_kernel::gateway::Gateway;
 use agent_core_kernel::journal::JournalStore;
-use agent_core_kernel::server::health_snapshot;
+use agent_core_kernel::server::{health_snapshot, DispatcherMetrics};
 use anyhow::Result;
 use chrono::Utc;
 use serde_json::json;
@@ -74,7 +74,7 @@ fn health_reports_undelivered_ingress_count() -> Result<()> {
     let accepted = gateway.validate_ingress(&journal, feishu_envelope("evt_3", "om_3")?)?;
 
     assert_eq!(
-        health_snapshot(&journal, false)?
+        health_snapshot(&journal, false, &DispatcherMetrics::new())?
             .get("undelivered_ingress_count")
             .and_then(|value| value.as_u64()),
         Some(1)
@@ -87,7 +87,7 @@ fn health_reports_undelivered_ingress_count() -> Result<()> {
         json!({ "run_id": "run_test" }),
     )?;
     assert_eq!(
-        health_snapshot(&journal, false)?
+        health_snapshot(&journal, false, &DispatcherMetrics::new())?
             .get("undelivered_ingress_count")
             .and_then(|value| value.as_u64()),
             Some(0)

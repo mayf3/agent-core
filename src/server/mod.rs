@@ -3,9 +3,11 @@ use crate::domain::OutboxDispatchStatus;
 use crate::gateway::Gateway;
 use crate::journal::JournalStore;
 mod delivery;
+mod dispatcher_metrics;
 
 use anyhow::{bail, Result};
 use delivery::{recover_undelivered_ingress, start_outbox_dispatcher_loop, start_worker_loop};
+pub use dispatcher_metrics::DispatcherMetrics;
 use serde_json::{json, Value};
 use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -39,6 +41,7 @@ pub fn serve(config: KernelConfig) -> Result<()> {
         println!("agent-core queued {recovered_ingress} undelivered ingress event(s)");
     }
     log_dispatcher_startup_state(&journal, config.outbox_dispatcher_enabled)?;
+    let dispatcher_metrics = Arc::new(DispatcherMetrics::new());
     let worker = start_worker_loop(
         config.clone(),
         Arc::clone(&journal),
@@ -49,6 +52,7 @@ pub fn serve(config: KernelConfig) -> Result<()> {
         config.clone(),
         Arc::clone(&journal),
         Arc::clone(&running),
+        Arc::clone(&dispatcher_metrics),
     );
     while running.load(Ordering::SeqCst) {
         match listener.accept() {
@@ -58,6 +62,7 @@ pub fn serve(config: KernelConfig) -> Result<()> {
                     &config,
                     Arc::clone(&journal),
                     Arc::clone(&gateway),
+                    Arc::clone(&dispatcher_metrics),
                 ) {
                     let _ = write_json(
                         &mut stream,
@@ -108,6 +113,7 @@ fn handle_connection(
     config: &KernelConfig,
     journal: Arc<JournalStore>,
     gateway: Arc<Gateway>,
+    dispatcher_metrics: Arc<DispatcherMetrics>,
 ) -> Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     stream.set_write_timeout(Some(Duration::from_secs(10)))?;
@@ -116,7 +122,11 @@ fn handle_connection(
         return write_json(
             stream,
             200,
-            health_snapshot(&journal, config.outbox_dispatcher_enabled)?,
+            health_snapshot(
+                &journal,
+                config.outbox_dispatcher_enabled,
+                &dispatcher_metrics,
+            )?,
         );
     }
     if request.method != "POST" || request.path != "/v1/ingress" {
@@ -163,6 +173,7 @@ fn handle_connection(
 pub fn health_snapshot(
     journal: &JournalStore,
     outbox_dispatcher_enabled: bool,
+    dispatcher_metrics: &DispatcherMetrics,
 ) -> Result<Value> {
     let hash_chain_ok = journal.verify_hash_chain()?;
     let unknown_invocations = journal.unknown_invocations()?;
@@ -189,6 +200,9 @@ pub fn health_snapshot(
         "worker_jobs": worker_job_counts,
         "outbox_dispatches": outbox_dispatch_counts,
         "outbox_dispatcher_enabled": outbox_dispatcher_enabled,
+        "outbox_dispatcher_running": dispatcher_metrics.is_running(),
+        "last_dispatch_tick_at": dispatcher_metrics.last_tick_at(),
+        "last_dispatch_error_category": dispatcher_metrics.last_error_category(),
         "outbox_pending_count": outbox_pending_count,
         "outbox_unknown_count": outbox_unknown_count,
         "outbox_dispatching_count": outbox_dispatching_count,
