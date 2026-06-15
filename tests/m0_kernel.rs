@@ -10,7 +10,6 @@ use anyhow::Result;
 use chrono::Utc;
 use serde_json::json;
 use std::path::PathBuf;
-
 #[test]
 fn m0_cli_vertical_slice_writes_journal_and_receipt() -> Result<()> {
     let config = test_config();
@@ -21,7 +20,6 @@ fn m0_cli_vertical_slice_writes_journal_and_receipt() -> Result<()> {
     let event = gateway.validate_ingress(&journal, envelope)?;
     let outcome = runtime.deliver(&journal, &gateway, event)?;
     let events = journal.events()?;
-
     assert_eq!(outcome.output, "收到：你好");
     assert!(journal.verify_hash_chain()?);
     assert!(events
@@ -29,27 +27,36 @@ fn m0_cli_vertical_slice_writes_journal_and_receipt() -> Result<()> {
         .any(|event| event.kind == JournalEventKind::IngressAccepted));
     assert!(events
         .iter()
-        .any(|event| event.kind == JournalEventKind::ReceiptReceived));
+        .any(|event| event.kind == JournalEventKind::OutboxQueued));
+    assert!(events
+        .iter()
+        .any(|event| event.kind == JournalEventKind::InvocationApproved));
     assert!(events.iter().any(|event| event
         .correlation_id
         .as_deref()
         .unwrap_or("")
         .starts_with("reply:run_")));
+    assert!(events
+        .iter()
+        .all(|event| event.kind != JournalEventKind::ReceiptReceived));
+    assert!(events
+        .iter()
+        .all(|event| event.kind != JournalEventKind::DispatchStarted));
+    assert!(events
+        .iter()
+        .all(|event| event.kind != JournalEventKind::RunCompleted));
     Ok(())
 }
-
 #[test]
 fn gateway_deduplicates_ingress_before_runtime() -> Result<()> {
     let config = test_config();
     let journal = JournalStore::in_memory()?;
     let gateway = Gateway::new(config);
     let envelope = gateway.cli_ingress("once".to_string())?;
-
     assert!(gateway.validate_ingress(&journal, envelope.clone()).is_ok());
     assert!(gateway.validate_ingress(&journal, envelope).is_err());
     Ok(())
 }
-
 #[test]
 fn gateway_rejects_stdout_target_mismatch() -> Result<()> {
     let config = test_config();
@@ -84,11 +91,9 @@ fn gateway_rejects_stdout_target_mismatch() -> Result<()> {
         arguments: json!({ "session_id": "session_other", "text": "bad" }),
         idempotency_key: None,
     };
-
     assert!(gateway.approve_invocation(intent, &run, &session).is_err());
     Ok(())
 }
-
 #[test]
 fn hash_chain_detects_tampering() -> Result<()> {
     let config = test_config();
@@ -97,13 +102,11 @@ fn hash_chain_detects_tampering() -> Result<()> {
     let runtime = Runtime::new(config, LocalEchoLlm, StdoutAdapter);
     let event = gateway.validate_ingress(&journal, gateway.cli_ingress("hash".to_string())?)?;
     runtime.deliver(&journal, &gateway, event)?;
-
     assert!(journal.verify_hash_chain()?);
     journal.tamper_first_event_for_test()?;
     assert!(!journal.verify_hash_chain()?);
     Ok(())
 }
-
 #[test]
 fn journal_scans_unknown_invocations() -> Result<()> {
     let journal = JournalStore::in_memory()?;
@@ -115,9 +118,7 @@ fn journal_scans_unknown_invocations() -> Result<()> {
         Some(correlation_id),
         json!({ "operation": "feishu.send_message" }),
     )?;
-
     assert_eq!(journal.unknown_invocations()?.len(), 1);
-
     journal.append_event(
         JournalEventKind::ReceiptReceived,
         None,
@@ -128,7 +129,6 @@ fn journal_scans_unknown_invocations() -> Result<()> {
     assert!(journal.unknown_invocations()?.is_empty());
     Ok(())
 }
-
 #[test]
 fn journal_recovery_marks_unknown_invocations() -> Result<()> {
     let journal = JournalStore::in_memory()?;
@@ -154,17 +154,29 @@ fn journal_recovery_marks_unknown_invocations() -> Result<()> {
         Some("invocation_recovery"),
         json!({ "operation": "feishu.send_message" }),
     )?;
-
     assert_eq!(journal.recover_unknown_invocations()?, 1);
     assert!(journal.unknown_invocations()?.is_empty());
     assert!(journal.events()?.iter().any(|event| {
-        event.kind == JournalEventKind::ReceiptReceived
+        event.kind == JournalEventKind::OutboxDispatchUnknown
             && event.correlation_id.as_deref() == Some("invocation_recovery")
-            && event.payload.get("status").and_then(|value| value.as_str()) == Some("Unknown")
     }));
+    assert!(journal
+        .events()?
+        .iter()
+        .filter(|event| {
+            event.kind == JournalEventKind::ReceiptReceived
+                && event.correlation_id.as_deref() == Some("invocation_recovery")
+        })
+        .count()
+        == 0);
+    assert!(journal
+        .events()?
+        .iter()
+        .filter(|event| event.kind == JournalEventKind::RunCompleted)
+        .count()
+        == 0);
     Ok(())
 }
-
 #[test]
 fn health_snapshot_reports_hash_and_unknowns() -> Result<()> {
     let journal = JournalStore::in_memory()?;
@@ -175,9 +187,7 @@ fn health_snapshot_reports_hash_and_unknowns() -> Result<()> {
         Some("invocation_unknown"),
         json!({ "operation": "feishu.send_message" }),
     )?;
-
-    let snapshot = health_snapshot(&journal)?;
-
+    let snapshot = health_snapshot(&journal, false)?;
     assert_eq!(
         snapshot.get("ok").and_then(|value| value.as_bool()),
         Some(true)
@@ -194,7 +204,6 @@ fn health_snapshot_reports_hash_and_unknowns() -> Result<()> {
     );
     Ok(())
 }
-
 #[test]
 fn disabled_phase0_runtime_abis_return_not_enabled() {
     assert!(session_spawn()
@@ -203,7 +212,6 @@ fn disabled_phase0_runtime_abis_return_not_enabled() {
         .contains("not_enabled"));
     assert!(run_yield().unwrap_err().to_string().contains("not_enabled"));
 }
-
 #[test]
 fn feishu_echo_creates_send_message_invocation() -> Result<()> {
     let mut config = test_config();
@@ -214,7 +222,6 @@ fn feishu_echo_creates_send_message_invocation() -> Result<()> {
     let event = gateway.validate_ingress(&journal, feishu_envelope("evt_1", "p2p", true)?)?;
     let outcome = runtime.deliver_echo(&journal, &gateway, event)?;
     let events = journal.events()?;
-
     assert_eq!(outcome.output, "收到：你好");
     assert!(events.iter().any(|event| {
         event.kind == JournalEventKind::InvocationApproved
@@ -227,14 +234,12 @@ fn feishu_echo_creates_send_message_invocation() -> Result<()> {
     assert!(journal.verify_hash_chain()?);
     Ok(())
 }
-
 #[test]
 fn feishu_deduplicates_by_message_id_across_event_ids() -> Result<()> {
     let mut config = test_config();
     config.feishu_allowed_open_ids = vec!["ou_user".to_string()];
     let journal = JournalStore::in_memory()?;
     let gateway = Gateway::new(config);
-
     assert!(gateway
         .validate_ingress(
             &journal,
@@ -245,7 +250,6 @@ fn feishu_deduplicates_by_message_id_across_event_ids() -> Result<()> {
         &journal,
         feishu_envelope_with_message("evt_redelivered", "om_same", "p2p", true)?,
     );
-
     assert!(duplicate.is_err());
     assert!(duplicate
         .err()
@@ -260,7 +264,6 @@ fn feishu_deduplicates_by_message_id_across_event_ids() -> Result<()> {
     assert_eq!(accepted, 1);
     Ok(())
 }
-
 #[test]
 fn feishu_reply_invocation_is_deterministic_for_run() -> Result<()> {
     let mut config = test_config();
@@ -272,11 +275,9 @@ fn feishu_reply_invocation_is_deterministic_for_run() -> Result<()> {
         &journal,
         feishu_envelope_with_message("evt_1", "om_reply_once", "p2p", true)?,
     )?;
-
     let outcome = runtime.deliver_echo(&journal, &gateway, event)?;
     let expected_invocation_id = format!("reply:{}", outcome.run_id.0);
     let expected_key = format!("feishu-reply:{}", outcome.run_id.0);
-
     assert!(journal.events()?.iter().any(|event| {
         event.kind == JournalEventKind::InvocationProposed
             && event.correlation_id.as_deref() == Some(expected_invocation_id.as_str())
@@ -288,7 +289,6 @@ fn feishu_reply_invocation_is_deterministic_for_run() -> Result<()> {
     }));
     Ok(())
 }
-
 #[test]
 fn feishu_deliver_wraps_llm_output_as_send_message() -> Result<()> {
     let mut config = test_config();
@@ -300,10 +300,8 @@ fn feishu_deliver_wraps_llm_output_as_send_message() -> Result<()> {
         &journal,
         feishu_envelope_with_message("evt_llm", "om_llm", "p2p", true)?,
     )?;
-
     let outcome = runtime.deliver(&journal, &gateway, event)?;
-
-    assert_eq!(outcome.output, "");
+    assert_eq!(outcome.output, "收到：你好");
     assert!(journal.events()?.iter().any(|event| {
         event.kind == JournalEventKind::InvocationProposed
             && event
@@ -314,7 +312,6 @@ fn feishu_deliver_wraps_llm_output_as_send_message() -> Result<()> {
     }));
     Ok(())
 }
-
 #[test]
 fn openai_compatible_llm_missing_config_returns_friendly_output() -> Result<()> {
     let llm = OpenAiCompatibleLlm::new(
@@ -323,12 +320,10 @@ fn openai_compatible_llm_missing_config_returns_friendly_output() -> Result<()> 
         String::new(),
         100,
     );
-
     let output = llm.complete(LlmInput {
         blocks: vec![],
         user_text: "hello".to_string(),
     })?;
-
     assert_eq!(output.provider, "openai-compatible");
     assert_eq!(
         output
@@ -340,7 +335,6 @@ fn openai_compatible_llm_missing_config_returns_friendly_output() -> Result<()> 
     assert!(output.content.contains("AGENT_CORE_OPENAI_API_KEY"));
     Ok(())
 }
-
 #[test]
 fn zai_model_prefix_is_normalized_for_zai_endpoint() -> Result<()> {
     let llm = OpenAiCompatibleLlm::new(
@@ -349,12 +343,10 @@ fn zai_model_prefix_is_normalized_for_zai_endpoint() -> Result<()> {
         "zai/glm-5.1".to_string(),
         100,
     );
-
     let output = llm.complete(LlmInput {
         blocks: vec![],
         user_text: "hello".to_string(),
     })?;
-
     assert_eq!(output.model, "glm-5.1");
     assert_eq!(
         output
@@ -365,7 +357,6 @@ fn zai_model_prefix_is_normalized_for_zai_endpoint() -> Result<()> {
     );
     Ok(())
 }
-
 #[test]
 fn provider_model_prefix_is_preserved_for_generic_endpoint() -> Result<()> {
     let llm = OpenAiCompatibleLlm::new(
@@ -374,16 +365,13 @@ fn provider_model_prefix_is_preserved_for_generic_endpoint() -> Result<()> {
         "zai/glm-5.1".to_string(),
         100,
     );
-
     let output = llm.complete(LlmInput {
         blocks: vec![],
         user_text: "hello".to_string(),
     })?;
-
     assert_eq!(output.model, "zai/glm-5.1");
     Ok(())
 }
-
 #[test]
 fn feishu_group_requires_mention() -> Result<()> {
     let mut config = test_config();
@@ -392,7 +380,6 @@ fn feishu_group_requires_mention() -> Result<()> {
     let journal = JournalStore::in_memory()?;
     let gateway = Gateway::new(config);
     let result = gateway.validate_ingress(&journal, feishu_envelope("evt_2", "group", false)?);
-
     assert!(result.is_err());
     assert!(result
         .err()
@@ -401,7 +388,6 @@ fn feishu_group_requires_mention() -> Result<()> {
         .contains("bot_not_mentioned"));
     Ok(())
 }
-
 fn test_config() -> KernelConfig {
     KernelConfig {
         db_path: PathBuf::from(":memory:"),
@@ -423,9 +409,10 @@ fn test_config() -> KernelConfig {
         model_timeout_ms: 100,
         context_recent_messages: 6,
         context_max_block_chars: 4_000,
+            outbox_dispatcher_enabled: false,
+            outbox_dispatcher_poll_interval_ms: 100,
     }
 }
-
 fn cli_principal() -> RunPrincipal {
     RunPrincipal {
         principal_id: PrincipalId("cli:local".to_string()),
@@ -438,11 +425,9 @@ fn cli_principal() -> RunPrincipal {
         requester_id: Some("cli:local".to_string()),
     }
 }
-
 fn feishu_envelope(event_id: &str, chat_type: &str, mentioned: bool) -> Result<IngressEnvelope> {
     feishu_envelope_with_message(event_id, "om_msg", chat_type, mentioned)
 }
-
 fn feishu_envelope_with_message(
     event_id: &str,
     message_id: &str,
@@ -470,9 +455,7 @@ fn feishu_envelope_with_message(
         routing_hint: None,
     })
 }
-
 struct RecordingAdapter;
-
 impl InvocationAdapter for RecordingAdapter {
     fn execute(&self, invocation: &ApprovedInvocation) -> Result<Receipt> {
         Ok(Receipt {

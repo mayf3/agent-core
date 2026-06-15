@@ -1,10 +1,11 @@
 use crate::config::KernelConfig;
+use crate::domain::OutboxDispatchStatus;
 use crate::gateway::Gateway;
 use crate::journal::JournalStore;
 mod delivery;
 
 use anyhow::{bail, Result};
-use delivery::{recover_undelivered_ingress, start_worker_loop};
+use delivery::{recover_undelivered_ingress, start_outbox_dispatcher_loop, start_worker_loop};
 use serde_json::{json, Value};
 use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -37,10 +38,16 @@ pub fn serve(config: KernelConfig) -> Result<()> {
     if recovered_ingress > 0 {
         println!("agent-core queued {recovered_ingress} undelivered ingress event(s)");
     }
+    log_dispatcher_startup_state(&journal, config.outbox_dispatcher_enabled)?;
     let worker = start_worker_loop(
         config.clone(),
         Arc::clone(&journal),
         Arc::clone(&gateway),
+        Arc::clone(&running),
+    );
+    let outbox_dispatcher = start_outbox_dispatcher_loop(
+        config.clone(),
+        Arc::clone(&journal),
         Arc::clone(&running),
     );
     while running.load(Ordering::SeqCst) {
@@ -68,7 +75,23 @@ pub fn serve(config: KernelConfig) -> Result<()> {
     if worker.join().is_err() {
         eprintln!("kernel worker thread panicked");
     }
+    if outbox_dispatcher.join().is_err() {
+        eprintln!("kernel outbox dispatcher thread panicked");
+    }
     println!("agent-core kernel stopped gracefully");
+    Ok(())
+}
+
+fn log_dispatcher_startup_state(journal: &JournalStore, enabled: bool) -> Result<()> {
+    let pending = journal.outbox_status_count(OutboxDispatchStatus::Pending)?;
+    let unknown = journal.outbox_status_count(OutboxDispatchStatus::Unknown)?;
+    let dispatching = journal.outbox_status_count(OutboxDispatchStatus::Dispatching)?;
+    println!("outbox_dispatcher_enabled={enabled}");
+    println!("existing_pending_outbox_count={pending}");
+    println!("existing_unknown_outbox_count={unknown}");
+    println!("existing_dispatching_outbox_count={dispatching}");
+    println!("dispatcher will process pending/retryable outbox items");
+    println!("unknown items will not be retried automatically");
     Ok(())
 }
 
@@ -90,7 +113,11 @@ fn handle_connection(
     stream.set_write_timeout(Some(Duration::from_secs(10)))?;
     let request = read_request(stream)?;
     if request.method == "GET" && request.path == "/health" {
-        return write_json(stream, 200, health_snapshot(&journal)?);
+        return write_json(
+            stream,
+            200,
+            health_snapshot(&journal, config.outbox_dispatcher_enabled)?,
+        );
     }
     if request.method != "POST" || request.path != "/v1/ingress" {
         return write_json(stream, 404, json!({ "ok": false, "error": "not_found" }));
@@ -133,12 +160,19 @@ fn handle_connection(
     )
 }
 
-pub fn health_snapshot(journal: &JournalStore) -> Result<Value> {
+pub fn health_snapshot(
+    journal: &JournalStore,
+    outbox_dispatcher_enabled: bool,
+) -> Result<Value> {
     let hash_chain_ok = journal.verify_hash_chain()?;
     let unknown_invocations = journal.unknown_invocations()?;
     let undelivered_ingress_count = journal.undelivered_ingress_events()?.len();
     let worker_job_counts = journal.worker_job_status_counts()?;
     let outbox_dispatch_counts = journal.outbox_dispatch_status_counts()?;
+    let outbox_pending_count = journal.outbox_status_count(OutboxDispatchStatus::Pending)?;
+    let outbox_unknown_count = journal.outbox_status_count(OutboxDispatchStatus::Unknown)?;
+    let outbox_dispatching_count =
+        journal.outbox_status_count(OutboxDispatchStatus::Dispatching)?;
     let status = if !hash_chain_ok {
         "corrupt"
     } else if unknown_invocations.is_empty() {
@@ -154,6 +188,10 @@ pub fn health_snapshot(journal: &JournalStore) -> Result<Value> {
         "undelivered_ingress_count": undelivered_ingress_count,
         "worker_jobs": worker_job_counts,
         "outbox_dispatches": outbox_dispatch_counts,
+        "outbox_dispatcher_enabled": outbox_dispatcher_enabled,
+        "outbox_pending_count": outbox_pending_count,
+        "outbox_unknown_count": outbox_unknown_count,
+        "outbox_dispatching_count": outbox_dispatching_count,
         "unknown_invocation_count": unknown_invocations.len(),
         "unknown_invocations": unknown_invocations.iter().map(|invocation| {
             json!({

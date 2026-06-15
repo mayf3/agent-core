@@ -23,6 +23,8 @@ pub struct KernelConfig {
     pub model_timeout_ms: u64,
     pub context_recent_messages: usize,
     pub context_max_block_chars: usize,
+    pub outbox_dispatcher_enabled: bool,
+    pub outbox_dispatcher_poll_interval_ms: u64,
 }
 
 impl KernelConfig {
@@ -68,6 +70,8 @@ impl KernelConfig {
             model_timeout_ms: env_u64("AGENT_CORE_MODEL_TIMEOUT_MS", 30_000),
             context_recent_messages: env_usize("AGENT_CORE_CONTEXT_RECENT_MESSAGES", 6),
             context_max_block_chars: env_usize("AGENT_CORE_CONTEXT_MAX_BLOCK_CHARS", 4_000),
+            outbox_dispatcher_enabled: env_bool("AGENT_CORE_OUTBOX_DISPATCHER_ENABLED", true),
+            outbox_dispatcher_poll_interval_ms: env_u64("AGENT_CORE_OUTBOX_DISPATCHER_POLL_MS", 500),
         }
     }
 }

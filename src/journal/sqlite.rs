@@ -178,6 +178,18 @@ impl JournalStore {
         Ok(())
     }
 
+    pub fn update_run_status(&self, run_id: &RunId, status: &str) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow!("journal mutex poisoned"))?;
+        conn.execute(
+            "UPDATE runs SET status = ?1, updated_at = ?2 WHERE id = ?3",
+            params![status, Utc::now().to_rfc3339(), run_id.0],
+        )?;
+        Ok(())
+    }
+
     pub fn complete_run(&self, run_id: &RunId) -> Result<()> {
         let conn = self
             .conn
@@ -200,6 +212,21 @@ impl JournalStore {
             params![Utc::now().to_rfc3339(), run_id.0],
         )?;
         Ok(())
+    }
+
+    pub fn run_status(&self, run_id: &RunId) -> Result<Option<String>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow!("journal mutex poisoned"))?;
+        let status: Option<String> = conn
+            .query_row(
+                "SELECT status FROM runs WHERE id = ?1",
+                params![run_id.0],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(status)
     }
 
     pub fn events(&self) -> Result<Vec<JournalEvent>> {
@@ -284,18 +311,6 @@ impl JournalStore {
             previous_hash = Some(event.hash);
         }
         Ok(true)
-    }
-
-    pub fn tamper_first_event_for_test(&self) -> Result<()> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| anyhow!("journal mutex poisoned"))?;
-        conn.execute(
-            "UPDATE journal_events SET payload_json = ?1 WHERE sequence = 1",
-            params![json!({"tampered": true}).to_string()],
-        )?;
-        Ok(())
     }
 
     fn migrate(&self) -> Result<()> {
@@ -418,8 +433,12 @@ fn parse_kind(value: &str) -> JournalEventKind {
         "OutboxQueued" => JournalEventKind::OutboxQueued,
         "OutboxDispatchFailed" => JournalEventKind::OutboxDispatchFailed,
         "OutboxDispatchUnknown" => JournalEventKind::OutboxDispatchUnknown,
+        "OutboxDispatchDead" => JournalEventKind::OutboxDispatchDead,
         "DispatchStarted" => JournalEventKind::DispatchStarted,
         "ReceiptReceived" => JournalEventKind::ReceiptReceived,
+        "WorkerJobDead" => JournalEventKind::WorkerJobDead,
+        "RunCompleted" => JournalEventKind::RunCompleted,
+        "RunFailed" => JournalEventKind::RunFailed,
         _ => JournalEventKind::RunCompleted,
     }
 }
