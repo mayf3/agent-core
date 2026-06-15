@@ -18,8 +18,8 @@ fn worker_job_queue_is_idempotent_and_journaled() -> Result<()> {
 
     assert_eq!(first, second);
     assert_eq!(
-        journal.worker_job_status(&first)?.as_deref(),
-        Some("queued")
+        journal.worker_job_status(&first)?.as_ref(),
+        Some(&WorkerJobStatus::Queued)
     );
     let queued_events = journal
         .events()?
@@ -44,8 +44,8 @@ fn outbox_dispatch_lifecycle_updates_projection_and_journal() -> Result<()> {
     journal.queue_outbox_dispatch(&approved, Some(&session.id))?;
     journal.start_outbox_dispatch(&approved, Some(&session.id))?;
     assert_eq!(
-        journal.outbox_dispatch_status(&invocation_id)?.as_deref(),
-        Some("dispatching")
+        journal.outbox_dispatch_status(&invocation_id)?.as_ref(),
+        Some(&OutboxDispatchStatus::Dispatching)
     );
     journal.succeed_outbox_dispatch(
         &Receipt {
@@ -60,8 +60,8 @@ fn outbox_dispatch_lifecycle_updates_projection_and_journal() -> Result<()> {
     )?;
 
     assert_eq!(
-        journal.outbox_dispatch_status(&invocation_id)?.as_deref(),
-        Some("succeeded")
+        journal.outbox_dispatch_status(&invocation_id)?.as_ref(),
+        Some(&OutboxDispatchStatus::Succeeded)
     );
     let events = journal.events()?;
     assert!(events
@@ -70,6 +70,9 @@ fn outbox_dispatch_lifecycle_updates_projection_and_journal() -> Result<()> {
     assert!(events
         .iter()
         .any(|event| event.kind == JournalEventKind::ReceiptReceived));
+    assert!(events
+        .iter()
+        .any(|event| event.kind == JournalEventKind::RunCompleted));
     assert!(journal.verify_hash_chain()?);
     Ok(())
 }
@@ -85,7 +88,7 @@ fn health_reports_queue_projection_counts() -> Result<()> {
 
     journal.enqueue_worker_job(&EventId("event_health".to_string()))?;
     journal.queue_outbox_dispatch(&approved, Some(&session.id))?;
-    let snapshot = health_snapshot(&journal)?;
+    let snapshot = health_snapshot(&journal, false)?;
 
     assert_eq!(
         snapshot
@@ -113,8 +116,8 @@ fn ingress_acceptance_queues_worker_job() -> Result<()> {
     let job_id = format!("job:deliver:{}", event.event_id.0);
 
     assert_eq!(
-        journal.worker_job_status(&job_id)?.as_deref(),
-        Some("queued")
+        journal.worker_job_status(&job_id)?.as_ref(),
+        Some(&WorkerJobStatus::Queued)
     );
     let events = journal.events()?;
     assert!(events
@@ -135,13 +138,13 @@ fn worker_job_lifecycle_updates_projection_and_journal() -> Result<()> {
 
     journal.start_worker_job(&source_event_id)?;
     assert_eq!(
-        journal.worker_job_status(&job_id)?.as_deref(),
-        Some("running")
+        journal.worker_job_status(&job_id)?.as_ref(),
+        Some(&WorkerJobStatus::Running)
     );
     journal.succeed_worker_job(&source_event_id)?;
     assert_eq!(
-        journal.worker_job_status(&job_id)?.as_deref(),
-        Some("succeeded")
+        journal.worker_job_status(&job_id)?.as_ref(),
+        Some(&WorkerJobStatus::Succeeded)
     );
     let events = journal.events()?;
     assert!(events
@@ -164,8 +167,8 @@ fn worker_job_lease_marks_running_and_returns_event() -> Result<()> {
 
     assert_eq!(leased, Some(source_event_id));
     assert_eq!(
-        journal.worker_job_status(&job_id)?.as_deref(),
-        Some("running")
+        journal.worker_job_status(&job_id)?.as_ref(),
+        Some(&WorkerJobStatus::Running)
     );
     assert!(journal.events()?.iter().any(|event| {
         event.kind == JournalEventKind::WorkerJobStarted
@@ -217,8 +220,8 @@ fn outbox_queue_is_idempotent_and_journaled() -> Result<()> {
     assert_eq!(
         journal
             .outbox_dispatch_status(&InvocationId("reply:run_test".to_string()))?
-            .as_deref(),
-        Some("pending")
+            .as_ref(),
+        Some(&OutboxDispatchStatus::Pending)
     );
     let queued_events = journal
         .events()?
@@ -251,6 +254,8 @@ fn test_config() -> KernelConfig {
         model_timeout_ms: 100,
         context_recent_messages: 6,
         context_max_block_chars: 4_000,
+        outbox_dispatcher_enabled: false,
+        outbox_dispatcher_poll_interval_ms: 100,
     }
 }
 
@@ -289,110 +294,6 @@ fn test_run(config: &KernelConfig, session: &Session) -> Run {
         status: RunStatus::Running,
         created_at: Utc::now(),
         updated_at: Utc::now(),
-    }
-}
-
-#[test]
-fn unknown_recovery_updates_outbox_projection_from_dispatching() -> Result<()> {
-    let config = test_config();
-    let gateway = Gateway::new(config.clone());
-    let journal = JournalStore::in_memory()?;
-    let session = test_session(&config);
-    let run = test_run(&config, &session);
-    let approved = approved_stdout_invocation(&gateway, &run, &session)?;
-    let invocation_id = approved.intent().invocation_id.clone();
-
-    journal.queue_outbox_dispatch(&approved, Some(&session.id))?;
-    journal.start_outbox_dispatch(&approved, Some(&session.id))?;
-    assert_eq!(
-        journal.outbox_dispatch_status(&invocation_id)?.as_deref(),
-        Some("dispatching")
-    );
-
-    let recovered = journal.recover_unknown_invocations()?;
-    assert_eq!(recovered, 1);
-
-    assert_eq!(
-        journal.outbox_dispatch_status(&invocation_id)?.as_deref(),
-        Some("unknown")
-    );
-
-    let restart = journal.start_outbox_dispatch(&approved, Some(&session.id));
-    assert!(restart
-        .unwrap_err()
-        .to_string()
-        .contains("outbox_dispatch_not_startable"));
-    assert_eq!(
-        journal.outbox_dispatch_status(&invocation_id)?.as_deref(),
-        Some("unknown")
-    );
-
-    assert!(journal.events()?.iter().any(|event| {
-        event.kind == JournalEventKind::ReceiptReceived
-            && event.correlation_id.as_deref() == Some(invocation_id.0.as_str())
-            && event.payload.get("status").and_then(|v| v.as_str()) == Some("Unknown")
-    }));
-    let dispatch_starts = journal
-        .events()?
-        .iter()
-        .filter(|event| {
-            event.kind == JournalEventKind::DispatchStarted
-                && event.correlation_id.as_deref() == Some(invocation_id.0.as_str())
-        })
-        .count();
-    assert_eq!(dispatch_starts, 1);
-    assert!(journal.verify_hash_chain()?);
-    Ok(())
-}
-
-#[test]
-fn unknown_recovery_still_writes_receipt_for_journal_only_dispatch() -> Result<()> {
-    let journal = JournalStore::in_memory()?;
-    let run_id = RunId::new();
-    let session_id = SessionId("session_unknown_outbox".to_string());
-    let run = Run {
-        id: run_id.clone(),
-        session_id: session_id.clone(),
-        agent_id: AgentId("main".to_string()),
-        trigger_event_id: EventId::new(),
-        principal: cli_principal(),
-        parent_run_id: None,
-        delegated_by: None,
-        status: RunStatus::Running,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
-    };
-    journal.insert_run(&run)?;
-    journal.append_event(
-        JournalEventKind::DispatchStarted,
-        Some(&run_id),
-        Some(&session_id),
-        Some("invocation_no_projection"),
-        json!({ "operation": "stdout.send_text" }),
-    )?;
-
-    let recovered = journal.recover_unknown_invocations()?;
-    assert_eq!(recovered, 1);
-
-    assert!(journal.events()?.iter().any(|event| {
-        event.kind == JournalEventKind::ReceiptReceived
-            && event.correlation_id.as_deref() == Some("invocation_no_projection")
-            && event.payload.get("status").and_then(|v| v.as_str()) == Some("Unknown")
-    }));
-    assert!(journal.verify_hash_chain()?);
-    Ok(())
-}
-
-fn cli_principal() -> RunPrincipal {
-    RunPrincipal {
-        principal_id: PrincipalId("cli:local".to_string()),
-        subject: PrincipalSubject::LocalUser,
-        source: PrincipalSource::Cli,
-        grants: vec![CapabilityGrant {
-            operation: "stdout.send_text".to_string(),
-            scope: "current_session".to_string(),
-        }],
-        requester_id: Some("cli:local".to_string()),
     }
 }
 

@@ -1,5 +1,7 @@
 use super::sqlite::JournalStore;
+use crate::domain::OutboxDispatchStatus;
 use anyhow::{anyhow, Result};
+use rusqlite::params;
 use std::collections::BTreeMap;
 
 impl JournalStore {
@@ -9,6 +11,19 @@ impl JournalStore {
 
     pub fn outbox_dispatch_status_counts(&self) -> Result<BTreeMap<String, i64>> {
         self.status_counts("outbox_dispatches")
+    }
+
+    pub fn outbox_status_count(&self, status: OutboxDispatchStatus) -> Result<i64> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow!("journal mutex poisoned"))?;
+        conn.query_row(
+            "SELECT COUNT(*) FROM outbox_dispatches WHERE status = ?1",
+            params![status.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
     }
 
     fn status_counts(&self, table: &str) -> Result<BTreeMap<String, i64>> {
