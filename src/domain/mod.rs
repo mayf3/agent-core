@@ -347,4 +347,14 @@ pub enum JournalEventKind {
     WorkerJobDead,
     RunCompleted,
     RunFailed,
+    /// Sentinel produced by `parse_kind`/`row_to_event` when the stored
+    /// `kind` text does not match any known variant. The kernel never writes
+    /// `Unknown` — observing it at read time indicates either external
+    /// tampering or a future enum variant whose read-path wasn't updated.
+    /// Routing unknown kinds here (rather than silently to `RunCompleted`)
+    /// keeps them from masquerading as a run completion in the recovery
+    /// predicates (`undelivered_ingress_events`); `verify_hash_chain` still
+    /// flags the row as corrupt since the re-serialized string won't match.
+    /// See HANDOVER §10.
+    Unknown,
 }
