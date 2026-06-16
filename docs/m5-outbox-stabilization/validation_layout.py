@@ -77,6 +77,11 @@ def main() -> int:
     # Anchor: schema version check (Phase 1 hardening)
     must_contain("src/journal/sqlite.rs", "CURRENT_SCHEMA_VERSION")
     must_contain("src/journal/sqlite.rs", "PRAGMA user_version")
+
+    # Anchor: release checklist (Phase 1 hardening)
+    must_exist("docs/release-checklist.md")
+    must_contain("docs/release-checklist.md", "pnpm check")
+    must_contain("docs/release-checklist.md", "hash_chain_ok")
     must_not_contain(
         "src/journal/sqlite.rs",
         "_ => JournalEventKind::RunCompleted",
