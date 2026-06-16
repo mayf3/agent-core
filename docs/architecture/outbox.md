@@ -334,6 +334,7 @@ Note: `lease_timeout_ms` (30s) is the canonical value in `RetryPolicy`. Worker a
   "outbox_unknown_count": <i64>,
   "outbox_dispatching_count": <i64>,
   "outbox_stale_dispatching_count": <i64>,
+  "outbox_projection_drift_count": <i64>,
   "outbox_dispatcher_running": <bool>,
   "last_dispatch_tick_at": "<rfc3339> | null",
   "last_dispatch_error_category": "<category> | null",
@@ -364,6 +365,11 @@ loop thread:
   dispatch abandoned mid-flight (e.g. a crash after
   `lease_next_outbox_dispatch`); operators use it to tell a busy dispatcher
   (stale=0) from a stuck one (stale>0).
+- `outbox_projection_drift_count` -- count of projection rows whose status
+  disagrees with the Journal's terminal fact (`ReceiptReceived` /
+  `OutboxDispatchUnknown`) for the same invocation. At steady state this is 0
+  (startup recovery reconciles drift). A persistent non-zero count signals
+  that recovery failed to run or a race left the projection inconsistent.
 
 ---
 
