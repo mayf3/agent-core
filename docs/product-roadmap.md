@@ -187,7 +187,7 @@ Feishu / CLI text
 - 延迟任务能从 health 看见；
 - unknown dispatch 明确可见；
 - ✅ 有 repair command 或操作手册（见 [Operating Guide](./operating-guide.md)，已落地）；
-- shutdown / restart 行为可预测。
+- ✅ shutdown / restart 行为可预测（restart recovery 在启动时把 abandoned dispatch 按 Journal terminal fact 修对；端到端生命周期测试 `tests/m1_restart_recovery_lifecycle.rs` 锁死 crash→restart→reconcile→idempotent 路径，已落地）。
 
 内核补强：
 

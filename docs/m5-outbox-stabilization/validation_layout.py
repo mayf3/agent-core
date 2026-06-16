@@ -87,6 +87,9 @@ def main() -> int:
     must_exist("docs/operating-guide.md")
     must_contain("docs/operating-guide.md", "/health")
     must_contain("docs/operating-guide.md", "outbox_stale_dispatching_count")
+
+    # Anchor: restart recovery lifecycle test (Phase 1 hardening)
+    must_exist("tests/m1_restart_recovery_lifecycle.rs")
     must_not_contain(
         "src/journal/sqlite.rs",
         "_ => JournalEventKind::RunCompleted",
