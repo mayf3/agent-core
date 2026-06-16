@@ -186,7 +186,7 @@ Feishu / CLI text
 
 - 延迟任务能从 health 看见；
 - unknown dispatch 明确可见；
-- 有 repair command 或操作手册；
+- ✅ 有 repair command 或操作手册（见 [Operating Guide](./operating-guide.md)，已落地）；
 - shutdown / restart 行为可预测。
 
 内核补强：
