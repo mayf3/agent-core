@@ -62,6 +62,17 @@ def main() -> int:
     must_contain("src/domain/mod.rs", "RunFailed,")
     must_contain("src/journal/sqlite.rs", '"RunFailed" => JournalEventKind::RunFailed')
 
+    # Anchor: parse_kind fallback routes unknown kinds to the Unknown sentinel,
+    # never to RunCompleted (HANDOVER §10). The negative anchor guards against
+    # reintroducing the silent mis-parse footgun.
+    must_contain("src/domain/mod.rs", "Unknown,")
+    must_contain("src/journal/sqlite.rs", "_ => JournalEventKind::Unknown")
+    must_not_contain(
+        "src/journal/sqlite.rs",
+        "_ => JournalEventKind::RunCompleted",
+    )
+    must_exist("tests/m5_parse_kind.rs")
+
     # Anchor: succeed/fail helpers write Run transitions
     must_contain(
         "src/journal/outbox_queue.rs",
