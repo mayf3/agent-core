@@ -34,6 +34,14 @@ For the final product shape and macro roadmap, see
 | Rust Phase 0 M5i | Done | `JournalStore::lease_next_outbox_dispatch()` leases pending outbox rows with lock fields and appends `DispatchStarted` |
 | Rust Phase 0 M5j | Done | outbox projection stores approval decision IDs for future dispatcher use |
 | Rust Phase 0 M5+ | Done | dispatch_once loop wired into server startup; Runtime delegates to outbox; connector reaction retry scheduling |
+| Phase 1 H1 | Done | Journal kind decode tightened (`parse_kind` -> `Unknown` sentinel); unrecognized kinds no longer masquerade as `RunCompleted` |
+| Phase 1 H2 | Done | migration check via `PRAGMA user_version` at startup; newer-than-supported schema rejected cleanly |
+| Phase 1 H3 | Done | parse/kind drift detection (`row_to_event` sanitized eprintln on unrecognized kind) |
+| Phase 1 H4 | Done | dispatcher observability in `/health` (`outbox_dispatcher_running`, `last_dispatch_tick_at`, `last_dispatch_error_category`) |
+| Phase 1 H5 | Done | `/health` exposes stale dispatching lease count (`outbox_stale_dispatching_count`) and projection drift count (`outbox_projection_drift_count`) |
+| Phase 1 H6 | Done | release checklist (`docs/release-checklist.md`) + operating guide (`docs/operating-guide.md`) |
+| Phase 1 H7 | Done | restart-recovery lifecycle end-to-end test (`tests/m1_restart_recovery_lifecycle.rs`); recovery verified idempotent + never auto-retries |
+| Phase 1 D1 | Decision | `RunStatus::Unknown` -- analysis in `docs/decisions/runstatus-unknown.md`; recommendation: introduce (zero-risk on serialization/read/DB); awaiting maintainer sign-off |
 
 ## Stage Plan
 
