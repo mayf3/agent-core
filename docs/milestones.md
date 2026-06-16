@@ -33,6 +33,7 @@ For the final product shape and macro roadmap, see
 | Rust Phase 0 M5h | Done | stale running worker job crash-test coverage |
 | Rust Phase 0 M5i | Done | `JournalStore::lease_next_outbox_dispatch()` leases pending outbox rows with lock fields and appends `DispatchStarted` |
 | Rust Phase 0 M5j | Done | outbox projection stores approval decision IDs for future dispatcher use |
+| Rust Phase 0 M5+ | Done | dispatch_once loop wired into server startup; Runtime delegates to outbox; connector reaction retry scheduling |
 
 ## Stage Plan
 
@@ -108,8 +109,12 @@ Done:
 
 Remaining:
 
-- wire the `dispatch_once` loop into server startup (still synchronous in Runtime);
-- connector-local reaction retry scheduling.
+- _(none -- M5 is complete. The `dispatch_once` loop is wired into server
+  startup (`start_outbox_dispatcher_loop` in `src/server/delivery.rs`, called
+  from `serve()`); `Runtime::deliver` delegates to `outbox_dispatches`
+  instead of sending synchronously; and connector-local reaction retry
+  scheduling is implemented via a bounded `withRetry` helper in
+  `connectors/feishu/src/reactions.ts`.)_
 
 ### Later: Invocation Gateway Hardening
 
