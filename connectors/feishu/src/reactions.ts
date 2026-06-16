@@ -27,6 +27,11 @@ export function createReactionTracker(
   const states = loadStates(store);
   const processingEmoji = config.processingReactionEmoji;
   const failedEmoji = config.failedReactionEmoji;
+  // Default retry parameters so callers building a minimal ConnectorConfig
+  // (e.g. tests) do not have to set every field. A config that explicitly
+  // disables retries can set reactionRetryAttempts = 1.
+  const retryAttempts = Math.max(1, config.reactionRetryAttempts ?? 3);
+  const retryBaseDelayMs = Math.max(0, config.reactionRetryBaseDelayMs ?? 500);
   if (states.size > 0) {
     console.log(`reaction tracker loaded states=${states.size}`);
   }
@@ -36,7 +41,12 @@ export function createReactionTracker(
         return;
       }
       try {
-        const reactionId = await addReaction(client, messageId, processingEmoji);
+        const reactionId = await withRetry(
+          () => addReaction(client, messageId, processingEmoji),
+          retryAttempts,
+          retryBaseDelayMs,
+          `add processing msg=${shortId(messageId)}`,
+        );
         if (!reactionId) {
           console.log(`reaction add skipped msg=${shortId(messageId)} reason=no_reaction_id`);
           return;
@@ -50,19 +60,24 @@ export function createReactionTracker(
         store.set(storedState(messageId, reactionId, processingEmoji, "processing"));
         console.log(`reaction added emoji=${processingEmoji} msg=${shortId(messageId)} reaction=${shortId(reactionId)}`);
       } catch (error) {
-        console.warn(`reaction add failed msg=${shortId(messageId)} category=${errorLabel(error)}`);
+        console.warn(`reaction add failed msg=${shortId(messageId)} category=${errorLabel(error)} attempts=${retryAttempts}`);
       }
     },
     async markSucceeded(messageId: string) {
-      await removeTrackedReaction(client, states, store, messageId, "succeeded");
+      await removeTrackedReaction(client, states, store, messageId, "succeeded", retryAttempts, retryBaseDelayMs);
     },
     async markFailed(messageId: string) {
       if (!messageId || !failedEmoji) {
         return;
       }
-      await removeTrackedReaction(client, states, store, messageId, "failed");
+      await removeTrackedReaction(client, states, store, messageId, "failed", retryAttempts, retryBaseDelayMs);
       try {
-        const reactionId = await addReaction(client, messageId, failedEmoji);
+        const reactionId = await withRetry(
+          () => addReaction(client, messageId, failedEmoji),
+          retryAttempts,
+          retryBaseDelayMs,
+          `add failed msg=${shortId(messageId)}`,
+        );
         if (!reactionId) {
           console.warn(`reaction failed marker skipped msg=${shortId(messageId)} reason=no_reaction_id`);
           return;
@@ -76,11 +91,11 @@ export function createReactionTracker(
         store.set(storedState(messageId, reactionId, failedEmoji, "failed"));
         console.warn(`reaction failed marker added emoji=${failedEmoji} msg=${shortId(messageId)} reaction=${shortId(reactionId)}`);
       } catch (error) {
-        console.warn(`reaction failed marker add failed msg=${shortId(messageId)} category=${errorLabel(error)}`);
+        console.warn(`reaction failed marker add failed msg=${shortId(messageId)} category=${errorLabel(error)} attempts=${retryAttempts}`);
       }
     },
     async clearProcessing(messageId: string) {
-      await removeTrackedReaction(client, states, store, messageId, "cleared");
+      await removeTrackedReaction(client, states, store, messageId, "cleared", retryAttempts, retryBaseDelayMs);
     },
   };
 }
@@ -108,24 +123,77 @@ async function removeTrackedReaction(
   store: ReactionStateStore,
   messageId: string,
   reason: string,
+  retryAttempts: number,
+  retryBaseDelayMs: number,
 ) {
   const state = states.get(messageId);
   if (!state || state.status === "remove_pending") {
+    // No tracked reaction, or a concurrent remove is already in-flight for
+    // this message — avoid duplicate DELETEs.
     return;
   }
   state.status = "remove_pending";
   try {
-    await client.request({
-      method: "DELETE",
-      url: `/open-apis/im/v1/messages/${encodeURIComponent(messageId)}/reactions/${encodeURIComponent(state.reactionId)}`,
-    });
+    await withRetry(
+      () =>
+        client.request({
+          method: "DELETE",
+          url: `/open-apis/im/v1/messages/${encodeURIComponent(messageId)}/reactions/${encodeURIComponent(state.reactionId)}`,
+        }),
+      retryAttempts,
+      retryBaseDelayMs,
+      `remove msg=${shortId(messageId)} reason=${reason}`,
+    );
     states.delete(messageId);
     store.delete(messageId);
     console.log(`reaction removed msg=${shortId(messageId)} reaction=${shortId(state.reactionId)} reason=${reason}`);
   } catch (error) {
+    // Restore the prior status so a restart can still drive the removal via
+    // markSucceeded/markFailed (the existing recovery path for processing
+    // state). The in-flight remove_pending guard above only protects against
+    // concurrent duplicate DELETEs within a single process.
     state.status = reason === "failed" ? "failed" : "processing";
-    console.warn(`reaction remove failed msg=${shortId(messageId)} category=${errorLabel(error)}`);
+    console.warn(`reaction remove failed msg=${shortId(messageId)} category=${errorLabel(error)} attempts=${retryAttempts}`);
   }
+}
+
+/**
+ * Run an async operation with bounded exponential-backoff retries. This is NOT
+ * a keepalive loop: total attempts are capped at `attempts` (including the
+ * first), preserving the Phase 0 invariant that reaction add/remove is bounded
+ * per handled message. A test-injectable sleep keeps the helper deterministic.
+ */
+export async function withRetry<T>(
+  operation: () => Promise<T>,
+  attempts: number,
+  baseDelayMs: number,
+  label: string,
+  sleep: (ms: number) => Promise<void> = defaultSleep,
+): Promise<T> {
+  let lastError: unknown;
+  const maxAttempts = Math.max(1, attempts);
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      if (attempt >= maxAttempts) {
+        break;
+      }
+      // Exponential backoff with full jitter: delay in [0, base * 2^(attempt-1)].
+      const ceiling = baseDelayMs * 2 ** (attempt - 1);
+      const delay = Math.floor(Math.random() * (ceiling + 1));
+      console.warn(`reaction retry scheduled label=${label} attempt=${attempt} next_delay_ms=${delay} category=${errorLabel(error)}`);
+      await sleep(delay);
+    }
+  }
+  throw lastError;
+}
+
+function defaultSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
 
 function loadStates(store: ReactionStateStore): Map<string, ReactionState> {
