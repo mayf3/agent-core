@@ -42,6 +42,18 @@ impl JournalStore {
         Ok(())
     }
 
+    /// Force `PRAGMA user_version` to a specific value, simulating a database
+    /// written by a newer kernel. Used to exercise the startup migration check
+    /// (Phase 1 hardening).
+    pub fn set_user_version_for_test(&self, version: i64) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow!("journal mutex poisoned"))?;
+        conn.pragma_update(None, "user_version", version)?;
+        Ok(())
+    }
+
     /// Expire an outbox lease so recovery queries select the row.
     pub fn expire_outbox_lease_for_test(&self, invocation_id: &InvocationId) -> Result<()> {
         let past = (Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
