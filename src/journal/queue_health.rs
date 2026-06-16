@@ -1,5 +1,5 @@
 use super::sqlite::JournalStore;
-use crate::domain::OutboxDispatchStatus;
+use crate::domain::{OutboxDispatchStatus, WorkerJobStatus};
 use anyhow::{anyhow, Result};
 use chrono::Utc;
 use rusqlite::params;
@@ -93,6 +93,26 @@ impl JournalStore {
                ))
              )",
             [],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
+    }
+
+    /// Count worker jobs still flagged `running` whose lease has expired
+    /// (`locked_until` is non-NULL and `<= now`). Symmetric to
+    /// `outbox_stale_dispatching_count`: a non-zero count signals a worker
+    /// loop that crashed mid-job (the lease was never released). Phase 1
+    /// Operational Hardening.
+    pub fn worker_job_stale_count(&self) -> Result<i64> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow!("journal mutex poisoned"))?;
+        let now = Utc::now().to_rfc3339();
+        conn.query_row(
+            "SELECT COUNT(*) FROM worker_jobs
+             WHERE status = ?1 AND locked_until IS NOT NULL AND locked_until <= ?2",
+            params![WorkerJobStatus::Running.as_str(), now.as_str()],
             |row| row.get(0),
         )
         .map_err(Into::into)
