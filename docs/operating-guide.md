@@ -91,6 +91,8 @@ Key fields:
 | `outbox_dispatching_count` | in-flight | may be >0 briefly |
 | `outbox_stale_dispatching_count` | inline-leased dispatches with expired lease (crash-abandoned) | `0` |
 | `outbox_unknown_count` | dispatched but terminal outcome unknown | `0` at steady state |
+| `outbox_projection_drift_count` | projection status disagrees with Journal terminal fact | `0` at steady state |
+| `worker_job_stale_count` | worker jobs flagged `running` with expired lease (crash mid-job) | `0` |
 | `unknown_invocation_count` / `unknown_invocations` | runs stuck in unknown state | `0` at steady state |
 
 `status` values:
@@ -141,6 +143,23 @@ An inline-leased dispatch was abandoned (crash after
 `lease_next_outbox_dispatch`). Recovery reconciles it on the next startup. If
 it persists across restarts, the Journal terminal fact is missing — treat as
 `unknown`.
+
+### `outbox_projection_drift_count > 0`
+
+A projection row's status disagrees with the Journal terminal fact (e.g.
+projection says `dispatching` but the Journal has `ReceiptReceived(Succeeded)`).
+At steady state this is 0 because startup recovery reconciles drift. If it
+persists, recovery did not run or a race left the projection inconsistent —
+restart the kernel to force reconciliation; if it still persists, inspect the
+Journal for the invocation to determine the true terminal fact.
+
+### `worker_job_stale_count > 0`
+
+A worker job flagged `running` has an expired lease — the worker loop crashed
+mid-job and never released the lease. On the next startup the worker loop
+re-leases stale jobs (`lease_next_worker_job` treats `running` with expired
+lease as re-leasable), so this should self-heal on restart. If it persists,
+inspect `worker_jobs.last_error` for the failing job.
 
 ### Connector not receiving Feishu events
 
