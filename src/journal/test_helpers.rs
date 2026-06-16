@@ -27,6 +27,21 @@ impl JournalStore {
         Ok(())
     }
 
+    /// Overwrite the `kind` column of sequence 1 with an arbitrary string,
+    /// simulating tampering or future-enum drift. Used to exercise the
+    /// `parse_kind` fallback routing to `JournalEventKind::Unknown`.
+    pub fn tamper_first_event_kind_for_test(&self, kind: &str) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow!("journal mutex poisoned"))?;
+        conn.execute(
+            "UPDATE journal_events SET kind = ?1 WHERE sequence = 1",
+            params![kind],
+        )?;
+        Ok(())
+    }
+
     /// Expire an outbox lease so recovery queries select the row.
     pub fn expire_outbox_lease_for_test(&self, invocation_id: &InvocationId) -> Result<()> {
         let past = (Utc::now() - chrono::Duration::hours(1)).to_rfc3339();

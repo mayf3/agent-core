@@ -378,6 +378,12 @@ PR description or in a follow-up conversation, do not guess:
   (in `src/journal/sqlite.rs`) be tightened? It is a pre-existing footgun
   where any unrecognized kind silently becomes `RunCompleted`. Out of
   scope for the current PR but worth tracking.
+  **Resolved:** the fallback now routes to a new `JournalEventKind::Unknown`
+  sentinel instead of `RunCompleted` (see PR for §10). Unknown kinds no
+  longer masquerade as a run completion in `undelivered_ingress_events`;
+  `verify_hash_chain` still flags the row corrupt. `parse_kind`/`row_to_event`
+  deliberately stay non-`Result` to preserve the existing `/health`
+  `"corrupt"` semantics (bailing would 500 the endpoint instead).
 - `RetryPolicy::lease_timeout_ms` (30s) vs the hardcoded 5-minute lease
   used inside `lease_next_worker_job` / `lease_next_outbox_dispatch`. Doc
   notes the divergence; unification is a future PR.

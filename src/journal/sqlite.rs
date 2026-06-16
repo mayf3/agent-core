@@ -403,13 +403,25 @@ fn backfill_feishu_message_dedup(conn: &Connection) -> Result<()> {
 fn row_to_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<JournalEvent> {
     let kind_text: String = row.get(5)?;
     let payload_json: String = row.get(6)?;
+    let sequence: i64 = row.get(0)?;
+    let kind = parse_kind(&kind_text);
+    if matches!(kind, JournalEventKind::Unknown) && kind_text != "Unknown" {
+        // Sanitized diagnostic: only the sequence and the unrecognized kind
+        // label. Never includes payload, correlation_id, run_id, session_id,
+        // or any external content. This is an operator signal that either
+        // external tampering occurred or a future enum variant's read-path
+        // was not updated. (HANDOVER §10)
+        eprintln!(
+            "journal: unrecognized event kind {kind_text:?} at sequence {sequence}; routing to Unknown"
+        );
+    }
     Ok(JournalEvent {
-        sequence: row.get(0)?,
+        sequence,
         event_id: EventId(row.get(1)?),
         run_id: row.get::<_, Option<String>>(2)?.map(RunId),
         session_id: row.get::<_, Option<String>>(3)?.map(SessionId),
         correlation_id: row.get(4)?,
-        kind: parse_kind(&kind_text),
+        kind,
         payload: serde_json::from_str(&payload_json).unwrap_or_else(|_| json!({})),
         previous_hash: row.get(7)?,
         hash: row.get(8)?,
@@ -439,7 +451,9 @@ fn parse_kind(value: &str) -> JournalEventKind {
         "WorkerJobDead" => JournalEventKind::WorkerJobDead,
         "RunCompleted" => JournalEventKind::RunCompleted,
         "RunFailed" => JournalEventKind::RunFailed,
-        _ => JournalEventKind::RunCompleted,
+        // Unknown kinds (tampering or future-enum drift) route to the sentinel
+        // instead of masquerading as RunCompleted. See HANDOVER §10.
+        _ => JournalEventKind::Unknown,
     }
 }
 
