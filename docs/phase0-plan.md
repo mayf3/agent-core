@@ -319,13 +319,14 @@ Done:
 
 Not done:
 
-- worker loop reads from `worker_jobs`;
-- outbox dispatcher reads from `outbox_dispatches`;
-- durable connector UX outbox for retry scheduling.
+- _(none remaining — the worker loop reads from `worker_jobs` via
+  `start_worker_loop` in `src/server/delivery.rs`; the outbox dispatcher reads
+  from `outbox_dispatches` via `start_outbox_dispatcher_loop`; and connector
+  reaction retry scheduling is in `connectors/feishu/src/reactions.ts`.)_
 
 ### M5: Minimal Durable Worker / Outbox
 
-Implementation status: projection foundation.
+Implementation status: complete.
 
 Done:
 
@@ -359,11 +360,14 @@ Done:
 
 Not done:
 
-- Runtime still sends approved invocations synchronously instead of letting a
-  separate dispatcher poll `outbox_dispatches` (the `dispatch_once` helper
-  exists in `src/runtime/outbox_dispatcher.rs` but is not wired into server
-  startup).
-- connector-local reaction retry scheduling.
+- _(none remaining — M5 is complete. The two items previously listed here are
+  now done: the `dispatch_once` loop is wired into server startup via
+  `start_outbox_dispatcher_loop` in `src/server/delivery.rs`, called from
+  `serve()` in `src/server/mod.rs`; `Runtime::deliver` no longer sends
+  synchronously and instead queues to `outbox_dispatches` and sets the run to
+  `WaitingDispatch`; and connector-local reaction retry scheduling is
+  implemented in `connectors/feishu/src/reactions.ts` via a bounded
+  `withRetry` helper.)_
 
 ## Phase 0 Non-Goals
 
