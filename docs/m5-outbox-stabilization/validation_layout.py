@@ -117,6 +117,10 @@ def main() -> int:
         "src/server/mod.rs",
         "outbox_dispatching_count",
     )
+    must_contain(
+        "src/server/mod.rs",
+        "outbox_stale_dispatching_count",
+    )
 
     # Anchor: dispatcher observability fields (HANDOVER §4.4)
     must_contain("src/server/mod.rs", "outbox_dispatcher_running")
