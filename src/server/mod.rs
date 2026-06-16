@@ -184,6 +184,7 @@ pub fn health_snapshot(
     let outbox_unknown_count = journal.outbox_status_count(OutboxDispatchStatus::Unknown)?;
     let outbox_dispatching_count =
         journal.outbox_status_count(OutboxDispatchStatus::Dispatching)?;
+    let outbox_stale_dispatching_count = journal.outbox_stale_dispatching_count()?;
     let status = if !hash_chain_ok {
         "corrupt"
     } else if unknown_invocations.is_empty() {
@@ -206,6 +207,7 @@ pub fn health_snapshot(
         "outbox_pending_count": outbox_pending_count,
         "outbox_unknown_count": outbox_unknown_count,
         "outbox_dispatching_count": outbox_dispatching_count,
+        "outbox_stale_dispatching_count": outbox_stale_dispatching_count,
         "unknown_invocation_count": unknown_invocations.len(),
         "unknown_invocations": unknown_invocations.iter().map(|invocation| {
             json!({
