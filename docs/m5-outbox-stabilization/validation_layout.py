@@ -58,15 +58,25 @@ def main() -> int:
     must_exist("src/server/dispatcher_metrics.rs")
     must_exist("src/runtime/outbox_dispatcher.rs")
 
-    # Anchor: RunFailed event kind
+    # Anchor: RunFailed event kind (parse_kind now lives in sqlite_read.rs)
     must_contain("src/domain/mod.rs", "RunFailed,")
-    must_contain("src/journal/sqlite.rs", '"RunFailed" => JournalEventKind::RunFailed')
+    must_contain("src/journal/sqlite_read.rs", '"RunFailed" => JournalEventKind::RunFailed')
 
     # Anchor: parse_kind fallback routes unknown kinds to the Unknown sentinel,
     # never to RunCompleted (HANDOVER §10). The negative anchor guards against
     # reintroducing the silent mis-parse footgun.
     must_contain("src/domain/mod.rs", "Unknown,")
-    must_contain("src/journal/sqlite.rs", "_ => JournalEventKind::Unknown")
+    must_contain("src/journal/sqlite_read.rs", "_ => JournalEventKind::Unknown")
+    must_not_contain(
+        "src/journal/sqlite_read.rs",
+        "_ => JournalEventKind::RunCompleted",
+    )
+    must_exist("tests/m1_schema_version.rs")
+    must_exist("src/journal/sqlite_read.rs")
+
+    # Anchor: schema version check (Phase 1 hardening)
+    must_contain("src/journal/sqlite.rs", "CURRENT_SCHEMA_VERSION")
+    must_contain("src/journal/sqlite.rs", "PRAGMA user_version")
     must_not_contain(
         "src/journal/sqlite.rs",
         "_ => JournalEventKind::RunCompleted",
