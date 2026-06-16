@@ -90,6 +90,10 @@ def main() -> int:
 
     # Anchor: restart recovery lifecycle test (Phase 1 hardening)
     must_exist("tests/m1_restart_recovery_lifecycle.rs")
+
+    # Anchor: RunStatus::Unknown decision doc (Phase 1 hardening)
+    must_exist("docs/decisions/runstatus-unknown.md")
+    must_contain("docs/decisions/runstatus-unknown.md", "RunStatus::Unknown")
     must_not_contain(
         "src/journal/sqlite.rs",
         "_ => JournalEventKind::RunCompleted",
