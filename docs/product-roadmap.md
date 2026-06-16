@@ -192,7 +192,7 @@ Feishu / CLI text
 内核补强：
 
 - ✅ stricter Journal decode（`parse_kind` → `Unknown` 哨兵，已落地）；
-- 是否引入 `RunStatus::Unknown` 的明确决策；
+- 是否引入 `RunStatus::Unknown` 的明确决策（分析见 [决策文档](./decisions/runstatus-unknown.md)，待 maintainer 拍板；推荐引入，影响面已分析为零风险）；
 - ✅ projection verify / repair（`/health` 的 `outbox_projection_drift_count` 暴露 projection 与 Journal terminal fact 的不一致;启动 recovery 自动 reconcile。已落地）;
 - ✅ migration check（启动时 `PRAGMA user_version` 校验，已落地）；
 - ✅ release checklist（见 [Release Checklist](./release-checklist.md)，已落地）；
