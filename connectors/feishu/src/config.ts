@@ -12,6 +12,8 @@ export interface ConnectorConfig {
   processingReactionEmoji: string;
   failedReactionEmoji: string;
   reactionStatePath: string;
+  reactionRetryAttempts: number;
+  reactionRetryBaseDelayMs: number;
 }
 
 export function loadConfig(): ConnectorConfig {
@@ -27,6 +29,13 @@ export function loadConfig(): ConnectorConfig {
     processingReactionEmoji: optionalReaction("AGENT_CORE_FEISHU_PROCESSING_REACTION", "OK"),
     failedReactionEmoji: optionalReaction("AGENT_CORE_FEISHU_FAILED_REACTION", "ERROR"),
     reactionStatePath: reactionStatePath(),
+    // Bounded retry for transient Feishu reaction add/remove failures. This is
+    // NOT a keepalive loop: the total attempt count is capped so the Phase 0
+    // invariant "one add and one delete per handled message is the intended
+    // upper bound" still holds (at most N adds, at most N deletes, then give
+    // up and log). See phase0-plan.md "Feishu Identity" / M1.
+    reactionRetryAttempts: positiveInt("AGENT_CORE_FEISHU_REACTION_RETRY_ATTEMPTS", 3),
+    reactionRetryBaseDelayMs: positiveInt("AGENT_CORE_FEISHU_REACTION_RETRY_BASE_DELAY_MS", 500),
   };
 }
 
@@ -44,6 +53,14 @@ function optionalReaction(key: string, fallback: string): string {
     return "";
   }
   return value;
+}
+
+function positiveInt(key: string, fallback: number): number {
+  const raw = Number(process.env[key] ?? fallback);
+  if (!Number.isInteger(raw) || raw < 0) {
+    return fallback;
+  }
+  return raw;
 }
 
 function reactionStatePath(): string {
