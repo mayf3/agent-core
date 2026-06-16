@@ -42,6 +42,22 @@ impl JournalStore {
         Ok(())
     }
 
+    /// Expire the lease of a `running` worker job (set `locked_until` to the
+    /// past), simulating a worker loop crash mid-job. Used to exercise
+    /// `worker_job_stale_count`.
+    pub fn expire_worker_lease_for_test(&self, job_id: &str) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow!("journal mutex poisoned"))?;
+        let past = (Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+        conn.execute(
+            "UPDATE worker_jobs SET locked_until = ?1 WHERE job_id = ?2",
+            params![past, job_id],
+        )?;
+        Ok(())
+    }
+
     /// Force `PRAGMA user_version` to a specific value, simulating a database
     /// written by a newer kernel. Used to exercise the startup migration check
     /// (Phase 1 hardening).
