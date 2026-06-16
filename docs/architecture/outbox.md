@@ -335,6 +335,7 @@ Note: `lease_timeout_ms` (30s) is the canonical value in `RetryPolicy`. Worker a
   "outbox_dispatching_count": <i64>,
   "outbox_stale_dispatching_count": <i64>,
   "outbox_projection_drift_count": <i64>,
+  "worker_job_stale_count": <i64>,
   "outbox_dispatcher_running": <bool>,
   "last_dispatch_tick_at": "<rfc3339> | null",
   "last_dispatch_error_category": "<category> | null",
@@ -370,6 +371,10 @@ loop thread:
   `OutboxDispatchUnknown`) for the same invocation. At steady state this is 0
   (startup recovery reconciles drift). A persistent non-zero count signals
   that recovery failed to run or a race left the projection inconsistent.
+- `worker_job_stale_count` -- count of `worker_jobs` rows still flagged
+  `running` whose `locked_until` is non-NULL and expired (`<= now`). Symmetric
+  to `outbox_stale_dispatching_count`; a non-zero count signals a worker loop
+  that crashed mid-job (the lease was never released).
 
 ---
 
