@@ -333,6 +333,7 @@ Note: `lease_timeout_ms` (30s) is the canonical value in `RetryPolicy`. Worker a
   "outbox_pending_count": <i64>,
   "outbox_unknown_count": <i64>,
   "outbox_dispatching_count": <i64>,
+  "outbox_stale_dispatching_count": <i64>,
   "outbox_dispatcher_running": <bool>,
   "last_dispatch_tick_at": "<rfc3339> | null",
   "last_dispatch_error_category": "<category> | null",
@@ -356,6 +357,13 @@ loop thread:
   `Err`). Per-dispatch adapter failures are already captured per-row in
   `outbox_dispatches.last_error` via `unknown_outbox_dispatch`; the raw error
   string is never surfaced.
+- `outbox_stale_dispatching_count` -- count of `dispatching` rows whose
+  `locked_until` is non-NULL and expired (`<= now`). A NULL `locked_until`
+  (the normal state for rows queued via `start_outbox_dispatch` and owned by
+  the dispatcher loop) is NOT stale. A non-zero count signals an inline-leased
+  dispatch abandoned mid-flight (e.g. a crash after
+  `lease_next_outbox_dispatch`); operators use it to tell a busy dispatcher
+  (stale=0) from a stuck one (stale>0).
 
 ---
 
