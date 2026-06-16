@@ -50,6 +50,54 @@ impl JournalStore {
         .map_err(Into::into)
     }
 
+    /// Count outbox projection rows whose status disagrees with the Journal's
+    /// terminal fact for the same invocation. A row is "drifted" when the
+    /// Journal already has a terminal event (`ReceiptReceived` or
+    /// `OutboxDispatchUnknown`) but the projection is not in the matching
+    /// terminal state. At steady state this is 0 — startup recovery
+    /// reconciles drift. A persistent non-zero count signals that recovery
+    /// failed to run or a race left the projection inconsistent. Phase 1
+    /// Operational Hardening (projection verify).
+    pub fn outbox_projection_drift_count(&self) -> Result<i64> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow!("journal mutex poisoned"))?;
+        // A row drifts if its Journal has a terminal fact but the projection
+        // status is not the matching terminal state. We treat any projection
+        // state that is NOT the Journal-implied terminal state as drift.
+        conn.query_row(
+            "SELECT COUNT(*) FROM outbox_dispatches od
+             WHERE EXISTS (
+               SELECT 1 FROM journal_events je
+               WHERE je.correlation_id = od.invocation_id
+                 AND je.kind IN ('ReceiptReceived', 'OutboxDispatchUnknown')
+             )
+             AND NOT (
+               (od.status = 'succeeded' AND EXISTS (
+                  SELECT 1 FROM journal_events je
+                  WHERE je.correlation_id = od.invocation_id
+                    AND je.kind = 'ReceiptReceived'
+                    AND je.payload_json LIKE '%\"status\":\"Succeeded\"%'
+               ))
+               OR (od.status = 'failed' AND EXISTS (
+                  SELECT 1 FROM journal_events je
+                  WHERE je.correlation_id = od.invocation_id
+                    AND je.kind = 'ReceiptReceived'
+                    AND je.payload_json LIKE '%\"status\":\"Failed\"%'
+               ))
+               OR (od.status = 'unknown' AND EXISTS (
+                  SELECT 1 FROM journal_events je
+                  WHERE je.correlation_id = od.invocation_id
+                    AND je.kind = 'OutboxDispatchUnknown'
+               ))
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
+    }
+
     fn status_counts(&self, table: &str) -> Result<BTreeMap<String, i64>> {
         let conn = self
             .conn

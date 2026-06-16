@@ -193,7 +193,7 @@ Feishu / CLI text
 
 - ✅ stricter Journal decode（`parse_kind` → `Unknown` 哨兵，已落地）；
 - 是否引入 `RunStatus::Unknown` 的明确决策；
-- projection verify / repair；
+- ✅ projection verify / repair（`/health` 的 `outbox_projection_drift_count` 暴露 projection 与 Journal terminal fact 的不一致;启动 recovery 自动 reconcile。已落地）;
 - ✅ migration check（启动时 `PRAGMA user_version` 校验，已落地）；
 - ✅ release checklist（见 [Release Checklist](./release-checklist.md)，已落地）；
 - ✅ parse / kind 漂移检测（`row_to_event` 在读到未知 kind 时输出脱敏 eprintln，已落地）。
