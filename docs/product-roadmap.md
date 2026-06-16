@@ -195,7 +195,7 @@ Feishu / CLI text
 - 是否引入 `RunStatus::Unknown` 的明确决策；
 - projection verify / repair；
 - ✅ migration check（启动时 `PRAGMA user_version` 校验，已落地）；
-- release checklist；
+- ✅ release checklist（见 [Release Checklist](./release-checklist.md)，已落地）；
 - ✅ parse / kind 漂移检测（`row_to_event` 在读到未知 kind 时输出脱敏 eprintln，已落地）。
 
 暂不做：
