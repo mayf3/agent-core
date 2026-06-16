@@ -1,9 +1,10 @@
 use super::hash_chain::event_hash;
+use super::sqlite_read::{parse_time, row_to_event};
 use crate::domain::*;
-use anyhow::{anyhow, Result};
-use chrono::{DateTime, Utc};
+use anyhow::{anyhow, bail, Result};
+use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
@@ -11,6 +12,11 @@ use std::sync::Mutex;
 pub struct JournalStore {
     pub(crate) conn: Mutex<Connection>,
 }
+
+/// The schema `PRAGMA user_version` this kernel writes and understands.
+/// Bumped only when `migrations/` gains a new applied migration. The startup
+/// `migrate()` refuses to run against a DB whose version is newer than this.
+const CURRENT_SCHEMA_VERSION: i64 = 1;
 
 impl JournalStore {
     pub fn open(path: &Path) -> Result<Self> {
@@ -31,6 +37,16 @@ impl JournalStore {
         };
         store.migrate()?;
         Ok(store)
+    }
+
+    /// The applied schema version (`PRAGMA user_version`). Useful for
+    /// operators and tests to confirm which migration level a database is at.
+    pub fn schema_version(&self) -> Result<i64> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow!("journal mutex poisoned"))?;
+        Ok(conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))?)
     }
 
     pub fn append_event(
@@ -318,9 +334,31 @@ impl JournalStore {
             .conn
             .lock()
             .map_err(|_| anyhow!("journal mutex poisoned"))?;
-        conn.execute_batch(include_str!("../../migrations/0001_init.sql"))?;
-        super::queue::migrate(&conn)?;
-        backfill_feishu_message_dedup(&conn)?;
+        let applied = conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))?;
+        if applied > CURRENT_SCHEMA_VERSION {
+            // The on-disk DB is newer than this kernel binary understands.
+            // Bail loudly with a sanitized, version-only message so an
+            // operator knows to upgrade the kernel rather than letting a
+            // partial/old migration run and corrupt the schema. (Phase 1
+            // hardening: migration check.)
+            bail!(
+                "database schema version {applied} is newer than supported version {CURRENT_SCHEMA_VERSION}; upgrade the kernel"
+            );
+        }
+        if applied == 0 {
+            // Fresh database: run the base migration and stamp the version.
+            conn.execute_batch(include_str!("../../migrations/0001_init.sql"))?;
+            super::queue::migrate(&conn)?;
+            backfill_feishu_message_dedup(&conn)?;
+            conn.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
+        } else {
+            // Existing database at a known version: the base schema migration
+            // is already applied. queue::migrate and the dedup backfill are
+            // idempotent / read-only-safe, so they can run every startup to
+            // heal any projection drift.
+            super::queue::migrate(&conn)?;
+            backfill_feishu_message_dedup(&conn)?;
+        }
         Ok(())
     }
 
@@ -398,73 +436,4 @@ fn backfill_feishu_message_dedup(conn: &Connection) -> Result<()> {
         )?;
     }
     Ok(())
-}
-
-fn row_to_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<JournalEvent> {
-    let kind_text: String = row.get(5)?;
-    let payload_json: String = row.get(6)?;
-    let sequence: i64 = row.get(0)?;
-    let kind = parse_kind(&kind_text);
-    if matches!(kind, JournalEventKind::Unknown) && kind_text != "Unknown" {
-        // Sanitized diagnostic: only the sequence and the unrecognized kind
-        // label. Never includes payload, correlation_id, run_id, session_id,
-        // or any external content. This is an operator signal that either
-        // external tampering occurred or a future enum variant's read-path
-        // was not updated. (HANDOVER §10)
-        eprintln!(
-            "journal: unrecognized event kind {kind_text:?} at sequence {sequence}; routing to Unknown"
-        );
-    }
-    Ok(JournalEvent {
-        sequence,
-        event_id: EventId(row.get(1)?),
-        run_id: row.get::<_, Option<String>>(2)?.map(RunId),
-        session_id: row.get::<_, Option<String>>(3)?.map(SessionId),
-        correlation_id: row.get(4)?,
-        kind,
-        payload: serde_json::from_str(&payload_json).unwrap_or_else(|_| json!({})),
-        previous_hash: row.get(7)?,
-        hash: row.get(8)?,
-        created_at: parse_time(row.get::<_, String>(9)?)?,
-    })
-}
-
-fn parse_kind(value: &str) -> JournalEventKind {
-    match value {
-        "IngressAccepted" => JournalEventKind::IngressAccepted,
-        "SessionReady" => JournalEventKind::SessionReady,
-        "RunStarted" => JournalEventKind::RunStarted,
-        "ContextBuilt" => JournalEventKind::ContextBuilt,
-        "LlmCompleted" => JournalEventKind::LlmCompleted,
-        "InvocationProposed" => JournalEventKind::InvocationProposed,
-        "InvocationApproved" => JournalEventKind::InvocationApproved,
-        "WorkerJobQueued" => JournalEventKind::WorkerJobQueued,
-        "WorkerJobStarted" => JournalEventKind::WorkerJobStarted,
-        "WorkerJobSucceeded" => JournalEventKind::WorkerJobSucceeded,
-        "WorkerJobFailed" => JournalEventKind::WorkerJobFailed,
-        "OutboxQueued" => JournalEventKind::OutboxQueued,
-        "OutboxDispatchFailed" => JournalEventKind::OutboxDispatchFailed,
-        "OutboxDispatchUnknown" => JournalEventKind::OutboxDispatchUnknown,
-        "OutboxDispatchDead" => JournalEventKind::OutboxDispatchDead,
-        "DispatchStarted" => JournalEventKind::DispatchStarted,
-        "ReceiptReceived" => JournalEventKind::ReceiptReceived,
-        "WorkerJobDead" => JournalEventKind::WorkerJobDead,
-        "RunCompleted" => JournalEventKind::RunCompleted,
-        "RunFailed" => JournalEventKind::RunFailed,
-        // Unknown kinds (tampering or future-enum drift) route to the sentinel
-        // instead of masquerading as RunCompleted. See HANDOVER §10.
-        _ => JournalEventKind::Unknown,
-    }
-}
-
-fn parse_time(value: String) -> rusqlite::Result<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(&value)
-        .map(|time| time.with_timezone(&Utc))
-        .map_err(|error| {
-            rusqlite::Error::FromSqlConversionFailure(
-                0,
-                rusqlite::types::Type::Text,
-                Box::new(error),
-            )
-        })
 }
