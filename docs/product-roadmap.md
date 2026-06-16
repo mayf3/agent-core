@@ -134,7 +134,7 @@ Agent Core 不拥有：
 
 ### Phase 0: Durable Chat Kernel
 
-状态：基本完成。
+状态：完成。全部代码要求已落地 `main`，`pnpm check` 全绿。
 
 目标：
 
@@ -159,10 +159,17 @@ Feishu / CLI text
 - SQLite Journal 从第一条消息开始使用；
 - worker_jobs / outbox_dispatches 是 projection，不是事实源；
 - restart recovery；
-- connector-local reaction；
+- connector-local reaction（含 bounded retry scheduling）；
 - `~/.agent-core` 下的 agent data；
 - OpenAI-compatible model fallback；
 - TypeScript Feishu Connector 仍是边缘 adapter。
+
+实现要点（已落地，非待办）：
+
+- `dispatch_once` loop 已接入 server startup（`start_outbox_dispatcher_loop`，由 `serve()` 启动）；
+- `Runtime::deliver` 不再同步发送，改为 `queue_outbox_dispatch` + `update_run_status("WaitingDispatch")`，由独立 dispatcher 消费 `outbox_dispatches`；
+- connector-local reaction add/remove 走 bounded `withRetry`（指数退避 + 抖动，非 keepalive loop），保留 Phase 0 "one add and one delete per handled message" 不变式；
+- Journal kind decode 的兜底从静默 `RunCompleted` 收紧为 `JournalEventKind::Unknown` 哨兵（见 §当前下一批决策）。
 
 退出标准：
 
@@ -184,12 +191,12 @@ Feishu / CLI text
 
 内核补强：
 
-- stricter Journal decode；
+- ✅ stricter Journal decode（`parse_kind` → `Unknown` 哨兵，已落地）；
 - 是否引入 `RunStatus::Unknown` 的明确决策；
 - projection verify / repair；
 - migration check；
 - release checklist；
-- parse / kind 漂移检测。
+- ✅ parse / kind 漂移检测（`row_to_event` 在读到未知 kind 时输出脱敏 eprintln，已落地）。
 
 暂不做：
 
@@ -375,10 +382,10 @@ Kernel 可以定义协议，但不吸收这些产品逻辑。
 
 ## 当前下一批决策
 
-近期优先做内核 hardening，再扩大能力：
+近期优先做内核 hardening，再扩大能力。**已落地**的决策标 ✅，仍未决的保持开放：
 
-- 是否引入 `RunStatus::Unknown`；
-- Journal kind decode 如何收紧；
+- ✅ **Journal kind decode 收紧**：`parse_kind` 的兜底已从静默 `RunCompleted` 改为 `JournalEventKind::Unknown` 哨兵；未知 kind 不再伪装成 run completion，`verify_hash_chain` 仍能检测篡改（PR #44，已合入 `main`）。`parse_kind`/`row_to_event` 刻意保持非 `Result`，以保留现有 `/health` 的 `status:"corrupt"` 语义。
+- 是否引入 `RunStatus::Unknown`：仍未决。当前 `unknown` dispatch 用 `WaitingDispatch` + outbox projection + health 表达，阶段 0 是否引入显式 `RunStatus::Unknown` 需要先讨论跨切面影响（runs.status 序列化面、所有 match 点、DB 已有数据兼容）。
 - 第一个非 chat 工具选什么；
 - Feishu connector 什么时候移出仓库；
 - replay fixture format 如何设计。
