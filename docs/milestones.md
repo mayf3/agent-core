@@ -2,6 +2,8 @@
 
 This file is the施工单. It deliberately excludes long-term protocol detail; see
 [Architecture RFC](./architecture-rfc.md) for invariants and future contracts.
+For the final product shape and macro roadmap, see
+[Product Roadmap](./product-roadmap.md).
 
 ## Current Status
 
