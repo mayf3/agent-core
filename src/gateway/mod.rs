@@ -6,6 +6,9 @@ use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+mod policy;
+pub use policy::{evaluate_policy, PolicyVerdict};
+
 #[derive(Clone)]
 pub struct Gateway {
     config: KernelConfig,
@@ -57,23 +60,19 @@ impl Gateway {
         run: &Run,
         session: &Session,
     ) -> Result<ApprovedInvocation> {
-        let has_grant = run
-            .principal
-            .grants
-            .iter()
-            .any(|grant| grant.operation == intent.operation);
-        if !has_grant {
-            bail!("capability_not_enabled: {}", intent.operation);
+        // Access control runs through the fixed, pure policy pipeline
+        // (Phase 2 M2c); see `src/gateway/policy.rs`. The first denial wins
+        // and its reason is surfaced verbatim, preserving the prior error
+        // messages (`capability_not_enabled` / `operation_not_allowed` /
+        // `target_session_mismatch`).
+        match policy::evaluate_policy(&intent, run, session) {
+            PolicyVerdict::Deny(reason) => bail!("{reason}"),
+            PolicyVerdict::Allow => {}
         }
-        // Operation allowlist is the single source of truth in the operation
-        // catalog (Phase 2 M2a); see `src/domain/operation.rs`.
-        if !crate::domain::operation::is_allowed(&intent.operation) {
-            bail!("operation_not_allowed: {}", intent.operation);
-        }
-        let target_session = string_arg(&intent.arguments, "session_id")?;
-        if target_session != session.id.0 {
-            bail!("target_session_mismatch");
-        }
+        // Argument-shape validation is a schema concern (M2a's
+        // `argument_schema`, deferred), not an access-control stage, so it
+        // stays here rather than in the policy pipeline. The feishu send
+        // operation requires message_id / chat_id / text to be present.
         if intent.operation == crate::domain::operation::FEISHU_SEND_MESSAGE {
             string_arg(&intent.arguments, "message_id")?;
             string_arg(&intent.arguments, "chat_id")?;
