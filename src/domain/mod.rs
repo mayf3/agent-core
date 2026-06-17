@@ -266,6 +266,32 @@ pub enum ReceiptStatus {
     Unknown,
 }
 
+/// Typed errors produced by adapters so `DispatchErrorCategory` can classify
+/// dispatch failures by variant instead of fragile string-substring matching.
+/// Replaces the old `from_error(msg.contains("timeout")/...)` sniffing (Phase
+/// 2 M2a typed-errors follow-up). Each variant maps 1:1 to a
+/// `DispatchErrorCategory` in `DispatchErrorCategory::from_error`.
+#[derive(Debug, thiserror::Error)]
+pub enum AdapterError {
+    /// Connect, read, or write timeout (the dispatch could not complete in the
+    /// configured budget). Outcome is uncertain.
+    #[error("adapter timeout")]
+    Timeout,
+    /// The connector returned a non-2xx HTTP status or otherwise signaled a
+    /// definite execution failure. Outcome is known-bad.
+    #[error("connector execute failed")]
+    ExecuteFailed,
+    /// The connector returned a malformed or unparseable response.
+    #[error("adapter malformed response")]
+    MalformedResponse,
+    /// The approved invocation is missing a required argument.
+    #[error("invalid approved invocation: {0}")]
+    InvalidArgument(String),
+    /// Any other transport/IO failure not covered above.
+    #[error("adapter transport error: {0}")]
+    Transport(String),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DispatchErrorCategory {
     AdapterTimeout,
@@ -289,13 +315,20 @@ impl DispatchErrorCategory {
     }
 
     pub fn from_error(error: &anyhow::Error) -> Self {
-        let msg = error.to_string().to_ascii_lowercase();
-        if msg.contains("timeout") {
-            DispatchErrorCategory::AdapterTimeout
-        } else if msg.contains("connector execute failed") {
-            DispatchErrorCategory::ConnectorExecuteFailed
-        } else if msg.contains("adapter") || msg.contains("execute") {
-            DispatchErrorCategory::AdapterFailed
+        // Prefer the typed `AdapterError` variant when the adapter produced one
+        // (downcast). Fall back to `UnknownTransportError` for non-adapter
+        // errors. This replaces the old string-substring sniffing
+        // (`contains("timeout")` / `contains("connector execute failed")`).
+        if let Some(adapter_error) = error.downcast_ref::<AdapterError>() {
+            match adapter_error {
+                AdapterError::Timeout => DispatchErrorCategory::AdapterTimeout,
+                AdapterError::ExecuteFailed => DispatchErrorCategory::ConnectorExecuteFailed,
+                AdapterError::MalformedResponse => DispatchErrorCategory::AdapterFailed,
+                AdapterError::InvalidArgument(_) => {
+                    DispatchErrorCategory::InvalidApprovedInvocation
+                }
+                AdapterError::Transport(_) => DispatchErrorCategory::UnknownTransportError,
+            }
         } else {
             DispatchErrorCategory::UnknownTransportError
         }
