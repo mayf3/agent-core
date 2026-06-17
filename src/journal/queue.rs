@@ -121,7 +121,7 @@ pub(crate) fn append_worker_event_tx(
             base.insert(key.clone(), value.clone());
         }
     }
-    append_event_tx(&tx, kind, None, None, Some(job_id), payload)
+    append_event_tx(tx, kind, None, None, Some(job_id), payload)
 }
 
 pub(crate) fn append_event_tx(
