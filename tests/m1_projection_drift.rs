@@ -204,5 +204,67 @@ fn undelivered_ingress_degrades_health_then_recovers() -> Result<()> {
     Ok(())
 }
 
+/// An operator can acknowledge a terminal-unknown row so it no longer degrades
+/// `/health.status`. Per docs/decisions/ack-clear-terminal-unknown.md (option 1):
+/// acked rows are excluded from `outbox_unknown_count` and the rollup. This
+/// test uses the `ack_outbox_unknown_for_test` helper, which mirrors the
+/// external ack SQL documented in the operating guide.
+#[test]
+fn acknowledging_terminal_unknown_clears_health_degraded() -> Result<()> {
+    let config = common::test_config();
+    let gateway = Gateway::new(config.clone());
+    let journal = JournalStore::in_memory()?;
+    let session = common::test_session(&config);
+    let run = common::test_run(&config, &session);
+    let approved = common::approved_stdout_invocation(&gateway, &run, &session)?;
+    let invocation_id = approved.intent().invocation_id.clone();
+
+    journal.queue_outbox_dispatch(&approved, Some(&session.id))?;
+    journal.start_outbox_dispatch(&approved, Some(&session.id))?;
+    // Recovery reconciles the abandoned dispatch to terminal unknown.
+    assert_eq!(journal.recover_unknown_invocations()?, 1);
+
+    // Before ack: terminal-unknown degrades health.
+    let snapshot = health_snapshot(&journal, true, &DispatcherMetrics::new())?;
+    assert_eq!(
+        snapshot.get("outbox_unknown_count").and_then(|v| v.as_u64()),
+        Some(1),
+        "unacked terminal-unknown is counted"
+    );
+    assert_eq!(
+        snapshot.get("status").and_then(|v| v.as_str()),
+        Some("degraded"),
+        "unacked terminal-unknown degrades status"
+    );
+
+    // Operator acknowledges the terminal-unknown row.
+    journal.ack_outbox_unknown_for_test(&invocation_id, true)?;
+
+    // After ack: the row is excluded from outbox_unknown_count and status
+    // returns to ok (no other degraded conditions present).
+    let snapshot = health_snapshot(&journal, true, &DispatcherMetrics::new())?;
+    assert_eq!(
+        snapshot.get("outbox_unknown_count").and_then(|v| v.as_u64()),
+        Some(0),
+        "acked terminal-unknown is not counted"
+    );
+    assert_eq!(
+        snapshot.get("status").and_then(|v| v.as_str()),
+        Some("ok"),
+        "acking all terminal-unknown rows clears degraded status"
+    );
+
+    // Ack is reversible: un-acking restores the degraded signal.
+    journal.ack_outbox_unknown_for_test(&invocation_id, false)?;
+    let snapshot = health_snapshot(&journal, true, &DispatcherMetrics::new())?;
+    assert_eq!(
+        snapshot.get("status").and_then(|v| v.as_str()),
+        Some("degraded"),
+        "un-acking a terminal-unknown row restores degraded status"
+    );
+    assert!(journal.verify_hash_chain()?);
+    Ok(())
+}
+
 #[path = "common/mod.rs"]
 mod common;
