@@ -97,14 +97,18 @@ Key fields:
 
 `status` values:
 - `ok` — hash chain intact, no live unknown invocations, no terminal-unknown
-  outbox rows, and no projection drift.
+  outbox rows, no projection drift, and no undelivered ingress.
 - `degraded` — hash chain intact but the Kernel's state is not fully
   trustworthy: live unknown invocations present (dispatch started, no terminal
   receipt), terminal-unknown outbox rows (recovered, outcome permanently
-  undetermined), or projection drift (projection disagrees with the Journal
-  terminal fact). Self-healing stale counts (`outbox_stale_dispatching_count`,
-  `worker_job_stale_count`) do **not** degrade status — they are cleared by
-  the next lease reclaim. See `docs/decisions/health-rollup-semantics.md`.
+  undetermined), projection drift (projection disagrees with the Journal
+  terminal fact), or undelivered ingress (accepted but never turned into a
+  worker job / run — transient during startup recovery; persistent non-zero
+  means recovery failed to re-enqueue). Self-healing stale counts
+  (`outbox_stale_dispatching_count`, `worker_job_stale_count`) do **not**
+  degrade status — they are cleared by the next lease reclaim. See
+  `docs/decisions/health-rollup-semantics.md` and
+  `docs/decisions/health-rollup-undelivered-ingress.md`.
 - `corrupt` — hash chain broken (Journal tampering or disk corruption;
   investigate immediately).
 

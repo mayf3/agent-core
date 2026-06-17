@@ -157,5 +157,52 @@ fn steady_state_health_is_ok() -> Result<()> {
     Ok(())
 }
 
+/// `undelivered_ingress_count > 0` (ingress accepted but never turned into a
+/// worker job / run) must degrade `/health.status`. Per
+/// docs/decisions/health-rollup-undelivered-ingress.md. This is transient:
+/// once the ingress is correlated to a run (as startup recovery would do by
+/// re-enqueuing), status returns to ok.
+#[test]
+fn undelivered_ingress_degrades_health_then_recovers() -> Result<()> {
+    let journal = JournalStore::in_memory()?;
+
+    // An IngressAccepted event with no correlated run-lifecycle event leaves
+    // an undelivered ingress entry.
+    journal.append_event(
+        JournalEventKind::IngressAccepted,
+        None,
+        None,
+        Some("evt_undelivered"),
+        json!({ "event_id": "evt_undelivered", "source": "cli" }),
+    )?;
+    assert_eq!(journal.undelivered_ingress_events()?.len(), 1);
+
+    let snapshot = health_snapshot(&journal, true, &DispatcherMetrics::new())?;
+    assert_eq!(
+        snapshot.get("status").and_then(|v| v.as_str()),
+        Some("degraded"),
+        "undelivered ingress must degrade health status"
+    );
+
+    // Simulate startup recovery correlating the ingress to a run: append a
+    // RunStarted correlated to the same event id. Now undelivered is empty
+    // and (with no other degraded conditions) status returns to ok.
+    journal.append_event(
+        JournalEventKind::RunStarted,
+        None,
+        None,
+        Some("evt_undelivered"),
+        json!({ "run_id": "run_recovered" }),
+    )?;
+    assert_eq!(journal.undelivered_ingress_events()?.len(), 0);
+    let snapshot = health_snapshot(&journal, true, &DispatcherMetrics::new())?;
+    assert_eq!(
+        snapshot.get("status").and_then(|v| v.as_str()),
+        Some("ok"),
+        "status must return to ok once undelivered ingress is consumed"
+    );
+    Ok(())
+}
+
 #[path = "common/mod.rs"]
 mod common;

@@ -192,17 +192,22 @@ pub fn health_snapshot(
     } else if !unknown_invocations.is_empty()
         || outbox_unknown_count > 0
         || outbox_projection_drift_count > 0
+        || undelivered_ingress_count > 0
     {
         // `degraded` when the Kernel cannot fully trust its state:
         // - live unknown invocations (dispatch started, no terminal receipt);
         // - terminal-unknown outbox rows (recovered, never auto-retried, but
         //   the dispatch outcome is permanently undetermined);
         // - projection drift (projection disagrees with the Journal terminal
-        //   fact — recovery failed to reconcile).
+        //   fact — recovery failed to reconcile);
+        // - undelivered ingress (accepted but never turned into a worker job /
+        //   run — transient during startup recovery; persistent non-zero
+        //   means recovery failed to re-enqueue).
         // Stale counts (outbox_stale_dispatching_count / worker_job_stale_count)
         // are deliberately excluded: they are self-healing transients cleared
         // by the next lease reclaim, not a loss of trust. See
-        // docs/decisions/health-rollup-semantics.md (档 C).
+        // docs/decisions/health-rollup-semantics.md (档 C) and
+        // docs/decisions/health-rollup-undelivered-ingress.md.
         "degraded"
     } else {
         "ok"
