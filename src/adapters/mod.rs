@@ -41,9 +41,24 @@ impl InvocationAdapter for HttpConnectorAdapter {
             .get("receipt")
             .cloned()
             .unwrap_or_else(|| json!({}));
+        // M2a: read the connector's reported receipt status instead of
+        // assuming every 2xx response means Succeeded. The connector execute
+        // response may carry `receipt.status` of "Succeeded" / "Failed" /
+        // "Unknown"; a missing or unrecognized status falls back to Succeeded
+        // to preserve the prior behavior for connectors that never set it.
+        let status = receipt
+            .get("status")
+            .and_then(Value::as_str)
+            .and_then(|s| match s {
+                "Succeeded" => Some(ReceiptStatus::Succeeded),
+                "Failed" => Some(ReceiptStatus::Failed),
+                "Unknown" => Some(ReceiptStatus::Unknown),
+                _ => None,
+            })
+            .unwrap_or(ReceiptStatus::Succeeded);
         Ok(Receipt {
             invocation_id: invocation.intent().invocation_id.clone(),
-            status: ReceiptStatus::Succeeded,
+            status,
             external_ref: receipt
                 .get("message_id")
                 .and_then(Value::as_str)
@@ -244,7 +259,7 @@ mod tests {
             crate::domain::InvocationIntent {
                 invocation_id: crate::domain::InvocationId("test:connect".to_string()),
                 run_id: crate::domain::RunId::new(),
-                operation: "stdout.send_text".to_string(),
+                operation: crate::domain::operation::STDOUT_SEND_TEXT.to_string(),
                 arguments: json!({ "text": "hi" }),
                 idempotency_key: Some("test:connect".to_string()),
             },

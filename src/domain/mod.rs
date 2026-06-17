@@ -6,8 +6,10 @@ use uuid::Uuid;
 
 pub mod status;
 pub mod retry;
+pub mod operation;
 pub use status::*;
 pub use retry::*;
+pub use operation::*;
 
 macro_rules! id_type {
     ($name:ident, $prefix:literal) => {
