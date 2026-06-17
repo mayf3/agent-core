@@ -30,9 +30,8 @@ fn unrecognized_kind_routes_to_unknown_and_keeps_chain_corrupt() -> Result<()> {
         JournalEventKind::Unknown,
         "unrecognized kind must route to Unknown, not RunCompleted"
     );
-    assert_eq!(
+    assert!(!
         journal.verify_hash_chain()?,
-        false,
         "hash chain must remain flagged corrupt when a kind was tampered"
     );
     Ok(())

@@ -236,6 +236,18 @@ fn classify_terminal_fact(
     }
 }
 
+fn parse_time(value: String) -> rusqlite::Result<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(&value)
+        .map(|time| time.with_timezone(&Utc))
+        .map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -285,16 +297,4 @@ mod tests {
         ));
         Ok(())
     }
-}
-
-fn parse_time(value: String) -> rusqlite::Result<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(&value)
-        .map(|time| time.with_timezone(&Utc))
-        .map_err(|error| {
-            rusqlite::Error::FromSqlConversionFailure(
-                0,
-                rusqlite::types::Type::Text,
-                Box::new(error),
-            )
-        })
 }
