@@ -52,10 +52,18 @@ pub const CATALOG: &[OperationSpec] = &[
         name: FEISHU_SEND_MESSAGE,
         risk: Risk::Write,
     },
+    OperationSpec {
+        name: TIME_NOW,
+        risk: Risk::ReadOnly,
+    },
 ];
 
 pub const STDOUT_SEND_TEXT: &str = "stdout.send_text";
 pub const FEISHU_SEND_MESSAGE: &str = "feishu.send_message";
+/// Read-only: return the current kernel wall-clock time. The first
+/// `Risk::ReadOnly` operation (Phase 2 M2e) — it produces no side effect and
+/// so may execute inline without approval. Implemented by `TimeAdapter`.
+pub const TIME_NOW: &str = "time.now";
 
 /// Look up an operation spec by name. Returns `None` for unknown operations.
 pub fn lookup(name: &str) -> Option<&'static OperationSpec> {
@@ -145,31 +153,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalog_lists_both_known_operations() {
+    fn catalog_lists_all_known_operations() {
         let names: Vec<&str> = CATALOG.iter().map(|spec| spec.name).collect();
         assert!(names.contains(&STDOUT_SEND_TEXT));
         assert!(names.contains(&FEISHU_SEND_MESSAGE));
+        assert!(names.contains(&TIME_NOW));
     }
 
     #[test]
     fn is_allowed_accepts_catalog_operations_only() {
         assert!(is_allowed(STDOUT_SEND_TEXT));
         assert!(is_allowed(FEISHU_SEND_MESSAGE));
+        assert!(is_allowed(TIME_NOW));
         assert!(!is_allowed("shell.exec"));
         assert!(!is_allowed(""));
     }
 
     #[test]
-    fn known_operations_are_currently_write_risk() {
-        // M2a: both existing operations produce side effects. M2e will add
-        // the first ReadOnly operation.
+    fn write_operations_are_marked_write_and_time_now_is_read_only() {
+        // M2e: `time.now` is the first ReadOnly operation (no side effect,
+        // may execute inline without approval). The two reply operations
+        // remain Write.
         for spec in CATALOG {
-            assert_eq!(
-                spec.risk,
-                Risk::Write,
-                "{} should be Write until M2e adds a read-only adapter",
-                spec.name
-            );
+            match spec.name {
+                TIME_NOW => assert_eq!(
+                    spec.risk,
+                    Risk::ReadOnly,
+                    "{} should be ReadOnly",
+                    spec.name
+                ),
+                _ => assert_eq!(
+                    spec.risk,
+                    Risk::Write,
+                    "{} should be Write (it produces a side effect)",
+                    spec.name
+                ),
+            }
         }
     }
 
