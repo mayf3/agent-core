@@ -19,11 +19,18 @@ impl JournalStore {
         let events = self.events()?;
         let mut delivered = HashSet::new();
         for event in &events {
+            // An ingress event is considered "delivered" once the worker has
+            // started, completed, or failed processing it. `RunFailed` is
+            // included on purpose: a failed worker delivery must NOT be
+            // re-queued on restart (see
+            // docs/decisions/worker-failure-journal-kind.md). Excluding it
+            // here would re-queue failed ingress forever.
             if matches!(
                 event.kind,
                 JournalEventKind::SessionReady
                     | JournalEventKind::RunStarted
                     | JournalEventKind::RunCompleted
+                    | JournalEventKind::RunFailed
             ) {
                 if let Some(correlation_id) = &event.correlation_id {
                     delivered.insert(correlation_id.clone());
