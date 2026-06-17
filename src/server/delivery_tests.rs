@@ -259,10 +259,9 @@ fn disabled_dispatcher_loop_returns_without_draining_outbox() -> Result<()> {
         Arc::new(AtomicBool::new(true)),
         Arc::new(DispatcherMetrics::new()),
     );
-    let finished = handle
+    handle
         .join()
         .map_err(|_| anyhow::anyhow!("dispatcher thread panicked"))?;
-    assert_eq!(finished, ());
 
     assert_eq!(
         journal
