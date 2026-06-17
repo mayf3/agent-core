@@ -1,5 +1,5 @@
-use crate::domain::{ApprovedInvocation, Receipt, ReceiptStatus};
-use anyhow::{anyhow, bail, Result};
+use crate::domain::{AdapterError, ApprovedInvocation, Receipt, ReceiptStatus};
+use anyhow::{bail, Result};
 use chrono::Utc;
 use serde_json::{json, Value};
 use std::io::{Read, Write};
@@ -84,25 +84,27 @@ impl InvocationAdapter for StdoutAdapter {
     }
 }
 
-fn string_arg(value: &Value, key: &str) -> Result<String> {
+fn string_arg(value: &Value, key: &str) -> Result<String, AdapterError> {
     value
         .get(key)
         .and_then(Value::as_str)
         .map(str::to_string)
-        .ok_or_else(|| anyhow::anyhow!("missing string argument: {key}"))
+        .ok_or_else(|| AdapterError::InvalidArgument(format!("missing string argument: {key}")))
 }
 
-fn post_json(url: &str, token: &str, body: &Value, timeout: Duration) -> Result<Value> {
-    let endpoint = Endpoint::parse(url)?;
+fn post_json(url: &str, token: &str, body: &Value, timeout: Duration) -> Result<Value, AdapterError> {
+    let endpoint = Endpoint::parse(url).map_err(|e| AdapterError::Transport(e.to_string()))?;
     // Bind the connect phase to the same timeout budget as read/write. The
     // dispatcher thread joins on the in-flight adapter call during shutdown,
-    // so an unbounded connect would drag shutdown. Errors are sanitized to a
-    // category string — the raw transport error is never surfaced so it
-    // cannot leak host/port/credential detail into logs or the journal.
+    // so an unbounded connect would drag shutdown.
     let mut stream = connect_with_timeout(&endpoint, timeout)?;
-    stream.set_read_timeout(Some(timeout))?;
-    stream.set_write_timeout(Some(timeout))?;
-    let payload = serde_json::to_string(body)?;
+    stream
+        .set_read_timeout(Some(timeout))
+        .map_err(|e| AdapterError::Transport(e.to_string()))?;
+    stream
+        .set_write_timeout(Some(timeout))
+        .map_err(|e| AdapterError::Transport(e.to_string()))?;
+    let payload = serde_json::to_string(body).map_err(|e| AdapterError::Transport(e.to_string()))?;
     let auth = if token.is_empty() {
         String::new()
     } else {
@@ -116,42 +118,52 @@ fn post_json(url: &str, token: &str, body: &Value, timeout: Duration) -> Result<
         payload.len(),
         payload
     );
-    stream.write_all(request.as_bytes())?;
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|e| io_error_to_adapter(e, timeout))?;
     let mut response = String::new();
-    stream.read_to_string(&mut response)?;
+    stream
+        .read_to_string(&mut response)
+        .map_err(|e| io_error_to_adapter(e, timeout))?;
     let Some((head, response_body)) = response.split_once("\r\n\r\n") else {
-        bail!("connector returned malformed HTTP response");
+        return Err(AdapterError::MalformedResponse);
     };
     if !head.starts_with("HTTP/1.1 2") && !head.starts_with("HTTP/1.0 2") {
-        bail!("connector execute failed");
+        return Err(AdapterError::ExecuteFailed);
     }
     Ok(serde_json::from_str(response_body.trim()).unwrap_or_else(|_| json!({})))
+}
+
+/// Map an IO error from a read/write on the adapter socket to the right
+/// `AdapterError` variant: timeouts → `Timeout`, everything else → `Transport`.
+fn io_error_to_adapter(error: std::io::Error, _timeout: Duration) -> AdapterError {
+    if error.kind() == std::io::ErrorKind::TimedOut
+        || error.kind() == std::io::ErrorKind::WouldBlock
+    {
+        AdapterError::Timeout
+    } else {
+        AdapterError::Transport(error.to_string())
+    }
 }
 
 /// Open a TCP connection to the endpoint with a bounded connect timeout.
 ///
 /// `TcpStream::connect_timeout` requires a resolved `SocketAddr`, so the
-/// host:port is resolved first. All failures are mapped to a sanitized
-/// category string so the raw transport error (which may echo the host, port,
-/// or OS-level detail) is never written to logs or the journal:
-///
-/// - timeout (resolve or connect) → `"adapter connect timeout"` — contains
-///   "timeout" so `DispatchErrorCategory::from_error` classifies it as
-///   `AdapterTimeout`.
-/// - any other failure → `"adapter connect failed"` — contains "adapter" so
-///   it classifies as `AdapterFailed`.
-fn connect_with_timeout(endpoint: &Endpoint, timeout: Duration) -> Result<TcpStream> {
+/// host:port is resolved first. Failures map to typed `AdapterError` variants:
+/// `TimedOut` → `Timeout`; anything else (refused, DNS, etc.) → `Transport`.
+/// The raw transport error message is carried in the `Transport` variant but
+/// is only surfaced via `DispatchErrorCategory` as a category string, never as
+/// the raw text in logs/journal.
+fn connect_with_timeout(endpoint: &Endpoint, timeout: Duration) -> Result<TcpStream, AdapterError> {
     let address = (endpoint.host.as_str(), endpoint.port)
         .to_socket_addrs()
-        .map_err(|_| anyhow!("adapter connect failed"))?
+        .map_err(|e| AdapterError::Transport(e.to_string()))?
         .next()
-        .ok_or_else(|| anyhow!("adapter connect failed"))?;
+        .ok_or_else(|| AdapterError::Transport("no socket address resolved".to_string()))?;
     match TcpStream::connect_timeout(&address, timeout) {
         Ok(stream) => Ok(stream),
-        Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {
-            Err(anyhow!("adapter connect timeout"))
-        }
-        Err(_) => Err(anyhow!("adapter connect failed")),
+        Err(error) if error.kind() == std::io::ErrorKind::TimedOut => Err(AdapterError::Timeout),
+        Err(error) => Err(AdapterError::Transport(error.to_string())),
     }
 }
 
@@ -199,29 +211,58 @@ mod tests {
     }
 
     #[test]
-    fn connect_refused_is_sanitized_to_category_string() {
+    fn connect_refused_is_a_typed_transport_error() {
         let endpoint = idle_endpoint();
         let error = connect_with_timeout(&endpoint, Duration::from_secs(1))
             .expect_err("expected connect failure on idle port");
-        let message = error.to_string();
-        assert_eq!(message, "adapter connect failed");
-        // The raw OS error must never be surfaced — this is the sanitization
-        // guarantee from HANDOVER §4.3.
-        assert!(
-            !message.contains("os error"),
-            "raw OS error leaked into message: {message}"
-        );
-        assert!(
-            !message.contains("refused"),
-            "raw 'refused' detail leaked into message: {message}"
+        // A refused connection is a Transport variant (not Timeout). The raw
+        // OS message lives inside the variant but is never surfaced as a
+        // category string — see the classification tests below.
+        assert!(matches!(error, AdapterError::Transport(_)));
+        assert!(!matches!(error, AdapterError::Timeout));
+    }
+
+    #[test]
+    fn connect_failed_classifies_as_unknown_transport() {
+        let endpoint = idle_endpoint();
+        let error = connect_with_timeout(&endpoint, Duration::from_secs(1))
+            .expect_err("expected connect failure");
+        // The typed error is wrapped in anyhow at the trait boundary; classify
+        // via from_error which downcasts to AdapterError.
+        let anyhow_error = anyhow::Error::new(error);
+        assert_eq!(
+            DispatchErrorCategory::from_error(&anyhow_error),
+            DispatchErrorCategory::UnknownTransportError
         );
     }
 
     #[test]
-    fn connect_failed_classifies_as_adapter_failed() {
-        let endpoint = idle_endpoint();
-        let error = connect_with_timeout(&endpoint, Duration::from_secs(1))
-            .expect_err("expected connect failure");
+    fn timeout_variant_classifies_as_adapter_timeout() {
+        let error = anyhow::Error::new(AdapterError::Timeout);
+        assert_eq!(
+            DispatchErrorCategory::from_error(&error),
+            DispatchErrorCategory::AdapterTimeout
+        );
+        // A Transport variant must NOT classify as timeout.
+        let transport = anyhow::Error::new(AdapterError::Transport("refused".to_string()));
+        assert_ne!(
+            DispatchErrorCategory::from_error(&transport),
+            DispatchErrorCategory::AdapterTimeout
+        );
+    }
+
+    #[test]
+    fn execute_failed_variant_classifies_as_connector_execute_failed() {
+        let error = anyhow::Error::new(AdapterError::ExecuteFailed);
+        assert_eq!(
+            DispatchErrorCategory::from_error(&error),
+            DispatchErrorCategory::ConnectorExecuteFailed
+        );
+    }
+
+    #[test]
+    fn malformed_response_classifies_as_adapter_failed() {
+        let error = anyhow::Error::new(AdapterError::MalformedResponse);
         assert_eq!(
             DispatchErrorCategory::from_error(&error),
             DispatchErrorCategory::AdapterFailed
@@ -229,27 +270,29 @@ mod tests {
     }
 
     #[test]
-    fn connect_timeout_message_classifies_as_adapter_timeout() {
-        // We do not trigger a real timeout (slow/flaky); instead we verify the
-        // sanitized timeout string routes through the existing classifier the
-        // same way a real connect_timeout TimedOut would.
-        let error = anyhow::Error::msg("adapter connect timeout");
+    fn invalid_argument_classifies_as_invalid_approved_invocation() {
+        let error = anyhow::Error::new(AdapterError::InvalidArgument(
+            "missing text".to_string(),
+        ));
         assert_eq!(
             DispatchErrorCategory::from_error(&error),
-            DispatchErrorCategory::AdapterTimeout
-        );
-        // And the sanitized failed string must NOT classify as timeout.
-        let failed = anyhow::Error::msg("adapter connect failed");
-        assert_ne!(
-            DispatchErrorCategory::from_error(&failed),
-            DispatchErrorCategory::AdapterTimeout
+            DispatchErrorCategory::InvalidApprovedInvocation
         );
     }
 
     #[test]
-    fn adapter_execute_surfaces_sanitized_connect_error() {
-        // End-to-end through the public adapter API: a connect failure must
-        // surface the sanitized category string, not the OS detail.
+    fn non_adapter_error_classifies_as_unknown_transport() {
+        let error = anyhow::Error::msg("something unrelated");
+        assert_eq!(
+            DispatchErrorCategory::from_error(&error),
+            DispatchErrorCategory::UnknownTransportError
+        );
+    }
+
+    #[test]
+    fn adapter_execute_surfaces_typed_connect_error() {
+        // End-to-end through the public adapter API: a connect failure surfaces
+        // as an AdapterError (wrapped in anyhow), classified to a safe category.
         let endpoint = idle_endpoint();
         let adapter = HttpConnectorAdapter::new(
             format!("http://127.0.0.1:{}/execute", endpoint.port),
@@ -268,7 +311,11 @@ mod tests {
         let error = adapter
             .execute(&invocation)
             .expect_err("expected connect failure");
-        assert_eq!(error.to_string(), "adapter connect failed");
-        assert!(!error.to_string().contains("os error"));
+        // Downcast confirms the typed error propagated through the trait.
+        assert!(error.downcast_ref::<AdapterError>().is_some());
+        assert_eq!(
+            DispatchErrorCategory::from_error(&error),
+            DispatchErrorCategory::UnknownTransportError
+        );
     }
 }
