@@ -234,6 +234,7 @@ fn disabled_dispatcher_loop_returns_without_draining_outbox() -> Result<()> {
         outbox_dispatcher_enabled: false,
         outbox_dispatcher_poll_interval_ms: 10,
         extra_allowed_operations: vec![],
+        require_write_approval: false,
     };
 
     let journal = Arc::new(JournalStore::in_memory()?);

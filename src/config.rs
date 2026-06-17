@@ -31,6 +31,10 @@ pub struct KernelConfig {
     /// profile is derived. Empty (the default) ⇒ the principal receives only
     /// its channel's baseline grant, preserving prior behavior.
     pub extra_allowed_operations: Vec<String>,
+    /// Phase 2 M2d opt-in: when true, a `risk: Write` operation pauses the
+    /// run in `AwaitingApproval` until a human decision resumes it. Default
+    /// false → all operations inline-approve (backward compatible).
+    pub require_write_approval: bool,
 }
 
 impl KernelConfig {
@@ -79,6 +83,7 @@ impl KernelConfig {
             outbox_dispatcher_enabled: env_bool("AGENT_CORE_OUTBOX_DISPATCHER_ENABLED", true),
             outbox_dispatcher_poll_interval_ms: env_u64("AGENT_CORE_OUTBOX_DISPATCHER_POLL_MS", 500),
             extra_allowed_operations: env_list("AGENT_CORE_EXTRA_ALLOWED_OPERATIONS"),
+            require_write_approval: env_bool("AGENT_CORE_REQUIRE_WRITE_APPROVAL", false),
         }
     }
 }

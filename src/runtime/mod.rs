@@ -45,6 +45,54 @@ where
         }
     }
 
+    /// Phase 2 M2d: decide whether an approved invocation is dispatched now or
+    /// paused for human approval, and persist the outcome.
+    ///
+    /// - `Risk::ReadOnly`, or `Risk::Write` when the operator has **not** opted
+    ///   in (`require_write_approval == false`): queue the dispatch and mark the
+    ///   run `WaitingDispatch` (the pre-M2d behavior, byte-identical).
+    /// - `Risk::Write` when the operator **has** opted in: do NOT queue. Append
+    ///   an `ApprovalRequested` fact carrying an `intent_snapshot` (so an
+    ///   approve can reconstruct and queue the dispatch without re-running the
+    ///   LLM) and mark the run `AwaitingApproval`. The run resumes later via
+    ///   `Gateway::approve_run` / `Gateway::deny_run`.
+    fn enqueue_or_pause(
+        &self,
+        journal: &JournalStore,
+        approved: &ApprovedInvocation,
+        run: &Run,
+        session: &Session,
+        correlation_id: &str,
+    ) -> Result<()> {
+        let risk = crate::domain::operation::lookup(&approved.intent().operation)
+            .map(|spec| spec.risk)
+            .unwrap_or(crate::domain::operation::Risk::Write);
+        let pause =
+            self.config.require_write_approval && risk == crate::domain::operation::Risk::Write;
+        if pause {
+            journal.append_event(
+                JournalEventKind::ApprovalRequested,
+                Some(&run.id),
+                Some(&session.id),
+                Some(correlation_id),
+                json!({
+                    "operation": approved.intent().operation,
+                    "decision_id": approved.decision_id,
+                    "invocation_id": approved.intent().invocation_id.0,
+                    "run_id": run.id.0,
+                    "session_id": session.id.0,
+                    "arguments": approved.intent().arguments,
+                    "idempotency_key": approved.intent().idempotency_key,
+                }),
+            )?;
+            journal.update_run_status(&run.id, "AwaitingApproval")?;
+            return Ok(());
+        }
+        journal.queue_outbox_dispatch(approved, Some(&session.id))?;
+        journal.update_run_status(&run.id, "WaitingDispatch")?;
+        Ok(())
+    }
+
     pub fn deliver(
         &self,
         journal: &JournalStore,
@@ -130,8 +178,7 @@ where
                 "operation": approved.intent().operation,
             }),
         )?;
-        journal.queue_outbox_dispatch(&approved, Some(&session.id))?;
-        journal.update_run_status(&run.id, "WaitingDispatch")?;
+        self.enqueue_or_pause(journal, &approved, &run, &session, &correlation_id)?;
         Ok(RuntimeOutcome {
             run_id: run.id,
             session_id: session.id,
@@ -200,8 +247,7 @@ where
                 "operation": approved.intent().operation,
             }),
         )?;
-        journal.queue_outbox_dispatch(&approved, Some(&session.id))?;
-        journal.update_run_status(&run.id, "WaitingDispatch")?;
+        self.enqueue_or_pause(journal, &approved, &run, &session, &correlation_id)?;
         Ok(RuntimeOutcome {
             run_id: run.id,
             session_id: session.id,

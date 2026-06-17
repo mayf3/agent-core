@@ -125,6 +125,14 @@ pub enum RunStatus {
     WaitingDispatch,
     Completed,
     Failed,
+    /// The run is paused awaiting a human approval decision (Phase 2 M2d).
+    /// Set only when an operator opts in (`require_write_approval`) and a
+    /// `risk: Write` operation has been proposed. Distinct from
+    /// `WaitingDispatch` (not yet dispatched) and `Unknown` (dispatched with
+    /// no terminal receipt): here the run is *intentionally* held until an
+    /// `ApprovalGranted`/`ApprovalDenied` fact resumes it. Stored in
+    /// `runs.status` as the raw string `"AwaitingApproval"`.
+    AwaitingApproval,
     /// The dispatch outcome is unknown: the run was dispatched but no
     /// terminal receipt was ever recorded, so its result cannot be
     /// determined. Recovery sets this when an outbox row is reconciled to
@@ -390,6 +398,11 @@ pub enum JournalEventKind {
     WorkerJobDead,
     RunCompleted,
     RunFailed,
+    // Phase 2 M2d: durable approval state. Appended when a `risk: Write`
+    // operation is held for a human decision, and when that decision lands.
+    ApprovalRequested,
+    ApprovalGranted,
+    ApprovalDenied,
     /// Sentinel produced by `parse_kind`/`row_to_event` when the stored
     /// `kind` text does not match any known variant. The kernel never writes
     /// `Unknown` — observing it at read time indicates either external

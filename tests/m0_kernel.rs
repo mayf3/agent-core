@@ -412,6 +412,7 @@ fn test_config() -> KernelConfig {
             outbox_dispatcher_enabled: false,
             outbox_dispatcher_poll_interval_ms: 100,
             extra_allowed_operations: vec![],
+            require_write_approval: false,
     }
 }
 fn cli_principal() -> RunPrincipal {

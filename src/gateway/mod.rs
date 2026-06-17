@@ -341,6 +341,96 @@ impl Gateway {
             requester_id: Some("cli:local".to_string()),
         }
     }
+
+    /// Phase 2 M2d: resume a run paused in `AwaitingApproval`. Loads the run's
+    /// `ApprovalRequested` snapshot, appends `ApprovalGranted`, queues the
+    /// dispatch, and advances the run to `WaitingDispatch`. **Idempotent**: if
+    /// the run is not currently `AwaitingApproval` (already resumed/denied, or
+    /// never paused), this is a no-op that returns `Ok(())`.
+    pub fn approve_run(&self, journal: &JournalStore, run_id: &RunId) -> Result<()> {
+        let status = journal.run_status(run_id)?;
+        if status.as_deref() != Some("AwaitingApproval") {
+            return Ok(());
+        }
+        let snapshot = journal
+            .approval_request_for_run(run_id)?
+            .ok_or_else(|| anyhow::anyhow!("approval_request_missing"))?;
+        let intent = InvocationIntent {
+            invocation_id: InvocationId(
+                snapshot
+                    .get("invocation_id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow::anyhow!("approval_request_missing_invocation_id"))?
+                    .to_string(),
+            ),
+            run_id: run_id.clone(),
+            operation: snapshot
+                .get("operation")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow::anyhow!("approval_request_missing_operation"))?
+                .to_string(),
+            arguments: snapshot
+                .get("arguments")
+                .cloned()
+                .unwrap_or_else(|| json!({})),
+            idempotency_key: snapshot
+                .get("idempotency_key")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        };
+        let session_id = snapshot
+            .get("session_id")
+            .and_then(Value::as_str)
+            .map(|s| SessionId(s.to_string()));
+        let decision_id = snapshot
+            .get("decision_id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let correlation_id = intent.invocation_id.0.clone();
+        let approved = ApprovedInvocation::new(intent, decision_id);
+        journal.append_event(
+            JournalEventKind::ApprovalGranted,
+            Some(run_id),
+            session_id.as_ref(),
+            Some(&correlation_id),
+            json!({ "operation": approved.intent().operation }),
+        )?;
+        journal.queue_outbox_dispatch(&approved, session_id.as_ref())?;
+        journal.update_run_status(run_id, "WaitingDispatch")?;
+        Ok(())
+    }
+
+    /// Phase 2 M2d: deny a run paused in `AwaitingApproval`. Appends
+    /// `ApprovalDenied` and fails the run (status `Failed`). **Idempotent**: if
+    /// the run is not currently `AwaitingApproval`, this is a no-op `Ok(())`.
+    pub fn deny_run(&self, journal: &JournalStore, run_id: &RunId) -> Result<()> {
+        let status = journal.run_status(run_id)?;
+        if status.as_deref() != Some("AwaitingApproval") {
+            return Ok(());
+        }
+        let snapshot = journal.approval_request_for_run(run_id)?;
+        let operation = snapshot
+            .as_ref()
+            .and_then(|p| p.get("operation"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let session_id = snapshot
+            .as_ref()
+            .and_then(|p| p.get("session_id"))
+            .and_then(Value::as_str)
+            .map(|s| SessionId(s.to_string()));
+        journal.append_event(
+            JournalEventKind::ApprovalDenied,
+            Some(run_id),
+            session_id.as_ref(),
+            None,
+            json!({ "operation": operation }),
+        )?;
+        journal.fail_run(run_id)?;
+        Ok(())
+    }
 }
 
 fn string_arg(value: &Value, key: &str) -> Result<String> {
