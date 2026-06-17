@@ -175,7 +175,7 @@ impl JournalStore {
                 |row| row.get(0),
             )
             .optional()?;
-        Ok(status.and_then(|s| WorkerJobStatus::from_str(&s)))
+        Ok(status.and_then(|s| WorkerJobStatus::parse_opt(&s)))
     }
 
     pub fn start_worker_job(&self, source_event_id: &EventId) -> Result<()> {
