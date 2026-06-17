@@ -37,6 +37,7 @@ fn approval_config() -> crate::config::KernelConfig {
         outbox_dispatcher_poll_interval_ms: 10,
         extra_allowed_operations: vec![],
         require_write_approval: true,
+        write_approval_ttl_secs: 0,
     }
 }
 
