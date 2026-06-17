@@ -65,14 +65,16 @@ impl Gateway {
         if !has_grant {
             bail!("capability_not_enabled: {}", intent.operation);
         }
-        if intent.operation != "stdout.send_text" && intent.operation != "feishu.send_message" {
+        // Operation allowlist is the single source of truth in the operation
+        // catalog (Phase 2 M2a); see `src/domain/operation.rs`.
+        if !crate::domain::operation::is_allowed(&intent.operation) {
             bail!("operation_not_allowed: {}", intent.operation);
         }
         let target_session = string_arg(&intent.arguments, "session_id")?;
         if target_session != session.id.0 {
             bail!("target_session_mismatch");
         }
-        if intent.operation == "feishu.send_message" {
+        if intent.operation == crate::domain::operation::FEISHU_SEND_MESSAGE {
             string_arg(&intent.arguments, "message_id")?;
             string_arg(&intent.arguments, "chat_id")?;
             string_arg(&intent.arguments, "text")?;
@@ -118,7 +120,7 @@ impl Gateway {
                 subject: PrincipalSubject::LocalUser,
                 source: PrincipalSource::Cli,
                 grants: vec![CapabilityGrant {
-                    operation: "stdout.send_text".to_string(),
+                    operation: crate::domain::operation::STDOUT_SEND_TEXT.to_string(),
                     scope: "current_session".to_string(),
                 }],
                 requester_id: Some("cli:local".to_string()),
@@ -223,7 +225,7 @@ impl Gateway {
                 subject: PrincipalSubject::FeishuOpenId(sender_open_id.clone()),
                 source: PrincipalSource::Feishu,
                 grants: vec![CapabilityGrant {
-                    operation: "feishu.send_message".to_string(),
+                    operation: crate::domain::operation::FEISHU_SEND_MESSAGE.to_string(),
                     scope: "current_session".to_string(),
                 }],
                 requester_id: Some(format!("feishu:open_id:{sender_open_id}")),
@@ -306,7 +308,7 @@ impl Gateway {
                 subject: PrincipalSubject::FeishuOpenId(sender_open_id.clone()),
                 source: PrincipalSource::Feishu,
                 grants: vec![CapabilityGrant {
-                    operation: "feishu.send_message".to_string(),
+                    operation: crate::domain::operation::FEISHU_SEND_MESSAGE.to_string(),
                     scope: "current_session".to_string(),
                 }],
                 requester_id: Some(format!("feishu:open_id:{sender_open_id}")),
@@ -333,7 +335,7 @@ fn cli_principal() -> RunPrincipal {
         subject: PrincipalSubject::LocalUser,
         source: PrincipalSource::Cli,
         grants: vec![CapabilityGrant {
-            operation: "stdout.send_text".to_string(),
+            operation: crate::domain::operation::STDOUT_SEND_TEXT.to_string(),
             scope: "current_session".to_string(),
         }],
         requester_id: Some("cli:local".to_string()),

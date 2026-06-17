@@ -42,6 +42,7 @@ For the final product shape and macro roadmap, see
 | Phase 1 H6 | Done | release checklist (`docs/release-checklist.md`) + operating guide (`docs/operating-guide.md`) |
 | Phase 1 H7 | Done | restart-recovery lifecycle end-to-end test (`tests/m1_restart_recovery_lifecycle.rs`); recovery verified idempotent + never auto-retries |
 | Phase 1 D1 | Done | `RunStatus::Unknown` introduced: recovery advances `runs.status` to `"Unknown"` when an outbox row is reconciled to unknown (distinct from `WaitingDispatch`); analysis in `docs/decisions/runstatus-unknown.md`, regression in `tests/m1_runstatus_unknown.rs` |
+| Phase 2 M2a | Done | operation catalog as single source of truth (`src/domain/operation.rs`); gateway allowlist + runtime intent + adapter test now reference catalog constants; `HttpConnectorAdapter` reads the connector's reported `receipt.status` instead of assuming 2xx ⇒ Succeeded; scoping in `docs/decisions/phase2-invocation-gateway-scoping.md` |
 
 ## Stage Plan
 
