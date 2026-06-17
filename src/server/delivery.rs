@@ -70,7 +70,7 @@ fn process_next_worker_job(
         );
         let _ = journal.fail_worker_job(&source_event_id, &category);
         let _ = journal.append_event(
-            JournalEventKind::RunCompleted,
+            JournalEventKind::RunFailed,
             None,
             None,
             Some(&event_id),
