@@ -119,10 +119,10 @@ impl Gateway {
                 principal_id: PrincipalId("cli:local".to_string()),
                 subject: PrincipalSubject::LocalUser,
                 source: PrincipalSource::Cli,
-                grants: vec![CapabilityGrant {
-                    operation: crate::domain::operation::STDOUT_SEND_TEXT.to_string(),
-                    scope: "current_session".to_string(),
-                }],
+                grants: crate::domain::operation::ExecutionProfile::for_channel(
+                    ChannelKind::Cli,
+                )
+                .grants,
                 requester_id: Some("cli:local".to_string()),
             },
             session_target: SessionTarget {
@@ -224,10 +224,10 @@ impl Gateway {
                 principal_id: PrincipalId(format!("feishu:open_id:{sender_open_id}")),
                 subject: PrincipalSubject::FeishuOpenId(sender_open_id.clone()),
                 source: PrincipalSource::Feishu,
-                grants: vec![CapabilityGrant {
-                    operation: crate::domain::operation::FEISHU_SEND_MESSAGE.to_string(),
-                    scope: "current_session".to_string(),
-                }],
+                grants: crate::domain::operation::ExecutionProfile::for_channel(
+                    ChannelKind::Feishu,
+                )
+                .grants,
                 requester_id: Some(format!("feishu:open_id:{sender_open_id}")),
             },
             session_target: SessionTarget {
@@ -307,10 +307,10 @@ impl Gateway {
                 principal_id: PrincipalId(format!("feishu:open_id:{sender_open_id}")),
                 subject: PrincipalSubject::FeishuOpenId(sender_open_id.clone()),
                 source: PrincipalSource::Feishu,
-                grants: vec![CapabilityGrant {
-                    operation: crate::domain::operation::FEISHU_SEND_MESSAGE.to_string(),
-                    scope: "current_session".to_string(),
-                }],
+                grants: crate::domain::operation::ExecutionProfile::for_channel(
+                    ChannelKind::Feishu,
+                )
+                .grants,
                 requester_id: Some(format!("feishu:open_id:{sender_open_id}")),
             },
             session_target: SessionTarget {
@@ -334,10 +334,7 @@ fn cli_principal() -> RunPrincipal {
         principal_id: PrincipalId("cli:local".to_string()),
         subject: PrincipalSubject::LocalUser,
         source: PrincipalSource::Cli,
-        grants: vec![CapabilityGrant {
-            operation: crate::domain::operation::STDOUT_SEND_TEXT.to_string(),
-            scope: "current_session".to_string(),
-        }],
+        grants: crate::domain::operation::ExecutionProfile::for_channel(ChannelKind::Cli).grants,
         requester_id: Some("cli:local".to_string()),
     }
 }
