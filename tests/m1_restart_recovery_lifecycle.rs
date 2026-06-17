@@ -3,8 +3,6 @@ use agent_core_kernel::gateway::Gateway;
 use agent_core_kernel::journal::JournalStore;
 use agent_core_kernel::server::{health_snapshot, DispatcherMetrics};
 use anyhow::Result;
-use rusqlite::Connection;
-use serde_json::json;
 
 /// Phase 1 user-facing goal: "shutdown / restart behavior is predictable".
 ///
