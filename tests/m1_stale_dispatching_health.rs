@@ -1,9 +1,7 @@
-use agent_core_kernel::domain::*;
 use agent_core_kernel::gateway::Gateway;
 use agent_core_kernel::journal::JournalStore;
 use agent_core_kernel::server::{health_snapshot, DispatcherMetrics};
 use anyhow::Result;
-use serde_json::json;
 
 /// A dispatching row whose lease has expired counts as stale, and /health
 /// reflects the count. This is the operator signal that distinguishes a busy
