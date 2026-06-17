@@ -123,6 +123,14 @@ pub enum RunStatus {
     WaitingDispatch,
     Completed,
     Failed,
+    /// The dispatch outcome is unknown: the run was dispatched but no
+    /// terminal receipt was ever recorded, so its result cannot be
+    /// determined. Recovery sets this when an outbox row is reconciled to
+    /// `unknown` (see `recover_unknown_invocations`). Distinct from
+    /// `WaitingDispatch`, which means "not yet dispatched". Stored in
+    /// `runs.status` as the raw string `"Unknown"` (no exhaustive match
+    /// reads it back; see `docs/decisions/runstatus-unknown.md`).
+    Unknown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -61,6 +61,12 @@ impl JournalStore {
     /// (Task 4.1) and clears stale `dispatching` projection rows whose journal
     /// is already terminal without appending duplicate events (Task 4.2).
     ///
+    /// For each newly-recovered unknown invocation that has a `run_id`, the
+    /// corresponding `runs.status` is also advanced to `"Unknown"`. This makes
+    /// the run's outcome visible on the run itself, distinct from
+    /// `WaitingDispatch` ("not yet dispatched"). See
+    /// `docs/decisions/runstatus-unknown.md`.
+    ///
     /// Safety:
     /// - never calls adapter / dispatch_once
     /// - never writes ReceiptReceived for unknown invocations
@@ -99,6 +105,12 @@ impl JournalStore {
                     invocation.invocation_id,
                 ],
             )?;
+            if let Some(run_id) = invocation.run_id.as_ref() {
+                tx.execute(
+                    "UPDATE runs SET status = ?1, updated_at = ?2 WHERE id = ?3",
+                    params!["Unknown", Utc::now().to_rfc3339(), run_id.0],
+                )?;
+            }
             tx.commit()?;
             recovered += 1;
         }
