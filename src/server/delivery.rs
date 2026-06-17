@@ -200,7 +200,7 @@ pub(crate) fn start_approval_expiry_loop(
         // Sweep at most once per TTL, but no less frequently than every minute,
         // so a short TTL still triggers promptly. A longer TTL means fewer
         // wakeups, not longer-than-TTL stalls.
-        let sweep = Duration::from_secs(ttl.max(60).min(3600));
+        let sweep = Duration::from_secs(ttl.clamp(60, 3600));
         while running.load(Ordering::SeqCst) {
             thread::sleep(sweep);
             if !running.load(Ordering::SeqCst) {
