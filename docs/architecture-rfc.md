@@ -32,7 +32,7 @@ programs.
 ## 2. Current Kernel Modules
 
 ```text
-src/domain.rs          durable domain types and ID newtypes
+src/domain             durable domain types and ID newtypes
 src/gateway            ingress validation and invocation approval
 src/runtime            single-agent event delivery loop
 src/journal            SQLite journal, hash chain, recovery scans
