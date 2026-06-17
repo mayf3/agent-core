@@ -213,3 +213,126 @@ fn parse_kind_round_trips_approval_kinds() -> Result<()> {
     let _ = std::fs::remove_dir_all(&dir);
     Ok(())
 }
+
+// ---- Phase 2 M2d follow-up: approval expiry ----
+
+struct FixedLlm;
+impl agent_core_kernel::llm::LlmClient for FixedLlm {
+    fn complete(&self, _input: agent_core_kernel::llm::LlmInput) -> Result<agent_core_kernel::llm::LlmOutput> {
+        Ok(agent_core_kernel::llm::LlmOutput {
+            provider: "local".to_string(),
+            model: "fixed".to_string(),
+            content: "reply".to_string(),
+            journal_payload: serde_json::json!({}),
+        })
+    }
+}
+
+fn config_with_ttl(ttl: u64) -> KernelConfig {
+    let mut c = common::test_config();
+    c.require_write_approval = true;
+    c.write_approval_ttl_secs = ttl;
+    c
+}
+
+/// Build a paused run; returns its id and the journal.
+fn paused_run(ttl: u64) -> Result<(RunId, JournalStore)> {
+    let config = config_with_ttl(ttl);
+    let journal = JournalStore::in_memory()?;
+    let gateway = Gateway::new(config.clone());
+    let runtime = Runtime::new(config, FixedLlm, agent_core_kernel::adapters::StdoutAdapter);
+    let envelope = gateway.cli_ingress("hi".to_string())?;
+    let event = gateway.validate_ingress(&journal, envelope)?;
+    let outcome = runtime.deliver(&journal, &gateway, event)?;
+    assert_eq!(
+        journal.run_status(&outcome.run_id)?.as_deref(),
+        Some("AwaitingApproval")
+    );
+    Ok((outcome.run_id, journal))
+}
+
+#[test]
+fn ttl_zero_is_a_noop() -> Result<()> {
+    // Default: a paused run stays AwaitingApproval; nothing is expired.
+    let (run_id, journal) = paused_run(0)?;
+    let expired = journal.expire_stale_approvals(0)?;
+    assert_eq!(expired, 0);
+    assert_eq!(
+        journal.run_status(&run_id)?.as_deref(),
+        Some("AwaitingApproval")
+    );
+    assert_eq!(count_kind(&journal, &run_id, JournalEventKind::ApprovalExpired), 0);
+    Ok(())
+}
+
+#[test]
+fn expire_advances_stale_run_to_failed() -> Result<()> {
+    // A tiny TTL means the just-paused run is already "stale" relative to it.
+    let (run_id, journal) = paused_run(1)?;
+    // Sleep just past the TTL so the run is older than 1 second.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let expired = journal.expire_stale_approvals(1)?;
+    assert_eq!(expired, 1);
+    assert_eq!(journal.run_status(&run_id)?.as_deref(), Some("Failed"));
+    assert_eq!(count_kind(&journal, &run_id, JournalEventKind::ApprovalExpired), 1);
+    // No dispatch happened (never queued).
+    assert_eq!(count_kind(&journal, &run_id, JournalEventKind::OutboxQueued), 0);
+    Ok(())
+}
+
+#[test]
+fn expire_does_not_touch_resume_or_deny_terminal_runs() -> Result<()> {
+    // A run that was already resumed (WaitingDispatch) must not be expired even
+    // if its ApprovalRequested is old — it's no longer AwaitingApproval.
+    let (run_id, journal) = paused_run(1)?;
+    let gateway = Gateway::new(common::test_config());
+    gateway.approve_run(&journal, &run_id)?;
+    assert_eq!(
+        journal.run_status(&run_id)?.as_deref(),
+        Some("WaitingDispatch")
+    );
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let expired = journal.expire_stale_approvals(1)?;
+    assert_eq!(expired, 0, "a resumed run must not be expired");
+    assert_eq!(count_kind(&journal, &run_id, JournalEventKind::ApprovalExpired), 0);
+    Ok(())
+}
+
+#[test]
+fn expire_is_idempotent() -> Result<()> {
+    let (run_id, journal) = paused_run(1)?;
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    assert_eq!(journal.expire_stale_approvals(1)?, 1);
+    // Second pass finds nothing (run is now Failed, no longer AwaitingApproval).
+    assert_eq!(journal.expire_stale_approvals(1)?, 0);
+    assert_eq!(count_kind(&journal, &run_id, JournalEventKind::ApprovalExpired), 1);
+    Ok(())
+}
+
+#[test]
+fn parse_kind_round_trips_approval_expired() -> Result<()> {
+    // Append ApprovalExpired directly, reopen, confirm it reads back correctly
+    // (not Unknown) — guards the hash-chain invariant.
+    let dir = std::env::temp_dir().join(format!("m2d-expiry-{}",
+        std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).ok();
+    let db_path = dir.join("e.sqlite");
+    {
+        let journal = JournalStore::open(&db_path)?;
+        journal.append_event(
+            JournalEventKind::ApprovalExpired,
+            None,
+            None,
+            None,
+            serde_json::json!({ "operation": "stdout.send_text", "ttl_secs": 1 }),
+        )?;
+        assert!(journal.verify_hash_chain()?);
+    }
+    let journal2 = JournalStore::open(&db_path)?;
+    let kinds: Vec<_> = journal2.events()?.iter().map(|e| e.kind.clone()).collect();
+    assert_eq!(kinds, vec![JournalEventKind::ApprovalExpired]);
+    assert!(journal2.verify_hash_chain()?);
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
+}

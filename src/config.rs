@@ -35,6 +35,12 @@ pub struct KernelConfig {
     /// run in `AwaitingApproval` until a human decision resumes it. Default
     /// false → all operations inline-approve (backward compatible).
     pub require_write_approval: bool,
+    /// Phase 2 M2d follow-up: max seconds an `AwaitingApproval` run may
+    /// wait for a human decision before startup recovery expires it to
+    /// `Failed` (appends `ApprovalExpired`). 0 = disabled (default → a
+    /// paused run waits indefinitely, the pre-expiry behavior). Only
+    /// consulted when `require_write_approval` is true.
+    pub write_approval_ttl_secs: u64,
 }
 
 impl KernelConfig {
@@ -84,6 +90,7 @@ impl KernelConfig {
             outbox_dispatcher_poll_interval_ms: env_u64("AGENT_CORE_OUTBOX_DISPATCHER_POLL_MS", 500),
             extra_allowed_operations: env_list("AGENT_CORE_EXTRA_ALLOWED_OPERATIONS"),
             require_write_approval: env_bool("AGENT_CORE_REQUIRE_WRITE_APPROVAL", false),
+            write_approval_ttl_secs: env_u64("AGENT_CORE_WRITE_APPROVAL_TTL_SECS", 0),
         }
     }
 }

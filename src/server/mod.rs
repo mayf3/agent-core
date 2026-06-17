@@ -35,6 +35,15 @@ pub fn serve(config: KernelConfig) -> Result<()> {
     if recovered > 0 {
         println!("agent-core recovered {recovered} unknown invocation(s)");
     }
+    // Phase 2 M2d follow-up: expire ApprovalRequested runs older than the
+    // operator-configured TTL. No-op unless both require_write_approval and a
+    // non-zero write_approval_ttl_secs are set.
+    if config.require_write_approval && config.write_approval_ttl_secs > 0 {
+        let expired = journal.expire_stale_approvals(config.write_approval_ttl_secs)?;
+        if expired > 0 {
+            println!("agent-core expired {expired} stale approval(s)");
+        }
+    }
     let gateway = Arc::new(Gateway::new(config.clone()));
     let recovered_ingress = recover_undelivered_ingress(Arc::clone(&journal))?;
     if recovered_ingress > 0 {
