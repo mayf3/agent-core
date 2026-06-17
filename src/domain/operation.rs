@@ -78,11 +78,12 @@ pub fn is_allowed(name: &str) -> bool {
 /// channel → operation mapping in four places. This type centralizes that
 /// mapping so the grant set a principal receives is derived from one place.
 ///
-/// Today [`ExecutionProfile::for_channel`] returns exactly the grant each
-/// branch hardcoded, so behavior is preserved. This is the foundation half of
-/// M2b; the config-driven half (letting the grant set be augmented from
-/// `KernelConfig`, so an operator can widen a channel's grants without editing
-/// code) is a separate follow-up increment and the named next candidate.
+/// [`ExecutionProfile::for_channel`] returns the baseline grant each branch
+/// hardcoded (behavior-preserving). [`ExecutionProfile::with_extra`] then
+/// augments it with operator-configured extra operations, closing M2b's
+/// config-driven exit criterion (cli/feishu grant set configurable via
+/// `KernelConfig`). With no extra operations configured the profile is
+/// identical to the previous inline literals.
 #[derive(Debug, Clone)]
 pub struct ExecutionProfile {
     pub grants: Vec<CapabilityGrant>,
@@ -104,6 +105,38 @@ impl ExecutionProfile {
                 scope: "current_session".to_string(),
             }],
         }
+    }
+
+    /// Augment the baseline profile with extra catalog-allowed operations
+    /// supplied by the operator. Phase 2 M2b's config-driven half: an operator
+    /// may widen a channel's grants via `KernelConfig` without editing code.
+    ///
+    /// Each entry in `extra_operations` must be a name in [`CATALOG`]; unknown
+    /// names are silently dropped (they cannot be approved anyway, because the
+    /// gateway allowlist is the catalog — dropping here keeps the grant set
+    /// honest). Extra grants are scoped to `current_session`, matching the
+    /// baseline scope invariant.
+    ///
+    /// This is additive: an unknown/empty `extra_operations` leaves the profile
+    /// identical to [`ExecutionProfile::for_channel`], so the default is
+    /// behavior-preserving.
+    pub fn with_extra(mut self, extra_operations: &[String]) -> Self {
+        for name in extra_operations {
+            if name.is_empty() {
+                continue;
+            }
+            if lookup(name).is_none() {
+                continue;
+            }
+            let already = self.grants.iter().any(|g| &g.operation == name);
+            if !already {
+                self.grants.push(CapabilityGrant {
+                    operation: name.clone(),
+                    scope: "current_session".to_string(),
+                });
+            }
+        }
+        self
     }
 }
 
@@ -178,5 +211,43 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn with_extra_no_op_when_empty() {
+        // Default config (no extra operations) must leave the profile
+        // identical to the baseline — behavior preservation gate for M2b's
+        // config-driven half.
+        let baseline = ExecutionProfile::for_channel(ChannelKind::Cli);
+        let augmented = ExecutionProfile::for_channel(ChannelKind::Cli).with_extra(&[]);
+        assert_eq!(baseline.grants.len(), augmented.grants.len());
+        assert_eq!(augmented.grants[0].operation, STDOUT_SEND_TEXT);
+    }
+
+    #[test]
+    fn with_extra_adds_catalog_operation() {
+        // An operator-configured catalog operation is appended as an extra
+        // grant, scoped to current_session.
+        let extra = vec![FEISHU_SEND_MESSAGE.to_string()];
+        let profile = ExecutionProfile::for_channel(ChannelKind::Cli).with_extra(&extra);
+        assert_eq!(profile.grants.len(), 2);
+        assert_eq!(profile.grants[0].operation, STDOUT_SEND_TEXT);
+        assert_eq!(profile.grants[1].operation, FEISHU_SEND_MESSAGE);
+        assert_eq!(profile.grants[1].scope, "current_session");
+    }
+
+    #[test]
+    fn with_extra_drops_unknown_operations() {
+        // Operations not in the catalog cannot be approved by the gateway
+        // allowlist, so they are dropped from the grant set rather than
+        // appearing as grants that will always be denied.
+        let extra = vec![
+            "shell.exec".to_string(),
+            "".to_string(),
+            STDOUT_SEND_TEXT.to_string(), // duplicate of baseline → dropped
+        ];
+        let profile = ExecutionProfile::for_channel(ChannelKind::Cli).with_extra(&extra);
+        assert_eq!(profile.grants.len(), 1);
+        assert_eq!(profile.grants[0].operation, STDOUT_SEND_TEXT);
     }
 }

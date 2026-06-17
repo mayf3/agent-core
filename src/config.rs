@@ -25,6 +25,12 @@ pub struct KernelConfig {
     pub context_max_block_chars: usize,
     pub outbox_dispatcher_enabled: bool,
     pub outbox_dispatcher_poll_interval_ms: u64,
+    /// Extra operation names a run principal is granted in addition to its
+    /// channel's baseline grant (Phase 2 M2b config-driven grants). Each name
+    /// must be in the operation catalog; unknown names are dropped when the
+    /// profile is derived. Empty (the default) ⇒ the principal receives only
+    /// its channel's baseline grant, preserving prior behavior.
+    pub extra_allowed_operations: Vec<String>,
 }
 
 impl KernelConfig {
@@ -72,6 +78,7 @@ impl KernelConfig {
             context_max_block_chars: env_usize("AGENT_CORE_CONTEXT_MAX_BLOCK_CHARS", 4_000),
             outbox_dispatcher_enabled: env_bool("AGENT_CORE_OUTBOX_DISPATCHER_ENABLED", true),
             outbox_dispatcher_poll_interval_ms: env_u64("AGENT_CORE_OUTBOX_DISPATCHER_POLL_MS", 500),
+            extra_allowed_operations: env_list("AGENT_CORE_EXTRA_ALLOWED_OPERATIONS"),
         }
     }
 }
