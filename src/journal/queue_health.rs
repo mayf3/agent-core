@@ -27,6 +27,25 @@ impl JournalStore {
         .map_err(Into::into)
     }
 
+    /// Count terminal-unknown outbox rows that have **not** been acknowledged
+    /// by an operator. This is the count `/health.outbox_unknown_count` and
+    /// the 档 C rollup use: an acknowledged row (`acked_unknown = 1`) is a
+    /// terminal-unknown the operator has explicitly accepted, so it no longer
+    /// degrades health. See `docs/decisions/ack-clear-terminal-unknown.md`.
+    pub fn outbox_unknown_unacked_count(&self) -> Result<i64> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow!("journal mutex poisoned"))?;
+        conn.query_row(
+            "SELECT COUNT(*) FROM outbox_dispatches
+             WHERE status = ?1 AND acked_unknown = 0",
+            params![OutboxDispatchStatus::Unknown.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
+    }
+
     /// Count outbox rows still flagged `dispatching` whose lease has expired
     /// (`locked_until` is non-NULL and `<= now`). A row with a NULL
     /// `locked_until` is NOT counted as stale — it is owned by the dispatcher

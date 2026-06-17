@@ -119,4 +119,25 @@ impl JournalStore {
         )?;
         Ok(())
     }
+
+    /// Simulate an operator acknowledging a terminal-unknown row (see
+    /// `docs/decisions/ack-clear-terminal-unknown.md`, option 1). Mirrors the
+    /// external ack SQL documented in the operating guide
+    /// (`UPDATE outbox_dispatches SET acked_unknown=1 WHERE invocation_id=?`).
+    /// Setting `ack=false` reverses it.
+    pub fn ack_outbox_unknown_for_test(
+        &self,
+        invocation_id: &InvocationId,
+        ack: bool,
+    ) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow!("journal mutex poisoned"))?;
+        conn.execute(
+            "UPDATE outbox_dispatches SET acked_unknown = ?1 WHERE invocation_id = ?2",
+            params![if ack { 1 } else { 0 }, invocation_id.0],
+        )?;
+        Ok(())
+    }
 }

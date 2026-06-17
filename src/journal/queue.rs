@@ -42,6 +42,7 @@ pub fn migrate(conn: &Connection) -> Result<()> {
           arguments_json TEXT NOT NULL,
           idempotency_key TEXT NOT NULL,
           decision_id TEXT NOT NULL DEFAULT '',
+          acked_unknown INTEGER NOT NULL DEFAULT 0,
           status TEXT NOT NULL,
           attempts INTEGER NOT NULL DEFAULT 0,
           available_at TEXT NOT NULL,
@@ -61,6 +62,7 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     )?;
 
     ensure_outbox_decision_id_column(conn)?;
+    ensure_outbox_acked_unknown_column(conn)?;
     Ok(())
 }
 
@@ -74,6 +76,26 @@ fn ensure_outbox_decision_id_column(conn: &Connection) -> Result<()> {
     }
     conn.execute_batch(
         "ALTER TABLE outbox_dispatches ADD COLUMN decision_id TEXT NOT NULL DEFAULT '';",
+    )?;
+    Ok(())
+}
+
+/// Add the `acked_unknown` column (see
+/// `docs/decisions/ack-clear-terminal-unknown.md`, option 1). An operator sets
+/// it to `1` via an external script to acknowledge that a terminal-unknown
+/// row's lost outcome is known and should no longer degrade `/health.status`.
+/// Idempotent: existing DBs (and the in-memory schema above) get the column
+/// added with default `0`; the in-memory `CREATE TABLE` already declares it.
+fn ensure_outbox_acked_unknown_column(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(outbox_dispatches)")?;
+    let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for column in columns {
+        if column? == "acked_unknown" {
+            return Ok(());
+        }
+    }
+    conn.execute_batch(
+        "ALTER TABLE outbox_dispatches ADD COLUMN acked_unknown INTEGER NOT NULL DEFAULT 0;",
     )?;
     Ok(())
 }

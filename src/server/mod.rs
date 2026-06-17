@@ -181,7 +181,10 @@ pub fn health_snapshot(
     let worker_job_counts = journal.worker_job_status_counts()?;
     let outbox_dispatch_counts = journal.outbox_dispatch_status_counts()?;
     let outbox_pending_count = journal.outbox_status_count(OutboxDispatchStatus::Pending)?;
-    let outbox_unknown_count = journal.outbox_status_count(OutboxDispatchStatus::Unknown)?;
+    // /health's unknown count excludes operator-acknowledged rows
+    // (acked_unknown=1), so an acked terminal-unknown no longer degrades
+    // status. See docs/decisions/ack-clear-terminal-unknown.md (option 1).
+    let outbox_unknown_count = journal.outbox_unknown_unacked_count()?;
     let outbox_dispatching_count =
         journal.outbox_status_count(OutboxDispatchStatus::Dispatching)?;
     let outbox_stale_dispatching_count = journal.outbox_stale_dispatching_count()?;
