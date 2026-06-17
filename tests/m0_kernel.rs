@@ -411,6 +411,7 @@ fn test_config() -> KernelConfig {
         context_max_block_chars: 4_000,
             outbox_dispatcher_enabled: false,
             outbox_dispatcher_poll_interval_ms: 100,
+            extra_allowed_operations: vec![],
     }
 }
 fn cli_principal() -> RunPrincipal {
