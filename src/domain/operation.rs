@@ -13,6 +13,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::domain::{CapabilityGrant, ChannelKind};
+
 /// The risk classification of an operation. Today every operation is
 /// `Write` in effect (it produces a side effect: a reply). M2d will gate
 /// `Write` operations behind durable approval state; `ReadOnly` operations
@@ -67,6 +69,44 @@ pub fn is_allowed(name: &str) -> bool {
     lookup(name).is_some()
 }
 
+/// The capability grants a run principal receives for a given channel.
+///
+/// Phase 2 M2b (`docs/decisions/phase2-invocation-gateway-scoping.md`):
+/// previously each gateway ingress branch (`validate_cli_ingress`,
+/// `validate_feishu_ingress`, `recover_feishu_event`, and the `cli_principal`
+/// helper) hardcoded a single `CapabilityGrant` inline, duplicating the
+/// channel → operation mapping in four places. This type centralizes that
+/// mapping so the grant set a principal receives is derived from one place.
+///
+/// Today [`ExecutionProfile::for_channel`] returns exactly the grant each
+/// branch hardcoded, so behavior is preserved. This is the foundation half of
+/// M2b; the config-driven half (letting the grant set be augmented from
+/// `KernelConfig`, so an operator can widen a channel's grants without editing
+/// code) is a separate follow-up increment and the named next candidate.
+#[derive(Debug, Clone)]
+pub struct ExecutionProfile {
+    pub grants: Vec<CapabilityGrant>,
+}
+
+impl ExecutionProfile {
+    /// Derive the baseline capability grants for `channel`. Each grant is
+    /// scoped to `current_session` (the run may only act within its own
+    /// session). This is the single source of truth referenced by every
+    /// gateway ingress branch.
+    pub fn for_channel(channel: ChannelKind) -> Self {
+        let operation = match channel {
+            ChannelKind::Cli => STDOUT_SEND_TEXT,
+            ChannelKind::Feishu => FEISHU_SEND_MESSAGE,
+        };
+        Self {
+            grants: vec![CapabilityGrant {
+                operation: operation.to_string(),
+                scope: "current_session".to_string(),
+            }],
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -97,6 +137,46 @@ mod tests {
                 "{} should be Write until M2e adds a read-only adapter",
                 spec.name
             );
+        }
+    }
+
+    #[test]
+    fn execution_profile_for_cli_grants_stdout_send_text() {
+        // M2b: the CLI channel baseline grant must match the grant the
+        // gateway previously hardcoded inline (`stdout.send_text` scoped to
+        // the current session), so this change is behavior-preserving.
+        let profile = ExecutionProfile::for_channel(ChannelKind::Cli);
+        assert_eq!(profile.grants.len(), 1);
+        let grant = &profile.grants[0];
+        assert_eq!(grant.operation, STDOUT_SEND_TEXT);
+        assert_eq!(grant.scope, "current_session");
+    }
+
+    #[test]
+    fn execution_profile_for_feishu_grants_feishu_send_message() {
+        // M2b: the Feishu channel baseline grant must match the grant the
+        // gateway previously hardcoded inline (`feishu.send_message` scoped
+        // to the current session), so this change is behavior-preserving.
+        let profile = ExecutionProfile::for_channel(ChannelKind::Feishu);
+        assert_eq!(profile.grants.len(), 1);
+        let grant = &profile.grants[0];
+        assert_eq!(grant.operation, FEISHU_SEND_MESSAGE);
+        assert_eq!(grant.scope, "current_session");
+    }
+
+    #[test]
+    fn execution_profile_scopes_every_grant_to_current_session() {
+        // The baseline profile never grants cross-session scope; a run may
+        // only act within its own session. The config-driven follow-up may
+        // add grants but must keep (or explicitly widen) this invariant.
+        let channels = [(ChannelKind::Cli, "Cli"), (ChannelKind::Feishu, "Feishu")];
+        for (channel, name) in channels {
+            for grant in ExecutionProfile::for_channel(channel).grants {
+                assert_eq!(
+                    grant.scope, "current_session",
+                    "baseline grant for {name} must be current_session"
+                );
+            }
         }
     }
 }
