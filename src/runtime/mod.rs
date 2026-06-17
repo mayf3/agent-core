@@ -237,7 +237,7 @@ where
             InvocationIntent {
                 invocation_id: InvocationId(format!("reply:{}", run.id.0)),
                 run_id: run.id.clone(),
-                operation: "feishu.send_message".to_string(),
+                operation: crate::domain::operation::FEISHU_SEND_MESSAGE.to_string(),
                 arguments: json!({
                     "session_id": session.id.0,
                     "message_id": message_id.unwrap_or_default(),
@@ -250,7 +250,7 @@ where
             InvocationIntent {
                 invocation_id: InvocationId(format!("reply:{}", run.id.0)),
                 run_id: run.id.clone(),
-                operation: "stdout.send_text".to_string(),
+                operation: crate::domain::operation::STDOUT_SEND_TEXT.to_string(),
                 arguments: json!({
                     "session_id": session.id.0,
                     "text": text,
