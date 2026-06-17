@@ -1,5 +1,5 @@
 use super::sqlite::JournalStore;
-use crate::domain::{JournalEvent, JournalEventKind};
+use crate::domain::{JournalEvent, JournalEventKind, RunId};
 use anyhow::Result;
 use std::collections::HashSet;
 
@@ -49,5 +49,23 @@ impl JournalStore {
                     .unwrap_or(false)
             })
             .collect())
+    }
+
+    /// Phase 2 M2d: return the `ApprovalRequested` payload for a run, if any.
+    /// Scans the run's journal events for the most recent `ApprovalRequested`
+    /// fact (a run may be paused at most once at a time). Returns `None` if the
+    /// run was never paused. The payload carries the full `intent_snapshot`
+    /// (operation, arguments, idempotency_key, decision_id, run_id, session_id)
+    /// so `Gateway::approve_run` can reconstruct and queue the dispatch.
+    pub fn approval_request_for_run(&self, run_id: &RunId) -> Result<Option<serde_json::Value>> {
+        let mut found = None;
+        for event in self.events()? {
+            if event.kind == JournalEventKind::ApprovalRequested
+                && event.run_id.as_ref() == Some(run_id)
+            {
+                found = Some(event.payload);
+            }
+        }
+        Ok(found)
     }
 }

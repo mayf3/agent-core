@@ -14,6 +14,23 @@ impl JournalStore {
         self.status_counts("outbox_dispatches")
     }
 
+    /// Count runs currently paused in `AwaitingApproval` (Phase 2 M2d). A
+    /// paused run is an expected operator state, not a trust loss, so the
+    /// `/health` rollup surfaces the count but does **not** degrade on it
+    /// (mirrors the stale-count exclusion rationale).
+    pub fn awaiting_approval_count(&self) -> Result<i64> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow!("journal mutex poisoned"))?;
+        conn.query_row(
+            "SELECT COUNT(*) FROM runs WHERE status = 'AwaitingApproval'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
+    }
+
     pub fn outbox_status_count(&self, status: OutboxDispatchStatus) -> Result<i64> {
         let conn = self
             .conn

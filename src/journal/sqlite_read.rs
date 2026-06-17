@@ -62,6 +62,12 @@ pub(crate) fn parse_kind(value: &str) -> JournalEventKind {
         "WorkerJobDead" => JournalEventKind::WorkerJobDead,
         "RunCompleted" => JournalEventKind::RunCompleted,
         "RunFailed" => JournalEventKind::RunFailed,
+        // Phase 2 M2d: approval-state kinds. Without these arms the new
+        // kinds would silently route to the `Unknown` sentinel and corrupt
+        // the hash chain (see tests/m5_parse_kind.rs).
+        "ApprovalRequested" => JournalEventKind::ApprovalRequested,
+        "ApprovalGranted" => JournalEventKind::ApprovalGranted,
+        "ApprovalDenied" => JournalEventKind::ApprovalDenied,
         _ => JournalEventKind::Unknown,
     }
 }
