@@ -25,7 +25,7 @@ impl WorkerJobStatus {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse_opt(s: &str) -> Option<Self> {
         match s {
             "queued" => Some(WorkerJobStatus::Queued),
             "leased" => Some(WorkerJobStatus::Leased),
@@ -66,7 +66,7 @@ impl OutboxDispatchStatus {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse_opt(s: &str) -> Option<Self> {
         match s {
             "pending" => Some(OutboxDispatchStatus::Pending),
             "leased" => Some(OutboxDispatchStatus::Leased),
@@ -117,7 +117,7 @@ mod tests {
             WorkerJobStatus::Failed,
         ] {
             let s = status.as_str();
-            let parsed = WorkerJobStatus::from_str(s);
+            let parsed = WorkerJobStatus::parse_opt(s);
             assert_eq!(parsed, Some(*status));
         }
     }
@@ -156,7 +156,7 @@ mod tests {
             OutboxDispatchStatus::Dead,
         ] {
             let s = status.as_str();
-            let parsed = OutboxDispatchStatus::from_str(s);
+            let parsed = OutboxDispatchStatus::parse_opt(s);
             assert_eq!(parsed, Some(*status));
         }
     }

@@ -81,7 +81,7 @@ impl JournalStore {
                 |row| row.get(0),
             )
             .optional()?;
-        Ok(status.and_then(|s| OutboxDispatchStatus::from_str(&s)))
+        Ok(status.and_then(|s| OutboxDispatchStatus::parse_opt(&s)))
     }
 
     pub fn start_outbox_dispatch(
