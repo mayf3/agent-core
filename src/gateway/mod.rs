@@ -122,6 +122,7 @@ impl Gateway {
                 grants: crate::domain::operation::ExecutionProfile::for_channel(
                     ChannelKind::Cli,
                 )
+                .with_extra(&self.config.extra_allowed_operations)
                 .grants,
                 requester_id: Some("cli:local".to_string()),
             },
@@ -227,6 +228,7 @@ impl Gateway {
                 grants: crate::domain::operation::ExecutionProfile::for_channel(
                     ChannelKind::Feishu,
                 )
+                .with_extra(&self.config.extra_allowed_operations)
                 .grants,
                 requester_id: Some(format!("feishu:open_id:{sender_open_id}")),
             },
@@ -274,7 +276,7 @@ impl Gateway {
         Ok(ValidatedEvent {
             event_id,
             source: EventSource::Cli,
-            principal: cli_principal(),
+            principal: self.cli_principal(),
             session_target: SessionTarget {
                 agent_id: self.config.agent_id.clone(),
                 channel: ChannelKind::Cli,
@@ -310,6 +312,7 @@ impl Gateway {
                 grants: crate::domain::operation::ExecutionProfile::for_channel(
                     ChannelKind::Feishu,
                 )
+                .with_extra(&self.config.extra_allowed_operations)
                 .grants,
                 requester_id: Some(format!("feishu:open_id:{sender_open_id}")),
             },
@@ -327,15 +330,17 @@ impl Gateway {
             occurred_at,
         })
     }
-}
 
-fn cli_principal() -> RunPrincipal {
-    RunPrincipal {
-        principal_id: PrincipalId("cli:local".to_string()),
-        subject: PrincipalSubject::LocalUser,
-        source: PrincipalSource::Cli,
-        grants: crate::domain::operation::ExecutionProfile::for_channel(ChannelKind::Cli).grants,
-        requester_id: Some("cli:local".to_string()),
+    fn cli_principal(&self) -> RunPrincipal {
+        RunPrincipal {
+            principal_id: PrincipalId("cli:local".to_string()),
+            subject: PrincipalSubject::LocalUser,
+            source: PrincipalSource::Cli,
+            grants: crate::domain::operation::ExecutionProfile::for_channel(ChannelKind::Cli)
+                .with_extra(&self.config.extra_allowed_operations)
+                .grants,
+            requester_id: Some("cli:local".to_string()),
+        }
     }
 }
 
