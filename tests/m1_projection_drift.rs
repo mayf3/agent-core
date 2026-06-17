@@ -76,6 +76,14 @@ fn unknown_terminal_fact_with_non_unknown_projection_is_drift() -> Result<()> {
             .and_then(|v| v.as_u64()),
         Some(1)
     );
+    // Per docs/decisions/health-rollup-semantics.md (档 C): projection drift
+    // (projection disagrees with the Journal terminal fact) makes the Kernel's
+    // state untrustworthy, so /health.status must be "degraded".
+    assert_eq!(
+        snapshot.get("status").and_then(|v| v.as_str()),
+        Some("degraded"),
+        "projection drift must degrade health status"
+    );
     Ok(())
 }
 
@@ -94,6 +102,58 @@ fn in_flight_dispatch_without_terminal_fact_is_not_drift() -> Result<()> {
     journal.start_outbox_dispatch(&approved, Some(&session.id))?;
     // No terminal fact appended -> not drift (just in-flight).
     assert_eq!(journal.outbox_projection_drift_count()?, 0);
+    Ok(())
+}
+
+/// After recovery reconciles an abandoned dispatch to terminal `unknown`,
+/// `unknown_invocations()` is empty (no live unknowns) but
+/// `outbox_unknown_count > 0`. Per docs/decisions/health-rollup-semantics.md
+/// (档 C), the rollup must still report `degraded` because the dispatch
+/// outcome is permanently undetermined. The pre-档 C rollup would have
+/// flipped back to `ok` here.
+#[test]
+fn terminal_unknown_keeps_health_degraded_after_recovery() -> Result<()> {
+    let config = common::test_config();
+    let gateway = Gateway::new(config.clone());
+    let journal = JournalStore::in_memory()?;
+    let session = common::test_session(&config);
+    let run = common::test_run(&config, &session);
+    let approved = common::approved_stdout_invocation(&gateway, &run, &session)?;
+
+    journal.queue_outbox_dispatch(&approved, Some(&session.id))?;
+    journal.start_outbox_dispatch(&approved, Some(&session.id))?;
+
+    // Recovery reconciles the abandoned dispatch to terminal unknown.
+    let recovered = journal.recover_unknown_invocations()?;
+    assert_eq!(recovered, 1);
+
+    // No live unknown invocations remain (recovery wrote OutboxDispatchUnknown).
+    assert_eq!(journal.unknown_invocations()?.len(), 0);
+    // But the projection still carries a terminal-unknown row.
+    assert_eq!(
+        journal.outbox_status_count(OutboxDispatchStatus::Unknown)?,
+        1
+    );
+    assert_eq!(journal.outbox_projection_drift_count()?, 0);
+
+    // 档 C: terminal-unknown keeps status degraded even though
+    // unknown_invocations() is empty.
+    let snapshot = health_snapshot(&journal, true, &DispatcherMetrics::new())?;
+    assert_eq!(
+        snapshot.get("status").and_then(|v| v.as_str()),
+        Some("degraded"),
+        "terminal-unknown outbox rows must keep health degraded after recovery"
+    );
+    Ok(())
+}
+
+/// At steady state (no unknowns, no drift, hash chain intact), status is ok.
+/// Guards against the rollup accidentally degrading a healthy Kernel.
+#[test]
+fn steady_state_health_is_ok() -> Result<()> {
+    let journal = JournalStore::in_memory()?;
+    let snapshot = health_snapshot(&journal, true, &DispatcherMetrics::new())?;
+    assert_eq!(snapshot.get("status").and_then(|v| v.as_str()), Some("ok"));
     Ok(())
 }
 
