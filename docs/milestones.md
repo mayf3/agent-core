@@ -89,9 +89,10 @@ Status: done.
 - recent-message context;
 - graceful shutdown.
 
-### Next: M5 Minimal Durable Worker / Outbox
+### Done: Phase 0 M5 Minimal Durable Worker / Outbox
 
-Build the smallest durable async runtime slice without adding workflow semantics.
+Built the smallest durable async runtime slice without adding workflow
+semantics. Status: complete.
 
 Done:
 
@@ -100,8 +101,9 @@ Done:
   one transaction;
 - accepted ingress queues `worker_jobs`, and current delivery threads update
   worker job started/succeeded/failed status;
-- current Runtime dispatch records outbox queued/dispatching/succeeded status
-  while preserving the existing synchronous send path;
+- `Runtime::deliver` queues an `outbox_dispatches` row
+  (`JournalStore::queue_outbox_dispatch`) instead of sending synchronously,
+  and updates the run to `WaitingDispatch`;
 - `/health` reports worker/outbox status counts for manual testing;
 - `/v1/ingress` returns after queueing and a single in-process worker loop
   leases queued `worker_jobs`;
@@ -114,15 +116,14 @@ Done:
 - outbox projection rows carry the original approval `decision_id` for future
   dispatcher calls.
 - `dispatch_once()` helper in `src/runtime/outbox_dispatcher.rs` leases one pending outbox row, executes it through the adapter, and marks it succeeded.
+- the `dispatch_once` loop is wired into server startup
+  (`start_outbox_dispatcher_loop` in `src/server/delivery.rs`, called from
+  `serve()`); connector-local reaction retry scheduling is implemented via a
+  bounded `withRetry` helper in `connectors/feishu/src/reactions.ts`.
 
 Remaining:
 
-- _(none -- M5 is complete. The `dispatch_once` loop is wired into server
-  startup (`start_outbox_dispatcher_loop` in `src/server/delivery.rs`, called
-  from `serve()`); `Runtime::deliver` delegates to `outbox_dispatches`
-  instead of sending synchronously; and connector-local reaction retry
-  scheduling is implemented via a bounded `withRetry` helper in
-  `connectors/feishu/src/reactions.ts`.)_
+- _(none -- M5 is complete.)_
 
 ### Later: Invocation Gateway Hardening
 
