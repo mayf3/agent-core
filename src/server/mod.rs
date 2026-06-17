@@ -1,5 +1,5 @@
 use crate::config::KernelConfig;
-use crate::domain::OutboxDispatchStatus;
+use crate::domain::{OutboxDispatchStatus, RunId};
 use crate::gateway::Gateway;
 use crate::journal::JournalStore;
 mod delivery;
@@ -129,12 +129,30 @@ fn handle_connection(
             )?,
         );
     }
-    if request.method != "POST" || request.path != "/v1/ingress" {
+    // All non-/health routes are POST under /v1/* and require the IPC bearer
+    // token. `/v1/approve` and `/v1/deny` (Phase 2 M2d follow-up) resume/deny a
+    // run paused in `AwaitingApproval` over the wire — the durable equivalent of
+    // the in-process `Gateway::approve_run`/`deny_run` API.
+    if request.method != "POST" || !request.path.starts_with("/v1/") {
         return write_json(stream, 404, json!({ "ok": false, "error": "not_found" }));
     }
     if request.bearer_token.as_deref() != Some(config.ipc_token.as_str()) {
         return write_json(stream, 401, json!({ "ok": false, "error": "unauthorized" }));
     }
+    match request.path.as_str() {
+        "/v1/ingress" => handle_ingress(stream, &gateway, &journal, &request),
+        "/v1/approve" => handle_approval_decision(stream, &gateway, &journal, &request, true),
+        "/v1/deny" => handle_approval_decision(stream, &gateway, &journal, &request, false),
+        _ => write_json(stream, 404, json!({ "ok": false, "error": "not_found" })),
+    }
+}
+
+fn handle_ingress(
+    stream: &mut TcpStream,
+    gateway: &Gateway,
+    journal: &JournalStore,
+    request: &HttpRequest,
+) -> Result<()> {
     let body: Value = serde_json::from_slice(&request.body)?;
     let envelope = serde_json::from_value(json!({
         "protocol_version": body.get("protocol_version").cloned().unwrap_or_else(|| json!("")),
@@ -145,7 +163,7 @@ fn handle_connection(
         "auth_context": { "authenticated": true },
         "routing_hint": body.get("routing_hint").cloned(),
     }))?;
-    let validated = match gateway.validate_ingress(&journal, envelope) {
+    let validated = match gateway.validate_ingress(journal, envelope) {
         Ok(event) => event,
         Err(error) if error.to_string().starts_with("skip:") => {
             return write_json(stream, 200, json!({ "ok": true, "status": "skipped" }));
@@ -166,6 +184,43 @@ fn handle_connection(
             "ok": true,
             "status": "accepted",
             "kernel_event_id": kernel_event_id,
+        }),
+    )
+}
+
+/// Phase 2 M2d follow-up: handle `POST /v1/approve` (`approved == true`) and
+/// `POST /v1/deny` (`approved == false`). Body: `{ "run_id": "<id>" }`. Both
+/// delegate to the (idempotent) `Gateway::approve_run`/`deny_run`. A run that
+/// is not `AwaitingApproval` is a no-op-200 (idempotent), matching the
+/// in-process API.
+fn handle_approval_decision(
+    stream: &mut TcpStream,
+    gateway: &Gateway,
+    journal: &JournalStore,
+    request: &HttpRequest,
+    approved: bool,
+) -> Result<()> {
+    let body: Value = serde_json::from_slice(&request.body)?;
+    let Some(run_id) = body.get("run_id").and_then(Value::as_str) else {
+        return write_json(
+            stream,
+            400,
+            json!({ "ok": false, "error": "missing run_id" }),
+        );
+    };
+    let run_id = RunId(run_id.to_string());
+    if approved {
+        gateway.approve_run(journal, &run_id)?;
+    } else {
+        gateway.deny_run(journal, &run_id)?;
+    }
+    write_json(
+        stream,
+        200,
+        json!({
+            "ok": true,
+            "run_id": run_id.0,
+            "decision": if approved { "approved" } else { "denied" },
         }),
     )
 }
@@ -346,3 +401,7 @@ fn content_length(head: &str) -> usize {
     }
     0
 }
+
+#[cfg(test)]
+#[path = "approval_endpoint_tests.rs"]
+mod approval_endpoint_tests;
