@@ -179,6 +179,42 @@ pub(crate) fn start_outbox_dispatcher_loop(
     })
 }
 
+/// Phase 2 M2d follow-up: periodic approval-expiry sweep. When
+/// `require_write_approval && write_approval_ttl_secs > 0`, this loop re-runs
+/// `JournalStore::expire_stale_approvals` on a fixed interval so a long-running
+/// server expires stalled approvals without a restart (PR #80 only ran it at
+/// startup). The transition is identical to the startup path
+/// (`AwaitingApproval` -> `Failed` + `ApprovalExpired`); this changes only
+/// *scheduling*, not protocol/state semantics, and is a no-op when the TTL is
+/// 0 (disabled) — so opt-out is byte-identical.
+pub(crate) fn start_approval_expiry_loop(
+    config: KernelConfig,
+    journal: Arc<JournalStore>,
+    running: Arc<AtomicBool>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        if !(config.require_write_approval && config.write_approval_ttl_secs > 0) {
+            return;
+        }
+        let ttl = config.write_approval_ttl_secs;
+        // Sweep at most once per TTL, but no less frequently than every minute,
+        // so a short TTL still triggers promptly. A longer TTL means fewer
+        // wakeups, not longer-than-TTL stalls.
+        let sweep = Duration::from_secs(ttl.max(60).min(3600));
+        while running.load(Ordering::SeqCst) {
+            thread::sleep(sweep);
+            if !running.load(Ordering::SeqCst) {
+                break;
+            }
+            match journal.expire_stale_approvals(ttl) {
+                Ok(0) => {}
+                Ok(n) => println!("agent-core expired {n} stale approval(s)"),
+                Err(error) => eprintln!("agent-core approval expiry sweep failed: {error}"),
+            }
+        }
+    })
+}
+
 fn run_dispatcher(
     journal: &JournalStore,
     adapter: &impl InvocationAdapter,

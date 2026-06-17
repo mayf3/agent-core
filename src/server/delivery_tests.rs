@@ -5,6 +5,7 @@ use super::*;
 use crate::domain::*;
 use chrono::Utc;
 use serde_json::json;
+use std::path::PathBuf;
 struct OkAdapter;
 impl InvocationAdapter for OkAdapter {
     fn execute(&self, invocation: &ApprovedInvocation) -> Result<Receipt> {
@@ -373,5 +374,97 @@ fn run_dispatcher_drains_multiple_pending_rows() -> Result<()> {
         assert_eq!(receipt, 1);
     }
     assert!(journal.verify_hash_chain()?);
+    Ok(())
+}
+
+// ---- Phase 2 M2d follow-up: periodic approval-expiry sweep ----
+
+/// A disabled-dispatcher test config (outbox dispatcher off). Phase 2 M2d
+/// follow-up tests override require_write_approval / write_approval_ttl_secs
+/// on the returned clone.
+fn disabled_test_config() -> KernelConfig {
+    KernelConfig {
+        db_path: PathBuf::from(":memory:"),
+        data_dir: PathBuf::from(".agent-core-test"),
+        agent_id: crate::domain::AgentId("main".to_string()),
+        root_dir: PathBuf::from("."),
+        kernel_port: 4130,
+        connector_execute_url: "http://127.0.0.1:4131/v1/execute".to_string(),
+        ipc_token: "test-token".to_string(),
+        feishu_allowed_open_ids: vec![],
+        feishu_allowed_chat_ids: vec![],
+        feishu_require_group_mention: true,
+        openai_base_url: String::new(),
+        openai_api_key: String::new(),
+        model: String::new(),
+        fallback_openai_base_url: String::new(),
+        fallback_openai_api_key: String::new(),
+        fallback_model: String::new(),
+        model_timeout_ms: 100,
+        context_recent_messages: 6,
+        context_max_block_chars: 4_000,
+        outbox_dispatcher_enabled: false,
+        outbox_dispatcher_poll_interval_ms: 10,
+        extra_allowed_operations: vec![],
+        require_write_approval: false,
+        write_approval_ttl_secs: 0,
+    }
+}
+
+/// Build an in-memory journal with a paused (AwaitingApproval) run, for
+/// sweep tests. Returns the run id and journal.
+fn paused_run_for_sweep(ttl: u64) -> Result<(String, Arc<JournalStore>)> {
+    use crate::adapters::StdoutAdapter;
+    use crate::gateway::Gateway;
+    use crate::llm::LocalEchoLlm;
+    use crate::runtime::Runtime;
+    let mut config = disabled_test_config();
+    config.require_write_approval = true;
+    config.write_approval_ttl_secs = ttl;
+    let journal = Arc::new(JournalStore::in_memory()?);
+    let gateway = Arc::new(Gateway::new(config.clone()));
+    let runtime = Runtime::new(config, LocalEchoLlm, StdoutAdapter);
+    let envelope = gateway.cli_ingress("hi".to_string())?;
+    let event = gateway.validate_ingress(&journal, envelope)?;
+    let outcome = runtime.deliver(&journal, &gateway, event)?;
+    assert_eq!(
+        journal.run_status(&outcome.run_id)?.as_deref(),
+        Some("AwaitingApproval")
+    );
+    Ok((outcome.run_id.0, journal))
+}
+
+#[test]
+fn approval_expiry_loop_is_noop_when_ttl_zero() -> Result<()> {
+    // TTL=0 → the loop thread returns immediately (does nothing). The run stays
+    // AwaitingApproval. We join the handle to prove it terminated.
+    let (run_id, journal) = paused_run_for_sweep(0)?;
+    let running = Arc::new(AtomicBool::new(true));
+    let mut config = disabled_test_config();
+    config.require_write_approval = true;
+    config.write_approval_ttl_secs = 0;
+    let handle = super::start_approval_expiry_loop(config, Arc::clone(&journal), Arc::clone(&running));
+    handle.join().unwrap();
+    assert_eq!(
+        journal.run_status(&RunId(run_id))?.as_deref(),
+        Some("AwaitingApproval")
+    );
+    Ok(())
+}
+
+#[test]
+fn approval_expiry_loop_expires_a_stale_run() -> Result<()> {
+    // TTL=1, paused run. The sweep loop sleeps ~60s (min sweep), which is too
+    // long for a test. Instead, drive expire_stale_approvals directly to prove
+    // the *contract* the loop calls is correct under a short TTL — the loop
+    // itself only adds scheduling on top. This keeps the test deterministic.
+    let (run_id, journal) = paused_run_for_sweep(1)?;
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let expired = journal.expire_stale_approvals(1)?;
+    assert_eq!(expired, 1);
+    assert_eq!(
+        journal.run_status(&RunId(run_id))?.as_deref(),
+        Some("Failed")
+    );
     Ok(())
 }

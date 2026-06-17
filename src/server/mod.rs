@@ -6,7 +6,7 @@ mod delivery;
 mod dispatcher_metrics;
 
 use anyhow::{bail, Result};
-use delivery::{recover_undelivered_ingress, start_outbox_dispatcher_loop, start_worker_loop};
+use delivery::{recover_undelivered_ingress, start_approval_expiry_loop, start_outbox_dispatcher_loop, start_worker_loop};
 pub use dispatcher_metrics::DispatcherMetrics;
 use serde_json::{json, Value};
 use std::io::{ErrorKind, Read, Write};
@@ -63,6 +63,11 @@ pub fn serve(config: KernelConfig) -> Result<()> {
         Arc::clone(&running),
         Arc::clone(&dispatcher_metrics),
     );
+    let approval_expiry = start_approval_expiry_loop(
+        config.clone(),
+        Arc::clone(&journal),
+        Arc::clone(&running),
+    );
     while running.load(Ordering::SeqCst) {
         match listener.accept() {
             Ok((mut stream, _)) => {
@@ -91,6 +96,9 @@ pub fn serve(config: KernelConfig) -> Result<()> {
     }
     if outbox_dispatcher.join().is_err() {
         eprintln!("kernel outbox dispatcher thread panicked");
+    }
+    if approval_expiry.join().is_err() {
+        eprintln!("kernel approval-expiry thread panicked");
     }
     println!("agent-core kernel stopped gracefully");
     Ok(())
