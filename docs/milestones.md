@@ -41,7 +41,7 @@ For the final product shape and macro roadmap, see
 | Phase 1 H5 | Done | `/health` exposes stale dispatching lease count (`outbox_stale_dispatching_count`) and projection drift count (`outbox_projection_drift_count`) |
 | Phase 1 H6 | Done | release checklist (`docs/release-checklist.md`) + operating guide (`docs/operating-guide.md`) |
 | Phase 1 H7 | Done | restart-recovery lifecycle end-to-end test (`tests/m1_restart_recovery_lifecycle.rs`); recovery verified idempotent + never auto-retries |
-| Phase 1 D1 | Decision | `RunStatus::Unknown` -- analysis in `docs/decisions/runstatus-unknown.md`; recommendation: introduce (zero-risk on serialization/read/DB); awaiting maintainer sign-off |
+| Phase 1 D1 | Done | `RunStatus::Unknown` introduced: recovery advances `runs.status` to `"Unknown"` when an outbox row is reconciled to unknown (distinct from `WaitingDispatch`); analysis in `docs/decisions/runstatus-unknown.md`, regression in `tests/m1_runstatus_unknown.rs` |
 
 ## Stage Plan
 
