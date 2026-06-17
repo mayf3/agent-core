@@ -148,6 +148,22 @@ Expected after an unclean shutdown. Recovery on the next startup marks these
 a deliberate human decision (out of scope for automatic recovery); inspect the
 Journal to determine the true outcome before acting.
 
+A terminal-unknown row keeps `/health.status` at `degraded` until it is
+acknowledged (see `docs/decisions/ack-clear-terminal-unknown.md`). To
+acknowledge a row — i.e. confirm you have inspected it and accept its lost
+outcome so it stops degrading health — run this against the Kernel's SQLite DB
+with the Kernel stopped (or backed up first):
+
+```sql
+UPDATE outbox_dispatches SET acked_unknown = 1 WHERE invocation_id = '<id>';
+```
+
+`outbox_unknown_count` and the `degraded` rollup exclude `acked_unknown = 1`
+rows. Ack is reversible: set `acked_unknown = 0` to restore the alert. Ack does
+**not** re-send or delete the row — the Journal `OutboxDispatchUnknown` fact and
+the projection row are preserved as history. To actually re-send, re-submit the
+original message through the normal ingress path (produces a new run).
+
 ### `outbox_stale_dispatching_count > 0`
 
 An inline-leased dispatch was abandoned (crash after
