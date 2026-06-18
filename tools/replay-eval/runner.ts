@@ -86,12 +86,22 @@ export function startKernel(binaryPath: string, ipcToken: string): RunHandle {
   const port = bindEphemeralPort();
   const child = spawn(binaryPath, ["serve", "--db", dbPath, "--port", String(port)], {
     stdio: "pipe",
+    // Minimal, explicit env only — do NOT spread process.env. Spreading would
+    // leak the operator's real secrets (OPENAI_API_KEY, IPC_TOKEN, etc. from
+    // .env or shell) into the candidate process, violating the harness's
+    // "never touch secrets" boundary. The candidate uses LocalEchoLlm (the
+    // stub key below is never a real credential) and a fresh ephemeral DB.
     env: {
-      ...process.env,
+      PATH: process.env.PATH ?? "",
+      HOME: process.env.HOME ?? "",
       AGENT_CORE_IPC_TOKEN: ipcToken,
       AGENT_CORE_OPENAI_API_KEY: "replay-stub-key", // LocalEchoLlm ignores it; never a real key
+      AGENT_CORE_FALLBACK_OPENAI_API_KEY: "replay-stub-key",
       AGENT_CORE_MODEL: "local",
       AGENT_CORE_OPENAI_BASE_URL: "http://127.0.0.1:0/v1",
+      AGENT_CORE_FALLBACK_OPENAI_BASE_URL: "http://127.0.0.1:0/v1",
+      AGENT_CORE_OUTBOX_DISPATCHER_ENABLED: "true",
+      AGENT_CORE_CONNECTOR_EXECUTE_URL: "http://127.0.0.1:0/v1/execute",
     },
   });
   return { process: child, port, dbPath, ipcToken };
