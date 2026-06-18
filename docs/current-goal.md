@@ -147,6 +147,9 @@ Recent work already merged:
   ToolCatalog), previously undocumented (PR #101).
 - docs: updated this continuous-goal tracker after PR #101 (PR #102).
 
+- test(connector): added execute-server payload-validation coverage (5 tests;
+  connector 13->18 tests) (PR #104).
+
 Open PRs at review time: none.
 
 ## Current Local Branch
