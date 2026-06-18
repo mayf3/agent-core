@@ -84,7 +84,7 @@ When updating this file after an iteration:
 Last reviewed main:
 
 ```text
-523bb59 docs(operating-guide): document last_dispatch_error_category /health field (#97)
+cdbbb07 feat: surface operation catalog to the LLM as a ToolCatalog context block (#99)
 ```
 
 Recent work already merged:
@@ -140,20 +140,28 @@ Recent work already merged:
 - docs(operating-guide): documented the `last_dispatch_error_category` /health field
   (present since Phase 1 PR #63 but never in the health table) (PR #97).
 
+- feat: surface the operation catalog to the LLM as a `ToolCatalog` context block
+  (Phase 2 tool-surfacing foundation, additive; `catalog_for_context()` + new
+  `ContextBlockKind::ToolCatalog`) (PR #99).
+
 Open PRs at review time: none.
 
 ## Current Local Branch
 
 On `main`, clean working tree. No in-flight feature branch. `docs/current-goal.md` is now tracked (PR #86).
 
-## Last Iteration — PR #97
+## Last Iteration — PR #99
 
-- Doc sync: `/health.last_dispatch_error_category` (sanitized dispatch error category)
-  was exposed since Phase 1 (PR #63) but absent from the operating-guide health table.
-  Added. The full `/health` field set is now documented; `.env.example` is fully in sync
-  with config.rs; operating-guide/release-checklist/roadmap all reflect Phase 2.
-- validation (doc-only): structure + secret-leak + git diff --check clean.
-- residual risks: none. Doc/code consistency audit essentially complete.
+- Phase 2 tool-surfacing foundation (additive). The operation catalog was invisible to
+  the model. Added a `ToolCatalog` context block generated from
+  `catalog_for_context()` (`<name> (risk: <ReadOnly|Write>) — <intent>`), so the LLM
+  sees available operations. New `ContextBlockKind::ToolCatalog`; unit test asserts
+  every catalogued op is surfaced with a risk tag.
+- Additive only — proposing/executing still goes through the existing intent → policy
+  → adapter chain. Routing a model-emitted tool-call end-to-end is a follow-up.
+- validation: cargo build/test green (incl. new test), zero new warnings, pnpm check
+  ok, structure + secret-leak + validation_layout passed.
+- residual risks: low (additive context block).
 
 ## Issues To Address Next
 
