@@ -4,12 +4,11 @@ Strings goal → candidate ref → (planned) replay/eval + audit → evidence pa
 → pass/blocked decision into an experienceable loop. **Plan-only by default.**
 Manual merge only.
 
-**Current capability:** plan + report only (resolves + pins the candidate/base
-commits, validates all inputs, emits `plan.json` + `evolution-report.md` +
-`manifest.json`). Real evaluation composition (`--evaluate` wiring replay-eval
-+ audit-report) is Batch 2; until then `--evaluate` is accepted but produces a
-plan-only report, and the removed `--no-dry-run` is rejected as
-`not_implemented` so it can never emit a false "candidate prepared" report.
+**Current capability:** plan + evaluate (with `--evaluate` + `--fixtures-dir` and/or
+`--audit-db`): resolves + pins the candidate/base commits, validates all inputs,
+composes `tools/replay-eval` and `tools/audit-report` as subprocesses, and
+derives a `pass`/`blocked` decision from the red-lines. Emits `plan.json` +
+`evolution-report.md` + `manifest.json`. Merge is always manual.
 
 **This tool lives outside `src/` and is not a Kernel dependency.** It composes
 (`tools/audit-report`, `tools/replay-eval`); it does not re-implement them.
@@ -40,19 +39,22 @@ node --experimental-strip-types tools/evolution-harness/cli.ts \
 #   optional: --fixtures-dir <dir>  --audit-db <copied.db>  --evaluate
 ```
 
-`--no-dry-run` is rejected (`not_implemented`); use `--evaluate` (Batch 2
-wires real evaluation; merge stays manual).
+`--no-dry-run` is rejected (`not_implemented`); use `--evaluate` for real
+evaluation (merge stays manual).
 
-Writes to `out/<run-id>/`: `plan.json`, `evolution-report.md`, `manifest.json`.
+Writes to `out/<run-id>/`: `plan.json`, `evolution-report.md`, `manifest.json`
+(+ `replay/` and/or `audit/` when `--evaluate` is used).
 
 ## Exit codes
 
 | Code | Meaning |
 |---|---|
-| 0 | report written |
-| 2 | `--goal` or `--candidate` missing |
+| 0 | report written, decision is **pass** |
+| 2 | `--goal` or `--candidate` missing / `--evaluate` without `--fixtures-dir` and `--audit-db` |
 | 3 | forbidden path / unsafe ref / unresolvable ref / missing file / `--fixtures-dir` not a directory |
 | 4 | `--no-dry-run` (not implemented) |
+| 5 | harness internal error (spawn failure, timeout) |
+| 10 | evaluation **blocked** by red-line (replay regress/hardFail or audit fault) |
 
 ## Tests
 
