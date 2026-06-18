@@ -220,21 +220,44 @@ function projectionDrift(db: DatabaseSync) {
 }
 
 function undeliveredIngress(db: DatabaseSync) {
-  // Mirror the Rust Kernel's undelivered_ingress_events (src/journal/recovery.rs).
-  // Count IngressAccepted events that have NO following terminal delivery event
-  // (SessionReady/RunStarted/RunCompleted/RunFailed) sharing the same correlation_id.
-  const row = db.prepare(`
-    SELECT COUNT(*) AS c,
-           MIN(e.created_at) AS oldest
-    FROM journal_events e
-    WHERE e.kind = 'IngressAccepted'
-      AND NOT EXISTS (
-        SELECT 1 FROM journal_events d
-        WHERE d.correlation_id = e.correlation_id
-          AND d.kind IN ('SessionReady', 'RunStarted', 'RunCompleted', 'RunFailed')
-      )
-  `).get() as { c: number; oldest: string | null };
-  return { count: row.c, oldest_at: row.oldest ?? null };
+  // Mirror the Rust Kernel's undelivered_ingress_events (src/journal/recovery.rs)
+  // EXACTLY. The delivered set is the collection of correlation_ids of any
+  // SessionReady / RunStarted / RunCompleted / RunFailed event. An
+  // IngressAccepted counts as UNDELIVERED only when its payload.event_id is
+  // present AND that event_id is NOT in the delivered set. An IngressAccepted
+  // with NO payload.event_id is NOT counted (the Rust impl uses
+  // unwrap_or(false) — missing event_id means we cannot match it, so it is
+  // treated as not-undelivered rather than spuriously flagged).
+  const delivered = new Set(
+    (db.prepare(`
+      SELECT DISTINCT correlation_id AS c FROM journal_events
+      WHERE kind IN ('SessionReady', 'RunStarted', 'RunCompleted', 'RunFailed')
+        AND correlation_id IS NOT NULL
+    `).all() as { c: string }[]).map((r) => r.c),
+  );
+  const ingress = db.prepare(`
+    SELECT sequence, payload_json, created_at
+    FROM journal_events
+    WHERE kind = 'IngressAccepted'
+    ORDER BY sequence ASC
+  `).all() as { sequence: number; payload_json: string; created_at: string }[];
+  let count = 0;
+  let oldest: string | null = null;
+  for (const e of ingress) {
+    let eventId: string | undefined;
+    try {
+      const payload = JSON.parse(e.payload_json);
+      if (typeof payload?.event_id === "string") eventId = payload.event_id;
+    } catch {
+      // malformed payload_json — treat as missing event_id (not undelivered)
+    }
+    // Mirrors Rust: map(|id| !delivered.contains(id)).unwrap_or(false).
+    if (eventId !== undefined && !delivered.has(eventId)) {
+      count++;
+      if (oldest === null) oldest = e.created_at;
+    }
+  }
+  return { count, oldest_at: oldest };
 }
 
 function approval(db: DatabaseSync) {
