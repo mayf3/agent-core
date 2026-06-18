@@ -2,8 +2,8 @@
 
 ## Status
 
-Design document. No `src/` change. Requires maintainer sign-off before
-implementation.
+Design document. No `src/` change. **Requires maintainer sign-off before
+implementation begins** — see §4.6.
 
 ## 1. Problem
 
@@ -61,7 +61,7 @@ It proves the pipeline and rejects everything else.
   The content is the model's free-text reply. No tool-call parsing exists.
 - **LLM serialization** (`src/llm/mod.rs`): `serialize_system_context()`
   renders context blocks as `## ToolCatalog\n...` sections.
-- **Runtime** (`src/runtime.rs`): `Runtime::deliver()` is the main entry
+- **Runtime** (`src/runtime/mod.rs`): `Runtime::deliver()` is the main entry
   point that takes a `ValidatedEvent`, builds context, calls the LLM,
   and produces outbox dispatches. It does not inspect model output for
   structured tool calls.
@@ -98,9 +98,13 @@ lookup(operation) → is_allowed?
        ↓
 is ReadOnly?                            ← MVP gate: only ReadOnly passes
        ↓ (yes)
-Route to existing intent → policy → adapter → receipt chain
+validate_tool_call → InvocationProposed → InvocationApproved (sync)
        ↓
-Append receipt output to next context
+TimeAdapter::execute() inline           ← NOT queued into outbox
+       ↓
+ReceiptReceived journaled              ← OutboxQueued/DispatchStarted skipped
+       ↓
+Append receipt output as ToolResult context block
 ```
 
 ### 4.2 Data flow
@@ -178,16 +182,34 @@ fn validate_tool_call(tool_call: ToolCall) -> Result<InvocationIntent> {
 }
 ```
 
-**Step 4 — Execution (existing path)**
+**Step 4 — Inline execution (MVP path)**
 
-The validated `InvocationIntent` enters the existing
-`intent → policy → adapter → receipt` pipeline in `Runtime`:
+For `time.now` (a local `TimeAdapter`), the validated `InvocationIntent` is
+**not queued into `outbox_dispatches`**. The outbox dispatcher is wired to a
+single `HttpConnectorAdapter` (`src/server/delivery.rs:164`), which sends
+invocations over HTTP to the connector. Queuing a local adapter's intent there
+would route it through the wrong adapter.
 
-1. The intent is approved (sync for ReadOnly).
-2. The adapter is looked up (for `time.now`, it is `TimeAdapter`).
-3. The adapter executes and returns a `Receipt`.
-4. The receipt is journaled.
-5. The outbox dispatches carry the result.
+Instead, the MVP executes `TimeAdapter` **inline** in the Runtime's delivery
+path after intent+policy approval:
+
+1. `validate_tool_call()` returns an `InvocationIntent`.
+2. The Runtime creates the `InvocationProposed` and `InvocationApproved`
+   Journal events (mirroring the existing approval path synchronously for
+   `ReadOnly`).
+3. `TimeAdapter::execute()` runs inline — it reads `Utc::now()` and returns a
+   `Receipt`.
+4. A `ReceiptReceived` Journal event is written.
+5. **`OutboxQueued` and `DispatchStarted` are intentionally skipped** — they
+   are outbox-dispatch lifecycle events that do not apply to inline local
+   adapters.
+6. The receipt output is attached to the context as a `ToolResult` block.
+
+An alternative (post-MVP) is to add an explicit **adapter router** that maps
+operation names to adapter implementations (local vs HTTP). The router would
+live in `src/runtime/` and allow both `TimeAdapter` (inline) and
+`HttpConnectorAdapter` (outbox) to coexist. The MVP chooses the simpler inline
+path and defers the router to a follow-up increment.
 
 **Step 5 — Context feedback**
 
@@ -228,17 +250,44 @@ that (the run pauses, approval resolves, dispatches continue).
 | Model returns both `content` and `tool_call` | Execute the tool call; append result to context alongside content. If both present, content is treated as the model's verbal response, tool_call as the action. |
 | Model returns multiple tool calls | MVP: execute only the first. Log a warning that parallel calls are not yet supported. |
 
+### 4.5 Audit facts for inline tool-call execution
+
+To preserve the `intent → decision → receipt` audit trail, the following
+Journal events are written for a successful `time.now` tool call:
+
+| Journal event kind | Purpose |
+|---|---|
+| `InvocationProposed` | Records that the model emitted a tool call for a catalog operation. Payload includes the operation name, arguments, and the originating run/session. |
+| `InvocationApproved` | Records that the intent passed policy (always approved synchronously for `ReadOnly` in MVP). |
+| `ReceiptReceived` | Records the `TimeAdapter` output (`iso`, `epoch_ms`) and `ReceiptStatus::Succeeded`. |
+
+**Explicitly skipped** for inline local adapters:
+
+| Journal event kind | Reason |
+|---|---|
+| `OutboxQueued` | Not queued — the inline path bypasses `outbox_dispatches`. |
+| `DispatchStarted` | No outbox dispatch lifecycle exists for inline execution. |
+
+If the tool call fails (e.g. adapter error), a `ReceiptReceived` with
+`ReceiptStatus::Failed` is written instead, and the error is surfaced in the
+`ToolResult` context block.
+
+### 4.6 Implementation sign-off gate
+
+This design modifies `src/` files (the Rust Kernel). **No implementation must
+start until this design document is merged and the maintainer explicitly signs
+off on implementation.** See `docs/agent-dispatch.md` §Roles: the maintainer
+decides when a phase or increment is allowed to start.
+
 ## 5. Files to change (implementation)
 
 | File | Change |
 |---|---|
-| `src/llm/mod.rs` | Add `ToolCall` struct and `tool_call: Option<ToolCall>` to `LlmOutput`. Parse `function_call`/`tool_calls` from OpenAI response. Add `tools` to request payload (only ReadOnly operations in MVP). |
-| `src/llm/openai.rs` (if separated) | Inject `functions`/`tools` parameter into chat completion request body. Parse response `choices[0].message.function_call` or `.tool_calls`. |
+| `src/llm/mod.rs` | Add `ToolCall` struct and `tool_call: Option<ToolCall>` to `LlmOutput`. Parse `function_call`/`tool_calls` from OpenAI response. Add `tools` to request payload (only ReadOnly operations in MVP). The OpenAI request/response logic lives here (there is no separate `src/llm/openai.rs` in this repo). |
 | `src/gateway/mod.rs` or new `src/gateway/tool_call.rs` | Add `validate_tool_call()` — checks operation exists in catalog, risk is ReadOnly, arguments are valid. Returns `InvocationIntent`. |
-| `src/runtime.rs` | After `llm_client.complete()`, check `LlmOutput.tool_call`. If present, validate, execute via existing `intent → adapter → receipt` pipeline, collect receipt. |
+| `src/runtime/mod.rs` | After `llm_client.complete()`, check `LlmOutput.tool_call`. If present, validate, execute inline via `TimeAdapter` (not outbox), write `InvocationProposed` / `InvocationApproved` / `ReceiptReceived` Journal events, collect receipt. |
 | `src/context.rs` | Add `ContextBlockKind::ToolResult` variant. After tool execution, append receipt output as a `ToolResult` block. |
 | `src/domain/mod.rs` | Add `ContextBlockKind::ToolResult` to the enum. |
-| `src/llm/mod.rs` — `LlmInput` | Optionally extend to carry previous turn's tool result (so the model can see it in context). Currently `LlmInput` has `blocks` and `user_text`. The tool result should be one of the blocks. |
 
 ## 6. Tests needed
 
@@ -263,6 +312,8 @@ that (the run pauses, approval resolves, dispatches continue).
 - No change to the Gateway approval flow for model-initiated tool calls
   (they are synchronous for ReadOnly; Write tool calls are rejected before
   reaching the adapter).
+- The outbox dispatcher (`src/server/delivery.rs`) is untouched — inline
+  tool-call execution bypasses `outbox_dispatches` entirely.
 
 ## 8. Security & Boundary
 
