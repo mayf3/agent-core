@@ -72,7 +72,7 @@ If a harness prototype is incubated here temporarily, it must:
 Last reviewed main:
 
 ```text
-f8388c1 docs: record PR #118 (tool-call MVP) -- all 3 follow-up items complete (#120)
+0b1338d Merge pull request #121 from mayf3/fix/tool-call-single-execution
 ```
 
 Open PRs at review time: none before this branch.
@@ -89,21 +89,21 @@ High-signal state:
 - External harness work has started outside the Kernel: `tools/audit-report`
   exists as a read-only audit report MVP (PR #114), and
   `docs/replay-eval-harness.md` defines the replay/eval harness design (PR #116).
-- Model-emitted `time.now` execution MVP is merged (PR #118), but this branch
-  fixes one regression: a single inline tool call must execute exactly once, and
-  the Runtime must pin the target `session_id` before policy evaluation.
+- Model-emitted `time.now` execution MVP is merged (PR #118), and PR #121 fixed
+  the inline execution regression: a single inline tool call executes exactly
+  once, and the Runtime pins the target `session_id` before policy evaluation.
 
-## Current Branch
+## Current State
 
-`fix/tool-call-single-execution`
+On `main` after PR #121. No open PRs at the time of this update.
 
-Purpose:
+PR #121:
 
-- remove duplicate inline `handle_inline_tool_call` execution in
+- removed duplicate inline `handle_inline_tool_call` execution in
   `Runtime::deliver`;
-- pin inline tool-call intents to the current session before the policy
+- pinned inline tool-call intents to the current session before the policy
   pipeline runs;
-- add a regression test that one model `time.now` call writes exactly one
+- added a regression test that one model `time.now` call writes exactly one
   `InvocationProposed`, one `InvocationApproved`, one `ReceiptReceived`, zero
   `DispatchStarted`, and only the normal reply `OutboxQueued`.
 
@@ -122,16 +122,11 @@ Result: passed on this branch.
 - PR #116: replay/eval harness design document.
 - PR #118: inline `time.now` model tool-call execution MVP.
 - PR #120: goal tracker recorded PR #118 completion.
+- PR #121: inline tool-call regression fix and this goal refresh.
 
 ## Issues To Address Next
 
-1. Merge the current inline tool-call regression fix before broad delegation.
-   - One model `time.now` call must produce one intent, one approval, and one
-     receipt.
-   - Inline read-only tool calls must not enter the outbox dispatcher.
-   - The model must not choose target session; Runtime pins `session_id`.
-
-2. Replay/eval harness MVP.
+1. Replay/eval harness MVP.
    - Implement outside `src/`, preferably under an extraction-ready tool/package.
    - Start from `docs/replay-eval-harness.md` and the existing
      `tools/audit-report` output.
@@ -141,13 +136,13 @@ Result: passed on this branch.
    - No automatic promotion, no self-modifying production runtime, no workflow
      engine, no shell/browser/deploy tools.
 
-3. Audit harness hardening.
+2. Audit harness hardening.
    - The current `tools/audit-report` MVP is useful, but some metrics are still
      intentionally lightweight.
    - Harden projection-drift and undelivered-ingress checks against the Rust
      Journal semantics before using reports as promotion gates.
 
-4. Connector extraction preparation.
+3. Connector extraction preparation.
    - Feishu remains in `connectors/feishu` inside this repo.
    - Before extraction, implement connector-local execute idempotency
      persistence, symmetric to the reaction store, as scoped in
@@ -155,7 +150,7 @@ Result: passed on this branch.
    - Extraction target should be a separate repo/package; do not move runtime,
      gateway, journal, or policy into TypeScript.
 
-5. Broader tool loop.
+4. Broader tool loop.
    - `time.now` proves the minimum read-only path.
    - More tools require strict schemas, session scoping, audit facts, and
      approval for write/external effects.
@@ -191,7 +186,7 @@ Rough estimates, assuming one focused coding agent and quick decisions:
 |---|---:|---|
 | Stable personal dogfooding chat/runtime | Done | Current main is already here. |
 | Tool catalog visible to model | Done | PR #99. |
-| One safe model-emitted tool | Done after this fix | `time.now`, no arbitrary tools. |
+| One safe model-emitted tool | Done | `time.now`, no arbitrary tools; PR #121 hardens execution. |
 | Audit report harness MVP | Done, hardening remains | PR #114. |
 | Replay/eval harness MVP | 1-2 weeks | External harness, selected fixtures. |
 | Feishu connector ready to extract | 1 week | Execute idempotency + extraction checklist. |
@@ -201,8 +196,7 @@ Rough estimates, assuming one focused coding agent and quick decisions:
 
 ## Next Recommended Goal
 
-After the current bugfix PR merges, retire the old audit/tool-call goal and give
-the worker agent this next goal:
+The old audit/tool-call goal is retired. Give the worker agent this next goal:
 
 ```text
 Read docs/current-goal.md, docs/agent-dispatch.md, docs/replay-eval-harness.md,
