@@ -84,7 +84,7 @@ When updating this file after an iteration:
 Last reviewed main:
 
 ```text
-f8810b0 test(connector): cover safe-logger redaction (#107)
+8318ca5 docs: add Tool-Call Execution Loop design document (#112)
 ```
 
 Recent work already merged:
@@ -153,6 +153,10 @@ Recent work already merged:
 - test(connector): covered `normalizeMessageEvent` ingress dedupe key behavior
   (PR #106).
 - test(connector): covered safe-logger redaction behavior (PR #107).
+- docs: External Audit Harness MVP design document (Task B) — read-only, outside
+  `src/`, schema-accurate against `migrations/0001_init.sql` + `src/journal/` (PR #109).
+- docs: Tool-Call Execution Loop design (Task D) — smallest safe `time.now` inline
+  execution; outbox bypass, audit facts, sign-off gate (PR #112).
 
 Open PRs at review time: none.
 
@@ -160,17 +164,19 @@ Open PRs at review time: none.
 
 On `main`, clean working tree. No in-flight feature branch. `docs/current-goal.md` is now tracked (PR #86).
 
-## Last Iteration — PR #107
+## Last Iteration — PRs #109 + #112 (design documents)
 
-- PR #107 added connector safe-logger redaction coverage.
-- PR #106 added connector `normalizeMessageEvent` coverage around ingress dedupe
-  key behavior.
-- PR #104 added connector execute-server payload-validation coverage.
-- These PRs are test-only connector hardening and do not change Kernel,
-  Runtime, Gateway, Journal, or policy behavior.
-- current local re-check before this tracker update: `pnpm check` passed on
-  `main` after PR #103; PR #104-#107 reported focused connector validation in
-  their PRs.
+- PR #109 (`0535846`): External Audit Harness MVP design (`docs/external-audit-harness.md`).
+  Verified schema-accurate against the real SQLite schema + hash-chain code; all 5 Codex
+  review blocking issues addressed (real table/column names, `verify_hash_chain` mirror,
+  undelivered-ingress correlation logic, projection-drift join, CLI-only inputs).
+- PR #112 (`8318ca5`): Tool-Call Execution Loop design
+  (`docs/decisions/tool-call-execution-loop.md`). Verified all 5 review fixes addressed:
+  explicit inline `time.now` path (not outbox), audit facts (InvocationProposed/Approved/
+  ReceiptReceived; OutboxQueued/DispatchStarted intentionally skipped), correct file paths,
+  sign-off gate. Both are doc-only; no implementation started.
+- residual risks: none (design docs). The objective now moves to the Audit Harness MVP
+  prototype (Task C).
 
 ## Issues To Address Next
 
