@@ -19,7 +19,9 @@ extraction target: `agent-core-replay-eval`. See
 - Does **not** read `.env`, `.agent-core`, `~/.openduck`, `~/.openclaw`, logs,
   API keys, tokens, or Authorization from any committed file. The Kernel's IPC
   token is generated fresh per run; the model key passed to the candidate is a
-  stub (the `LocalEchoLlm` build ignores it).
+  stub (the `LocalEchoLlm` build ignores it). The candidate process receives a
+  **minimal explicit env only** (the harness does **not** spread `process.env`,
+  so the operator's real secrets never leak into the candidate).
 - **Promotion is manual**: this tool only produces a score — it never merges,
   never pushes to `main`, never opens a PR on its own. A reviewer merges after
   reading the report.
