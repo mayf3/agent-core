@@ -108,6 +108,17 @@ state described below.
   score.json + report.md. 14 tests (fixture validation + scoring). External, no new
   dependency, PR-only promotion (PR #125).
 
+- test(replay-eval): synthetic fixture pack (forbidden_operations, policy_verdict,
+  reply_contains) — expands fixture coverage for the scorer (PR #130).
+- feat(audit-report): aligned projection_drift + undelivered_ingress with Rust Journal
+  semantics. undeliveredIngress now mirrors recovery.rs exactly — delivered set is the
+  correlation_ids of SessionReady/RunStarted/RunCompleted/RunFailed; an IngressAccepted is
+  undelivered only when payload.event_id is present and not in that set (not the old
+  correlation_id match). Regression test added (PR #131).
+- fix(replay-eval): scorer hard-fail branches used a comma expression that pushed a
+  boolean into details instead of the ExpectationResult object; rewritten as if/else +
+  3 regression tests (PR #132).
+
 Open PRs at review time: none.
 
 High-signal state:
