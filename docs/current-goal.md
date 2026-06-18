@@ -84,7 +84,7 @@ When updating this file after an iteration:
 Last reviewed main:
 
 ```text
-285f029 docs: sync release-checklist + roadmap with Phase 2 (#91)
+4db67b9 docs(.env.example): add missing OUTBOX_DISPATCHER env vars (#93)
 ```
 
 Recent work already merged:
@@ -133,6 +133,7 @@ Recent work already merged:
 - refactor: dropped the vestigial `Runtime.adapter` dead-code field + generic + dead `RecordingAdapter` test double (PR #87).
 - docs(operating-guide): documented Phase 2 approval surfaces — /v1/approve + /v1/deny, awaiting_approval_count, opt-in env vars + expiry (PR #90).
 - docs: synced release-checklist (Phase 1->1+2, 14->23 suites, approval boundary) + roadmap Phase 2 completion note (PR #91).
+- docs(.env.example): added the missing OUTBOX_DISPATCHER_ENABLED + _POLL_MS vars; .env.example now fully in sync with config.rs (PR #93).
 
 Open PRs at review time: none.
 
@@ -140,17 +141,14 @@ Open PRs at review time: none.
 
 On `main`, clean working tree. No in-flight feature branch. `docs/current-goal.md` is now tracked (PR #86).
 
-## Last Iteration — PRs #90–#91
+## Last Iteration — PR #93
 
-- Doc content debt cleared: the operating guide, release checklist, and roadmap did
-  not reflect Phase 2's operator-facing surfaces (opt-in write-approval gate, HTTP
-  `/v1/approve`+`/v1/deny`, `awaiting_approval_count`, approval expiry).
-- PR #90 (`71b4e3e`): operating-guide — env vars, /health field, new "Approval state
-  (optional)" section with the resume/deny endpoints + TTL expiry.
-- PR #91 (`285f029`): release-checklist (scope Phase 1→1+2, suites 14→23, approval
-  boundary) + roadmap Phase 2 completion note.
-- validation (doc-only): structure + secret-leak + git diff --check all clean.
-- residual risks: none. All Phase 2 docs now consistent with the code.
+- Config-doc sync: `config.rs` reads `AGENT_CORE_OUTBOX_DISPATCHER_ENABLED` and
+  `AGENT_CORE_OUTBOX_DISPATCHER_POLL_MS`, but `.env.example` listed neither. Added
+  both with comments; verified `.env.example` is now fully in sync with `config.rs`
+  (no remaining kernel env var absent from the template).
+- validation (config-doc-only): structure + secret-leak + git diff --check clean.
+- residual risks: none.
 
 ## Issues To Address Next
 
