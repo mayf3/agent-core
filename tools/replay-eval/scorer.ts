@@ -175,10 +175,15 @@ export function summarize(verdicts: FixtureVerdict[]): RunSummary {
   const candidateScore = verdicts.reduce((s, v) => s + v.candidate.score, 0) / verdicts.length;
   const baselineScore = verdicts.reduce((s, v) => s + v.baseline.score, 0) / verdicts.length;
   const delta = candidateScore - baselineScore;
-  const anyRegress = verdicts.some((v) => v.verdict === "regress");
+  // Hard-fail on any candidate: if candidate hard-failed and baseline did not,
+  // the overall verdict must be regress regardless of score.
+  const anyCandidateHardFail = verdicts.some(
+    (v) => v.candidate.hardFail && !v.baseline.hardFail,
+  );
   let verdict: "improve" | "regress" | "neutral";
-  if (anyRegress && delta < 0) verdict = "regress";
-  else if (delta > 0 && !anyRegress) verdict = "improve";
+  if (anyCandidateHardFail) verdict = "regress";
+  else if (delta > 0) verdict = "improve";
+  else if (delta < 0) verdict = "regress";
   else verdict = "neutral";
   return { candidateScore, baselineScore, delta, verdict };
 }

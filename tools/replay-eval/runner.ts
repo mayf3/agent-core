@@ -18,7 +18,7 @@ import { DatabaseSync } from "node:sqlite";
 import { mkdtempSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { execSync, spawn } from "node:child_process";
+import { execSync, execFileSync, spawn } from "node:child_process";
 import type { Fixture } from "./fixture.ts";
 import type { ReplayOutcome } from "./scorer.ts";
 
@@ -35,7 +35,7 @@ export interface RunHandle {
 /** Resolve a git ref to a short commit hash. Throws if unresolvable. */
 export function resolveRef(ref: string): string {
   try {
-    return execSync(`git rev-parse --short ${ref}`, { encoding: "utf8" }).trim();
+    return execFileSync("git", ["rev-parse", "--short", ref], { encoding: "utf8" }).trim();
   } catch {
     throw new Error(`cannot resolve git ref: ${ref}`);
   }

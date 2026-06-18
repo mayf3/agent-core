@@ -242,14 +242,15 @@ test("summarize: all improve = improve", () => {
   assert.equal(summarize([v]).verdict, "improve");
 });
 
-test("summarize: regress with delta >= 0 is neutral (anyRegress but delta >= 0)", () => {
-  // One fixture regressed (candidate hard-fail, baseline ok) but same score.
+test("summarize: candidate hard-fail with same score forces regress", () => {
+  // Candidate hard-failed, baseline did not, but scores are equal.
   const base: FixtureScore = { score: 1.0, passes: 2, fails: 0, details: [], hardFail: false };
   const cand: FixtureScore = { score: 1.0, passes: 2, fails: 0, details: [], hardFail: true };
   const v = compareFixture(cand, base);
-  assert.equal(v.verdict, "regress"); // hard-fail forces regress
+  assert.equal(v.verdict, "regress"); // hard-fail forces per-fixture regress
   const sum = summarize([v]);
-  assert.equal(sum.verdict, "neutral"); // delta >= 0 overrides anyRegress
+  assert.equal(sum.verdict, "regress"); // candidate hard-fail must regress overall
+  assert.equal(sum.delta, 0); // score same, but regress from hard-fail
 });
 
 test("summarize: multi-fixture mixed aggregates correctly", () => {
@@ -261,4 +262,12 @@ test("summarize: multi-fixture mixed aggregates correctly", () => {
   const sum = summarize([v1, v2]);
   assert.equal(sum.verdict, "regress");
   assert.ok(sum.delta < 0);
+});
+
+test("summarize: candidate hard-fail + baseline also hard-fail = neutral if scores equal", () => {
+  // Both hard-failed equally — no regression relative to baseline.
+  const s: FixtureScore = { score: 0.5, passes: 1, fails: 1, details: [], hardFail: true };
+  const v = compareFixture(s, s);
+  assert.equal(v.verdict, "neutral"); // both hard-fail cancel at per-fixture level
+  assert.equal(summarize([v]).verdict, "neutral");
 });

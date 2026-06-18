@@ -17,26 +17,31 @@
 
 import { readFileSync, writeFileSync, existsSync, statSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { validateFixture, type Fixture } from "./fixture.ts";
 import { scoreFixture, compareFixture, summarize, type FixtureVerdict, type ReplayOutcome } from "./scorer.ts";
 import { resolveRef, buildKernel, runFixtureAgainst } from "./runner.ts";
 
-const FORBIDDEN_PATH_PATTERNS = [
-  ".env",
-  ".agent-core",
-  ".openduck",
-  ".openclaw",
-  "/logs/",
-  "\\logs\\",
-];
-
-/** Reject input/output paths that match forbidden patterns (secrets, config, logs). */
+/** Reject input/output paths that match forbidden patterns (secrets, config, logs).
+ *
+ * Uses resolved path segments so that `/tmp/logs`, `./logs/output`, and
+ * `x/logs/y` all match, while a file named `logs.txt` at the top level does
+ * not. */
 function isForbiddenPath(filePath: string): boolean {
-  const normalized = filePath.replace(/\\/g, "/");
-  return FORBIDDEN_PATH_PATTERNS.some((pat) => normalized.includes(pat));
+  const resolved = resolve(filePath);
+  const segments = resolved.replace(/\\/g, "/").split("/");
+  return segments.some((seg) =>
+    [".env", ".agent-core", ".openduck", ".openclaw", "logs"].includes(seg),
+  );
+}
+
+/** Reject git refs that contain shell metacharacters or path traversal. */
+function validateGitRef(ref: string): void {
+  if (/[<>|;&$`'"\\\s]/.test(ref)) {
+    throw new Error(`unsafe git ref: ${ref}`);
+  }
 }
 
 interface Args {
@@ -70,16 +75,18 @@ function parseArgs(argv: string[]): Args {
     console.error("error: --candidate (git ref) is required");
     process.exit(2);
   }
-  // Reject path-traversal characters in the git ref.
-  if (/[<>|;&$`'"\\]/.test(a.candidate)) {
-    console.error(`error: --candidate contains unsafe characters: ${a.candidate}`);
+  try {
+    validateGitRef(a.candidate);
+    if (a.baseline) validateGitRef(a.baseline);
+  } catch (e) {
+    console.error(`error: ${(e as Error).message}`);
     process.exit(2);
   }
   return {
     fixture: a.fixture,
     candidate: a.candidate,
     baseline: a.baseline ?? "main",
-    outDir: a.outDir ?? process.cwd(),
+    outDir: a["out-dir"] ?? process.cwd(),
   };
 }
 
@@ -89,7 +96,7 @@ function buildWorktree(ref: string): { dir: string; binary: string; commit: stri
   const commit = resolveRef(ref);
   const dir = mkdtempSync(join(tmpdir(), "replay-wt-"));
   try {
-    execSync(`git worktree add --detach ${dir} ${ref}`, { stdio: "pipe" });
+    execFileSync("git", ["worktree", "add", "--detach", dir, ref], { stdio: "pipe" });
   } catch (e) {
     rmSync(dir, { recursive: true, force: true });
     throw new Error(`cannot create worktree for ${ref}: ${(e as Error).message}`);
@@ -100,7 +107,7 @@ function buildWorktree(ref: string): { dir: string; binary: string; commit: stri
 
 function cleanupWorktree(dir: string): void {
   try {
-    execSync(`git worktree remove --force ${dir}`, { stdio: "pipe" });
+    execFileSync("git", ["worktree", "remove", "--force", dir], { stdio: "pipe" });
   } catch {
     /* best effort */
   }
