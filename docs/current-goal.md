@@ -84,7 +84,7 @@ When updating this file after an iteration:
 Last reviewed main:
 
 ```text
-8318ca5 docs: add Tool-Call Execution Loop design document (#112)
+2c91738 feat(tools): external audit report harness MVP (#114)
 ```
 
 Recent work already merged:
