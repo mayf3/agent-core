@@ -394,8 +394,8 @@ Kernel 可以定义协议，但不吸收这些产品逻辑。
 - ✅ **Journal kind decode 收紧**：`parse_kind` 的兜底已从静默 `RunCompleted` 改为 `JournalEventKind::Unknown` 哨兵；未知 kind 不再伪装成 run completion，`verify_hash_chain` 仍能检测篡改（PR #44，已合入 `main`）。`parse_kind`/`row_to_event` 刻意保持非 `Result`，以保留现有 `/health` 的 `status:"corrupt"` 语义。
 - ✅ **`RunStatus::Unknown` 已实现**：PR #64 引入显式 `RunStatus::Unknown`，覆盖 unknown recovery（tests 已覆盖）。当前 `unknown` dispatch 可通过 `runs.status = 'Unknown'` 直接查询，不再依赖 `WaitingDispatch` + outbox projection 间接推断。
 - 第一个非 chat 工具选什么；
-- Feishu connector 什么时候移出仓库；
-- replay fixture format 如何设计。
+- Feishu connector 什么时候移出仓库（见 `docs/connector-extraction-checklist.md`）；
+- ~~replay fixture format 如何设计~~ **已落地**（`docs/replay-eval-harness.md` §4 + `tools/replay-eval/examples/`；fixture 类型可在未来按需扩展）。
 
 最终判断标准：
 
