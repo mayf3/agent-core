@@ -218,6 +218,7 @@ pub enum ContextBlockKind {
     AgentProfile,
     SkillCatalog,
     ToolCatalog,
+    ToolResult,
     ActiveSkill,
     RecentMessages,
     UserMessage,

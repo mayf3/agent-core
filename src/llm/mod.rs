@@ -17,6 +17,25 @@ pub struct LlmOutput {
     pub model: String,
     pub content: String,
     pub journal_payload: serde_json::Value,
+    /// Optional structured tool call emitted by the model (Phase 2 tool-call
+    /// execution MVP). When present, the Runtime validates + executes it
+    /// inline for `ReadOnly` operations (see `src/gateway/tool_call.rs`).
+    /// `None` preserves the text-only flow (byte-identical to pre-MVP).
+    pub tool_call: Option<ToolCall>,
+}
+
+/// A structured tool call the model wishes to execute (Phase 2 tool-call MVP).
+/// `operation` must be a catalogued `ReadOnly` operation or the call is
+/// rejected before any adapter runs.
+#[derive(Debug, Clone)]
+pub struct ToolCall {
+    /// Stable id the model assigns (e.g. OpenAI tool_call id); used as the
+    /// idempotency-key seed.
+    pub id: String,
+    /// Catalogued operation name (e.g. `time.now`).
+    pub operation: String,
+    /// JSON arguments for the operation.
+    pub arguments: serde_json::Value,
 }
 
 impl<T: LlmClient + ?Sized> LlmClient for Box<T> {
@@ -33,6 +52,7 @@ impl LlmClient for LocalEchoLlm {
             provider: "local".to_string(),
             model: "local-echo".to_string(),
             content: format!("收到：{}", input.user_text),
+            tool_call: None,
             journal_payload: json!({
                 "provider": "local",
                 "model": "local-echo",
@@ -194,6 +214,7 @@ fn config_required_output(model: &str, context_blocks: usize) -> LlmOutput {
             "status": "needs_config",
             "error_category": "model_config_required",
         }),
+        tool_call: None,
     }
 }
 
@@ -209,6 +230,7 @@ fn request_failed_output(model: &str, context_blocks: usize, category: &str) -> 
             "status": "error",
             "error_category": category,
         }),
+        tool_call: None,
     }
 }
 
@@ -231,6 +253,7 @@ fn success_output(model: &str, context_blocks: usize, value: Value) -> LlmOutput
             "status": "ok",
             "usage": sanitize_usage(value.get("usage")),
         }),
+        tool_call: None,
     }
 }
 

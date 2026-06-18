@@ -224,6 +224,7 @@ impl agent_core_kernel::llm::LlmClient for FixedLlm {
             model: "fixed".to_string(),
             content: "reply".to_string(),
             journal_payload: serde_json::json!({}),
+            tool_call: None,
         })
     }
 }
@@ -335,4 +336,29 @@ fn parse_kind_round_trips_approval_expired() -> Result<()> {
     assert!(journal2.verify_hash_chain()?);
     let _ = std::fs::remove_dir_all(&dir);
     Ok(())
+}
+
+// ---- Phase 2 tool-call MVP: inline time.now execution ----
+
+#[test]
+fn validate_tool_call_accepts_time_now_and_rejects_others() {
+    use agent_core_kernel::gateway::validate_tool_call;
+    use agent_core_kernel::llm::ToolCall;
+    use agent_core_kernel::domain::RunId;
+    use serde_json::json;
+    let ok = validate_tool_call(
+        &ToolCall { id: "c1".into(), operation: "time.now".into(), arguments: json!({}) },
+        &RunId::new(),
+    );
+    assert!(ok.is_ok(), "time.now should be accepted");
+    let unknown = validate_tool_call(
+        &ToolCall { id: "c1".into(), operation: "shell.exec".into(), arguments: json!({}) },
+        &RunId::new(),
+    );
+    assert!(unknown.is_err(), "unknown op rejected");
+    let write_op = validate_tool_call(
+        &ToolCall { id: "c1".into(), operation: "feishu.send_message".into(), arguments: json!({}) },
+        &RunId::new(),
+    );
+    assert!(write_op.is_err(), "Write op rejected via tool-call path");
 }
