@@ -84,7 +84,7 @@ When updating this file after an iteration:
 Last reviewed main:
 
 ```text
-ae8a7f7 docs: update goal tracker for PR #101 (#102)
+f8810b0 test(connector): cover safe-logger redaction (#107)
 ```
 
 Recent work already merged:
@@ -149,6 +149,10 @@ Recent work already merged:
 
 - test(connector): added execute-server payload-validation coverage (5 tests;
   connector 13->18 tests) (PR #104).
+- docs: updated this continuous-goal tracker after PR #104 (PR #105).
+- test(connector): covered `normalizeMessageEvent` ingress dedupe key behavior
+  (PR #106).
+- test(connector): covered safe-logger redaction behavior (PR #107).
 
 Open PRs at review time: none.
 
@@ -156,17 +160,17 @@ Open PRs at review time: none.
 
 On `main`, clean working tree. No in-flight feature branch. `docs/current-goal.md` is now tracked (PR #86).
 
-## Last Iteration — PR #102
+## Last Iteration — PR #107
 
-- PR #102 was a docs-only tracker update after PR #101.
-- PR #101 documented all 8 LLM context blocks in the operating guide:
-  RootSystem, RuntimeContract, AgentProfile, SkillCatalog, ToolCatalog,
-  ActiveSkill, RecentMessages, UserMessage.
-- PR #99 made the operation catalog visible to the model as a `ToolCatalog`
-  context block. This is foundation only: model-emitted tool-call parsing and
-  execution is still not implemented.
-- validation (doc-only): structure + secret-leak + git diff --check clean.
-- current local re-check: `pnpm check` passes on `main` at `ae8a7f7`.
+- PR #107 added connector safe-logger redaction coverage.
+- PR #106 added connector `normalizeMessageEvent` coverage around ingress dedupe
+  key behavior.
+- PR #104 added connector execute-server payload-validation coverage.
+- These PRs are test-only connector hardening and do not change Kernel,
+  Runtime, Gateway, Journal, or policy behavior.
+- current local re-check before this tracker update: `pnpm check` passed on
+  `main` after PR #103; PR #104-#107 reported focused connector validation in
+  their PRs.
 
 ## Issues To Address Next
 
@@ -276,6 +280,10 @@ decisions, and no major redesign:
 
 Main is clean and `pnpm check` passes. The project is no longer in early Kernel
 construction. It is at the transition from Phase 2 to Phase 3/6 preparation:
+
+Read `docs/agent-dispatch.md` before delegating work to another agent. It
+defines the branch flow, task-packet format, hard safety rules, and current
+parallelizable task shapes.
 
 1. **Recommended next increment: external audit report harness MVP.**
    - Branch/package: `feat/external-audit-report-mvp` if incubated here, or a
