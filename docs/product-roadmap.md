@@ -192,7 +192,7 @@ Feishu / CLI text
 内核补强：
 
 - ✅ stricter Journal decode（`parse_kind` → `Unknown` 哨兵，已落地）；
-- 是否引入 `RunStatus::Unknown` 的明确决策（分析见 [决策文档](./decisions/runstatus-unknown.md)，待 maintainer 拍板；推荐引入，影响面已分析为零风险）；
+- ✅ `RunStatus::Unknown` 已实现（分析见 [决策文档](./decisions/runstatus-unknown.md)，已落地 PR #64）；
 - ✅ projection verify / repair（`/health` 的 `outbox_projection_drift_count` 暴露 projection 与 Journal terminal fact 的不一致;启动 recovery 自动 reconcile。已落地）;
 - ✅ migration check（启动时 `PRAGMA user_version` 校验，已落地）；
 - ✅ release checklist（见 [Release Checklist](./release-checklist.md)，已落地）；
@@ -210,6 +210,7 @@ Feishu / CLI text
 > execution profile，config-driven grants）、M2c（fixed policy pipeline）、M2d（durable
 > approval state，opt-in；含 HTTP `/v1/approve`+`/v1/deny` 端点与 approval expiry）
 > 已全部落地（PRs #72–#80）。`time.now` 是第一个 `Risk::ReadOnly` 本地 adapter（M2e）。
+> 后续工具可见性基础：`ToolCatalog` 上下文块使操作目录对模型可见（PR #99）。
 > 见 `docs/milestones.md` 与 `docs/decisions/phase2-invocation-gateway-scoping.md`。
 
 目标：让 Agent 能做少量真实工作，但不破坏小内核边界。
@@ -391,7 +392,7 @@ Kernel 可以定义协议，但不吸收这些产品逻辑。
 近期优先做内核 hardening，再扩大能力。**已落地**的决策标 ✅，仍未决的保持开放：
 
 - ✅ **Journal kind decode 收紧**：`parse_kind` 的兜底已从静默 `RunCompleted` 改为 `JournalEventKind::Unknown` 哨兵；未知 kind 不再伪装成 run completion，`verify_hash_chain` 仍能检测篡改（PR #44，已合入 `main`）。`parse_kind`/`row_to_event` 刻意保持非 `Result`，以保留现有 `/health` 的 `status:"corrupt"` 语义。
-- 是否引入 `RunStatus::Unknown`：仍未决。当前 `unknown` dispatch 用 `WaitingDispatch` + outbox projection + health 表达，阶段 0 是否引入显式 `RunStatus::Unknown` 需要先讨论跨切面影响（runs.status 序列化面、所有 match 点、DB 已有数据兼容）。
+- ✅ **`RunStatus::Unknown` 已实现**：PR #64 引入显式 `RunStatus::Unknown`，覆盖 unknown recovery（tests 已覆盖）。当前 `unknown` dispatch 可通过 `runs.status = 'Unknown'` 直接查询，不再依赖 `WaitingDispatch` + outbox projection 间接推断。
 - 第一个非 chat 工具选什么；
 - Feishu connector 什么时候移出仓库；
 - replay fixture format 如何设计。
