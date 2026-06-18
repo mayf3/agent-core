@@ -33,8 +33,7 @@ dependency of the Kernel. It must never be imported by any `src/` code.
 
 ## 3. Inputs
 
-The harness takes exactly these inputs, all passed explicitly as CLI arguments or
-environment variables with safe defaults:
+The harness takes exactly these inputs, all passed explicitly as CLI arguments:
 
 | Input | Required | Format | Description |
 |---|---|---|---|
@@ -73,7 +72,7 @@ support ticket. Structure:
 ## Metadata
 - Generated at: <ISO 8601>
 - Git revision: <input or "not specified">
-- Database snapshot: <path or hash>
+- Database snapshot: <path or file hash>
 - Health JSON: <present/absent>
 
 ## 1. Schema Version
@@ -83,13 +82,14 @@ support ticket. Structure:
 
 ## 2. Hash-Chain Status
 - Total journal entries: <count>
-- Linked entries (parent_uid resolves): <count>
-- Broken links: <count>
-- Integrity: ✅ / ❌ / Partial (see detail)
+- Matching entries: <count>
+- Mismatched entries (hash or previous_hash): <count>
+- First failing sequence: <sequence> (or "none")
+- Integrity: ✅ / ❌
 
 ## 3. Recent Runs
 - Total runs in snapshot: <count>
-- Runs by status: pending=N, running=N, completed=N, failed=N, unknown=N
+- Runs by status: pending=N, running=N, completed=N, failed=N, unknown=N, awaiting_approval=N
 - Most recent 10 runs (ID, status, created_at, updated_at)
 
 ## 4. Unknown Dispatches
@@ -114,8 +114,9 @@ support ticket. Structure:
 - Approval TTL configured: <if available>
 
 ## 8. Duplicate-Reply Safety Notes
-- Last dedupe key range: <from> – <to>
-- Dedupe collisions found: <count>
+- Ingress dedup entries: <count>
+- Oldest dedup entry: <timestamp>
+- Idempotency collisions found: <count>
 - Comment: <brief assessment>
 ```
 
@@ -139,9 +140,10 @@ dashboards, alerting). Structure:
   },
   "hash_chain": {
     "total_entries": 1500,
-    "linked_entries": 1498,
-    "broken_links": 2,
-    "integrity": "partial"
+    "matching_entries": 1498,
+    "mismatched_entries": 2,
+    "first_failing_sequence": 421,
+    "integrity": "faulty"
   },
   "recent_runs": {
     "total": 200,
@@ -166,9 +168,10 @@ dashboards, alerting). Structure:
     "oldest_pending_at": "2026-06-17T08:00:00Z"
   },
   "duplicate_reply_safety": {
-    "last_dedupe_key_range": ["run_001:msg_100", "run_001:msg_200"],
-    "collisions": 0
-  }
+    "ingress_dedup_count": 1200,
+    "oldest_dedup_at": "2026-06-01T00:00:00Z",
+    "idempotency_collisions": 0
+  },
 }
 ```
 
@@ -188,19 +191,31 @@ expected, which could invalidate query assumptions.
 
 ### 5.2 Hash-Chain Status
 
-The Journal stores entries linked by `parent_uid`. The harness:
+The Journal stores entries in `journal_events` with an append-only hash chain.
+Each entry carries the hash of the prior entry, forming a verifiable chain. The
+hash is computed deterministically as:
 
-1. Counts total entries in the `journal_entries` table.
-2. Counts entries where `parent_uid` is `NULL` (root entries, always valid).
-3. Counts entries where `parent_uid` references an existing entry (linked).
-4. Counts entries where `parent_uid` references a non-existent UID (broken link).
+```
+SHA-256(previous_hash | sequence | kind | payload_json)
+```
 
-If `broken_links == 0`, integrity is `"ok"`. If `broken_links > 0`, integrity is
-`"faulty"`. If the table cannot be read, integrity is `"unknown"`.
+where `|` is literal `|` separator, matching `src/journal/hash_chain.rs`
+`event_hash()`. The harness mirrors `src/journal/sqlite.rs` `verify_hash_chain`:
 
-**Important**: This is a structural check, not a cryptographic one. The MVP does
-not verify signatures or hashes of journal entry bodies. A future iteration may
-add content-addressable verification.
+1. Counts total entries in `journal_events`.
+2. Iterates entries in `sequence` order, recomputing `expected_hash` from
+   `previous_hash`, `sequence`, `kind`, and `payload_json`.
+3. Verifies that each entry's `previous_hash` matches the prior entry's `hash`,
+   and its `hash` matches the recomputed value.
+
+If all entries pass, integrity is `"ok"`. On first mismatch, integrity is
+`"faulty"` and the report records the failing `sequence` and `event_id`. If the
+table cannot be read, integrity is `"unknown"`.
+
+**Note on entry 1 (sequence=1)**: `previous_hash` is `NULL` (not the empty
+string). The `event_hash` function treats `None` as `""` internally, so the
+harness must replicate that — pass `NULL`/`None` as the previous-hash input,
+not a literal `"null"` or empty string, to match the Kernel's computation.
 
 ### 5.3 Recent Runs
 
@@ -212,44 +227,88 @@ Purpose: give the operator a quick overview of what the system has processed.
 
 ### 5.4 Unknown Dispatches
 
-Query the dispatching table for rows where the dispatch status is `unknown`.
-These are dispatches that did not complete normally and may indicate stuck work
-or system faults.
+Query `outbox_dispatches` for rows where `status = 'unknown'` and
+`acked_unknown = 0`. These are dispatches that reached a terminal-unknown state
+and have **not** been acknowledged by an operator (matching
+`src/journal/queue_health.rs` `outbox_unknown_unacked_count`). An acknowledged
+unknown (`acked_unknown = 1`) is accepted by the operator and no longer counts
+as a health concern.
 
 If the `/health` JSON was provided, cross-reference the `outbox_unknown_count`
-field from health to ensure consistency with the raw DB query.
+field from health to ensure consistency with the raw DB query. The Kernel's
+health endpoint reports the unacknowledged count.
 
 ### 5.5 Projection Drift (Outbox)
 
-Query outbox or projection tables to find rows where the projected/expected state
-differs from the actual state. This detects corruption or inconsistency in the
-projection rebuild mechanism.
+The Kernel maintains `outbox_dispatches` as a projection of the Journal's
+terminal facts. A row "drifts" when the Journal already has a terminal event
+(`ReceiptReceived` or `OutboxDispatchUnknown`) for the same invocation, but the
+projection status disagrees. The harness mirrors
+`src/journal/queue_health.rs` `outbox_projection_drift_count`:
+
+1. Join `outbox_dispatches od` to `journal_events je` on
+   `je.correlation_id = od.invocation_id`.
+2. Find rows where `je.kind` is `ReceiptReceived` or `OutboxDispatchUnknown`
+   (Journal has a terminal fact).
+3. Check that the projection status matches — e.g. `od.status = 'succeeded'`
+   with a Journal `ReceiptReceived` whose payload contains `"status":"Succeeded"`,
+   or `od.status = 'failed'` with `"status":"Failed"`, or `od.status = 'unknown'`
+   paired with `OutboxDispatchUnknown`.
+4. Count rows where no matching terminal-status pair is found.
 
 If the `/health` JSON was provided, cross-reference `outbox_drift_count`.
 
 ### 5.6 Undelivered Ingress
 
-Query the ingress/event table for rows whose delivery status is `undelivered`.
-This indicates events that were received but not yet processed by the runtime.
+The Kernel does not store a `delivery_status` column. Instead, undelivered
+ingress is derived from `journal_events`: an `IngressAccepted` event whose
+`correlation_id` (which holds the payload `event_id`) has no matching
+`SessionReady`, `RunStarted`, `RunCompleted`, or `RunFailed` event with the
+same `correlation_id`. This matches `src/journal/recovery.rs`
+`undelivered_ingress_events()` — `RunFailed` is included on purpose so that a
+failed worker delivery is NOT re-queued on restart.
+
+The harness:
+1. Collects all `IngressAccepted` events.
+2. Collects all `correlation_id` values from events of kind `SessionReady`,
+   `RunStarted`, `RunCompleted`, `RunFailed`.
+3. Filters to `IngressAccepted` events whose payload `event_id` is NOT in the
+   delivered set.
+4. Returns the count and oldest such event.
 
 ### 5.7 Approval Waits & Expiries
 
-Query the `runs` table for runs with `status = AwaitingApproval`. Count them and
-find the oldest. Also query any approval-expiry audit log or flag to count
-expired approvals.
+Query the `runs` table for runs with `status = 'AwaitingApproval'`. Count them
+and find the oldest `created_at`. Expired approvals are runs that transitioned
+from `AwaitingApproval` to `Failed` (the Kernel's approval-expiry sweep sets
+the run status to `'Failed'` with a failure context indicating
+`ApprovalExpired`). The harness:
+
+1. Counts `runs` with `status = 'AwaitingApproval'`.
+2. Queries `journal_events` for `ApprovalExpired` kind events or runs where
+   `status = 'Failed'` and the payload/reason suggests approval expiry.
+3. Reports both counts and the oldest pending approval timestamp.
 
 If the `/health` JSON was provided, cross-reference `awaiting_approval_count`.
 
 ### 5.8 Duplicate-Reply Safety Notes
 
-The Kernel deduplicates outbound messages using a dedupe key. The harness:
+The Kernel deduplicates ingress events using the `ingress_dedup` table. On each
+incoming event, the gateway calls `reserve_ingress(source, external_event_id)`
+which inserts into `ingress_dedup` with `INSERT OR IGNORE`. If the row already
+exists the event is rejected as a duplicate (`bail!("skip:duplicate_ingress")`).
+The outbox meanwhile uses `idempotency_key` (unique constraint on
+`outbox_dispatches.invocation_id`) to prevent duplicate dispatch of the same
+intent.
 
-1. Queries the last range of dedupe keys used (e.g. `SELECT MIN(dedupe_key),
-   MAX(dedupe_key) FROM outbox WHERE ...`).
-2. Counts any collisions (duplicate dedupe keys with different payloads).
-
-This is a safety indicator: a high collision count could mean duplicate replies
-were sent to users.
+The harness:
+1. Queries the total count and time range of `ingress_dedup` entries.
+2. Checks for any `outbox_dispatches` rows sharing the same `idempotency_key`
+   with different `arguments_json` (potential duplicate with different payload).
+3. Reports the count and the recency of the oldest dedup entry as a safety
+   indicator — a stale dedup range does not directly imply a safety problem, but
+   an unexpectedly small `ingress_dedup` footprint for a long-running system may
+   warrant investigation.
 
 ## 6. Constraints & Safety Rules
 
@@ -270,7 +329,7 @@ were sent to users.
 | `--db` not provided | Print error to stderr, exit code 1 |
 | `--db` file does not exist | Print error to stderr, exit code 1 |
 | `--db` file is not SQLite (no `SQLite format 3\000` header) | Print error to stderr, exit code 2 |
-| Required table missing (e.g. `journal_entries` does not exist) | Report that section as "table not found", continue with other sections, exit code 3 |
+| Required table missing (e.g. `journal_events` does not exist) | Report that section as "table not found", continue with other sections, exit code 3 |
 | `--health` file not valid JSON | Print warning to stderr, report "health JSON malformed", continue without cross-referencing, exit code 0 |
 | Output directory not writable | Print error to stderr, exit code 4 |
 | SQLite file is encrypted or corrupted | Catch `SQLITE_NOTADB` error, print message to stderr, exit code 5 |
@@ -298,7 +357,7 @@ Each report section maps to one module:
 tools/audit-report/
   index.mjs          # CLI argument parsing, orchestration
   schema-version.mjs # PRAGMA user_version / schema_version table
-  hash-chain.mjs     # parent_uid link analysis
+  hash-chain.mjs     # verify_hash_chain replay (sequence, previous_hash, hash)
   runs.mjs           # Recent runs summary
   dispatches.mjs     # Unknown dispatches
   drift.mjs          # Projection drift
@@ -373,14 +432,14 @@ This is a design reference; the actual implementation must verify table existenc
 
 | Section | Table(s) | Key Columns |
 |---|---|---|
-| Schema version | `schema_version` or `PRAGMA user_version` | `version` |
-| Hash chain | `journal_entries` | `uid`, `parent_uid` |
+| Schema version | `PRAGMA user_version` | N/A (scalar) |
+| Hash chain | `journal_events` | `sequence`, `previous_hash`, `hash`, `kind`, `payload_json` |
 | Recent runs | `runs` | `id`, `status`, `created_at`, `updated_at` |
-| Unknown dispatches | `dispatching` or `outbox_dispatch` | `status`, `created_at` |
-| Projection drift | `outbox_entries` or `projection_entries` | `projected_status`, `actual_status` |
-| Undelivered ingress | `ingress_events` or `inbound_messages` | `delivery_status`, `created_at` |
-| Approval waits | `runs` | `status = 'AwaitingApproval'` |
-| Approval expiries | `runs` + `approval_audit_log` | `status = 'Failed'`, `failure_reason` |
-| Dedupe safety | `outbox` or `deduplication_log` | `dedupe_key`, `payload_hash` |
+| Unknown dispatches | `outbox_dispatches` | `status`, `acked_unknown`, `created_at` |
+| Projection drift | `outbox_dispatches` + `journal_events` | `od.invocation_id`, `je.correlation_id`, `od.status`, `je.kind`, `je.payload_json` |
+| Undelivered ingress | `journal_events` | `kind = 'IngressAccepted'`, `correlation_id`, payload `event_id` |
+| Approval waits | `runs` | `status = 'AwaitingApproval'`, `created_at` |
+| Approval expiries | `runs` + `journal_events` | `status = 'Failed'`, `kind = 'ApprovalExpired'` or payload indicator |
+| Dedupe safety | `ingress_dedup` + `outbox_dispatches` | `ingress_dedup.source`, `external_event_id`, `event_id`; `outbox_dispatches.idempotency_key`, `arguments_json` |
 
 This mapping will be validated and refined during implementation.
