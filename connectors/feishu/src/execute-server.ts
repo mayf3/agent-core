@@ -47,7 +47,7 @@ export function startExecuteServer(config: ConnectorConfig, client: any, reactio
   return server;
 }
 
-function validateExecute(body: any) {
+export function validateExecute(body: any) {
   if (body.protocol_version !== "v1") {
     throw new Error("unsupported protocol version");
   }
