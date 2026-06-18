@@ -384,7 +384,7 @@ Kernel 可以定义协议，但不吸收这些产品逻辑。
 | L2 | Actions are safe | 外部动作都有 intent、approval、receipt |
 | L3 | Extensions are clean | connector / adapter 能脱离 Kernel 开发 |
 | L4 | Work is replayable | 历史 run 可以基于 snapshot replay |
-| L5 | Harness can improve itself | candidate 经过 replay、eval、PR |
+| L5 | Harness can improve itself | candidate 经过 replay、eval、PR。**已具备**：给定候选分支 → evolution-harness 自动评估（replay/eval + 可选 audit）→ 生成证据包 + 明确 pass/blocked 决策（PRs #142–#146，手动 merge）。下一步是 worker-agent 自动准备候选（temp worktree），仍手动 merge。 |
 | L6 | Product is operable | 安装、health、repair、upgrade 文档清楚 |
 
 ## 当前下一批决策
