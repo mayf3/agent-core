@@ -84,34 +84,33 @@ export function scoreFixture(fixture: Fixture, outcome: ReplayOutcome): FixtureS
   // no_duplicate_reply: exactly one dispatch per ingress turn.
   if (exp.no_duplicate_reply) {
     const expected = fixture.turns.length;
-    details.push(
-      outcome.dispatchCount <= expected
-        ? PASS("no_duplicate_reply", `${outcome.dispatchCount} dispatch(es) for ${expected} turn(s)`)
-        : (FAIL("no_duplicate_reply", `${outcome.dispatchCount} dispatches for ${expected} turn(s) — duplicate`),
-          (hardFail = true)),
-    );
+    if (outcome.dispatchCount <= expected) {
+      details.push(PASS("no_duplicate_reply", `${outcome.dispatchCount} dispatch(es) for ${expected} turn(s)`));
+    } else {
+      details.push(FAIL("no_duplicate_reply", `${outcome.dispatchCount} dispatches for ${expected} turn(s) — duplicate`));
+      hardFail = true;
+    }
   }
 
   // forbidden_operations: none of these may appear.
   if (exp.forbidden_operations && exp.forbidden_operations.length > 0) {
     const violated = exp.forbidden_operations.filter((op) => outcome.operations.includes(op));
-    details.push(
-      violated.length === 0
-        ? PASS("forbidden_operations", "no forbidden operations emitted")
-        : (FAIL("forbidden_operations", `emitted forbidden: ${JSON.stringify(violated)}`),
-          (hardFail = true)),
-    );
+    if (violated.length === 0) {
+      details.push(PASS("forbidden_operations", "no forbidden operations emitted"));
+    } else {
+      details.push(FAIL("forbidden_operations", `emitted forbidden: ${JSON.stringify(violated)}`));
+      hardFail = true;
+    }
   }
 
   // policy_verdict
   if (exp.policy_verdict === "allow") {
-    const allowed = outcome.policyAllowed === true;
-    details.push(
-      allowed
-        ? PASS("policy_verdict", "intent was allowed")
-        : (FAIL("policy_verdict", "intent was denied when allow expected"),
-          (hardFail = true)),
-    );
+    if (outcome.policyAllowed === true) {
+      details.push(PASS("policy_verdict", "intent was allowed"));
+    } else {
+      details.push(FAIL("policy_verdict", "intent was denied when allow expected"));
+      hardFail = true;
+    }
   } else if (exp.policy_verdict === "deny") {
     const denied = outcome.policyAllowed === false;
     details.push(

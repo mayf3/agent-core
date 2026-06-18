@@ -345,3 +345,41 @@ test("scoreFixture: multiple expectations in single fixture aggregate correctly"
   assert.equal(s.passes, 6, "no_crash + reply_operations + no_duplicate + forbidden + policy_verdict + max_latency all pass");
   assert.equal(s.fails, 1, "only reply_contains_any fails");
 });
+
+// --- regression: hard-fail details must be proper ExpectationResult objects ---
+// The old comma-expression `(FAIL(...), (hardFail = true))` pushed a boolean
+// into details instead of the FAIL result. This asserts the detail entry is a
+// real object with name/pass/detail after the fix.
+
+test("scoreFixture: forbidden-operation hard-fail detail is a proper object (not a boolean)", () => {
+  const o = { ...goodOutcome(), operations: ["feishu.send_message", "shell.exec"] };
+  const s = scoreFixture(validFixture(), o);
+  assert.equal(s.hardFail, true);
+  const detail = s.details.find((d) => d.name === "forbidden_operations");
+  assert.ok(detail, "forbidden_operations detail must exist");
+  assert.equal(typeof detail, "object");
+  assert.equal(detail.pass, false);
+  assert.ok(typeof detail.detail === "string" && detail.detail.length > 0);
+});
+
+test("scoreFixture: duplicate-reply hard-fail detail is a proper object (not a boolean)", () => {
+  const o = { ...goodOutcome(), dispatchCount: 3 }; // 3 dispatches for 1 turn
+  const s = scoreFixture(validFixture(), o);
+  assert.equal(s.hardFail, true);
+  const detail = s.details.find((d) => d.name === "no_duplicate_reply");
+  assert.ok(detail, "no_duplicate_reply detail must exist");
+  assert.equal(typeof detail, "object");
+  assert.equal(detail.pass, false);
+  assert.ok(typeof detail.detail === "string" && detail.detail.length > 0);
+});
+
+test("scoreFixture: policy-deny hard-fail detail is a proper object (not a boolean)", () => {
+  const o = { ...goodOutcome(), policyAllowed: false };
+  const s = scoreFixture(validFixture(), o);
+  assert.equal(s.hardFail, true);
+  const detail = s.details.find((d) => d.name === "policy_verdict");
+  assert.ok(detail, "policy_verdict detail must exist");
+  assert.equal(typeof detail, "object");
+  assert.equal(detail.pass, false);
+  assert.ok(typeof detail.detail === "string" && detail.detail.length > 0);
+});
