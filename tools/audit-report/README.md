@@ -54,8 +54,8 @@ Writes `out/report.md` and `out/report.json`.
 2. **Hash-chain status** — recomputes `SHA-256(previous_hash | sequence | kind | payload_json)` per entry, mirroring `src/journal/hash_chain.rs`.
 3. **Recent runs** — total, by-status breakdown, latest 10.
 4. **Unknown dispatches** — `outbox_dispatches` where `status='unknown' AND acked_unknown=0`.
-5. **Projection drift** — outbox rows in a non-terminal `dispatching` state.
-6. **Undelivered ingress** — `IngressAccepted` events with no correlated `SessionReady`/`RunStarted`/`RunCompleted`/`RunFailed` (mirrors `src/journal/recovery.rs`).
+5. **Projection drift** — outbox rows whose terminal Journal fact (by `invocation_id`/`correlation_id`) disagrees with the projection `status` (mirrors the Kernel's `outbox_projection_drift_count` in `src/journal/queue_health.rs`).
+6. **Undelivered ingress** — `IngressAccepted` events whose `payload.event_id` is present AND not found among the `correlation_id`s of any `SessionReady`/`RunStarted`/`RunCompleted`/`RunFailed` (mirrors `src/journal/recovery.rs` exactly — an `IngressAccepted` missing `payload.event_id` is not counted).
 7. **Approval waits & expiries** — runs in `AwaitingApproval` + `ApprovalExpired` facts.
 8. **Duplicate-reply safety** — `ingress_dedup` rows + idempotency-key collisions.
 

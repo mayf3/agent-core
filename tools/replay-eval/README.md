@@ -61,9 +61,17 @@ Writes `out/score.json` and `out/report.md`.
 
 ## Fixture format
 
-See `docs/replay-eval-harness.md §4` and `examples/smoke.json`. Fixtures are
+See `docs/replay-eval-harness.md §4` and `examples/`. Fixtures are
 deterministic seeds with **soft** expectations (`reply_contains_any`, not exact
-match). Empty `expectations` = smoke replay.
+match). Empty `expectations` = smoke replay. The shipped fixture pack exercises
+the expectation kinds: `forbidden_operations`, `policy_verdict`, and
+`reply_contains_any` (see `test/replay.test.ts`).
+
+**Hard-fail details are always structured.** Any expectation that forces a
+`regress` verdict (duplicate reply, forbidden operation, policy-deny-when-allow,
+crash) pushes a structured `ExpectationResult` object into `details` — never a
+bare boolean. This is covered by per-branch regression tests plus a
+cross-cutting invariant test.
 
 ## Exit codes
 
@@ -81,7 +89,7 @@ match). Empty `expectations` = smoke replay.
 node --test --experimental-strip-types tools/replay-eval/test/replay.test.ts
 ```
 
-The unit tests cover fixture validation + scoring (14 tests). The end-to-end
+The unit tests cover fixture validation + scoring (50 tests). The end-to-end
 driver (build + start + replay) requires `cargo` + `git` and is exercised
 manually; it is intentionally not part of the `node --test` suite to keep CI
 fast and dependency-free.
