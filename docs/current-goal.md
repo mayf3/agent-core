@@ -84,7 +84,7 @@ When updating this file after an iteration:
 Last reviewed main:
 
 ```text
-7695335 refactor: clear remaining test-style clippy lints (#85)
+f70ab23 refactor: drop vestigial Runtime.adapter field (#87)
 ```
 
 Recent work already merged:
@@ -129,64 +129,22 @@ Recent work already merged:
 - Code quality: clippy `needless_borrow` + `manual_clamp` fixes (PR #83).
 - Code quality: removed 4 unused test imports (PR #84).
 - Code quality: cleared remaining test-style clippy lints — items-after-test-module, unit-value let-binding, bool-assert-comparison (PR #85).
+- docs: committed the standing continuous-goal tracker into `main` (PR #86).
+- refactor: dropped the vestigial `Runtime.adapter` dead-code field + generic + dead `RecordingAdapter` test double (PR #87).
 
 Open PRs at review time: none.
 
 ## Current Local Branch
 
-Current branch:
+On `main`, clean working tree. No in-flight feature branch. `docs/current-goal.md` is now tracked (PR #86).
 
-```text
-refactor/runtime-drop-vestigial-adapter
-```
+## Last Iteration — PR #87
 
-Current working tree is not clean:
+- branch `refactor/runtime-drop-vestigial-adapter` (squash-merged); merge `f70ab23`.
+- dropped the vestigial `Runtime.adapter` dead-code field + `A` generic + bound + all call-site args + the dead `RecordingAdapter` test double. Behavior-preserving (field never read; empirically verified).
+- validation: cargo build/test green (zero warnings), clippy clean of new lints, pnpm check ok, structure/secret-leak/validation_layout passed.
+- Also PR #86: committed `docs/current-goal.md` into `main` (had been untracked all session).
 
-```text
-M docs/current-goal.md
-M src/main.rs
-M src/runtime/mod.rs
-M src/server/approval_endpoint_tests.rs
-M src/server/delivery.rs
-M src/server/delivery_tests.rs
-M tests/m0_kernel.rs
-M tests/m2d_approval_state.rs
-```
-
-`docs/current-goal.md` is this goal-contract update. The Rust files are an
-in-flight refactor by another agent to remove the vestigial `Runtime.adapter`
-field and update its call sites/tests. Do not start another behavior branch on
-top of this dirty worktree.
-
-Current compile status:
-
-```text
-cargo check
-```
-
-passes as of this review with **zero warnings** (the unused
-`StdoutAdapter` import was removed; the dead `RecordingAdapter` test double was
-dropped). `pnpm check`, `cargo test`, structure/secret-leak checks, and
-`validation_layout.py` are all green. The refactor is behavior-preserving (the
-field was never read) and ready to commit + PR.
-
-## Last Iteration — PR #85
-
-- branch: `refactor/clippy-test-style` (squash-merged, branch deleted);
-- merge commit: `7695335`;
-- approval: behavior-preserving clippy fixes, no sign-off.
-- files changed: `src/journal/unknown.rs` (moved `parse_time` above `mod tests`),
-  `src/server/delivery_tests.rs` (dropped unit-value binding + meaningless
-  assert), `tests/m5_parse_kind.rs` (`assert_eq!(x,false)` -> `assert!(!x)`).
-- implementation: cleared 3 test-style clippy lints. All behavior-preserving.
-- validation: cargo build/test green, 3 lints cleared, pnpm check ok, structure
-  + secret-leak + validation_layout passed.
-- resolved issue: all *safe* clippy debt is now cleared. The 6 remaining lints
-  are `Default`-impl suggestions on macro-generated domain id-types
-  (`RunId`/`AgentId`/...) — deliberately left, since a `Default` impl there
-  would risk a misleading empty id masking bugs (a real correctness hazard,
-  not cosmetic).
-- residual risks: none from this PR. The `Default` lints are correctly deferred.
 ## Issues To Address Next
 
 Phase 0, Phase 1, and Phase 2 are complete. The Kernel is now a durable chat
