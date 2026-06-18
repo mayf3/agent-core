@@ -139,7 +139,11 @@ High-signal state:
 
 ## Current State
 
-On `main` after PR #137. No open PRs at the time of this update.
+On `main` after PR #140. No open PRs at the time of this update.
+
+Phase 3 (Connector Extraction Readiness) is complete: connector-local execute
+idempotency persists across restart (PR #139), and the extraction checklist +
+connector README landed (PR #140).
 
 Phase 0/1/2 are dogfood-ready: durable Feishu/CLI chat kernel, Journal/hash-chain/projection recovery, conservative duplicate-reply handling, health + recovery surfaces, operation catalog + policy pipeline + read-only adapter proof, durable approval state + approval endpoints, `ToolCatalog` visible to the model, and one model-emitted read-only tool (`time.now`).
 
@@ -248,50 +252,51 @@ Rough estimates, assuming one focused coding agent and quick decisions:
 
 ## Next Recommended Goal
 
-The external-harness productization sprint is complete. The next goal is
-**Phase 3 — Connector Extraction Readiness**: make the Feishu connector
-ready to be split into a standalone repo/package while keeping the Rust Kernel
-thin. Give the worker agent this next goal:
+Phase 3 (Connector Extraction Readiness) is complete: connector-local execute
+idempotency persists across restart (PR #139) and the extraction checklist +
+connector README landed (PR #140). The next goal is the **External
+Self-Evolution Rehearsal MVP**: an external harness that strings
+"candidate branch → replay/eval → audit/report → PR" into an experienceable
+loop, with **manual merge only** and **no self-evolution in the Kernel**. Give
+the worker agent this next goal:
 
 ```text
-Goal: Phase 3 Connector Extraction Readiness Sprint. Make the Feishu Connector
-ready to be extracted into a standalone repo/package while keeping the Rust
-Kernel thin. Split into 2-4 small PRs; do NOT modify Rust Kernel src/ unless a
-proven security bug requires it (then a separate PR).
+Goal: External Self-Evolution Rehearsal MVP. Build an external harness that
+strings candidate-branch → replay/eval → audit/report → PR into a loop the
+user can experience. It is NOT auto-merge, NOT a workflow engine. Keep the
+Kernel thin; self-evolution stays in the external tool layer, never in
+src/. Split into 3-4 small PRs.
 
-PR1 — doc convergence: current-goal.md snapshot refresh; replay-eval README
-test count; roadmap replay-fixture blocker retired.
-PR2 — connector-local execute idempotency persistence (connectors/feishu/**):
-JSONL store + load + append + compact + TTL; minimal fields only
-(idempotency_key, invocation_id, operation, status, timestamps, optional
-receipt summary); no full Feishu response/Authorization/secret; tests for
-first-execute/persist, restart-replay-dedup, failure-not-saved, compact,
-short-id logging.
-PR3 — extraction checklist (docs/connector-extraction-checklist.md) +
-connectors/feishu/README.md (edge adapter, not Runtime/Gateway/Journal) +
-a guard test that connectors/feishu does not import src/ and the Kernel does
-not import tools/ or connector TS.
-PR4 — current-goal next-step pointer to "first practical safe tool with
-approval" (design/task-pack only; no shell/http/browser/deploy).
+PR1 — current-goal convergence: mark #139/#140 done; set this Next Goal.
+PR2 — docs/evolution-harness.md design: MVP flow (goal.md → candidate branch/
+worktree → delegate to worker agent → replay-eval suite → optional
+audit-report → evolution-report.md + score.json → open PR → human/Codex review
+→ manual merge only); red-lines (no .env/~/.openduck/~/.openclaw/logs/prod-DB/
+secrets; no stop/restart; no auto-merge; no Kernel src/ writes unless the task
+explicitly targets the Kernel and is separately reviewed; no workflow/multi-
+agent/shell/browser/deploy); run output dir tools/evolution-harness/runs/<run-id>/.
+PR3 — tools/evolution-harness/ CLI skeleton: read goal file; validate candidate/
+base git ref safety; create run dir; emit plan.json; optionally call replay-eval
+suite; emit report.md; dry-run default; NEVER auto-commit/merge/push main.
+Tests: reject .env/~/.openduck/~/.openclaw/logs paths; reject unsafe git refs;
+dry-run produces plan/report; does not invoke git push/merge.
+PR4 — handoff: update current-goal with skeleton status; next step (real worker
+agent or gh pr create) stays manual-merge.
 
-Boundaries: no .env/~/.openduck/~/.openclaw/logs/prod-DB/secrets reads; no
-service stop/restart; no Rust Kernel src/ changes; no Workflow/Multi-Agent/
-Shell/Memory/Hook/Plugin/Sandbox/Self-Evolution; audit/replay/evolution stay
-out of src/; one PR per topic, ≤3 open PRs at once. PR1+PR2+PR3 must all pass
-validation before the sprint is considered done.
+Boundaries: no Rust Kernel src/ changes; no auto-promotion; no workflow graph /
+multi-agent orchestration; no shell/browser/deploy; no secret/log reads; one
+PR per topic, ≤3 open PRs. PR1+PR2+PR3 must all pass validation before the
+rehearsal MVP is considered to have a first version.
 ```
 
 Acceptance for that goal:
 
-- `pnpm check` passes; connector tests green; `git diff --check` clean.
-- The connector restarts without re-sending a Feishu message for a replayed
-  idempotency key.
-- `docs/connector-extraction-checklist.md` exists and a guard asserts no
-  cross-boundary imports.
-- `score.json` includes candidate git revision, fixture results, pass/fail
-  counts, and a machine-readable overall score.
-- `report.md` summarizes baseline/candidate comparison, failures, and residual
-  risks in a form the user can inspect.
+- `pnpm check` passes; `node --test --experimental-strip-types
+  tools/evolution-harness/test/*.test.ts` green; `git diff --check` clean.
+- The harness refuses forbidden paths (`.env`, `~/.openduck`, `~/.openclaw`,
+  logs, production DB) and unsafe git refs.
+- A dry run produces a `plan.json` + `report.md` in
+  `tools/evolution-harness/runs/<run-id>/` without invoking `git push`/`merge`.
 - No implementation is added under `src/`.
 
 Do not start self-evolution orchestration before replay/eval can produce a
