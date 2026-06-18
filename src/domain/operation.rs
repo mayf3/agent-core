@@ -148,9 +148,52 @@ impl ExecutionProfile {
     }
 }
 
+/// Render the operation catalog as a compact tool-catalog text block for the
+/// LLM context (Phase 2 tool-surfacing foundation). Each line is
+/// `<name> (risk: <ReadOnly|Write>) — <one-line intent>`. Only catalogued
+/// operations appear; the model is told these are the only operations it may
+/// propose. Today this surfaces `time.now` (ReadOnly) alongside the two reply
+/// operations (Write). Surfacing is additive — proposing/executing an
+/// operation still goes through the existing intent → policy → adapter chain.
+pub fn catalog_for_context() -> String {
+    CATALOG
+        .iter()
+        .map(|spec| {
+            let risk = match spec.risk {
+                Risk::ReadOnly => "ReadOnly",
+                Risk::Write => "Write",
+            };
+            let desc = match spec.name {
+                STDOUT_SEND_TEXT => "send a text reply to the user (stdout).",
+                FEISHU_SEND_MESSAGE => "send a message reply to the Feishu chat.",
+                TIME_NOW => "read the current kernel wall-clock time (no side effect).",
+                _ => "catalogued operation.",
+            };
+            format!("{} (risk: {}) — {}", spec.name, risk, desc)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn catalog_for_context_lists_every_catalogued_operation_with_risk() {
+        // Phase 2 tool-surfacing: the context block must surface every
+        // catalogued operation, each tagged with its risk.
+        let text = catalog_for_context();
+        for spec in CATALOG {
+            assert!(
+                text.contains(spec.name),
+                "context catalog missing {}",
+                spec.name
+            );
+        }
+        assert!(text.contains("ReadOnly"), "risk tag missing");
+        assert!(text.contains("Write"), "risk tag missing");
+    }
 
     #[test]
     fn catalog_lists_all_known_operations() {
