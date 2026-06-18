@@ -15,7 +15,7 @@
  * promotion (this tool only produces the score — it never merges).
  */
 
-import { readFileSync, writeFileSync, existsSync, statSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, statSync, mkdirSync, mkdtempSync, rmSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
@@ -45,7 +45,8 @@ function validateGitRef(ref: string): void {
 }
 
 interface Args {
-  fixture: string;
+  fixture: string | null;          // null when --fixtures-dir is used
+  fixturesDir: string | null;      // null when --fixture is used
   candidate: string;
   baseline: string;
   outDir: string;
@@ -55,21 +56,35 @@ function parseArgs(argv: string[]): Args {
   const a: Record<string, string> = {};
   for (let i = 2; i < argv.length; i++) {
     const k = argv[i];
-    if (k === "--fixture" || k === "--candidate" || k === "--baseline" || k === "--out-dir") {
-      a[k.slice(2)] = argv[++i];
+    if (k === "--fixture" || k === "--fixtures-dir" || k === "--candidate" || k === "--baseline" || k === "--out-dir") {
+      a[k.slice(2).replace("-", "_")] = argv[++i];
     }
   }
-  if (!a.fixture) {
-    console.error("error: --fixture is required");
+  // Exactly one of --fixture / --fixtures-dir is required.
+  const hasFixture = !!a.fixture;
+  const hasDir = !!a.fixtures_dir;
+  if (hasFixture === hasDir) {
+    console.error("error: provide exactly one of --fixture <file> or --fixtures-dir <dir>");
     process.exit(2);
   }
-  if (isForbiddenPath(a.fixture)) {
-    console.error(`error: --fixture resolves to a forbidden path (may contain secrets): ${a.fixture}`);
-    process.exit(3);
-  }
-  if (!existsSync(a.fixture) || !statSync(a.fixture).isFile()) {
-    console.error(`error: --fixture is not a regular file: ${a.fixture}`);
-    process.exit(3);
+  if (hasFixture) {
+    if (isForbiddenPath(a.fixture)) {
+      console.error(`error: --fixture resolves to a forbidden path (may contain secrets): ${a.fixture}`);
+      process.exit(3);
+    }
+    if (!existsSync(a.fixture) || !statSync(a.fixture).isFile()) {
+      console.error(`error: --fixture is not a regular file: ${a.fixture}`);
+      process.exit(3);
+    }
+  } else {
+    if (isForbiddenPath(a.fixtures_dir)) {
+      console.error(`error: --fixtures-dir resolves to a forbidden path: ${a.fixtures_dir}`);
+      process.exit(3);
+    }
+    if (!existsSync(a.fixtures_dir) || !statSync(a.fixtures_dir).isDirectory()) {
+      console.error(`error: --fixtures-dir is not a directory: ${a.fixtures_dir}`);
+      process.exit(3);
+    }
   }
   if (!a.candidate) {
     console.error("error: --candidate (git ref) is required");
@@ -83,11 +98,34 @@ function parseArgs(argv: string[]): Args {
     process.exit(2);
   }
   return {
-    fixture: a.fixture,
+    fixture: hasFixture ? a.fixture : null,
+    fixturesDir: hasDir ? a.fixtures_dir : null,
     candidate: a.candidate,
     baseline: a.baseline ?? "main",
-    outDir: a["out-dir"] ?? process.cwd(),
+    outDir: a.out_dir ?? process.cwd(),
   };
+}
+
+/** Load + validate every *.json fixture in a directory (non-recursive). */
+function loadFixturesFromDir(dir: string): Fixture[] {
+  const files = readdirSync(dir)
+    .filter((f) => f.endsWith(".json"))
+    .sort();
+  if (files.length === 0) {
+    console.error(`error: --fixtures-dir contains no *.json fixtures: ${dir}`);
+    process.exit(3);
+  }
+  const fixtures: Fixture[] = [];
+  for (const f of files) {
+    const path = join(dir, f);
+    try {
+      fixtures.push(validateFixture(JSON.parse(readFileSync(path, "utf8"))));
+    } catch (e) {
+      console.error(`error: invalid fixture ${path}: ${(e as Error).message}`);
+      process.exit(3);
+    }
+  }
+  return fixtures;
 }
 
 const EXIT_DRIVER_ERROR = 4;
@@ -121,14 +159,10 @@ function cleanupWorktree(dir: string): void {
 async function main() {
   const args = parseArgs(process.argv);
 
-  // Load + validate the fixture.
-  let fixture: Fixture;
-  try {
-    fixture = validateFixture(JSON.parse(readFileSync(args.fixture, "utf8")));
-  } catch (e) {
-    console.error(`error: invalid fixture: ${(e as Error).message}`);
-    process.exit(3);
-  }
+  // Load + validate the fixture list (one file, or a directory of fixtures).
+  const fixtures: Fixture[] = args.fixture
+    ? [validateFixture(JSON.parse(readFileSync(args.fixture, "utf8")))]
+    : loadFixturesFromDir(args.fixturesDir!);
 
   const ipcToken = randomBytes(16).toString("hex");
 
@@ -163,27 +197,54 @@ async function main() {
     process.exit(EXIT_DRIVER_ERROR);
   }
 
-  let candidateOutcome: ReplayOutcome;
-  let baselineOutcome: ReplayOutcome;
+  const fixtureResults: Array<{
+    fixture_id: string;
+    candidate: ReturnType<typeof scoreFixture>;
+    baseline: ReturnType<typeof scoreFixture>;
+    delta: number;
+    verdict: "improve" | "regress" | "neutral";
+  }> = [];
+  let driverFailed = false;
   try {
-    console.error(`replaying fixture ${fixture.fixture_id} against candidate...`);
-    candidateOutcome = await runFixtureAgainst(candidateWt.binary, fixture, ipcToken);
-    console.error(`replaying fixture ${fixture.fixture_id} against baseline...`);
-    baselineOutcome = await runFixtureAgainst(baselineWt.binary, fixture, ipcToken);
-  } catch (e) {
-    console.error(`error: replay driver failed: ${(e as Error).message}`);
-    cleanupWorktree(candidateWt.dir);
-    cleanupWorktree(baselineWt.dir);
-    process.exit(EXIT_DRIVER_ERROR);
+    for (const fixture of fixtures) {
+      let candidateOutcome: ReplayOutcome;
+      let baselineOutcome: ReplayOutcome;
+      try {
+        console.error(`replaying fixture ${fixture.fixture_id} against candidate...`);
+        candidateOutcome = await runFixtureAgainst(candidateWt.binary, fixture, ipcToken);
+        console.error(`replaying fixture ${fixture.fixture_id} against baseline...`);
+        baselineOutcome = await runFixtureAgainst(baselineWt.binary, fixture, ipcToken);
+      } catch (e) {
+        console.error(`error: replay driver failed for ${fixture.fixture_id}: ${(e as Error).message}`);
+        driverFailed = true;
+        continue;
+      }
+      const candidateScore = scoreFixture(fixture, candidateOutcome);
+      const baselineScore = scoreFixture(fixture, baselineOutcome);
+      const v = compareFixture(candidateScore, baselineScore);
+      fixtureResults.push({
+        fixture_id: fixture.fixture_id,
+        candidate: candidateScore,
+        baseline: baselineScore,
+        delta: v.delta,
+        verdict: v.verdict,
+      });
+    }
   } finally {
     cleanupWorktree(candidateWt.dir);
     cleanupWorktree(baselineWt.dir);
   }
+  if (driverFailed) {
+    console.error("error: one or more fixture replays failed; partial report written");
+  }
 
-  const candidateScore = scoreFixture(fixture, candidateOutcome);
-  const baselineScore = scoreFixture(fixture, baselineOutcome);
-  const verdict: FixtureVerdict = compareFixture(candidateScore, baselineScore);
-  const summary = summarize([verdict]);
+  const verdicts: FixtureVerdict[] = fixtureResults.map((r) => ({
+    candidate: r.candidate,
+    baseline: r.baseline,
+    delta: r.delta,
+    verdict: r.verdict,
+  }));
+  const summary = summarize(verdicts);
 
   const report = {
     meta: {
@@ -192,19 +253,10 @@ async function main() {
       candidate_commit: candidateWt.commit,
       baseline: args.baseline,
       baseline_commit: baselineWt.commit,
-      fixture_id: fixture.fixture_id,
-      fixture_count: 1,
+      fixture_count: fixtureResults.length,
     },
     summary,
-    fixtures: [
-      {
-        fixture_id: fixture.fixture_id,
-        candidate: candidateScore,
-        baseline: baselineScore,
-        delta: verdict.delta,
-        verdict: verdict.verdict,
-      },
-    ],
+    fixtures: fixtureResults,
   };
 
   const dir = resolve(args.outDir);
@@ -230,7 +282,22 @@ function toMarkdown(r: any): string {
   lines.push("| Fixture | Candidate | Baseline | Δ | Verdict |");
   lines.push("|---|---|---|---|---|");
   for (const f of r.fixtures) {
-    lines.push(`| ${f.fixture_id} | ${f.candidate.score.toFixed(2)} | ${f.baseline.score.toFixed(2)} | ${f.delta.toFixed(2)} | ${f.verdict} |`);
+    lines.push(`| ${f.fixture_id} | ${f.candidate.score.toFixed(2)}${f.candidate.hardFail ? " ⚠" : ""} | ${f.baseline.score.toFixed(2)} | ${f.delta.toFixed(2)} | ${f.verdict} |`);
+  }
+  lines.push("");
+  lines.push("_⚠ = candidate hard-fail (regress regardless of score)_");
+  lines.push("");
+  const hardFails = r.fixtures.filter((f: any) => f.candidate.hardFail);
+  if (hardFails.length > 0) {
+    lines.push("## Candidate hard failures");
+    lines.push("");
+    for (const f of hardFails) {
+      lines.push(`### ${f.fixture_id}`);
+      for (const d of f.candidate.details) {
+        lines.push(`- [${d.pass ? "x" : " "}] ${d.name}: ${d.detail}`);
+      }
+      lines.push("");
+    }
   }
   lines.push("");
   lines.push("## Candidate expectation details");
@@ -239,12 +306,6 @@ function toMarkdown(r: any): string {
     lines.push(`- [${d.pass ? "x" : " "}] ${d.name}: ${d.detail}`);
   }
   lines.push("");
-  if (r.fixtures[0].candidate.hardFail) {
-    lines.push("## Hard failures");
-    lines.push("");
-    lines.push("- candidate triggered a hard-fail expectation (see details above)");
-    lines.push("");
-  }
   return lines.join("\n");
 }
 

@@ -28,6 +28,8 @@ extraction target: `agent-core-replay-eval`. See
 
 ## Usage
 
+Run a **single fixture**:
+
 ```bash
 node --experimental-strip-types tools/replay-eval/cli.ts \
   --fixture tools/replay-eval/examples/smoke.json \
@@ -36,6 +38,18 @@ node --experimental-strip-types tools/replay-eval/cli.ts \
   --out-dir ./out
 ```
 
+Or a **suite** (every `*.json` fixture in a directory, one candidate/baseline
+build reused across all, one aggregated report):
+
+```bash
+node --experimental-strip-types tools/replay-eval/cli.ts \
+  --fixtures-dir tools/replay-eval/examples \
+  --candidate feat/my-change \
+  --baseline main \
+  --out-dir ./out
+```
+
+`--fixture` and `--fixtures-dir` are mutually exclusive (exactly one required).
 Writes `out/score.json` and `out/report.md`.
 
 ## What it does (per run)
