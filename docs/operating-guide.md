@@ -98,7 +98,7 @@ Key fields:
 | `outbox_dispatcher_enabled` | dispatcher loop configured | `true` in production |
 | `outbox_dispatcher_running` | loop thread alive | `true` |
 | `last_dispatch_tick_at` | last poll cycle (RFC3339) | recent |
-| `outbox_pending_count` | queued, not yet dispatched | may be >0 briefly |
+| `last_dispatch_error_category` | sanitized category of the last dispatch error (e.g. `adapter_timeout`, `connector_execute_failed`, `adapter_failed`, `unknown_transport_error`), or null | `null` at steady state || `outbox_pending_count` | queued, not yet dispatched | may be >0 briefly |
 | `outbox_dispatching_count` | in-flight | may be >0 briefly |
 | `outbox_stale_dispatching_count` | inline-leased dispatches with expired lease (crash-abandoned) | `0` |
 | `outbox_unknown_count` | dispatched but terminal outcome unknown | `0` at steady state |
