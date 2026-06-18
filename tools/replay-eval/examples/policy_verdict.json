@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "fixture_id": "policy-verdict-allow",
+  "description": "Policy verdict expected to be 'allow': the default auto-approval pipeline should allow the model-emitted tool call (time.now). Combined with reply_contains_any for regression detection.",
+  "source": { "kind": "authored" },
+  "setup": { "agent_id": "main", "channel": "cli", "session_id": "sess_policy_1" },
+  "turns": [
+    { "role": "user", "external_event_id": "msg_policy_1", "text": "what time is it" }
+  ],
+  "expectations": {
+    "reply_contains_any": ["time", "now", "current"],
+    "reply_operations": ["time.now"],
+    "no_duplicate_reply": true,
+    "policy_verdict": "allow"
+  }
+}
