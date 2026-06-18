@@ -59,14 +59,13 @@ fn read_body(stream: &mut std::net::TcpStream) -> Value {
 
 /// Build a paused run and return (run_id, journal, gateway).
 fn paused_run() -> anyhow::Result<(String, Arc<JournalStore>, Arc<crate::gateway::Gateway>)> {
-    use crate::adapters::StdoutAdapter;
     use crate::gateway::Gateway;
     use crate::llm::LocalEchoLlm;
     use crate::runtime::Runtime;
     let config = approval_config();
     let journal = Arc::new(JournalStore::in_memory()?);
     let gateway = Arc::new(Gateway::new(config.clone()));
-    let runtime = Runtime::new(config, LocalEchoLlm, StdoutAdapter);
+    let runtime = Runtime::new(config, LocalEchoLlm);
     let envelope = gateway.cli_ingress("hi".to_string())?;
     let event = gateway.validate_ingress(&journal, envelope)?;
     let outcome = runtime.deliver(&journal, &gateway, event)?;

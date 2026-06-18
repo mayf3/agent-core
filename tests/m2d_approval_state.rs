@@ -36,11 +36,11 @@ fn count_kind(journal: &JournalStore, run_id: &RunId, kind: JournalEventKind) ->
         .count()
 }
 
-fn run_deliver_cli(required: bool) -> Result<(JournalStore, Gateway, Runtime<LocalEchoLlm, agent_core_kernel::adapters::StdoutAdapter>, RunId)> {
+fn run_deliver_cli(required: bool) -> Result<(JournalStore, Gateway, Runtime<LocalEchoLlm>, RunId)> {
     let config = config_with_approval(required);
     let journal = JournalStore::in_memory()?;
     let gateway = Gateway::new(config.clone());
-    let runtime = Runtime::new(config, LocalEchoLlm, agent_core_kernel::adapters::StdoutAdapter);
+    let runtime = Runtime::new(config, LocalEchoLlm);
     let envelope = gateway.cli_ingress("hello".to_string())?;
     let event = gateway.validate_ingress(&journal, envelope)?;
     let outcome = runtime.deliver(&journal, &gateway, event)?;
@@ -154,7 +154,7 @@ fn approval_state_is_durable_across_reopen() -> Result<()> {
     let run_id = {
         let journal = JournalStore::open(&db_path)?;
         let gateway = Gateway::new(config.clone());
-        let runtime = Runtime::new(config, LocalEchoLlm, agent_core_kernel::adapters::StdoutAdapter);
+        let runtime = Runtime::new(config, LocalEchoLlm);
         let envelope = gateway.cli_ingress("hi".to_string())?;
         let event = gateway.validate_ingress(&journal, envelope)?;
         let outcome = runtime.deliver(&journal, &gateway, event)?;
@@ -240,7 +240,7 @@ fn paused_run(ttl: u64) -> Result<(RunId, JournalStore)> {
     let config = config_with_ttl(ttl);
     let journal = JournalStore::in_memory()?;
     let gateway = Gateway::new(config.clone());
-    let runtime = Runtime::new(config, FixedLlm, agent_core_kernel::adapters::StdoutAdapter);
+    let runtime = Runtime::new(config, FixedLlm);
     let envelope = gateway.cli_ingress("hi".to_string())?;
     let event = gateway.validate_ingress(&journal, envelope)?;
     let outcome = runtime.deliver(&journal, &gateway, event)?;
