@@ -65,9 +65,14 @@ export function startExecuteServer(
           return receipt;
         })
         .catch((error) => {
-          inFlight.delete(idempotencyKey);
           void reactions?.markFailed(body.arguments.message_id);
           throw error;
+        })
+        .finally(() => {
+          // Always clean up inFlight to prevent unbounded Map growth.
+          // Subsequent same-key requests will hit the persisted store dedup
+          // (or, on failure, retry sendReply from scratch).
+          inFlight.delete(idempotencyKey);
         });
       inFlight.set(idempotencyKey, promise);
       const receipt = await promise;
