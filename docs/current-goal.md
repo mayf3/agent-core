@@ -84,7 +84,7 @@ When updating this file after an iteration:
 Last reviewed main:
 
 ```text
-f70ab23 refactor: drop vestigial Runtime.adapter field (#87)
+285f029 docs: sync release-checklist + roadmap with Phase 2 (#91)
 ```
 
 Recent work already merged:
@@ -131,6 +131,8 @@ Recent work already merged:
 - Code quality: cleared remaining test-style clippy lints — items-after-test-module, unit-value let-binding, bool-assert-comparison (PR #85).
 - docs: committed the standing continuous-goal tracker into `main` (PR #86).
 - refactor: dropped the vestigial `Runtime.adapter` dead-code field + generic + dead `RecordingAdapter` test double (PR #87).
+- docs(operating-guide): documented Phase 2 approval surfaces — /v1/approve + /v1/deny, awaiting_approval_count, opt-in env vars + expiry (PR #90).
+- docs: synced release-checklist (Phase 1->1+2, 14->23 suites, approval boundary) + roadmap Phase 2 completion note (PR #91).
 
 Open PRs at review time: none.
 
@@ -138,12 +140,17 @@ Open PRs at review time: none.
 
 On `main`, clean working tree. No in-flight feature branch. `docs/current-goal.md` is now tracked (PR #86).
 
-## Last Iteration — PR #87
+## Last Iteration — PRs #90–#91
 
-- branch `refactor/runtime-drop-vestigial-adapter` (squash-merged); merge `f70ab23`.
-- dropped the vestigial `Runtime.adapter` dead-code field + `A` generic + bound + all call-site args + the dead `RecordingAdapter` test double. Behavior-preserving (field never read; empirically verified).
-- validation: cargo build/test green (zero warnings), clippy clean of new lints, pnpm check ok, structure/secret-leak/validation_layout passed.
-- Also PR #86: committed `docs/current-goal.md` into `main` (had been untracked all session).
+- Doc content debt cleared: the operating guide, release checklist, and roadmap did
+  not reflect Phase 2's operator-facing surfaces (opt-in write-approval gate, HTTP
+  `/v1/approve`+`/v1/deny`, `awaiting_approval_count`, approval expiry).
+- PR #90 (`71b4e3e`): operating-guide — env vars, /health field, new "Approval state
+  (optional)" section with the resume/deny endpoints + TTL expiry.
+- PR #91 (`285f029`): release-checklist (scope Phase 1→1+2, suites 14→23, approval
+  boundary) + roadmap Phase 2 completion note.
+- validation (doc-only): structure + secret-leak + git diff --check all clean.
+- residual risks: none. All Phase 2 docs now consistent with the code.
 
 ## Issues To Address Next
 
