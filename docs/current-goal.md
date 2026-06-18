@@ -84,7 +84,7 @@ When updating this file after an iteration:
 Last reviewed main:
 
 ```text
-8d2f014 docs(operating-guide): document AGENT_CORE_EXTRA_ALLOWED_OPERATIONS (M2b) (#95)
+523bb59 docs(operating-guide): document last_dispatch_error_category /health field (#97)
 ```
 
 Recent work already merged:
@@ -137,20 +137,23 @@ Recent work already merged:
 - docs(operating-guide): documented AGENT_CORE_EXTRA_ALLOWED_OPERATIONS (the M2b
   config-driven grant knob, missed in the earlier Phase 2 doc sync) (PR #95).
 
+- docs(operating-guide): documented the `last_dispatch_error_category` /health field
+  (present since Phase 1 PR #63 but never in the health table) (PR #97).
+
 Open PRs at review time: none.
 
 ## Current Local Branch
 
 On `main`, clean working tree. No in-flight feature branch. `docs/current-goal.md` is now tracked (PR #86).
 
-## Last Iteration — PRs #93–#95 (doc/config sync)
+## Last Iteration — PR #97
 
-- #93: `.env.example` now lists `AGENT_CORE_OUTBOX_DISPATCHER_ENABLED` + `_POLL_MS`
-  (read by config.rs but missing from the template); fully in sync with config.rs.
-- #95: operating-guide documented `AGENT_CORE_EXTRA_ALLOWED_OPERATIONS` (M2b
-  config-driven grants), the Phase 2 env var the earlier sync missed.
-- validation (doc/config-only): structure + secret-leak + git diff --check clean.
-- residual risks: none. Operator docs + `.env.example` now consistent with code.
+- Doc sync: `/health.last_dispatch_error_category` (sanitized dispatch error category)
+  was exposed since Phase 1 (PR #63) but absent from the operating-guide health table.
+  Added. The full `/health` field set is now documented; `.env.example` is fully in sync
+  with config.rs; operating-guide/release-checklist/roadmap all reflect Phase 2.
+- validation (doc-only): structure + secret-leak + git diff --check clean.
+- residual risks: none. Doc/code consistency audit essentially complete.
 
 ## Issues To Address Next
 
