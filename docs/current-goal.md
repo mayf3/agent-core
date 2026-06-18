@@ -75,11 +75,8 @@ Functional baseline reviewed:
 0b1338d Merge pull request #121 from mayf3/fix/tool-call-single-execution
 ```
 
-Latest doc refresh after that baseline:
-
-```text
-cee14b4 Merge pull request #122 from mayf3/docs/refresh-goal-after-pr121
-```
+Doc-only refreshes may follow this baseline without changing the functional
+state described below.
 
 Open PRs at review time: none.
 
