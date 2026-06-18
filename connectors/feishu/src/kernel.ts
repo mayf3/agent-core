@@ -41,7 +41,7 @@ export async function postIngress(config: ConnectorConfig, event: unknown, react
   }
 }
 
-function normalizeMessageEvent(raw: any) {
+export function normalizeMessageEvent(raw: any) {
   const event = raw?.event || raw;
   const header = raw?.header || event?.header || {};
   const message = event?.message || {};
