@@ -78,6 +78,11 @@ Functional baseline reviewed:
 Doc-only refreshes may follow this baseline without changing the functional
 state described below.
 
+- feat(tools): Replay/Eval Harness MVP (`tools/replay-eval/`) — drives a candidate build
+  against a fixture on ephemeral port+DB+worktree, scores vs baseline, writes
+  score.json + report.md. 14 tests (fixture validation + scoring). External, no new
+  dependency, PR-only promotion (PR #125).
+
 Open PRs at review time: none.
 
 High-signal state:
