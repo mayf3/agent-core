@@ -14,6 +14,8 @@ export interface ConnectorConfig {
   reactionStatePath: string;
   reactionRetryAttempts: number;
   reactionRetryBaseDelayMs: number;
+  /** Path to JSONL file for execute idempotency persistence (Plan B). */
+  executeStatePath: string;
 }
 
 export function loadConfig(): ConnectorConfig {
@@ -36,6 +38,7 @@ export function loadConfig(): ConnectorConfig {
     // up and log). See phase0-plan.md "Feishu Identity" / M1.
     reactionRetryAttempts: positiveInt("AGENT_CORE_FEISHU_REACTION_RETRY_ATTEMPTS", 3),
     reactionRetryBaseDelayMs: positiveInt("AGENT_CORE_FEISHU_REACTION_RETRY_BASE_DELAY_MS", 500),
+    executeStatePath: executeStatePath(),
   };
 }
 
@@ -67,6 +70,13 @@ function reactionStatePath(): string {
   return expandHome(
     process.env.AGENT_CORE_FEISHU_REACTION_STATE_PATH ||
       join(defaultDataDir(), "feishu-reactions.jsonl"),
+  );
+}
+
+function executeStatePath(): string {
+  return expandHome(
+    process.env.AGENT_CORE_FEISHU_EXECUTE_STATE_PATH ||
+      join(defaultDataDir(), "feishu-executes.jsonl"),
   );
 }
 
