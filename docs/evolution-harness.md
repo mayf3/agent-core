@@ -24,6 +24,10 @@ This is a **design document only** — no implementation in this PR.
   `tools/evolution-harness/` (incubation) or a separate
   `agent-core-evolution-harness` package (extraction target). It **must never**
   live under `src/`, and the Kernel must never depend on it.
+- **No shell.** All git invocations use `spawnSync`/`execFileSync` + an argv
+  array (never string-concatenated `execSync`), eliminating shell-injection
+  risk. Refs are validated for metacharacters, path traversal, control
+  characters, and leading `-` (option injection).
 - The harness is a **client** of the Kernel (over HTTP) and an **orchestrator**
   of the existing `tools/audit-report` + `tools/replay-eval`. It does not link
   Kernel code and does not mutate Journal/approval/connector state.
@@ -44,7 +48,7 @@ This is a **design document only** — no implementation in this PR.
 | `--fixtures-dir <dir>` | No | Fixtures for the replay/eval suite (passed through to `tools/replay-eval`). |
 | `--audit-db <path>` | No | A **copied** SQLite snapshot to run `tools/audit-report` against. Never the live DB. |
 | `--out-dir <dir>` | No | Where to write run artifacts. Default: `tools/evolution-harness/runs/<run-id>/`. |
-| `--dry-run` | No | Default `true` for the skeleton: produce the plan + report without spawning a worker agent or mutating any repo state. |
+| `--evaluate` | No | Real evaluation mode (Batch 2): compose `tools/replay-eval` + optional `tools/audit-report` into the evidence package. Until Batch 2, `--evaluate` is accepted but produces a plan-only report. The removed `--no-dry-run` is rejected as `not_implemented` so it never emits a false "candidate prepared" report. |
 
 The harness **must refuse** to run if any input path resolves to `.env`,
 `.agent-core`, `~/.openduck`, `~/.openclaw`, logs, or a production DB, or if a

@@ -1,11 +1,15 @@
 #!/usr/bin/env node
 /**
- * External Self-Evolution Rehearsal Harness — CLI skeleton (Phase 3 MVP).
+ * External Self-Evolution Rehearsal Harness — CLI.
  *
- * Strings goal → candidate branch → (planned) replay/eval + audit → report into
- * an experienceable loop. DRY-RUN BY DEFAULT: produces plan.json +
- * evolution-report.md without spawning a worker agent, committing, merging, or
- * pushing. Manual merge only.
+ * Strings goal → candidate ref → (evaluation-only, Batch 2) replay/eval +
+ * optional audit → evidence package → pass/blocked decision. **Dry-run by
+ * default** (plan + report only). Real evaluation is `--evaluate` (Batch 2);
+ * `--no-dry-run` is rejected as not_implemented so it never emits a false
+ * "candidate prepared" report.
+ *
+ * Safety: no shell — all git calls use spawnSync + argv. Refuses forbidden
+ * paths and unsafe git refs. Never invokes git push/merge. Manual merge only.
  *
  * See docs/evolution-harness.md for the design contract.
  *
@@ -14,15 +18,12 @@
  *     --goal docs/current-goal.md \
  *     --candidate feat/my-change \
  *     [--base main] [--fixtures-dir <dir>] [--audit-db <copied.db>] \
- *     [--out-dir <dir>] [--no-dry-run]
- *
- * Safety: refuses forbidden paths (.env/.agent-core/.openduck/.openclaw/logs/
- * production DB) and unsafe git refs; never invokes git push/merge.
+ *     [--out-dir <dir>] [--evaluate]
  */
 
 import { readFileSync, writeFileSync, existsSync, statSync, mkdirSync } from "node:fs";
 import { resolve, join } from "node:path";
-import { execSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 
 const FORBIDDEN_SEGMENTS = [".env", ".agent-core", ".openduck", ".openclaw", "logs"];
@@ -33,21 +34,34 @@ export function isForbiddenPath(filePath: string): boolean {
   return segments.some((seg) => FORBIDDEN_SEGMENTS.includes(seg));
 }
 
-/** Throw if the git ref contains shell metacharacters or path traversal. */
+/**
+ * Reject a git ref if it is unsafe or structurally invalid. Hardens against:
+ * - shell metacharacters (`<>|;&$\`'"\\` and whitespace)
+ * - path traversal (`..`)
+ * - control characters (0x00–0x1f, 0x7f)
+ * - option injection (leading `-`)
+ * Unresolvable refs are rejected separately by resolveRef.
+ */
 export function validateGitRef(ref: string): void {
-  if (/[<>|;&$`'"\\\s]/.test(ref) || ref.includes("..")) {
-    throw new Error(`unsafe git ref: ${ref}`);
-  }
+  if (ref.length === 0) throw new Error("unsafe git ref: empty");
+  if (ref.startsWith("-")) throw new Error(`unsafe git ref (option-injection): ${ref}`);
+  if (ref.includes("..")) throw new Error(`unsafe git ref (path traversal): ${ref}`);
+  if (/[<>|;&$`'"\\\s]/.test(ref)) throw new Error(`unsafe git ref (metacharacters): ${ref}`);
+  if (/[\x00-\x1f\x7f]/.test(ref)) throw new Error(`unsafe git ref (control characters): ${ref}`);
 }
 
-/** Resolve a git ref to a short commit hash, or throw if unresolvable. */
+/** Run `git rev-parse --short <ref>` WITHOUT a shell (spawnSync + argv). Returns
+ *  the trimmed short commit, or throws if the ref is unsafe/unresolvable. */
 export function resolveRef(ref: string): string {
   validateGitRef(ref);
-  try {
-    return execSync(`git rev-parse --short ${ref}`, { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] }).trim();
-  } catch {
+  const result = spawnSync("git", ["rev-parse", "--short", ref], {
+    encoding: "utf8",
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  if (result.status !== 0 || !result.stdout) {
     throw new Error(`cannot resolve git ref: ${ref}`);
   }
+  return result.stdout.trim();
 }
 
 interface Args {
@@ -57,58 +71,62 @@ interface Args {
   fixturesDir: string | null;
   auditDb: string | null;
   outDir: string;
-  dryRun: boolean;
+  /** Real evaluation mode (Batch 2). Dry-run is the default. */
+  evaluate: boolean;
+}
+
+const EXIT_BAD_ARG = 2;
+const EXIT_FORBIDDEN_OR_MISSING = 3;
+const EXIT_NOT_IMPLEMENTED = 4;
+
+function fail(msg: string, code: number): never {
+  console.error(`error: ${msg}`);
+  process.exit(code);
 }
 
 function parseArgs(argv: string[]): Args {
   const a: Record<string, string> = {};
-  let dryRun = true;
+  let evaluate = false;
   for (let i = 2; i < argv.length; i++) {
     const k = argv[i];
-    if (k === "--no-dry-run") {
-      dryRun = false;
+    if (k === "--evaluate") {
+      evaluate = true;
       continue;
+    }
+    if (k === "--no-dry-run") {
+      // Removed: --no-dry-run never had real execution. Reject explicitly so it
+      // cannot produce a false "candidate prepared" report. Use --evaluate.
+      fail("--no-dry-run is not implemented; use --evaluate for real evaluation (Batch 2)", EXIT_NOT_IMPLEMENTED);
     }
     if (k === "--goal" || k === "--candidate" || k === "--base" || k === "--fixtures-dir" || k === "--audit-db" || k === "--out-dir") {
       a[k.slice(2).replace(/-/g, "_")] = argv[++i];
     }
   }
-  if (!a.goal) {
-    console.error("error: --goal is required");
-    process.exit(2);
+  if (!a.goal) fail("--goal is required", EXIT_BAD_ARG);
+  if (isForbiddenPath(a.goal)) fail(`--goal resolves to a forbidden path: ${a.goal}`, EXIT_FORBIDDEN_OR_MISSING);
+  if (!existsSync(a.goal) || !statSync(a.goal).isFile()) fail(`--goal is not a regular file: ${a.goal}`, EXIT_FORBIDDEN_OR_MISSING);
+  if (!a.candidate) fail("--candidate (git ref) is required", EXIT_BAD_ARG);
+  try {
+    validateGitRef(a.candidate);
+  } catch (e) {
+    fail((e as Error).message, EXIT_FORBIDDEN_OR_MISSING);
   }
-  if (isForbiddenPath(a.goal)) {
-    console.error(`error: --goal resolves to a forbidden path: ${a.goal}`);
-    process.exit(3);
+  if (a.base) {
+    try {
+      validateGitRef(a.base);
+    } catch (e) {
+      fail((e as Error).message, EXIT_FORBIDDEN_OR_MISSING);
+    }
   }
-  if (!existsSync(a.goal) || !statSync(a.goal).isFile()) {
-    console.error(`error: --goal is not a regular file: ${a.goal}`);
-    process.exit(3);
-  }
-  if (!a.candidate) {
-    console.error("error: --candidate (git ref) is required");
-    process.exit(2);
-  }
-  validateGitRef(a.candidate);
-  if (a.base) validateGitRef(a.base);
-  if (a.fixtures_dir && isForbiddenPath(a.fixtures_dir)) {
-    console.error(`error: --fixtures-dir resolves to a forbidden path: ${a.fixtures_dir}`);
-    process.exit(3);
+  if (a.fixtures_dir) {
+    if (isForbiddenPath(a.fixtures_dir)) fail(`--fixtures-dir resolves to a forbidden path: ${a.fixtures_dir}`, EXIT_FORBIDDEN_OR_MISSING);
+    if (!existsSync(a.fixtures_dir) || !statSync(a.fixtures_dir).isDirectory()) fail(`--fixtures-dir is not a directory: ${a.fixtures_dir}`, EXIT_FORBIDDEN_OR_MISSING);
   }
   if (a.audit_db) {
-    if (isForbiddenPath(a.audit_db)) {
-      console.error(`error: --audit-db resolves to a forbidden path: ${a.audit_db}`);
-      process.exit(3);
-    }
-    if (!existsSync(a.audit_db) || !statSync(a.audit_db).isFile()) {
-      console.error(`error: --audit-db is not a regular file: ${a.audit_db}`);
-      process.exit(3);
-    }
+    if (isForbiddenPath(a.audit_db)) fail(`--audit-db resolves to a forbidden path: ${a.audit_db}`, EXIT_FORBIDDEN_OR_MISSING);
+    if (!existsSync(a.audit_db) || !statSync(a.audit_db).isFile()) fail(`--audit-db is not a regular file: ${a.audit_db}`, EXIT_FORBIDDEN_OR_MISSING);
   }
-  if (a.out_dir && isForbiddenPath(a.out_dir)) {
-    console.error(`error: --out-dir resolves to a forbidden path: ${a.out_dir}`);
-    process.exit(3);
-  }
+  if (a.out_dir && isForbiddenPath(a.out_dir)) fail(`--out-dir resolves to a forbidden path: ${a.out_dir}`, EXIT_FORBIDDEN_OR_MISSING);
   return {
     goal: a.goal,
     candidate: a.candidate,
@@ -116,7 +134,7 @@ function parseArgs(argv: string[]): Args {
     fixturesDir: a.fixtures_dir ?? null,
     auditDb: a.audit_db ?? null,
     outDir: a.out_dir ?? join(process.cwd(), "tools", "evolution-harness", "runs"),
-    dryRun,
+    evaluate,
   };
 }
 
@@ -126,13 +144,34 @@ function runId(): string {
   return `${ts}-${suffix}`;
 }
 
-function main() {
+export interface RunManifest {
+  run_id: string;
+  argv: string[];
+  started_at: string;
+  finished_at: string;
+  exit_code: number;
+  candidate: { ref: string; commit: string };
+  base: { ref: string; commit: string };
+  artifacts: { path: string; kind: string }[];
+  git_push_invoked: boolean;
+  git_merge_invoked: boolean;
+  src_mutated: boolean;
+}
+
+export function main(): RunManifest {
+  const startedAt = new Date().toISOString();
   const args = parseArgs(process.argv);
   const goalText = readFileSync(args.goal, "utf8");
 
-  // Resolve refs (fail fast on unsafe/unresolvable).
-  const candidateCommit = resolveRef(args.candidate);
-  const baseCommit = resolveRef(args.base);
+  // Resolve refs (fail fast on unsafe/unresolvable) and pin commits.
+  let candidateCommit: string;
+  let baseCommit: string;
+  try {
+    candidateCommit = resolveRef(args.candidate);
+    baseCommit = resolveRef(args.base);
+  } catch (e) {
+    fail((e as Error).message, EXIT_FORBIDDEN_OR_MISSING);
+  }
 
   const id = runId();
   const runDir = join(resolve(args.outDir), id);
@@ -140,13 +179,12 @@ function main() {
 
   // The harness NEVER auto-commits, merges, or pushes. This invariant is
   // enforced by the absence of any such call here — there is no git push/merge
-  // invocation anywhere in this file. Dry-run additionally skips worker-agent
-  // delegation and PR creation (not yet implemented anyway).
+  // invocation anywhere in this file.
 
   const plan = {
     run_id: id,
     generated_at: new Date().toISOString(),
-    dry_run: args.dryRun,
+    evaluate: args.evaluate,
     goal_path: resolve(args.goal),
     goal_first_line: goalText.split("\n").find((l) => l.trim().length > 0)?.slice(0, 200) ?? "",
     candidate: { ref: args.candidate, commit: candidateCommit },
@@ -156,11 +194,8 @@ function main() {
       "validate candidate/base refs",
       "create run directory",
       "emit plan.json",
-      args.dryRun ? "(dry-run) skip worker-agent delegation" : "delegate to worker agent on candidate",
-      args.fixturesDir ? `run replay-eval suite (--fixtures-dir ${args.fixturesDir})` : "(no fixtures-dir) skip replay-eval",
-      args.auditDb ? `run audit-report against copied --audit-db ${args.auditDb}` : "(no audit-db) skip audit-report",
+      args.evaluate ? "(evaluate) compose replay-eval/audit-report" : "(dry-run) skip evaluation",
       "emit evolution-report.md",
-      args.dryRun ? "(dry-run) skip PR creation" : "optionally open a PR (manual merge only)",
     ],
     boundaries: {
       no_src_writes: true,
@@ -169,14 +204,13 @@ function main() {
       manual_merge_only: true,
     },
   };
-
   writeFileSync(join(runDir, "plan.json"), JSON.stringify(plan, null, 2) + "\n");
 
   const reportLines: string[] = [
     "# Evolution Rehearsal Report",
     "",
     `Run: ${id}  Generated: ${plan.generated_at}`,
-    `Mode: ${args.dryRun ? "**dry-run** (no worker agent, no PR)" : "non-dry-run"}`,
+    `Mode: ${args.evaluate ? "**evaluate** (real evaluation; merge still manual)" : "**dry-run** (no evaluation ran)"}`,
     "",
     "## Plan",
     "",
@@ -197,23 +231,30 @@ function main() {
     "",
     "## Composition (this run)",
     "",
-    `- replay-eval: ${args.fixturesDir ? `scheduled (--fixtures-dir ${args.fixturesDir})` : "skipped (no --fixtures-dir)"}`,
-    `- audit-report: ${args.auditDb ? `scheduled (--audit-db ${args.auditDb})` : "skipped (no --audit-db)"}`,
+    `- replay-eval: ${args.fixturesDir ? `requested (--fixtures-dir ${args.fixturesDir})` : "skipped (no --fixtures-dir)"}`,
+    `- audit-report: ${args.auditDb ? `requested (--audit-db ${args.auditDb})` : "skipped (no --audit-db)"}`,
     "",
     "## Decision",
     "",
-    args.dryRun
-      ? "Dry-run: no candidate was built, no worker agent ran, no PR opened. Inspect `plan.json` and re-run with `--no-dry-run` (still manual merge) to proceed."
-      : "A candidate was prepared. **Merge is manual**: a human/Codex reviewer must read this report + the linked score.json/audit-report before merging.",
+    args.evaluate
+      ? "Evaluate mode is not yet wired in this build (Batch 2). This report is plan-only."
+      : "Dry-run: no evaluation ran. Inspect `plan.json`; re-run with `--evaluate` for real evaluation (Batch 2).",
     "",
   ];
   writeFileSync(join(runDir, "evolution-report.md"), reportLines.join("\n"));
 
-  const manifest = {
+  const manifest: RunManifest = {
     run_id: id,
-    commands_run: [
-      `git rev-parse --short ${args.candidate} -> ${candidateCommit}`,
-      `git rev-parse --short ${args.base} -> ${baseCommit}`,
+    argv: process.argv.slice(2),
+    started_at: startedAt,
+    finished_at: new Date().toISOString(),
+    exit_code: 0,
+    candidate: { ref: args.candidate, commit: candidateCommit },
+    base: { ref: args.base, commit: baseCommit },
+    artifacts: [
+      { path: "plan.json", kind: "plan" },
+      { path: "evolution-report.md", kind: "report" },
+      { path: "manifest.json", kind: "manifest" },
     ],
     git_push_invoked: false,
     git_merge_invoked: false,
@@ -221,8 +262,9 @@ function main() {
   };
   writeFileSync(join(runDir, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n");
 
-  console.log(`evolution rehearsal ${args.dryRun ? "dry-run " : ""}report written to ${runDir}`);
+  console.log(`evolution rehearsal ${args.evaluate ? "evaluate " : "dry-run "}report written to ${runDir}`);
   console.log(`  plan.json + evolution-report.md + manifest.json`);
+  return manifest;
 }
 
 // Run as a CLI entry only when invoked directly (not when imported by tests).
