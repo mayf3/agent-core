@@ -1,6 +1,7 @@
 import * as Lark from "@larksuiteoapi/node-sdk";
 import { loadConfig } from "./config.js";
 import { startExecuteServer } from "./execute-server.js";
+import { createJsonlExecuteStore } from "./execute-store.js";
 import { postIngress } from "./kernel.js";
 import { createReactionTracker } from "./reactions.js";
 import { safeLarkLogger } from "./safe-logger.js";
@@ -15,7 +16,9 @@ baseConfig["app" + "Secret"] = config.appSecret;
 
 const client = new Lark.Client(baseConfig);
 const reactions = createReactionTracker(config, client);
-startExecuteServer(config, client, reactions);
+const executeStore = createJsonlExecuteStore(config.executeStatePath);
+executeStore.load(); // warm up the store from disk on startup
+startExecuteServer(config, client, reactions, executeStore);
 
 const eventDispatcher = new Lark.EventDispatcher({}).register({
   "im.message.receive_v1": async (data: unknown) => {
