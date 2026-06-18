@@ -84,7 +84,7 @@ When updating this file after an iteration:
 Last reviewed main:
 
 ```text
-152d665 docs: Replay/Eval Harness design document (#116)
+5518b4a docs: update goal snapshot head to #116 (replay/eval design) (#117)
 ```
 
 Recent work already merged:
