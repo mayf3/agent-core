@@ -69,13 +69,19 @@ If a harness prototype is incubated here temporarily, it must:
 
 ## Current Snapshot
 
-Last reviewed main:
+Functional baseline reviewed:
 
 ```text
 0b1338d Merge pull request #121 from mayf3/fix/tool-call-single-execution
 ```
 
-Open PRs at review time: none before this branch.
+Latest doc refresh after that baseline:
+
+```text
+cee14b4 Merge pull request #122 from mayf3/docs/refresh-goal-after-pr121
+```
+
+Open PRs at review time: none.
 
 High-signal state:
 
@@ -168,7 +174,7 @@ Already good enough:
 - Operation catalog, policy pipeline, read-only adapter proof.
 - Durable approval state and approval endpoints.
 - ToolCatalog visible to the model.
-- One model-emitted read-only tool (`time.now`) after this bugfix merges.
+- One model-emitted read-only tool (`time.now`).
 - Read-only audit report MVP outside `src/`.
 - Replay/eval harness design.
 
