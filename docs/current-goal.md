@@ -139,11 +139,13 @@ High-signal state:
 
 ## Current State
 
-On `main` after PR #140. No open PRs at the time of this update.
+On `main` after PR #143. No open PRs at the time of this update.
 
 Phase 3 (Connector Extraction Readiness) is complete: connector-local execute
 idempotency persists across restart (PR #139), and the extraction checklist +
-connector README landed (PR #140).
+connector README landed (PR #140). The **External Self-Evolution Rehearsal
+sprint** landed its design (`docs/evolution-harness.md`, PR #142) + CLI skeleton
+(`tools/evolution-harness/`, dry-run default, manual-merge-only, PR #143).
 
 Phase 0/1/2 are dogfood-ready: durable Feishu/CLI chat kernel, Journal/hash-chain/projection recovery, conservative duplicate-reply handling, health + recovery surfaces, operation catalog + policy pipeline + read-only adapter proof, durable approval state + approval endpoints, `ToolCatalog` visible to the model, and one model-emitted read-only tool (`time.now`).
 
@@ -252,52 +254,53 @@ Rough estimates, assuming one focused coding agent and quick decisions:
 
 ## Next Recommended Goal
 
-Phase 3 (Connector Extraction Readiness) is complete: connector-local execute
-idempotency persists across restart (PR #139) and the extraction checklist +
-connector README landed (PR #140). The next goal is the **External
-Self-Evolution Rehearsal MVP**: an external harness that strings
-"candidate branch → replay/eval → audit/report → PR" into an experienceable
-loop, with **manual merge only** and **no self-evolution in the Kernel**. Give
-the worker agent this next goal:
+The External Self-Evolution Rehearsal MVP has a **first version**: design
+(`docs/evolution-harness.md`, PR #142) + CLI skeleton (`tools/evolution-harness/`,
+dry-run default, manual-merge-only, 9 tests, PR #143) are on `main`. The
+rehearsal loop is experienceable end-to-end in dry-run.
+
+The next goal is to **wire the skeleton to real execution while keeping merge
+manual** — but only as design/task-packs unless explicitly approved:
+
+1. **Worker-agent delegation** (`--no-dry-run`): have the harness spawn a worker
+   agent on the candidate branch in a temp worktree to implement the goal. The
+   harness still never auto-commits/merges/pushes; it opens a PR (gated behind
+   `--pr`) that a human/Codex reviews. **Manual merge only.**
+2. **Composition with replay-eval + audit-report**: invoke `tools/replay-eval`
+   (`--fixtures-dir`) and `tools/audit-report` (`--audit-db`, copied snapshot)
+   inside the run, copying their `score.json`/`report.json` into the run dir so
+   the evolution-report links them.
+3. **First practical safe tool** (design only): beyond `time.now`, define one
+   more read-only or approval-gated tool. Do NOT implement shell/HTTP/browser/
+   deploy/memory tools.
+
+Give the worker agent this next goal:
 
 ```text
-Goal: External Self-Evolution Rehearsal MVP. Build an external harness that
-strings candidate-branch → replay/eval → audit/report → PR into a loop the
-user can experience. It is NOT auto-merge, NOT a workflow engine. Keep the
-Kernel thin; self-evolution stays in the external tool layer, never in
-src/. Split into 3-4 small PRs.
+Goal: Wire the External Self-Evolution Rehearsal skeleton to real (still
+manual-merge) execution. tools/evolution-harness/** only; no Rust Kernel src/
+changes.
 
-PR1 — current-goal convergence: mark #139/#140 done; set this Next Goal.
-PR2 — docs/evolution-harness.md design: MVP flow (goal.md → candidate branch/
-worktree → delegate to worker agent → replay-eval suite → optional
-audit-report → evolution-report.md + score.json → open PR → human/Codex review
-→ manual merge only); red-lines (no .env/~/.openduck/~/.openclaw/logs/prod-DB/
-secrets; no stop/restart; no auto-merge; no Kernel src/ writes unless the task
-explicitly targets the Kernel and is separately reviewed; no workflow/multi-
-agent/shell/browser/deploy); run output dir tools/evolution-harness/runs/<run-id>/.
-PR3 — tools/evolution-harness/ CLI skeleton: read goal file; validate candidate/
-base git ref safety; create run dir; emit plan.json; optionally call replay-eval
-suite; emit report.md; dry-run default; NEVER auto-commit/merge/push main.
-Tests: reject .env/~/.openduck/~/.openclaw/logs paths; reject unsafe git refs;
-dry-run produces plan/report; does not invoke git push/merge.
-PR4 — handoff: update current-goal with skeleton status; next step (real worker
-agent or gh pr create) stays manual-merge.
+PR1 — --no-dry-run worker-agent delegation: spawn a worker agent on the
+candidate branch in a temp worktree; NEVER auto-commit/merge/push; open a PR
+only behind an explicit --pr flag; merge stays manual.
+PR2 — composition: call tools/replay-eval (--fixtures-dir) and
+tools/audit-report (--audit-db copied snapshot) inside the run; copy their
+score.json/report.json into the run dir; evolution-report.md links them.
+PR3 — current-goal handoff.
 
-Boundaries: no Rust Kernel src/ changes; no auto-promotion; no workflow graph /
-multi-agent orchestration; no shell/browser/deploy; no secret/log reads; one
-PR per topic, ≤3 open PRs. PR1+PR2+PR3 must all pass validation before the
-rehearsal MVP is considered to have a first version.
+Boundaries: no Rust Kernel src/; no auto-promotion; no workflow/multi-agent/
+shell/browser/deploy; no secret/log/prod-DB reads; manual merge only; one PR
+per topic, ≤3 open PRs.
 ```
 
 Acceptance for that goal:
 
-- `pnpm check` passes; `node --test --experimental-strip-types
-  tools/evolution-harness/test/*.test.ts` green; `git diff --check` clean.
-- The harness refuses forbidden paths (`.env`, `~/.openduck`, `~/.openclaw`,
-  logs, production DB) and unsafe git refs.
-- A dry run produces a `plan.json` + `report.md` in
-  `tools/evolution-harness/runs/<run-id>/` without invoking `git push`/`merge`.
-- No implementation is added under `src/`.
+- `pnpm check` passes; evolution-harness tests green; `git diff --check` clean.
+- `--no-dry-run` prepares a candidate in a temp worktree without auto-merging.
+- The evolution-report links a real `score.json`/audit `report.json` when those
+  sub-runs are requested.
+- No implementation is added under `src/`. Merge is always manual.
 
 Do not start self-evolution orchestration before replay/eval can produce a
 visible report. Without a report, the user cannot verify what changed or why.
