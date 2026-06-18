@@ -159,6 +159,7 @@ function config(reactionStatePath = join(tmpdir(), "agent-core-reactions.jsonl")
     reactionStatePath,
     reactionRetryAttempts: 3,
     reactionRetryBaseDelayMs: 0,
+    executeStatePath: join(tmpdir(), "agent-core-executes.jsonl"),
   };
 }
 
