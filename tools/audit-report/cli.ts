@@ -184,49 +184,78 @@ function unknownDispatches(db: DatabaseSync) {
 }
 
 function projectionDrift(db: DatabaseSync) {
-  // A projection row is "drifted" if its terminal status disagrees with the
-  // journal's terminal fact for the same invocation. Per design §5.5, this
-  // counts outbox rows whose journal shows a terminal receipt/recovery the
-  // projection does not reflect. As a tractable MVP proxy matching the
-  // Kernel's outbox_projection_drift_count spirit, count Dispatching rows
-  // whose lease has expired AND no terminal receipt exists.
-  const row = db.prepare(
-    `SELECT COUNT(*) AS c, MAX(updated_at) AS latest FROM outbox_dispatches
-     WHERE status='dispatching'`,
-  ).get() as { c: number; latest: string | null };
+  // Mirror the Rust Kernel's outbox_projection_drift_count (src/journal/queue_health.rs).
+  // Count outbox rows where a terminal journal fact exists (ReceiptReceived or
+  // OutboxDispatchUnknown) for the same invocation_id (correlation_id), but the
+  // projection status disagrees with the terminal fact.
+  const row = db.prepare(`
+    SELECT COUNT(*) AS c, MAX(od.updated_at) AS latest
+    FROM outbox_dispatches od
+    WHERE EXISTS (
+      SELECT 1 FROM journal_events je
+      WHERE je.correlation_id = od.invocation_id
+        AND je.kind IN ('ReceiptReceived', 'OutboxDispatchUnknown')
+    )
+    AND NOT (
+      (od.status = 'succeeded' AND EXISTS (
+        SELECT 1 FROM journal_events je
+        WHERE je.correlation_id = od.invocation_id
+          AND je.kind = 'ReceiptReceived'
+          AND je.payload_json LIKE '%"status":"Succeeded"%'
+      ))
+      OR (od.status = 'failed' AND EXISTS (
+        SELECT 1 FROM journal_events je
+        WHERE je.correlation_id = od.invocation_id
+          AND je.kind = 'ReceiptReceived'
+          AND je.payload_json LIKE '%"status":"Failed"%'
+      ))
+      OR (od.status = 'unknown' AND EXISTS (
+        SELECT 1 FROM journal_events je
+        WHERE je.correlation_id = od.invocation_id
+          AND je.kind = 'OutboxDispatchUnknown'
+      ))
+    )
+  `).get() as { c: number; latest: string | null };
   return { count: row.c, latest_at: row.latest ?? null };
 }
 
 function undeliveredIngress(db: DatabaseSync) {
-  const rows = db.prepare(
-    "SELECT correlation_id FROM journal_events WHERE kind='IngressAccepted'",
-  ).all() as { correlation_id: string }[];
-  const deliveredCorr = new Set(
-    (db.prepare(
-      `SELECT DISTINCT correlation_id FROM journal_events
-       WHERE kind IN ('SessionReady','RunStarted','RunCompleted','RunFailed')`,
-    ).all() as { correlation_id: string }[]).map((r) => r.correlation_id),
+  // Mirror the Rust Kernel's undelivered_ingress_events (src/journal/recovery.rs)
+  // EXACTLY. The delivered set is the collection of correlation_ids of any
+  // SessionReady / RunStarted / RunCompleted / RunFailed event. An
+  // IngressAccepted counts as UNDELIVERED only when its payload.event_id is
+  // present AND that event_id is NOT in the delivered set. An IngressAccepted
+  // with NO payload.event_id is NOT counted (the Rust impl uses
+  // unwrap_or(false) — missing event_id means we cannot match it, so it is
+  // treated as not-undelivered rather than spuriously flagged).
+  const delivered = new Set(
+    (db.prepare(`
+      SELECT DISTINCT correlation_id AS c FROM journal_events
+      WHERE kind IN ('SessionReady', 'RunStarted', 'RunCompleted', 'RunFailed')
+        AND correlation_id IS NOT NULL
+    `).all() as { c: string }[]).map((r) => r.c),
   );
-  // An IngressAccepted is delivered if any of the expected-delivery kinds
-  // share its correlation_id.
+  const ingress = db.prepare(`
+    SELECT sequence, payload_json, created_at
+    FROM journal_events
+    WHERE kind = 'IngressAccepted'
+    ORDER BY sequence ASC
+  `).all() as { sequence: number; payload_json: string; created_at: string }[];
   let count = 0;
   let oldest: string | null = null;
-  for (const r of rows) {
-    if (!deliveredCorr.has(r.correlation_id)) {
-      count++;
+  for (const e of ingress) {
+    let eventId: string | undefined;
+    try {
+      const payload = JSON.parse(e.payload_json);
+      if (typeof payload?.event_id === "string") eventId = payload.event_id;
+    } catch {
+      // malformed payload_json — treat as missing event_id (not undelivered)
     }
-  }
-  if (count > 0) {
-    const o = db.prepare(
-      `SELECT MIN(created_at) AS oldest FROM journal_events e
-       WHERE e.kind='IngressAccepted'
-         AND NOT EXISTS (
-           SELECT 1 FROM journal_events d
-           WHERE d.correlation_id = e.correlation_id
-             AND d.kind IN ('SessionReady','RunStarted','RunCompleted','RunFailed')
-         )`,
-    ).get() as { oldest: string | null };
-    oldest = o.oldest ?? null;
+    // Mirrors Rust: map(|id| !delivered.contains(id)).unwrap_or(false).
+    if (eventId !== undefined && !delivered.has(eventId)) {
+      count++;
+      if (oldest === null) oldest = e.created_at;
+    }
   }
   return { count, oldest_at: oldest };
 }
