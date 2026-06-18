@@ -61,6 +61,11 @@ Secrets are **never** committed. Load them from the environment at runtime.
 `AGENT_CORE_MODEL_TIMEOUT_MS`.
 Optional fallback model: `AGENT_CORE_FALLBACK_*`.
 
+Optional capability grants (Phase 2 M2b): `AGENT_CORE_EXTRA_ALLOWED_OPERATIONS`
+(comma-separated catalog operation names granted to every run principal in
+addition to its channel baseline; unknown/non-catalog names are dropped). Empty
+(default) => principals receive only their channel baseline grant.
+
 Optional write-approval gate (Phase 2 M2d, **disabled by default**):
 `AGENT_CORE_REQUIRE_WRITE_APPROVAL` (`false` → all operations inline-approve,
 byte-identical to pre-M2d), `AGENT_CORE_WRITE_APPROVAL_TTL_SECS` (`0` → a paused
