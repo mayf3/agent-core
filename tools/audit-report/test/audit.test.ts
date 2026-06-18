@@ -189,6 +189,87 @@ test("audit report detects a corrupted hash chain", () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
+	// --- projection drift tests ---
+
+test("audit report detects projection drift when dispatching row has terminal journal fact", () => {
+  const dir = mkdtempSync(join(tmpdir(), "audit-drift-"));
+  const dbPath = join(dir, "snap.db");
+  const outDir = join(dir, "out");
+  buildFixture(dbPath);
+
+  // Add a dispatching outbox row whose invocation_id has a ReceiptReceived(Succeeded)
+  // terminal fact in the journal, but the projection status is still "dispatching".
+  // Per the Kernel's outbox_projection_drift_count logic, this is a drift.
+  const db = new DatabaseSync(dbPath);
+  const lastRow = db.prepare("SELECT hash FROM journal_events ORDER BY sequence DESC LIMIT 1").get() as { hash: string };
+  const seq = 5;
+  const receiptPayload = JSON.stringify({ status: "Succeeded", output_kind: "text" });
+  const hasher = createHash("sha256");
+  hasher.update(lastRow.hash + "|");
+  hasher.update(String(seq) + "|");
+  hasher.update("ReceiptReceived|");
+  hasher.update(receiptPayload);
+  const hash = hasher.digest("hex");
+  db.prepare(
+    `INSERT INTO journal_events (sequence, event_id, kind, payload_json, previous_hash, hash, correlation_id, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(seq, "evt_receipt", "ReceiptReceived", receiptPayload, lastRow.hash, hash, "inv_drift", "2026-06-18T10:00:00Z");
+  db.prepare(
+    `INSERT INTO outbox_dispatches (dispatch_id, invocation_id, run_id, operation, arguments_json, idempotency_key, status, attempts, available_at, created_at, updated_at)
+     VALUES ('d_drift', 'inv_drift', 'run_1', 'feishu.send_message', '{}', 'idem_drift', 'dispatching', 1, '2026-06-18T10:00:00Z', '2026-06-18T10:00:00Z', '2026-06-18T10:00:30Z')`,
+  ).run();
+  db.close();
+
+  runCli(dbPath, outDir);
+  const report = JSON.parse(readFileSync(join(outDir, "report.json"), "utf8"));
+
+  // Chain integrity must hold (we appended correctly).
+  assert.equal(report.hash_chain.integrity, "ok");
+  // The dispatching row has a ReceiptReceived(Succeeded) terminal fact -> drift.
+  assert.equal(report.projection_drift.count, 1);
+  assert.ok(report.projection_drift.latest_at, "latest_at should be set");
+
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("audit report does not flag projection drift when status matches terminal fact", () => {
+  const dir = mkdtempSync(join(tmpdir(), "audit-no-drift-"));
+  const dbPath = join(dir, "snap.db");
+  const outDir = join(dir, "out");
+  buildFixture(dbPath);
+
+  // Add a succeeded outbox row with a matching ReceiptReceived(Succeeded) terminal fact.
+  const db = new DatabaseSync(dbPath);
+  const lastRow = db.prepare("SELECT hash FROM journal_events ORDER BY sequence DESC LIMIT 1").get() as { hash: string };
+  const seq = 5;
+  const receiptPayload = JSON.stringify({ status: "Succeeded", output_kind: "text" });
+  const hasher = createHash("sha256");
+  hasher.update(lastRow.hash + "|");
+  hasher.update(String(seq) + "|");
+  hasher.update("ReceiptReceived|");
+  hasher.update(receiptPayload);
+  const hash = hasher.digest("hex");
+  db.prepare(
+    `INSERT INTO journal_events (sequence, event_id, kind, payload_json, previous_hash, hash, correlation_id, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(seq, "evt_receipt_ok", "ReceiptReceived", receiptPayload, lastRow.hash, hash, "inv_consistent", "2026-06-18T10:00:00Z");
+  db.prepare(
+    `INSERT INTO outbox_dispatches (dispatch_id, invocation_id, run_id, operation, arguments_json, idempotency_key, status, attempts, available_at, created_at, updated_at)
+     VALUES ('d_consistent', 'inv_consistent', 'run_1', 'feishu.send_message', '{}', 'idem_consistent', 'succeeded', 1, '2026-06-18T10:00:00Z', '2026-06-18T10:00:00Z', '2026-06-18T10:00:30Z')`,
+  ).run();
+  db.close();
+
+  runCli(dbPath, outDir);
+  const report = JSON.parse(readFileSync(join(outDir, "report.json"), "utf8"));
+
+  // Chain intact.
+  assert.equal(report.hash_chain.integrity, "ok");
+  // The succeeded row matches ReceiptReceived(Succeeded) -> no drift.
+  assert.equal(report.projection_drift.count, 0);
+
+  rmSync(dir, { recursive: true, force: true });
+});
+
 test("audit report flags undelivered ingress", () => {
   const dir = mkdtempSync(join(tmpdir(), "audit-undelivered-"));
   const dbPath = join(dir, "snap.db");

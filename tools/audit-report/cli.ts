@@ -184,51 +184,57 @@ function unknownDispatches(db: DatabaseSync) {
 }
 
 function projectionDrift(db: DatabaseSync) {
-  // A projection row is "drifted" if its terminal status disagrees with the
-  // journal's terminal fact for the same invocation. Per design §5.5, this
-  // counts outbox rows whose journal shows a terminal receipt/recovery the
-  // projection does not reflect. As a tractable MVP proxy matching the
-  // Kernel's outbox_projection_drift_count spirit, count Dispatching rows
-  // whose lease has expired AND no terminal receipt exists.
-  const row = db.prepare(
-    `SELECT COUNT(*) AS c, MAX(updated_at) AS latest FROM outbox_dispatches
-     WHERE status='dispatching'`,
-  ).get() as { c: number; latest: string | null };
+  // Mirror the Rust Kernel's outbox_projection_drift_count (src/journal/queue_health.rs).
+  // Count outbox rows where a terminal journal fact exists (ReceiptReceived or
+  // OutboxDispatchUnknown) for the same invocation_id (correlation_id), but the
+  // projection status disagrees with the terminal fact.
+  const row = db.prepare(`
+    SELECT COUNT(*) AS c, MAX(od.updated_at) AS latest
+    FROM outbox_dispatches od
+    WHERE EXISTS (
+      SELECT 1 FROM journal_events je
+      WHERE je.correlation_id = od.invocation_id
+        AND je.kind IN ('ReceiptReceived', 'OutboxDispatchUnknown')
+    )
+    AND NOT (
+      (od.status = 'succeeded' AND EXISTS (
+        SELECT 1 FROM journal_events je
+        WHERE je.correlation_id = od.invocation_id
+          AND je.kind = 'ReceiptReceived'
+          AND je.payload_json LIKE '%"status":"Succeeded"%'
+      ))
+      OR (od.status = 'failed' AND EXISTS (
+        SELECT 1 FROM journal_events je
+        WHERE je.correlation_id = od.invocation_id
+          AND je.kind = 'ReceiptReceived'
+          AND je.payload_json LIKE '%"status":"Failed"%'
+      ))
+      OR (od.status = 'unknown' AND EXISTS (
+        SELECT 1 FROM journal_events je
+        WHERE je.correlation_id = od.invocation_id
+          AND je.kind = 'OutboxDispatchUnknown'
+      ))
+    )
+  `).get() as { c: number; latest: string | null };
   return { count: row.c, latest_at: row.latest ?? null };
 }
 
 function undeliveredIngress(db: DatabaseSync) {
-  const rows = db.prepare(
-    "SELECT correlation_id FROM journal_events WHERE kind='IngressAccepted'",
-  ).all() as { correlation_id: string }[];
-  const deliveredCorr = new Set(
-    (db.prepare(
-      `SELECT DISTINCT correlation_id FROM journal_events
-       WHERE kind IN ('SessionReady','RunStarted','RunCompleted','RunFailed')`,
-    ).all() as { correlation_id: string }[]).map((r) => r.correlation_id),
-  );
-  // An IngressAccepted is delivered if any of the expected-delivery kinds
-  // share its correlation_id.
-  let count = 0;
-  let oldest: string | null = null;
-  for (const r of rows) {
-    if (!deliveredCorr.has(r.correlation_id)) {
-      count++;
-    }
-  }
-  if (count > 0) {
-    const o = db.prepare(
-      `SELECT MIN(created_at) AS oldest FROM journal_events e
-       WHERE e.kind='IngressAccepted'
-         AND NOT EXISTS (
-           SELECT 1 FROM journal_events d
-           WHERE d.correlation_id = e.correlation_id
-             AND d.kind IN ('SessionReady','RunStarted','RunCompleted','RunFailed')
-         )`,
-    ).get() as { oldest: string | null };
-    oldest = o.oldest ?? null;
-  }
-  return { count, oldest_at: oldest };
+  // Mirror the Rust Kernel's undelivered_ingress_events (src/journal/recovery.rs).
+  // Count IngressAccepted events that have NO following terminal delivery event
+  // (SessionReady/RunStarted/RunCompleted/RunFailed) sharing the same correlation_id.
+  const row = db.prepare(`
+    SELECT COUNT(*) AS c,
+           MIN(e.created_at) AS oldest
+    FROM journal_events e
+    WHERE e.kind = 'IngressAccepted'
+      AND NOT EXISTS (
+        SELECT 1 FROM journal_events d
+        WHERE d.correlation_id = e.correlation_id
+          AND d.kind IN ('SessionReady', 'RunStarted', 'RunCompleted', 'RunFailed')
+      )
+  `).get() as { c: number; oldest: string | null };
+  return { count: row.c, oldest_at: row.oldest ?? null };
 }
 
 function approval(db: DatabaseSync) {
