@@ -16,7 +16,7 @@ Policy engine, or Agent loop.
 | 1 | **Execute idempotency persistence** | ✅ Done (PR #139) | JSONL append-log, 7d TTL, compaction; survives connector restart. |
 | 2 | **Eviction / TTL** | ✅ Done (PR #139) | Built into execute store: `maxAgeMs` (default 7d), load-time sweep, compaction at 256 KB. |
 | 3 | **Regression tests** | ✅ Done (PR #139) | HTTP integration tests: restart replay, same-server dedup, failure exclusion, secret leak. |
-| 4 | **Idempotency contract documented** | ❌ Open | IPC doc must state: execute idempotency = connector-local JSONL store; ingress idempotency = Kernel Journal + `ingress_dedup`. |
+| 4 | **Idempotency contract documented** | ✅ Partial (PR #140) | exec/ingress/reaction boundary documented in `README.md` + checklist. Full IPC protocol spec (wire format, retry, timeout) is a follow-up. |
 | 5 | **No kernel-connector import cycle** | ✅ By design | Rust Kernel does not import `connectors/`. TS connector does not import `src/`. Verify with `node scripts/check-structure.mjs`. |
 | 6 | **Test suite portability** | ✅ In progress | All connector tests use ephemeral temp fixtures. No production DB or secret files. Run via `pnpm check:connector`. |
 | 7 | **Secret scan passes** | ✅ Continuous | `node scripts/check-local-secret-leaks.mjs` covers all tracked files. |
@@ -55,9 +55,13 @@ These invariants must hold **before and after extraction**:
 - **Reaction state** is owned by the connector-local JSONL store
   (`connectors/feishu/src/reaction-store.ts`). The connector persists
   processing/failed reaction markers and recovers them after restart.
-- **The connector never reads `.env`, `~/.openduck`, `~/.openclaw`,
-  logs, production databases, or secret files.** All configuration comes
-  through environment variables defined in `config.ts`.
+- **The connector supports local development via a `.env` loader**
+  (`config.ts` `loadLocalEnv()`), so a repo-local `.env` is read at
+  startup. Extraction should decide whether to keep or remove this
+  loader (see "Before Extraction" below). The connector **never** reads
+  `~/.openduck`, `~/.openclaw`, logs, production databases, or secret
+  backup files. All production configuration comes through environment
+  variables defined in `config.ts`.
 - **The connector only speaks Feishu.** It maintains a WebSocket long
   connection, normalizes incoming events, POSTs them to
   `POST /v1/ingress`, and responds to `POST /v1/execute` by calling

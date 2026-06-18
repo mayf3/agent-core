@@ -8,7 +8,7 @@ the connector fulfills by calling the Feishu Send Message API.
 
 This connector is **not** a Kernel, Runtime, Gateway, Journal, Session
 manager, LLM caller, Context assembler, Policy engine, or Agent loop. It is
-the thinest possible translation layer between the Feishu wire protocol and
+the thinnest possible translation layer between the Feishu wire protocol and
 the Kernel's IPC protocol.
 
 ## Architecture
@@ -71,9 +71,11 @@ database access.
 
 ## Configuration
 
-All configuration comes through environment variables. The connector **never**
-reads `.env`, `~/.openduck`, `~/.openclaw`, logs, production databases, or
-secret files directly.
+All production configuration comes through environment variables. The
+connector also includes a local-development `.env` loader (`loadLocalEnv` in
+`config.ts`) that reads a repo-root `.env` if present. The connector
+**never** reads `~/.openduck`, `~/.openclaw`, logs, production databases, or
+secret backup files directly.
 
 See `src/config.ts` for the complete list, including `appId`, `appSecret`,
 `ipcToken`, `connectorPort`, reaction retry parameters, and execute state
@@ -106,9 +108,10 @@ The Feishu connector **is NOT allowed to**:
 The Rust Kernel does **not** import or depend on `connectors/feishu/`. It
 communicates with the connector exclusively through the IPC protocol
 (HTTP `POST /v1/ingress` from connector to Kernel, HTTP `POST /v1/execute`
-from Kernel to connector). The Kernel treats the connector as a stateless
-edge adapter; all durable state lives in the Kernel's SQLite journal or in
-the connector's JSONL store.
+from Kernel to connector). The Kernel treats the connector as a thin
+edge adapter with connector-local UX/idempotency state; all durable
+Kernel-level state lives in the SQLite journal, while the connector's
+JSONL store holds execute idempotency and reaction markers.
 
 ## Running
 
