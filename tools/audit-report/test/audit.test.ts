@@ -76,13 +76,19 @@ function buildFixture(path: string) {
   }
 
   let prev: string | null = null;
-  // The IngressAccepted + its delivery chain (SessionReady/RunStarted/RunCompleted)
-  // must share one correlation_id so the ingress is counted as delivered.
+  // Rust semantics (src/journal/recovery.rs): the "delivered" set is the
+  // collection of correlation_ids of SessionReady/RunStarted/RunCompleted/
+  // RunFailed. An IngressAccepted counts as DELIVERED when its
+  // payload.event_id is in that delivered set. So the delivery chain here
+  // carries correlation_id = "msg_1" (the IngressAccepted's payload.event_id),
+  // NOT a correlation_id copied from the IngressAccepted row itself. This is
+  // the realistic shape: the kernel stamps the ingress's external event_id
+  // onto the delivery events' correlation_id.
   const events: [string, string, string, string][] = [
-    ["evt_1", "IngressAccepted", JSON.stringify({ event_id: "msg_1" }), "corr_1"],
-    ["evt_2", "SessionReady", "{}", "corr_1"],
-    ["evt_3", "RunStarted", "{}", "corr_1"],
-    ["evt_4", "RunCompleted", "{}", "corr_1"],
+    ["evt_1", "IngressAccepted", JSON.stringify({ event_id: "msg_1" }), "corr_ingress"],
+    ["evt_2", "SessionReady", "{}", "msg_1"],
+    ["evt_3", "RunStarted", "{}", "msg_1"],
+    ["evt_4", "RunCompleted", "{}", "msg_1"],
   ];
   let seq = 0;
   for (const [eid, kind, payload, corr] of events) {
@@ -189,6 +195,87 @@ test("audit report detects a corrupted hash chain", () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
+	// --- projection drift tests ---
+
+test("audit report detects projection drift when dispatching row has terminal journal fact", () => {
+  const dir = mkdtempSync(join(tmpdir(), "audit-drift-"));
+  const dbPath = join(dir, "snap.db");
+  const outDir = join(dir, "out");
+  buildFixture(dbPath);
+
+  // Add a dispatching outbox row whose invocation_id has a ReceiptReceived(Succeeded)
+  // terminal fact in the journal, but the projection status is still "dispatching".
+  // Per the Kernel's outbox_projection_drift_count logic, this is a drift.
+  const db = new DatabaseSync(dbPath);
+  const lastRow = db.prepare("SELECT hash FROM journal_events ORDER BY sequence DESC LIMIT 1").get() as { hash: string };
+  const seq = 5;
+  const receiptPayload = JSON.stringify({ status: "Succeeded", output_kind: "text" });
+  const hasher = createHash("sha256");
+  hasher.update(lastRow.hash + "|");
+  hasher.update(String(seq) + "|");
+  hasher.update("ReceiptReceived|");
+  hasher.update(receiptPayload);
+  const hash = hasher.digest("hex");
+  db.prepare(
+    `INSERT INTO journal_events (sequence, event_id, kind, payload_json, previous_hash, hash, correlation_id, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(seq, "evt_receipt", "ReceiptReceived", receiptPayload, lastRow.hash, hash, "inv_drift", "2026-06-18T10:00:00Z");
+  db.prepare(
+    `INSERT INTO outbox_dispatches (dispatch_id, invocation_id, run_id, operation, arguments_json, idempotency_key, status, attempts, available_at, created_at, updated_at)
+     VALUES ('d_drift', 'inv_drift', 'run_1', 'feishu.send_message', '{}', 'idem_drift', 'dispatching', 1, '2026-06-18T10:00:00Z', '2026-06-18T10:00:00Z', '2026-06-18T10:00:30Z')`,
+  ).run();
+  db.close();
+
+  runCli(dbPath, outDir);
+  const report = JSON.parse(readFileSync(join(outDir, "report.json"), "utf8"));
+
+  // Chain integrity must hold (we appended correctly).
+  assert.equal(report.hash_chain.integrity, "ok");
+  // The dispatching row has a ReceiptReceived(Succeeded) terminal fact -> drift.
+  assert.equal(report.projection_drift.count, 1);
+  assert.ok(report.projection_drift.latest_at, "latest_at should be set");
+
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("audit report does not flag projection drift when status matches terminal fact", () => {
+  const dir = mkdtempSync(join(tmpdir(), "audit-no-drift-"));
+  const dbPath = join(dir, "snap.db");
+  const outDir = join(dir, "out");
+  buildFixture(dbPath);
+
+  // Add a succeeded outbox row with a matching ReceiptReceived(Succeeded) terminal fact.
+  const db = new DatabaseSync(dbPath);
+  const lastRow = db.prepare("SELECT hash FROM journal_events ORDER BY sequence DESC LIMIT 1").get() as { hash: string };
+  const seq = 5;
+  const receiptPayload = JSON.stringify({ status: "Succeeded", output_kind: "text" });
+  const hasher = createHash("sha256");
+  hasher.update(lastRow.hash + "|");
+  hasher.update(String(seq) + "|");
+  hasher.update("ReceiptReceived|");
+  hasher.update(receiptPayload);
+  const hash = hasher.digest("hex");
+  db.prepare(
+    `INSERT INTO journal_events (sequence, event_id, kind, payload_json, previous_hash, hash, correlation_id, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(seq, "evt_receipt_ok", "ReceiptReceived", receiptPayload, lastRow.hash, hash, "inv_consistent", "2026-06-18T10:00:00Z");
+  db.prepare(
+    `INSERT INTO outbox_dispatches (dispatch_id, invocation_id, run_id, operation, arguments_json, idempotency_key, status, attempts, available_at, created_at, updated_at)
+     VALUES ('d_consistent', 'inv_consistent', 'run_1', 'feishu.send_message', '{}', 'idem_consistent', 'succeeded', 1, '2026-06-18T10:00:00Z', '2026-06-18T10:00:00Z', '2026-06-18T10:00:30Z')`,
+  ).run();
+  db.close();
+
+  runCli(dbPath, outDir);
+  const report = JSON.parse(readFileSync(join(outDir, "report.json"), "utf8"));
+
+  // Chain intact.
+  assert.equal(report.hash_chain.integrity, "ok");
+  // The succeeded row matches ReceiptReceived(Succeeded) -> no drift.
+  assert.equal(report.projection_drift.count, 0);
+
+  rmSync(dir, { recursive: true, force: true });
+});
+
 test("audit report flags undelivered ingress", () => {
   const dir = mkdtempSync(join(tmpdir(), "audit-undelivered-"));
   const dbPath = join(dir, "snap.db");
@@ -216,6 +303,46 @@ test("audit report flags undelivered ingress", () => {
   const report = JSON.parse(readFileSync(join(outDir, "report.json"), "utf8"));
   assert.equal(report.hash_chain.integrity, "ok", "orphan event must not corrupt the chain");
   assert.equal(report.undelivered_ingress.count, 1);
+
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("audit report counts undelivered when row correlation_id matches but payload.event_id differs (regression)", () => {
+  // Regression for the old correlation_id-based implementation. The Rust Kernel
+  // (src/journal/recovery.rs) compares IngressAccepted.payload.event_id to the
+  // delivery events' correlation_id — NOT the IngressAccepted row's
+  // correlation_id. Construct: an IngressAccepted whose ROW correlation_id
+  // EQUALS a delivery event's correlation_id, but whose PAYLOAD.event_id is
+  // DIFFERENT and not delivered. The old impl would wrongly count this as
+  // delivered; the correct impl counts it undelivered.
+  const dir = mkdtempSync(join(tmpdir(), "audit-regress-"));
+  const dbPath = join(dir, "snap.db");
+  const outDir = join(dir, "out");
+  buildFixture(dbPath);
+  const db = new DatabaseSync(dbPath);
+  const lastRow = db.prepare("SELECT hash FROM journal_events ORDER BY sequence DESC LIMIT 1").get() as { hash: string };
+  const seq = 5;
+  const payload = JSON.stringify({ event_id: "msg_tricky" });
+  const hasher = createHash("sha256");
+  hasher.update(lastRow.hash + "|");
+  hasher.update(String(seq) + "|");
+  hasher.update("IngressAccepted|");
+  hasher.update(payload);
+  const hash = hasher.digest("hex");
+  // ROW correlation_id = "msg_1" (same as the delivered chain), but
+  // PAYLOAD.event_id = "msg_tricky" (never delivered).
+  db.prepare(
+    `INSERT INTO journal_events (sequence, event_id, kind, payload_json, previous_hash, hash, correlation_id, created_at)
+     VALUES (?, 'evt_tricky', 'IngressAccepted', ?, ?, ?, 'msg_1', '2026-06-18T12:00:00Z')`,
+  ).run(seq, payload, lastRow.hash, hash);
+  db.close();
+
+  runCli(dbPath, outDir);
+  const report = JSON.parse(readFileSync(join(outDir, "report.json"), "utf8"));
+  assert.equal(report.hash_chain.integrity, "ok", "fixture must not corrupt the chain");
+  // The tricky IngressAccepted must be counted undelivered: payload.event_id
+  // "msg_tricky" is present and not in the delivered set ({msg_1}).
+  assert.equal(report.undelivered_ingress.count, 1, "tricky ingress must be undelivered");
 
   rmSync(dir, { recursive: true, force: true });
 });
