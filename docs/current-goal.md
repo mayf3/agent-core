@@ -84,7 +84,7 @@ When updating this file after an iteration:
 Last reviewed main:
 
 ```text
-5518b4a docs: update goal snapshot head to #116 (replay/eval design) (#117)
+c321df1 feat(m2-toolcall): inline time.now tool-call execution MVP (#118)
 ```
 
 Recent work already merged:
@@ -157,6 +157,11 @@ Recent work already merged:
   `src/`, schema-accurate against `migrations/0001_init.sql` + `src/journal/` (PR #109).
 - docs: Tool-Call Execution Loop design (Task D) — smallest safe `time.now` inline
   execution; outbox bypass, audit facts, sign-off gate (PR #112).
+
+- feat(m2-toolcall): inline `time.now` tool-call execution MVP — model emits a
+  ReadOnly tool call; Runtime validates (catalog + ReadOnly gate), executes
+  `TimeAdapter` inline (skipping the outbox), journals Intent→Approved→Receipt.
+  Write/unknown rejected before any adapter. All 3 follow-up items complete (PR #118).
 
 Open PRs at review time: none.
 
