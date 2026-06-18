@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "fixture_id": "smoke-cli-greeting",
+  "description": "Smoke fixture: a single CLI greeting. No semantic expectations — only checks the candidate does not crash and does not duplicate-reply.",
+  "source": { "kind": "authored" },
+  "setup": { "agent_id": "main", "channel": "cli", "session_id": "sess_smoke_1" },
+  "turns": [
+    { "role": "user", "external_event_id": "msg_smoke_1", "text": "hi" }
+  ],
+  "expectations": {
+    "no_duplicate_reply": true
+  }
+}
