@@ -27,6 +27,35 @@ Use the worker agent for:
 The worker agent should not invent new architecture. It should implement one
 assigned task and stop at a PR.
 
+## Codex Operating Mode
+
+Codex is reviewer/coordinator by default, not the primary implementer.
+
+Use Codex for:
+
+- turning user intent into task packets;
+- updating `docs/current-goal.md` or this dispatch document with the next task;
+- reviewing GLM/DeepSeek PRs in batches;
+- checking thin-kernel boundaries, Journal/projection semantics, duplicate
+  reply risk, and secret exposure;
+- deciding whether a worker PR can be merged or needs follow-up.
+
+Do not ask Codex to implement routine code directly unless the user explicitly
+overrides this mode. If Codex sees implementation work, it should write the
+requirements and acceptance criteria into docs, then delegate the actual code
+change to GLM or DeepSeek.
+
+Suggested model allocation:
+
+- GLM: start boundary-sensitive work when tokens are available. Good examples:
+  replay/eval skeleton design, fixture contract shape, audit gate semantics,
+  and first implementation outline.
+- DeepSeek: take constrained follow-up tasks. Good examples: add fixtures,
+  expand tests, sync docs, harden CLI validation, improve reports, and fix
+  narrow bugs with explicit acceptance criteria.
+- Codex: review the resulting PRs, merge safe doc/test/external-harness work
+  when validation is green, and keep the next goal current.
+
 ## Hard Rules
 
 Every delegated task must follow these rules:
