@@ -37,6 +37,6 @@ function formatValue(value: unknown): string {
   return typeof value;
 }
 
-function redact(text: string) {
+export function redact(text: string) {
   return REDACTIONS.reduce((current, [pattern, replacement]) => current.replace(pattern, replacement), text);
 }
