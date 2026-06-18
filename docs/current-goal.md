@@ -84,7 +84,7 @@ When updating this file after an iteration:
 Last reviewed main:
 
 ```text
-1e96814 docs(operating-guide): document the LLM context blocks (#101)
+ae8a7f7 docs: update goal tracker for PR #101 (#102)
 ```
 
 Recent work already merged:
@@ -145,6 +145,7 @@ Recent work already merged:
   `ContextBlockKind::ToolCatalog`) (PR #99).
 - docs(operating-guide): documented all 8 LLM context blocks (incl. the new
   ToolCatalog), previously undocumented (PR #101).
+- docs: updated this continuous-goal tracker after PR #101 (PR #102).
 
 Open PRs at review time: none.
 
@@ -152,12 +153,17 @@ Open PRs at review time: none.
 
 On `main`, clean working tree. No in-flight feature branch. `docs/current-goal.md` is now tracked (PR #86).
 
-## Last Iteration — PR #101
+## Last Iteration — PR #102
 
-- Doc: operating-guide now documents all 8 LLM context blocks (RootSystem,
-  RuntimeContract, AgentProfile, SkillCatalog, ToolCatalog, ActiveSkill,
-  RecentMessages, UserMessage), including the new Phase 2 ToolCatalog (PR #99).
+- PR #102 was a docs-only tracker update after PR #101.
+- PR #101 documented all 8 LLM context blocks in the operating guide:
+  RootSystem, RuntimeContract, AgentProfile, SkillCatalog, ToolCatalog,
+  ActiveSkill, RecentMessages, UserMessage.
+- PR #99 made the operation catalog visible to the model as a `ToolCatalog`
+  context block. This is foundation only: model-emitted tool-call parsing and
+  execution is still not implemented.
 - validation (doc-only): structure + secret-leak + git diff --check clean.
+- current local re-check: `pnpm check` passes on `main` at `ae8a7f7`.
 
 ## Issues To Address Next
 
@@ -168,31 +174,38 @@ longer "make the Kernel correct"; it is "make the product useful, extensible,
 and observable without making the Kernel fat."
 
 1. Documentation drift cleanup (safe doc-only PR).
-   - `docs/product-roadmap.md` still describes some Phase 1/2 items as future
-     or undecided, e.g. `RunStatus::Unknown` and Phase 2 hardening.
+   - `docs/product-roadmap.md` still contains at least one stale Phase 1 note:
+     it says `RunStatus::Unknown` is undecided even though PR #64 implemented it
+     and tests now cover unknown recovery.
    - Update roadmap wording to match `main` without changing scope.
 
-2. Tool surfacing to the model (requires maintainer sign-off).
-   - The Kernel has an operation catalog and a `time.now` read-only adapter,
-     but the model is not yet given a durable tool schema / selection path.
-   - Next implementation should expose a small, registered tool catalog to the
-     model while keeping unregistered/generated tools impossible.
-   - Do not add shell, browser, workflow, memory, or deployment tools here.
+2. External audit report harness MVP (recommended next product increment).
+   - This is the bridge from "solid Kernel" to "late-stage self-evolution": the
+     user needs a visible report of what the Agent ran before trusting replay or
+     evolution.
+   - Preferred destination is a separate package/repo such as
+     `agent-core-audit-tools`.
+   - If incubated in this repo, keep it outside `src/`, mark an extraction target,
+     and make it read-only against a copied SQLite DB or explicit snapshot.
+   - Output should include run/session/outbox summaries, unknown/drift health,
+     hash-chain status, Git revision, and a short human-readable Markdown report.
+   - It must not mutate Journal, approval state, connector state, or production DB.
 
-3. Connector extraction preparation (requires maintainer sign-off).
+3. Tool-call execution loop (requires maintainer sign-off).
+   - PR #99 made the catalog visible to the model, but the model still cannot
+     emit a durable tool call that becomes an `InvocationIntent`.
+   - Next tool increment should start with one read-only operation (`time.now`)
+     and prove unregistered/generated tools are rejected before adapter execution.
+   - Do not add shell, browser, workflow, memory, deployment, or arbitrary HTTP
+     tools here.
+
+4. Connector extraction preparation (requires maintainer sign-off).
    - Feishu remains in `connectors/feishu` inside this repo.
    - Before extraction, implement connector-local execute idempotency
      persistence, symmetric to the reaction store, as scoped in
      `docs/decisions/connector-local-durability.md`.
    - Extraction target should be a separate repo/package; do not move runtime,
      gateway, journal, or policy into TypeScript.
-
-4. External audit / replay / self-evolution harness (external only).
-   - Audit reports, replay runners, evaluators, and self-evolution orchestration
-     belong in external harness/plugin repos, not `src/`.
-   - First useful harness should be read-only against a copied SQLite DB or a
-     snapshot, plus `/health` and Git metadata.
-   - It must not mutate production Journal, run approval, or connector state.
 
 5. Context modules and task memory (future phase, sign-off required).
    - Current context is intentionally simple and file-backed.
@@ -211,14 +224,8 @@ and observable without making the Kernel fat."
    - No audit/replay/evaluator/evolution module under `src/`.
 
 8. Known code smell that needs design judgment, not a blind fix.
-   - `src/runtime/mod.rs` stores an `adapter: A` behind `#[allow(dead_code)]`;
-     dispatch now goes through the outbox dispatcher, not `Runtime`.
-   - Removing it changes the `Runtime::new` API and should be handled as a
-     deliberate refactor PR with sign-off.
-   - Current in-flight branch `refactor/runtime-drop-vestigial-adapter` is
-     attempting this refactor. `cargo check` now passes, but the branch still
-     needs `pnpm check`, warning cleanup or an explicit rationale, PR review,
-     and merge before any new feature work.
+   - None currently blocking. The former vestigial `Runtime.adapter` concern was
+     resolved by PR #87.
 
 9. Known intentionally deferred lint.
    - `cargo clippy --all-targets -- -D warnings` still reports
@@ -240,7 +247,8 @@ What is already good enough:
 
 What is missing before it feels like a complete usable product:
 
-- Model-visible tool calling for the registered operation catalog.
+- Model-emitted tool-call parsing and execution for the registered operation
+  catalog. The catalog is visible as context, but not executable by the model yet.
 - A first practical non-chat workflow built from safe tools and approval.
 - Feishu connector extraction with connector-local execute idempotency.
 - External audit report harness so the user can inspect what actually ran.
@@ -253,7 +261,9 @@ decisions, and no major redesign:
 | Target | Rough Estimate | Notes |
 |---|---:|---|
 | Stable personal dogfooding chat/runtime | Done | Current `main` is already here. |
-| Tool-visible Agent that can use safe registered tools | 1-2 weeks | Mainly tool schema surfacing + model loop integration + tests. |
+| Tool catalog visible to the model | Done | PR #99 adds `ToolCatalog` context. |
+| Model can execute one safe registered tool | 3-7 days | Start with `time.now`, no arbitrary tools. |
+| Broader safe-tool loop with approval | 1-2 weeks | More schemas, tests, and user-visible failure states. |
 | Feishu connector ready to extract | 1 week | Execute idempotency persistence + extraction checklist/tests. |
 | External audit report harness MVP | 3-5 days | Must live outside Kernel; read-only SQLite/health report. |
 | Replay/eval/self-evolution rehearsal | 2-3 weeks | External harness, selected fixtures, PR-only promotion. |
@@ -261,32 +271,36 @@ decisions, and no major redesign:
 
 ## Next Recommended Increment
 
-Main at `dc90965` (16 PRs this session, #73-#88). Phase 2 complete + all M2d
-follow-ups + all *safe* debt cleared.
+Main is clean and `pnpm check` passes. The project is no longer in early Kernel
+construction. It is at the transition from Phase 2 to Phase 3/6 preparation:
 
-**Exhaustive safe-debt audit (this iteration):**
-- clippy: only 6 `Default`-impl lints remain — deliberately deferred (a
-  `RunId::default()` would produce a misleading empty id masking bugs).
-- dead code: vestigial `Runtime.adapter` dropped (PR #87).
-- unused imports + test-style lints: cleared (PRs #82-#85).
-- broken doc cross-references: none found.
-- goal-doc tracking: fixed (PR #86); step-9 updates now reach main via PR.
-- production `unwrap()`/`expect()` panic sites: none (all in `#[cfg(test)]`).
+1. **Recommended next increment: external audit report harness MVP.**
+   - Branch/package: `feat/external-audit-report-mvp` if incubated here, or a
+     separate `agent-core-audit-tools` repo/package.
+   - Keep all implementation outside `src/`.
+   - Read from an explicit copied SQLite DB/snapshot plus optional `/health`
+     JSON. Do not read secret files or production logs.
+   - Produce `report.md` and `report.json` with: Git revision, schema version,
+     hash-chain verification result, recent runs, unknown dispatches, projection
+     drift, undelivered ingress, approval waits/expiries, and duplicate-reply
+     safety notes.
+   - This unlocks user-visible acceptance of Agent-run behavior.
 
-**The loop is at a genuine sign-off gate** (empirically verified, not asserted):
-every remaining increment changes protocol/state semantics or contradicts a
-recorded decision:
+2. **After audit MVP: replay/eval rehearsal.**
+   - Define replay fixture format from audited runs.
+   - Run candidate branch/worktree against selected fixtures.
+   - Produce `score.json` and `report.md`.
+   - Promote only through PR; never mutate production runtime in place.
 
-- **Approve Phase 3 plan B** → `feat/connector-execute-idempotency`.
-  ⚠️ `docs/decisions/connector-local-durability.md` explicitly scopes this to
-  ship *with* the connector-extraction PR, not before — needs decision reversal.
-- **Approve tool-surfacing** → `feat/tool-surfacing` (expose catalog ops like
-  `time.now` to the LLM as a tool schema; new subsystem).
-- **Say STOP** to end the loop.
+3. **Parallel but lower priority: model tool-call execution.**
+   - Start with `time.now` only.
+   - Preserve catalog -> intent -> policy -> adapter -> receipt.
+   - Reject unknown/generated operations before adapter execution.
 
-To continue autonomously I need one of the above approved.
+Do not start self-evolution orchestration before the audit report MVP exists.
+Without a visible audit report, the user cannot verify what changed or why.
 
-## Validation Rule## Validation Rule
+## Validation Rule
 
 For doc-only changes:
 
