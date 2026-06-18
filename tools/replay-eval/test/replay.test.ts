@@ -422,3 +422,54 @@ test("scoreFixture: EVERY details entry is a structured ExpectationResult (no bo
     }
   }
 });
+
+// --- suite mode (loadFixturesFromDir behavior, via validateFixture parity) ---
+// The directory loader reuses validateFixture, so we test its semantics on a
+// synthetic directory of fixtures + an invalid one.
+
+import { mkdtempSync, rmSync, writeFileSync as _wf, readdirSync as readdirSyncSync, readFileSync as readFileSyncSync } from "node:fs";
+import { join as _join } from "node:path";
+import { tmpdir as _tmp } from "node:os";
+
+test("suite: loadFixturesFromDir loads every valid *.json fixture (sorted)", () => {
+  // Indirectly: validateFixture accepts each of a known-good set. We assert the
+  // loader's contract by building a temp dir and validating each *.json the way
+  // loadFixturesFromDir does (no Kernel spawn).
+  const dir = mkdtempSync(_join(_tmp(), "suite-load-"));
+  try {
+    _wf(_join(dir, "b_second.json"), JSON.stringify(validFixture({ fixture_id: "b_second" })));
+    _wf(_join(dir, "a_first.json"), JSON.stringify(validFixture({ fixture_id: "a_first" })));
+    const files = readdirSyncSync(dir).filter((f) => f.endsWith(".json")).sort();
+    assert.deepEqual(files, ["a_first.json", "b_second.json"]);
+    for (const f of files) {
+      assert.doesNotThrow(() => validateFixture(JSON.parse(readFileSyncSync(_join(dir, f), "utf8"))));
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("suite: an invalid fixture in the dir is rejected by validateFixture", () => {
+  // The loader calls validateFixture on every file; a malformed one must throw.
+  assert.throws(
+    () => validateFixture({ ...validFixture(), schema_version: 99 }),
+    /schema_version must be 1/,
+  );
+});
+
+test("suite: aggregate summary forces overall regress when any fixture hard-fails", () => {
+  // summarize() already takes a list of FixtureVerdict; assert that one
+  // hard-fail-driven regress + negative delta yields an overall regress.
+  const cand: FixtureScore = { score: 0.2, passes: 1, fails: 4, details: [], hardFail: true };
+  const base: FixtureScore = { score: 1.0, passes: 5, fails: 0, details: [], hardFail: false };
+  const okCand: FixtureScore = { score: 1.0, passes: 1, fails: 0, details: [], hardFail: false };
+  const okBase: FixtureScore = { score: 1.0, passes: 1, fails: 0, details: [], hardFail: false };
+  const verdicts = [compareFixture(okCand, okBase), compareFixture(cand, base)];
+  assert.equal(summarize(verdicts).verdict, "regress");
+});
+
+test("suite: aggregate summary is improve when all fixtures improve", () => {
+  const better: FixtureScore = { score: 1.0, passes: 1, fails: 0, details: [], hardFail: false };
+  const worse: FixtureScore = { score: 0.5, passes: 1, fails: 1, details: [], hardFail: false };
+  assert.equal(summarize([compareFixture(better, worse), compareFixture(better, worse)]).verdict, "improve");
+});
