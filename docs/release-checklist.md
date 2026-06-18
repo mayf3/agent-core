@@ -1,8 +1,9 @@
 # Release Checklist
 
-Phase 1 Operational Hardening. This is the pre-release checklist an operator
-runs before cutting or deploying an Agent Core build. Every item maps to a
-concrete, verifiable command or invariant on `main` — no aspirational steps.
+Phase 1 Operational Hardening + Phase 2 Invocation Gateway. This is the
+pre-release checklist an operator runs before cutting or deploying an Agent
+Core build. Every item maps to a concrete, verifiable command or invariant on
+`main` — no aspirational steps.
 
 ## 1. Build & test gates (all must pass)
 
@@ -20,7 +21,7 @@ pnpm check
   per file, ≤ 20 files per dir, required anchors present).
 - `node scripts/check-local-secret-leaks.mjs` — scans for leaked secrets /
   credentials. Must report `secret scan passed`.
-- `cargo test` — all Rust suites (currently 14 suites).
+- `cargo test` — all Rust suites (currently 23 suites).
 - `pnpm check:connector` — TypeScript Feishu connector tests + module import
   smoke (currently 13 tests + `connector modules ok`).
 
@@ -72,6 +73,10 @@ After a deploy, `GET /health` must respond 200 and report:
 - `"outbox_dispatcher_running": true` — the dispatcher loop thread is alive.
 - `"outbox_unknown_count": 0` and `"outbox_stale_dispatching_count": 0` at
   steady state (non-zero after a crash is recoverable, not a release blocker).
+- `"awaiting_approval_count": 0` at steady state — non-zero only when
+  `AGENT_CORE_REQUIRE_WRITE_APPROVAL=true` and runs are paused for human
+  decision. Does **not** degrade `status`; see the operating guide's
+  [Approval state (optional)](./operating-guide.md#approval-state-optional).
 
 A release that cannot reach `status: ok` on a fresh DB after a clean restart is
 blocked.
@@ -95,6 +100,10 @@ These are enforced by tests but must be re-affirmed before release:
   Gateway, or Journal state.
 - No Workflow / Multi-Agent / Shell / Memory / Dynamic Hook / Plugin / Sandbox
   / Self-Evolution code is introduced prematurely.
+- Phase 2 approval surfaces (`/v1/approve`, `/v1/deny`, the
+  `AwaitingApproval` run status, `ApprovalRequested/Granted/Denied/Expired`
+  Journal kinds) are **opt-in** and disabled by default — a release that does
+  not set `AGENT_CORE_REQUIRE_WRITE_APPROVAL=true` is byte-identical to pre-M2d.
 
 ## 9. Tagging
 
