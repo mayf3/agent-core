@@ -25,6 +25,7 @@ import { readFileSync, writeFileSync, existsSync, statSync, mkdirSync } from "no
 import { resolve, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { runEvaluation, type Decision } from "./evaluate.ts";
 
 const FORBIDDEN_SEGMENTS = [".env", ".agent-core", ".openduck", ".openclaw", "logs"];
 
@@ -152,6 +153,8 @@ export interface RunManifest {
   exit_code: number;
   candidate: { ref: string; commit: string };
   base: { ref: string; commit: string };
+  /** "pass" / "blocked" when evaluation ran; null when plan-only. */
+  decision: "pass" | "blocked" | null;
   artifacts: { path: string; kind: string }[];
   git_push_invoked: boolean;
   git_merge_invoked: boolean;
@@ -206,6 +209,25 @@ export function main(): RunManifest {
   };
   writeFileSync(join(runDir, "plan.json"), JSON.stringify(plan, null, 2) + "\n");
 
+  // Batch 2: real evaluation composition. Only when --evaluate; pins to the
+  // resolved commits (no ref drift). NEVER commits/merges/pushes.
+  let decision: Decision | null = null;
+  const evalArtifacts: { path: string; kind: string }[] = [];
+  if (args.evaluate && (args.fixturesDir || args.auditDb)) {
+    const result = runEvaluation({
+      repoRoot: process.cwd(),
+      candidateRef: args.candidate,
+      candidateCommit,
+      baseRef: args.base,
+      baseCommit,
+      fixturesDir: args.fixturesDir ? resolve(args.fixturesDir) : null,
+      auditDb: args.auditDb ? resolve(args.auditDb) : null,
+      runDir,
+    });
+    decision = result.decision;
+    evalArtifacts.push(...result.evidence.artifacts);
+  }
+
   const reportLines: string[] = [
     "# Evolution Rehearsal Report",
     "",
@@ -236,9 +258,15 @@ export function main(): RunManifest {
     "",
     "## Decision",
     "",
-    args.evaluate
-      ? "Evaluate mode is not yet wired in this build (Batch 2). This report is plan-only."
-      : "Dry-run: no evaluation ran. Inspect `plan.json`; re-run with `--evaluate` for real evaluation (Batch 2).",
+    decision === null
+      ? (args.evaluate
+          ? "Evaluate requested but no --fixtures-dir/--audit-db was provided; nothing to evaluate (plan-only)."
+          : "Dry-run: no evaluation ran. Re-run with `--evaluate` (+ `--fixtures-dir` and/or `--audit-db`) for real evaluation.")
+      : `**${decision.toUpperCase()}** — ${decision === "pass"
+          ? "no red-line triggered; a human may merge after reviewing the evidence."
+          : "a red-line triggered (replay regress/hardFail or audit fault). Do NOT merge."}`,
+    "",
+    "_Merge is always manual._",
     "",
   ];
   writeFileSync(join(runDir, "evolution-report.md"), reportLines.join("\n"));
@@ -248,13 +276,15 @@ export function main(): RunManifest {
     argv: process.argv.slice(2),
     started_at: startedAt,
     finished_at: new Date().toISOString(),
-    exit_code: 0,
+    exit_code: decision === "blocked" ? 0 : 0, // non-zero exit reserved for harness-internal errors; the decision is in the report
     candidate: { ref: args.candidate, commit: candidateCommit },
     base: { ref: args.base, commit: baseCommit },
+    decision,
     artifacts: [
       { path: "plan.json", kind: "plan" },
       { path: "evolution-report.md", kind: "report" },
       { path: "manifest.json", kind: "manifest" },
+      ...evalArtifacts,
     ],
     git_push_invoked: false,
     git_merge_invoked: false,
@@ -263,7 +293,7 @@ export function main(): RunManifest {
   writeFileSync(join(runDir, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n");
 
   console.log(`evolution rehearsal ${args.evaluate ? "evaluate " : "dry-run "}report written to ${runDir}`);
-  console.log(`  plan.json + evolution-report.md + manifest.json`);
+  console.log(`  plan.json + evolution-report.md + manifest.json${decision ? ` (decision: ${decision})` : ""}`);
   return manifest;
 }
 
