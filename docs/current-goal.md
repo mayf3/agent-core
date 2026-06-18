@@ -84,7 +84,7 @@ When updating this file after an iteration:
 Last reviewed main:
 
 ```text
-cdbbb07 feat: surface operation catalog to the LLM as a ToolCatalog context block (#99)
+1e96814 docs(operating-guide): document the LLM context blocks (#101)
 ```
 
 Recent work already merged:
@@ -143,6 +143,8 @@ Recent work already merged:
 - feat: surface the operation catalog to the LLM as a `ToolCatalog` context block
   (Phase 2 tool-surfacing foundation, additive; `catalog_for_context()` + new
   `ContextBlockKind::ToolCatalog`) (PR #99).
+- docs(operating-guide): documented all 8 LLM context blocks (incl. the new
+  ToolCatalog), previously undocumented (PR #101).
 
 Open PRs at review time: none.
 
@@ -150,18 +152,12 @@ Open PRs at review time: none.
 
 On `main`, clean working tree. No in-flight feature branch. `docs/current-goal.md` is now tracked (PR #86).
 
-## Last Iteration — PR #99
+## Last Iteration — PR #101
 
-- Phase 2 tool-surfacing foundation (additive). The operation catalog was invisible to
-  the model. Added a `ToolCatalog` context block generated from
-  `catalog_for_context()` (`<name> (risk: <ReadOnly|Write>) — <intent>`), so the LLM
-  sees available operations. New `ContextBlockKind::ToolCatalog`; unit test asserts
-  every catalogued op is surfaced with a risk tag.
-- Additive only — proposing/executing still goes through the existing intent → policy
-  → adapter chain. Routing a model-emitted tool-call end-to-end is a follow-up.
-- validation: cargo build/test green (incl. new test), zero new warnings, pnpm check
-  ok, structure + secret-leak + validation_layout passed.
-- residual risks: low (additive context block).
+- Doc: operating-guide now documents all 8 LLM context blocks (RootSystem,
+  RuntimeContract, AgentProfile, SkillCatalog, ToolCatalog, ActiveSkill,
+  RecentMessages, UserMessage), including the new Phase 2 ToolCatalog (PR #99).
+- validation (doc-only): structure + secret-leak + git diff --check clean.
 
 ## Issues To Address Next
 
