@@ -1,4 +1,3 @@
-use agent_core_kernel::adapters::StdoutAdapter;
 use agent_core_kernel::config::KernelConfig;
 use agent_core_kernel::gateway::Gateway;
 use agent_core_kernel::journal::JournalStore;
@@ -25,7 +24,7 @@ fn run_cli(args: &[String]) -> Result<()> {
     let config = KernelConfig::from_cli(options.db_path);
     let journal = JournalStore::open(&config.db_path)?;
     let gateway = Gateway::new(config.clone());
-    let runtime = Runtime::new(config, LocalEchoLlm, StdoutAdapter);
+    let runtime = Runtime::new(config, LocalEchoLlm);
     let envelope = gateway.cli_ingress(options.text)?;
     let validated = gateway.validate_ingress(&journal, envelope)?;
     let outcome = runtime.deliver(&journal, &gateway, validated)?;
