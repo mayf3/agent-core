@@ -139,11 +139,11 @@ High-signal state:
 
 ## Current State
 
-On `main` after PR #134. No open PRs at the time of this update.
+On `main` after PR #137. No open PRs at the time of this update.
 
 Phase 0/1/2 are dogfood-ready: durable Feishu/CLI chat kernel, Journal/hash-chain/projection recovery, conservative duplicate-reply handling, health + recovery surfaces, operation catalog + policy pipeline + read-only adapter proof, durable approval state + approval endpoints, `ToolCatalog` visible to the model, and one model-emitted read-only tool (`time.now`).
 
-External harness state:
+External harness state (productization sprint complete, PRs #135/#136/#137):
 
 - **`tools/audit-report`** — read-only audit MVP, hardened. `projection_drift`
   now mirrors `outbox_projection_drift_count` (terminal Journal fact vs
@@ -153,12 +153,15 @@ External harness state:
   undelivered only when `payload.event_id` is present and not in that set).
   7 tests. (PRs #114, #131.)
 - **`tools/replay-eval`** — replay/eval MVP + synthetic fixture pack +
-  scorer hardening. Drives a candidate build on ephemeral port/DB/worktree,
-  scores vs baseline, writes `score.json` + `report.md`. Fixtures cover
-  `forbidden_operations` / `policy_verdict` / `reply_contains_any`. Hard-fail
-  details are always structured `ExpectationResult` objects (comma-expression
-  leak fixed; per-branch + cross-cutting regressions). 50 tests. (PRs #125,
-  #128, #130, #132, #134.)
+  scorer hardening + batch/suite mode (`--fixtures-dir`). Drives a candidate
+  build on ephemeral port/DB/worktree, scores vs baseline, writes one aggregated
+  `score.json` + `report.md`. Fixtures cover `forbidden_operations` /
+  `policy_verdict` / `reply_contains_any`. Hard-fail details are always structured
+  `ExpectationResult` objects (comma-expression leak fixed; per-branch +
+  cross-cutting regressions). 54 tests. (PRs #125, #128, #130, #132, #134, #136.)
+- **`docs/harness-acceptance-runbook.md`** — how to run each harness, how to
+  read the reports, the red-lines that block merge, plus a manual acceptance
+  checklist (PR #137).
 
 Validation:
 
@@ -245,25 +248,46 @@ Rough estimates, assuming one focused coding agent and quick decisions:
 
 ## Next Recommended Goal
 
-The old audit/tool-call goal is retired. Give the worker agent this next goal:
+The external-harness productization sprint is complete. The next goal is
+**Phase 3 — Connector Extraction Readiness**: make the Feishu connector
+ready to be split into a standalone repo/package while keeping the Rust Kernel
+thin. Give the worker agent this next goal:
 
 ```text
-Read docs/current-goal.md, docs/agent-dispatch.md, docs/replay-eval-harness.md,
-and tools/audit-report/README.md.
+Goal: Phase 3 Connector Extraction Readiness Sprint. Make the Feishu Connector
+ready to be extracted into a standalone repo/package while keeping the Rust
+Kernel thin. Split into 2-4 small PRs; do NOT modify Rust Kernel src/ unless a
+proven security bug requires it (then a separate PR).
 
-Goal: implement the Replay/Eval Harness MVP outside src/. It should evaluate one
-candidate branch or worktree against explicit fixtures or copied snapshots,
-produce score.json and report.md, and never touch live services, production
-SQLite, secret files, .env, ~/.openduck, or ~/.openclaw. Keep promotion manual
-through PR only. Do not implement self-evolution orchestration, workflow engine,
-multi-agent scheduling, shell/browser/deploy tools, or Kernel changes unless a
-bug is proven and split into a separate PR.
+PR1 — doc convergence: current-goal.md snapshot refresh; replay-eval README
+test count; roadmap replay-fixture blocker retired.
+PR2 — connector-local execute idempotency persistence (connectors/feishu/**):
+JSONL store + load + append + compact + TTL; minimal fields only
+(idempotency_key, invocation_id, operation, status, timestamps, optional
+receipt summary); no full Feishu response/Authorization/secret; tests for
+first-execute/persist, restart-replay-dedup, failure-not-saved, compact,
+short-id logging.
+PR3 — extraction checklist (docs/connector-extraction-checklist.md) +
+connectors/feishu/README.md (edge adapter, not Runtime/Gateway/Journal) +
+a guard test that connectors/feishu does not import src/ and the Kernel does
+not import tools/ or connector TS.
+PR4 — current-goal next-step pointer to "first practical safe tool with
+approval" (design/task-pack only; no shell/http/browser/deploy).
+
+Boundaries: no .env/~/.openduck/~/.openclaw/logs/prod-DB/secrets reads; no
+service stop/restart; no Rust Kernel src/ changes; no Workflow/Multi-Agent/
+Shell/Memory/Hook/Plugin/Sandbox/Self-Evolution; audit/replay/evolution stay
+out of src/; one PR per topic, ≤3 open PRs at once. PR1+PR2+PR3 must all pass
+validation before the sprint is considered done.
 ```
 
 Acceptance for that goal:
 
-- `pnpm check` passes.
-- A synthetic fixture can be replayed deterministically.
+- `pnpm check` passes; connector tests green; `git diff --check` clean.
+- The connector restarts without re-sending a Feishu message for a replayed
+  idempotency key.
+- `docs/connector-extraction-checklist.md` exists and a guard asserts no
+  cross-boundary imports.
 - `score.json` includes candidate git revision, fixture results, pass/fail
   counts, and a machine-readable overall score.
 - `report.md` summarizes baseline/candidate comparison, failures, and residual

@@ -103,7 +103,7 @@ cross-cutting invariant test.
 node --test --experimental-strip-types tools/replay-eval/test/replay.test.ts
 ```
 
-The unit tests cover fixture validation + scoring (50 tests). The end-to-end
+The unit tests cover fixture validation + scoring (54 tests). The end-to-end
 driver (build + start + replay) requires `cargo` + `git` and is exercised
 manually; it is intentionally not part of the `node --test` suite to keep CI
 fast and dependency-free.
