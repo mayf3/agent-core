@@ -84,7 +84,7 @@ When updating this file after an iteration:
 Last reviewed main:
 
 ```text
-4db67b9 docs(.env.example): add missing OUTBOX_DISPATCHER env vars (#93)
+8d2f014 docs(operating-guide): document AGENT_CORE_EXTRA_ALLOWED_OPERATIONS (M2b) (#95)
 ```
 
 Recent work already merged:
@@ -134,6 +134,8 @@ Recent work already merged:
 - docs(operating-guide): documented Phase 2 approval surfaces — /v1/approve + /v1/deny, awaiting_approval_count, opt-in env vars + expiry (PR #90).
 - docs: synced release-checklist (Phase 1->1+2, 14->23 suites, approval boundary) + roadmap Phase 2 completion note (PR #91).
 - docs(.env.example): added the missing OUTBOX_DISPATCHER_ENABLED + _POLL_MS vars; .env.example now fully in sync with config.rs (PR #93).
+- docs(operating-guide): documented AGENT_CORE_EXTRA_ALLOWED_OPERATIONS (the M2b
+  config-driven grant knob, missed in the earlier Phase 2 doc sync) (PR #95).
 
 Open PRs at review time: none.
 
@@ -141,14 +143,14 @@ Open PRs at review time: none.
 
 On `main`, clean working tree. No in-flight feature branch. `docs/current-goal.md` is now tracked (PR #86).
 
-## Last Iteration — PR #93
+## Last Iteration — PRs #93–#95 (doc/config sync)
 
-- Config-doc sync: `config.rs` reads `AGENT_CORE_OUTBOX_DISPATCHER_ENABLED` and
-  `AGENT_CORE_OUTBOX_DISPATCHER_POLL_MS`, but `.env.example` listed neither. Added
-  both with comments; verified `.env.example` is now fully in sync with `config.rs`
-  (no remaining kernel env var absent from the template).
-- validation (config-doc-only): structure + secret-leak + git diff --check clean.
-- residual risks: none.
+- #93: `.env.example` now lists `AGENT_CORE_OUTBOX_DISPATCHER_ENABLED` + `_POLL_MS`
+  (read by config.rs but missing from the template); fully in sync with config.rs.
+- #95: operating-guide documented `AGENT_CORE_EXTRA_ALLOWED_OPERATIONS` (M2b
+  config-driven grants), the Phase 2 env var the earlier sync missed.
+- validation (doc/config-only): structure + secret-leak + git diff --check clean.
+- residual risks: none. Operator docs + `.env.example` now consistent with code.
 
 ## Issues To Address Next
 
