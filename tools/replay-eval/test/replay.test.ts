@@ -383,3 +383,42 @@ test("scoreFixture: policy-deny hard-fail detail is a proper object (not a boole
   assert.equal(detail.pass, false);
   assert.ok(typeof detail.detail === "string" && detail.detail.length > 0);
 });
+
+test("scoreFixture: crash hard-fail detail is a proper object (not a boolean)", () => {
+  // The no_crash branch already pushes a FAIL object, but it was uncovered by
+  // the hard-fail detail-shape regression suite. This closes that gap: a
+  // crashed candidate's no_crash detail must be a structured ExpectationResult,
+  // not the boolean the comma-expression bug would have produced.
+  const o = { ...goodOutcome(), crashed: true };
+  const s = scoreFixture(validFixture(), o);
+  assert.equal(s.hardFail, true);
+  const detail = s.details.find((d) => d.name === "no_crash");
+  assert.ok(detail, "no_crash detail must exist");
+  assert.equal(typeof detail, "object");
+  assert.equal(detail.pass, false);
+  assert.ok(typeof detail.detail === "string" && detail.detail.length > 0);
+});
+
+test("scoreFixture: EVERY details entry is a structured ExpectationResult (no booleans leak)", () => {
+  // Cross-cutting invariant: regardless of pass/fail/hard-fail mix, every entry
+  // in details must be an object with name (string), pass (boolean), detail
+  // (non-empty string). This is the strongest guard against any future branch
+  // re-introducing the comma-expression boolean leak. Exercise a fully-passing
+  // outcome and a hard-fail outcome.
+  const passDetails = scoreFixture(validFixture(), goodOutcome()).details;
+  const failDetails = scoreFixture(
+    validFixture(),
+    { ...goodOutcome(), crashed: true, operations: ["feishu.send_message", "shell.exec"], dispatchCount: 3, policyAllowed: false },
+  ).details;
+  for (const [label, details] of [["pass", passDetails] as const, ["fail", failDetails] as const]) {
+    assert.ok(details.length > 0, `${label} case must produce details`);
+    for (const d of details) {
+      assert.equal(typeof d, "object", `${label}: entry is not an object — got ${typeof d}`);
+      assert.ok(d !== null, `${label}: entry is null`);
+      assert.equal(typeof d.name, "string", `${label}: name must be a string`);
+      assert.equal(typeof d.pass, "boolean", `${label}: pass must be a boolean`);
+      assert.equal(typeof d.detail, "string", `${label}: detail must be a string`);
+      assert.ok((d.detail as string).length > 0, `${label}: detail must be non-empty`);
+    }
+  }
+});
