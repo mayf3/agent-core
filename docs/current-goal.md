@@ -139,62 +139,69 @@ High-signal state:
 
 ## Current State
 
-On `main` after PR #121. No open PRs at the time of this update.
+On `main` after PR #134. No open PRs at the time of this update.
 
-PR #121:
+Phase 0/1/2 are dogfood-ready: durable Feishu/CLI chat kernel, Journal/hash-chain/projection recovery, conservative duplicate-reply handling, health + recovery surfaces, operation catalog + policy pipeline + read-only adapter proof, durable approval state + approval endpoints, `ToolCatalog` visible to the model, and one model-emitted read-only tool (`time.now`).
 
-- removed duplicate inline `handle_inline_tool_call` execution in
-  `Runtime::deliver`;
-- pinned inline tool-call intents to the current session before the policy
-  pipeline runs;
-- added a regression test that one model `time.now` call writes exactly one
-  `InvocationProposed`, one `InvocationApproved`, one `ReceiptReceived`, zero
-  `DispatchStarted`, and only the normal reply `OutboxQueued`.
+External harness state:
+
+- **`tools/audit-report`** — read-only audit MVP, hardened. `projection_drift`
+  now mirrors `outbox_projection_drift_count` (terminal Journal fact vs
+  projection status, not a naive `dispatching` count). `undelivered_ingress`
+  mirrors `src/journal/recovery.rs` exactly (delivered set = correlation_ids of
+  SessionReady/RunStarted/RunCompleted/RunFailed; an IngressAccepted is
+  undelivered only when `payload.event_id` is present and not in that set).
+  7 tests. (PRs #114, #131.)
+- **`tools/replay-eval`** — replay/eval MVP + synthetic fixture pack +
+  scorer hardening. Drives a candidate build on ephemeral port/DB/worktree,
+  scores vs baseline, writes `score.json` + `report.md`. Fixtures cover
+  `forbidden_operations` / `policy_verdict` / `reply_contains_any`. Hard-fail
+  details are always structured `ExpectationResult` objects (comma-expression
+  leak fixed; per-branch + cross-cutting regressions). 50 tests. (PRs #125,
+  #128, #130, #132, #134.)
 
 Validation:
 
 ```text
 pnpm check
+node --test --experimental-strip-types tools/replay-eval/test/*.test.ts
+node --test --experimental-strip-types tools/audit-report/test/*.test.ts
 ```
 
-Result: passed on this branch.
+Result: replay-eval 50/50, audit-report 7/7, structure + secret-scan + diff --check clean.
 
 ## Completed Recently
 
-- PR #114: external audit report harness MVP under `tools/audit-report`,
-  outside `src/`.
+- PR #114: external audit report harness MVP under `tools/audit-report`, outside `src/`.
 - PR #116: replay/eval harness design document.
 - PR #118: inline `time.now` model tool-call execution MVP.
-- PR #120: goal tracker recorded PR #118 completion.
-- PR #121: inline tool-call regression fix and this goal refresh.
+- PR #121: inline tool-call regression fix.
+- PR #125: replay/eval harness MVP (`tools/replay-eval`).
+- PR #128: replay-eval minimal-env hardening (no `process.env` secret leak).
+- PR #130: replay-eval synthetic fixture pack.
+- PR #131: audit-report `projection_drift` + `undelivered_ingress` Rust-semantics alignment.
+- PR #132/#134: replay-eval hard-fail details structured-object fix + regression coverage.
 
 ## Issues To Address Next
 
-1. Replay/eval harness MVP.
-   - Implement outside `src/`, preferably under an extraction-ready tool/package.
-   - Start from `docs/replay-eval-harness.md` and the existing
-     `tools/audit-report` output.
-   - Use explicit fixtures or copied snapshots only. Do not read production DBs,
-     logs, secret files, or live connector state.
-   - Output `score.json` and `report.md` for a candidate branch/worktree.
-   - No automatic promotion, no self-modifying production runtime, no workflow
-     engine, no shell/browser/deploy tools.
+1. **External harness productization** (current sprint, in progress).
+   - Replay-eval batch/suite mode (multiple fixtures in one run, one aggregated
+     `score.json`/`report.md`).
+   - Acceptance runbook (`docs/harness-acceptance-runbook.md`): how to run each
+     harness, how to read the reports, the red-lines that block merge
+     (hash-chain faulty, unacked unknown dispatch, projection drift, undelivered
+     ingress, duplicate-reply collision, replay hardFail/regress).
 
-2. Audit harness hardening.
-   - The current `tools/audit-report` MVP is useful, but some metrics are still
-     intentionally lightweight.
-   - Harden projection-drift and undelivered-ingress checks against the Rust
-     Journal semantics before using reports as promotion gates.
-
-3. Connector extraction preparation.
+2. **Connector extraction preparation.**
    - Feishu remains in `connectors/feishu` inside this repo.
    - Before extraction, implement connector-local execute idempotency
      persistence, symmetric to the reaction store, as scoped in
-     `docs/decisions/connector-local-durability.md`.
+     `docs/decisions/connector-local-durability.md` (Plan B ships *with*
+     extraction).
    - Extraction target should be a separate repo/package; do not move runtime,
      gateway, journal, or policy into TypeScript.
 
-4. Broader tool loop.
+3. **First safe practical tool / broader tool loop.**
    - `time.now` proves the minimum read-only path.
    - More tools require strict schemas, session scoping, audit facts, and
      approval for write/external effects.
@@ -213,13 +220,12 @@ Already good enough:
 - Durable approval state and approval endpoints.
 - ToolCatalog visible to the model.
 - One model-emitted read-only tool (`time.now`).
-- Read-only audit report MVP outside `src/`.
-- Replay/eval harness design.
+- Read-only audit report (hardened) outside `src/`.
+- Replay/eval harness MVP + fixtures + scorer hardening outside `src/`.
 
 Still missing before it feels like a complete product:
 
-- Replay/eval harness prototype for controlled self-evolution rehearsal.
-- Audit report hardening so reports can become user-visible acceptance gates.
+- Replay-eval batch/suite mode + acceptance runbook for user-visible gates.
 - Feishu connector extraction with connector-local execute idempotency.
 - A first practical non-chat workflow built from safe tools and approval.
 - Packaging/service/runbook polish for repeatable installation and upgrades.
