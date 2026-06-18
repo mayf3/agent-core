@@ -1,4 +1,3 @@
-use agent_core_kernel::adapters::{InvocationAdapter, StdoutAdapter};
 use agent_core_kernel::config::KernelConfig;
 use agent_core_kernel::domain::*;
 use agent_core_kernel::gateway::Gateway;
@@ -15,7 +14,7 @@ fn m0_cli_vertical_slice_writes_journal_and_receipt() -> Result<()> {
     let config = test_config();
     let journal = JournalStore::in_memory()?;
     let gateway = Gateway::new(config.clone());
-    let runtime = Runtime::new(config, LocalEchoLlm, StdoutAdapter);
+    let runtime = Runtime::new(config, LocalEchoLlm);
     let envelope = gateway.cli_ingress("你好".to_string())?;
     let event = gateway.validate_ingress(&journal, envelope)?;
     let outcome = runtime.deliver(&journal, &gateway, event)?;
@@ -99,7 +98,7 @@ fn hash_chain_detects_tampering() -> Result<()> {
     let config = test_config();
     let journal = JournalStore::in_memory()?;
     let gateway = Gateway::new(config.clone());
-    let runtime = Runtime::new(config, LocalEchoLlm, StdoutAdapter);
+    let runtime = Runtime::new(config, LocalEchoLlm);
     let event = gateway.validate_ingress(&journal, gateway.cli_ingress("hash".to_string())?)?;
     runtime.deliver(&journal, &gateway, event)?;
     assert!(journal.verify_hash_chain()?);
@@ -218,7 +217,7 @@ fn feishu_echo_creates_send_message_invocation() -> Result<()> {
     config.feishu_allowed_open_ids = vec!["ou_user".to_string()];
     let journal = JournalStore::in_memory()?;
     let gateway = Gateway::new(config.clone());
-    let runtime = Runtime::new(config, LocalEchoLlm, RecordingAdapter);
+    let runtime = Runtime::new(config, LocalEchoLlm);
     let event = gateway.validate_ingress(&journal, feishu_envelope("evt_1", "p2p", true)?)?;
     let outcome = runtime.deliver_echo(&journal, &gateway, event)?;
     let events = journal.events()?;
@@ -270,7 +269,7 @@ fn feishu_reply_invocation_is_deterministic_for_run() -> Result<()> {
     config.feishu_allowed_open_ids = vec!["ou_user".to_string()];
     let journal = JournalStore::in_memory()?;
     let gateway = Gateway::new(config.clone());
-    let runtime = Runtime::new(config, LocalEchoLlm, RecordingAdapter);
+    let runtime = Runtime::new(config, LocalEchoLlm);
     let event = gateway.validate_ingress(
         &journal,
         feishu_envelope_with_message("evt_1", "om_reply_once", "p2p", true)?,
@@ -295,7 +294,7 @@ fn feishu_deliver_wraps_llm_output_as_send_message() -> Result<()> {
     config.feishu_allowed_open_ids = vec!["ou_user".to_string()];
     let journal = JournalStore::in_memory()?;
     let gateway = Gateway::new(config.clone());
-    let runtime = Runtime::new(config, LocalEchoLlm, RecordingAdapter);
+    let runtime = Runtime::new(config, LocalEchoLlm);
     let event = gateway.validate_ingress(
         &journal,
         feishu_envelope_with_message("evt_llm", "om_llm", "p2p", true)?,
@@ -457,16 +456,4 @@ fn feishu_envelope_with_message(
         },
         routing_hint: None,
     })
-}
-struct RecordingAdapter;
-impl InvocationAdapter for RecordingAdapter {
-    fn execute(&self, invocation: &ApprovedInvocation) -> Result<Receipt> {
-        Ok(Receipt {
-            invocation_id: invocation.intent().invocation_id.clone(),
-            status: ReceiptStatus::Succeeded,
-            external_ref: Some("om_reply".to_string()),
-            output: json!({ "message_id": "om_reply" }),
-            occurred_at: Utc::now(),
-        })
-    }
 }

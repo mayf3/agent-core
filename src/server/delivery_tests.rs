@@ -413,7 +413,6 @@ fn disabled_test_config() -> KernelConfig {
 /// Build an in-memory journal with a paused (AwaitingApproval) run, for
 /// sweep tests. Returns the run id and journal.
 fn paused_run_for_sweep(ttl: u64) -> Result<(String, Arc<JournalStore>)> {
-    use crate::adapters::StdoutAdapter;
     use crate::gateway::Gateway;
     use crate::llm::LocalEchoLlm;
     use crate::runtime::Runtime;
@@ -422,7 +421,7 @@ fn paused_run_for_sweep(ttl: u64) -> Result<(String, Arc<JournalStore>)> {
     config.write_approval_ttl_secs = ttl;
     let journal = Arc::new(JournalStore::in_memory()?);
     let gateway = Arc::new(Gateway::new(config.clone()));
-    let runtime = Runtime::new(config, LocalEchoLlm, StdoutAdapter);
+    let runtime = Runtime::new(config, LocalEchoLlm);
     let envelope = gateway.cli_ingress("hi".to_string())?;
     let event = gateway.validate_ingress(&journal, envelope)?;
     let outcome = runtime.deliver(&journal, &gateway, event)?;

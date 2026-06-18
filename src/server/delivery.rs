@@ -109,10 +109,6 @@ fn deliver_event(
     gateway: &Gateway,
     validated: ValidatedEvent,
 ) -> Result<()> {
-    let adapter = HttpConnectorAdapter::new(
-        config.connector_execute_url.clone(),
-        config.ipc_token.clone(),
-    );
     let llm = OpenAiCompatibleLlm::new(
         config.openai_base_url.clone(),
         config.openai_api_key.clone(),
@@ -125,7 +121,7 @@ fn deliver_event(
         config.fallback_model.clone(),
     );
     let llm = Box::new(llm);
-    let runtime = Runtime::new(config.clone(), llm, adapter);
+    let runtime = Runtime::new(config.clone(), llm);
     runtime.deliver(journal, gateway, validated)?;
     Ok(())
 }

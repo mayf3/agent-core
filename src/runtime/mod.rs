@@ -1,4 +1,3 @@
-use crate::adapters::InvocationAdapter;
 use crate::config::KernelConfig;
 use crate::context::ContextAssembler;
 use crate::domain::*;
@@ -11,11 +10,9 @@ use serde_json::json;
 
 pub mod outbox_dispatcher;
 
-pub struct Runtime<L, A> {
+pub struct Runtime<L> {
     config: KernelConfig,
     llm: L,
-    #[allow(dead_code)]
-    adapter: A,
 }
 
 pub struct RuntimeOutcome {
@@ -32,16 +29,14 @@ pub fn run_yield() -> Result<()> {
     bail!("not_enabled:run.yield")
 }
 
-impl<L, A> Runtime<L, A>
+impl<L> Runtime<L>
 where
     L: LlmClient,
-    A: InvocationAdapter,
 {
-    pub fn new(config: KernelConfig, llm: L, adapter: A) -> Self {
+    pub fn new(config: KernelConfig, llm: L) -> Self {
         Self {
             config,
             llm,
-            adapter,
         }
     }
 
