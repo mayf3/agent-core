@@ -247,35 +247,32 @@ decisions, and no major redesign:
 
 ## Next Recommended Increment
 
-Phase 1 complete; **Phase 2 complete** incl. all M2d follow-ups (M2a/M2b/M2c/
-M2d/M2e + HTTP endpoint + approval expiry + periodic sweep, PRs #72–#81);
-Phase 3 pre-scoped.
+Main at `dc90965` (16 PRs this session, #73-#88). Phase 2 complete + all M2d
+follow-ups + all *safe* debt cleared.
 
-The loop is at a **sign-off gate**. Remaining options, each gated on maintainer
-approval (each changes protocol/state semantics or contradicts a recorded
-decision):
+**Exhaustive safe-debt audit (this iteration):**
+- clippy: only 6 `Default`-impl lints remain — deliberately deferred (a
+  `RunId::default()` would produce a misleading empty id masking bugs).
+- dead code: vestigial `Runtime.adapter` dropped (PR #87).
+- unused imports + test-style lints: cleared (PRs #82-#85).
+- broken doc cross-references: none found.
+- goal-doc tracking: fixed (PR #86); step-9 updates now reach main via PR.
+- production `unwrap()`/`expect()` panic sites: none (all in `#[cfg(test)]`).
 
-- **Finish current in-flight branch first** ->
-  `refactor/runtime-drop-vestigial-adapter`. Required before any new work:
-  update all `Runtime::new` call sites after removing the adapter type
-  parameter, keep behavior unchanged, run `pnpm check`, and open a focused PR.
-- **Doc-only cleanup** -> branch `docs/roadmap-current-state`
-  (update `docs/product-roadmap.md` to reflect Phase 1/2 completion). Safe if
-  no code changes.
-- **Approve Phase 3 plan B** → branch `feat/connector-execute-idempotency`
-  (connector-local execute-idempotency persistence — the mandatory pre-extraction
-  checklist item; connector-side TS, not kernel `src/`). **Note**:
-  `docs/decisions/connector-local-durability.md` explicitly scopes Plan B to
-  ship *with* the extraction PR, not before — implementing it now would
-  contradict the recorded decision.
-- **Approve surfacing read-only/Write tools to the LLM** (context/tool-schema
-  increment) → branch `feat/tool-surfacing`.
+**The loop is at a genuine sign-off gate** (empirically verified, not asserted):
+every remaining increment changes protocol/state semantics or contradicts a
+recorded decision:
+
+- **Approve Phase 3 plan B** → `feat/connector-execute-idempotency`.
+  ⚠️ `docs/decisions/connector-local-durability.md` explicitly scopes this to
+  ship *with* the connector-extraction PR, not before — needs decision reversal.
+- **Approve tool-surfacing** → `feat/tool-surfacing` (expose catalog ops like
+  `time.now` to the LLM as a tool schema; new subsystem).
 - **Say STOP** to end the loop.
 
-Absent direction, no remaining increment is both safe and non-trivial without
-new sign-off.
+To continue autonomously I need one of the above approved.
 
-## Validation Rule
+## Validation Rule## Validation Rule
 
 For doc-only changes:
 
