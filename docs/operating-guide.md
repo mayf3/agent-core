@@ -61,6 +61,12 @@ Secrets are **never** committed. Load them from the environment at runtime.
 `AGENT_CORE_MODEL_TIMEOUT_MS`.
 Optional fallback model: `AGENT_CORE_FALLBACK_*`.
 
+Optional write-approval gate (Phase 2 M2d, **disabled by default**):
+`AGENT_CORE_REQUIRE_WRITE_APPROVAL` (`false` → all operations inline-approve,
+byte-identical to pre-M2d), `AGENT_CORE_WRITE_APPROVAL_TTL_SECS` (`0` → a paused
+run waits indefinitely; a non-zero value expires stale approvals). See
+[Approval state (optional)](#approval-state-optional) below.
+
 **Connector:** `AGENT_CORE_FEISHU_APP_ID`, `AGENT_CORE_FEISHU_APP_SECRET`,
 `AGENT_CORE_IPC_TOKEN` (must match the kernel),
 `AGENT_CORE_KERNEL_INGRESS_TIMEOUT_MS`,
@@ -93,7 +99,7 @@ Key fields:
 | `outbox_unknown_count` | dispatched but terminal outcome unknown | `0` at steady state |
 | `outbox_projection_drift_count` | projection status disagrees with Journal terminal fact | `0` at steady state |
 | `worker_job_stale_count` | worker jobs flagged `running` with expired lease (crash mid-job) | `0` |
-| `unknown_invocation_count` / `unknown_invocations` | runs stuck in unknown state | `0` at steady state |
+| `awaiting_approval_count` | runs paused for human approval (Phase 2 M2d, opt-in) | `0` unless approvals are pending || `unknown_invocation_count` / `unknown_invocations` | runs stuck in unknown state | `0` at steady state |
 
 `status` values:
 - `ok` — hash chain intact, no live unknown invocations, no terminal-unknown
@@ -112,6 +118,50 @@ Key fields:
 - `corrupt` — hash chain broken (Journal tampering or disk corruption;
   investigate immediately).
 
+## Approval state (optional)
+
+Phase 2 M2d introduces an **opt-in** human-approval gate for `risk: Write`
+operations. Both knobs default off, so the default deployment is byte-identical
+to pre-M2d behavior (every operation inline-approves and dispatches).
+
+### Enabling
+
+Set `AGENT_CORE_REQUIRE_WRITE_APPROVAL=true`. A `risk: Write` operation (today:
+`stdout.send_text`, `feishu.send_message`) then pauses the run in the
+`AwaitingApproval` status with a durable `ApprovalRequested` Journal fact,
+instead of dispatching immediately. Read-only operations (`time.now`) always
+execute inline.
+
+A paused run is observable via `/health` → `awaiting_approval_count`. Note this
+count does **not** degrade the rollup status: a paused run is an expected
+operator state, not a trust loss.
+
+### Resuming / denying a paused run
+
+Two HTTP endpoints (re-using the IPC bearer token, idempotent — a run not in
+`AwaitingApproval` is a no-op `200`):
+
+```bash
+# Approve: append ApprovalGranted, queue the dispatch, advance to WaitingDispatch.
+curl -X POST http://127.0.0.1:4130/v1/approve   -H "Authorization: Bearer $AGENT_CORE_IPC_TOKEN"   -H "Content-Type: application/json"   -d '{"run_id":"<run id>"}'
+
+# Deny: append ApprovalDenied and fail the run (status -> Failed).
+curl -X POST http://127.0.0.1:4130/v1/deny   -H "Authorization: Bearer $AGENT_CORE_IPC_TOKEN"   -H "Content-Type: application/json"   -d '{"run_id":"<run id>"}'
+```
+
+Both return `{"ok": true, "run_id": "...", "decision": "approved"|"denied"}`.
+The in-process `Gateway::approve_run`/`deny_run` API is the single source of
+truth; the endpoints are a thin HTTP wrapper over it.
+
+### Expiry (optional)
+
+A paused run otherwise waits indefinitely. Set
+`AGENT_CORE_WRITE_APPROVAL_TTL_SECS=<n>` to bound it: a run paused longer than
+`<n>` seconds is expired to `Failed` with a terminal `ApprovalExpired` Journal
+fact. Expiry runs both at startup recovery and on a periodic background sweep
+(when both `REQUIRE_WRITE_APPROVAL=true` and a non-zero TTL are set). The sweep
+interval is `clamp(ttl, 60s, 3600s)`.
+
 ## Recovery behavior (automatic, on startup)
 
 On startup the kernel reconciles projections to the Journal:
@@ -125,7 +175,10 @@ On startup the kernel reconciles projections to the Journal:
 3. **Unknown invocations** — `DispatchStarted` with no terminal fact becomes
    `OutboxDispatchUnknown` (appended as a terminal fact) and the projection is
    set to `unknown`. **Never auto-retried.**
-
+4. **Stale approvals** (only when `REQUIRE_WRITE_APPROVAL=true` and a non-zero
+   `WRITE_APPROVAL_TTL_SECS` are set) — `AwaitingApproval` runs whose
+   `ApprovalRequested` is older than the TTL are expired to `Failed` with a
+   terminal `ApprovalExpired` fact. See [Approval state (optional)](#approval-state-optional).
 Invariants that always hold:
 - The kernel **never automatically redispatches** an unknown or stale row.
 - The Journal is append-only and hash-chained; tampering is detectable.
