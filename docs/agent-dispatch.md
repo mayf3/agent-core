@@ -61,6 +61,87 @@ report PR link + validation + risks
 If the worker sees a dirty worktree before starting, it must stop and report the
 dirty files. It must not overwrite another agent's work.
 
+## Batch Review Mode
+
+A GOL-style worker loop may open several PRs before the reviewing agent looks at
+them. This is useful for throughput, but only under a small batch size and clear
+stop rules.
+
+Recommended batch size:
+
+- 1 PR for architecture, schema, state-machine, approval, duplicate-reply, or
+  security-sensitive changes.
+- 2 to 3 PRs for independent docs, tests, fixtures, or narrow external harness
+  work.
+- Do not accumulate more than 3 open worker PRs without review.
+
+The worker may continue autonomously only when the next PR is independent of
+the previous unreviewed PR. If PR B depends on PR A, stop after PR A and wait for
+review/merge.
+
+Batch-safe examples:
+
+- one doc-sync PR;
+- one connector test coverage PR;
+- one external harness design PR.
+
+Not batch-safe examples:
+
+- a schema design PR followed by an implementation that assumes that schema;
+- a policy change followed by a tool execution change;
+- an outbox/recovery change followed by a service startup change;
+- any change that could affect duplicate replies.
+
+## Codex Collaboration Points
+
+If the worker can call Codex directly, use Codex as a reviewer/checkpoint, not
+as a line-by-line pair programmer. The worker should avoid streaming every
+small edit to Codex.
+
+Call Codex at these checkpoints:
+
+1. **Plan checkpoint** before starting a boundary-sensitive task. Ask whether
+   the proposed scope violates the thin-kernel boundary.
+2. **Schema checkpoint** before writing implementation that depends on SQLite
+   table names, Journal event semantics, health fields, or status machines.
+3. **Pre-PR checkpoint** after implementation and validation, with the PR diff
+   summary and residual risks.
+4. **Batch checkpoint** after 2 to 3 independent PRs, or sooner if one PR fails
+   review.
+
+Do not call Codex for:
+
+- every file read;
+- every small refactor step;
+- routine formatting;
+- test iteration that stays inside the assigned scope.
+
+When calling Codex, provide:
+
+```text
+Task:
+<one sentence>
+
+Branch / PR:
+<branch or PR URL>
+
+Allowed scope:
+<files/directories>
+
+What changed:
+<short bullet list>
+
+Validation:
+<commands and results>
+
+Questions:
+<specific review questions>
+```
+
+The worker should then continue only after recording the Codex feedback in the
+PR or task handoff. If Codex identifies a blocking issue, fix that PR before
+starting dependent work.
+
 ## Task Packet Template
 
 Copy this block when assigning work to a worker agent:
@@ -242,4 +323,3 @@ Before merging a worker PR, verify:
 - It preserved the Rust Kernel / TS Connector boundary.
 - Validation commands are reported and credible.
 - `docs/current-goal.md` is updated when the task changes the next-step map.
-
