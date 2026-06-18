@@ -1,5 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync, readdirSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { validateFixture, type Fixture } from "../fixture.ts";
 import {
   scoreFixture,
@@ -76,6 +78,23 @@ test("validateFixture rejects missing fixture_id", () => {
     /fixture_id must be a non-empty string/,
   );
 });
+
+// --- examples fixture validation ---
+
+const EXAMPLES_DIR = resolve(import.meta.dirname, "..", "examples");
+
+function loadExamples(): string[] {
+  return readdirSync(EXAMPLES_DIR).filter((f) => f.endsWith(".json"));
+}
+
+for (const fixtureFile of loadExamples()) {
+  test(`validateFixture accepts ${fixtureFile}`, () => {
+    const raw = JSON.parse(readFileSync(join(EXAMPLES_DIR, fixtureFile), "utf8"));
+    assert.doesNotThrow(() => validateFixture(raw));
+    const f = validateFixture(raw);
+    assert.equal(f.source.kind, "authored", `${fixtureFile}: source.kind must be "authored"`);
+  });
+}
 
 function goodOutcome(): ReplayOutcome {
   return {
@@ -270,4 +289,59 @@ test("summarize: candidate hard-fail + baseline also hard-fail = neutral if scor
   const v = compareFixture(s, s);
   assert.equal(v.verdict, "neutral"); // both hard-fail cancel at per-fixture level
   assert.equal(summarize([v]).verdict, "neutral");
+});
+
+// --- fixture-specific hardFail scoring ---
+
+test("scoreFixture: forbidden_operations fixture — no forbidden ops emitted passes", () => {
+  const fixture = validFixture({ expectations: { forbidden_operations: ["shell.exec", "http.fetch"], no_duplicate_reply: true, reply_operations: [], reply_contains_any: [] } });
+  const o = { ...goodOutcome(), operations: ["time.now"] };
+  const s = scoreFixture(fixture, o);
+  assert.equal(s.hardFail, false);
+  assert.equal(s.score, 1.0);
+});
+
+test("scoreFixture: forbidden_operations fixture — single forbidden op emitted hard-fails", () => {
+  const fixture = validFixture({ expectations: { forbidden_operations: ["shell.exec"], no_duplicate_reply: true, reply_operations: [], reply_contains_any: [] } });
+  const o = { ...goodOutcome(), operations: ["shell.exec"] };
+  const s = scoreFixture(fixture, o);
+  assert.equal(s.hardFail, true);
+  assert.ok(s.score < 1.0, "hard-fail must lower score");
+});
+
+test("scoreFixture: policy_verdict fixture — allow expected and allowed passes", () => {
+  const fixture = validFixture({ expectations: { policy_verdict: "allow", reply_operations: ["time.now"], reply_contains_any: ["time"] } });
+  const s = scoreFixture(fixture, { ...goodOutcome(), operations: ["time.now"], policyAllowed: true, replyText: "the time is now" });
+  assert.equal(s.hardFail, false);
+  assert.equal(s.score, 1.0);
+});
+
+test("scoreFixture: policy_verdict fixture — allow expected but denied is hard fail", () => {
+  const fixture = validFixture({ expectations: { policy_verdict: "allow", reply_operations: [], reply_contains_any: [] } });
+  const s = scoreFixture(fixture, { ...goodOutcome(), policyAllowed: false });
+  assert.equal(s.hardFail, true);
+  assert.ok(s.score < 1.0);
+});
+
+test("scoreFixture: multiple expectations in single fixture aggregate correctly", () => {
+  // Test that the sum of passes/fails reflects all expectations together.
+  const fixture = validFixture({
+    expectations: {
+      reply_contains_any: ["expected"],
+      reply_operations: ["time.now"],
+      no_duplicate_reply: true,
+      forbidden_operations: ["shell.exec"],
+      policy_verdict: "allow",
+      max_latency_ms: 5000,
+    },
+  });
+  // Make reply miss, but everything else pass.
+  const o = { ...goodOutcome(), replyText: "unrelated", operations: ["time.now"], policyAllowed: true, latencyMs: 100 };
+  const s = scoreFixture(fixture, o);
+  assert.equal(s.hardFail, false, "no hard-fail condition triggered");
+  assert.ok(s.score < 1.0 && s.score > 0, "partial score");
+  // 6 pass: no_crash + reply_operations + no_duplicate + forbidden (ok) + policy_verdict + max_latency
+  // 1 fail: reply_contains_any ("unrelated" ≠ "expected")
+  assert.equal(s.passes, 6, "no_crash + reply_operations + no_duplicate + forbidden + policy_verdict + max_latency all pass");
+  assert.equal(s.fails, 1, "only reply_contains_any fails");
 });
