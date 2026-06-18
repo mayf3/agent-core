@@ -139,13 +139,16 @@ High-signal state:
 
 ## Current State
 
-On `main` after PR #143. No open PRs at the time of this update.
+On `main` after PR #146. No open PRs at the time of this update.
 
 Phase 3 (Connector Extraction Readiness) is complete: connector-local execute
 idempotency persists across restart (PR #139), and the extraction checklist +
 connector README landed (PR #140). The **External Self-Evolution Rehearsal
-sprint** landed its design (`docs/evolution-harness.md`, PR #142) + CLI skeleton
-(`tools/evolution-harness/`, dry-run default, manual-merge-only, PR #143).
+harness** now has a **real evaluation-only loop**: a hardened, no-shell CLI
+that pins candidate/base commits, composes `tools/replay-eval` (+ optional
+`tools/audit-report` against a copied snapshot), writes an evidence package,
+and derives a `pass`/`blocked` decision from the red-lines (PRs #142–#146).
+Merge is always manual.
 
 Phase 0/1/2 are dogfood-ready: durable Feishu/CLI chat kernel, Journal/hash-chain/projection recovery, conservative duplicate-reply handling, health + recovery surfaces, operation catalog + policy pipeline + read-only adapter proof, durable approval state + approval endpoints, `ToolCatalog` visible to the model, and one model-emitted read-only tool (`time.now`).
 
@@ -254,40 +257,31 @@ Rough estimates, assuming one focused coding agent and quick decisions:
 
 ## Next Recommended Goal
 
-The External Self-Evolution Rehearsal MVP has a **first version**: design
-(`docs/evolution-harness.md`, PR #142) + CLI skeleton (`tools/evolution-harness/`,
-dry-run default, manual-merge-only, 9 tests, PR #143) are on `main`. The
-rehearsal loop is experienceable end-to-end in dry-run.
+The External Self-Evolution Rehearsal harness now has a **real evaluation-only
+loop** on `main` (PRs #142–#146): given a candidate git ref, it pins the
+candidate/base commits, composes `tools/replay-eval` (+ optional
+`tools/audit-report` against a copied snapshot), writes a full evidence package
+(plan.json, manifest.json, evolution-report.md, replay score.json/report.md,
+optional audit report.json/report.md), and derives an explicit
+`pass`/`blocked` decision from the red-lines. **Merge is always manual.**
 
-The next goal is to **wire the skeleton to real execution while keeping merge
-manual** — but only as design/task-packs unless explicitly approved:
-
-1. **Worker-agent delegation** (`--no-dry-run`): have the harness spawn a worker
-   agent on the candidate branch in a temp worktree to implement the goal. The
-   harness still never auto-commits/merges/pushes; it opens a PR (gated behind
-   `--pr`) that a human/Codex reviews. **Manual merge only.**
-2. **Composition with replay-eval + audit-report**: invoke `tools/replay-eval`
-   (`--fixtures-dir`) and `tools/audit-report` (`--audit-db`, copied snapshot)
-   inside the run, copying their `score.json`/`report.json` into the run dir so
-   the evolution-report links them.
-3. **First practical safe tool** (design only): beyond `time.now`, define one
-   more read-only or approval-gated tool. Do NOT implement shell/HTTP/browser/
-   deploy/memory tools.
-
-Give the worker agent this next goal:
+The next goal is **worker-agent/worktree delegation** — but this Goal does
+**not** implement it. It is the next phase. Give the worker agent this next
+goal:
 
 ```text
-Goal: Wire the External Self-Evolution Rehearsal skeleton to real (still
-manual-merge) execution. tools/evolution-harness/** only; no Rust Kernel src/
-changes.
+Goal: Worker-agent delegation for the External Self-Evolution Harness (design
++ task-pack only this phase; no auto-dispatch/auto-code-change/auto-PR). The
+harness currently evaluates a candidate the user already provides; the next
+phase lets it prepare that candidate by spawning a worker agent on a temp
+worktree. NEVER auto-commit/merge/push; a PR is opened only behind an explicit
+--pr flag; merge stays manual.
 
-PR1 — --no-dry-run worker-agent delegation: spawn a worker agent on the
-candidate branch in a temp worktree; NEVER auto-commit/merge/push; open a PR
-only behind an explicit --pr flag; merge stays manual.
-PR2 — composition: call tools/replay-eval (--fixtures-dir) and
-tools/audit-report (--audit-db copied snapshot) inside the run; copy their
-score.json/report.json into the run dir; evolution-report.md links them.
-PR3 — current-goal handoff.
+PR1 — design doc for worker-agent delegation (temp worktree, goal handoff,
+safety: no src/ writes unless the goal targets the Kernel + separate review,
+no secret/prod-DB reads, no service control).
+PR2 — (later, separately approved) implementation + tests using an injectable
+agent runner (no real network/prod).
 
 Boundaries: no Rust Kernel src/; no auto-promotion; no workflow/multi-agent/
 shell/browser/deploy; no secret/log/prod-DB reads; manual merge only; one PR
@@ -296,14 +290,13 @@ per topic, ≤3 open PRs.
 
 Acceptance for that goal:
 
-- `pnpm check` passes; evolution-harness tests green; `git diff --check` clean.
-- `--no-dry-run` prepares a candidate in a temp worktree without auto-merging.
-- The evolution-report links a real `score.json`/audit `report.json` when those
-  sub-runs are requested.
+- The design doc defines the temp-worktree + goal-handoff + safety model.
 - No implementation is added under `src/`. Merge is always manual.
 
-Do not start self-evolution orchestration before replay/eval can produce a
-visible report. Without a report, the user cannot verify what changed or why.
+What is **already done** (this phase, PRs #145/#146): the harness can evaluate
+a real candidate ref end-to-end and produce a `pass`/`blocked` decision with a
+full evidence package — the "given a candidate branch → automatic evaluation →
+explicit pass/block" loop is experienceable now.
 
 ## Validation Rule
 
