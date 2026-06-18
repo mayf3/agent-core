@@ -331,6 +331,73 @@ test("HTTP: sendReply failure does NOT persist as sent, retry allowed", async ()
   }
 });
 
+test("HTTP: same key on same server (not restart) uses persisted dedup after success, not in-flight", async () => {
+  // The inFlight Map is cleaned up in .finally after the promise settles.
+  // A subsequent request with the same key on the same server must go through
+  // the persisted store path, not the in-flight path.
+  const dir = mkdtempSync(join(tmpdir(), "exec-http-dedup-"));
+  try {
+    const storePath = join(dir, "exec.jsonl");
+    const store = createJsonlExecuteStore(storePath);
+
+    // Spy on store.get to prove it's reached on the second request.
+    const origGet = store.get.bind(store);
+    let storeGetCount = 0;
+    store.get = (key: string) => {
+      storeGetCount++;
+      return origGet(key);
+    };
+
+    const fakeClient = {
+      calls: [] as Array<{ method: string; url: string; data: unknown }>,
+      async request(opts: { method: string; url: string; data: unknown }) {
+        this.calls.push(opts);
+        return { data: { message_id: "om_reply_1" } };
+      },
+    };
+
+    const server = startExecuteServer(
+      makeConfig({ executeStatePath: storePath }),
+      fakeClient,
+      undefined,
+      store,
+    );
+    await new Promise<void>((r) => server.on("listening", () => r()));
+    const addr = server.address() as { port: number };
+    const url = `http://127.0.0.1:${addr.port}/v1/execute`;
+
+    try {
+      // First call: should call sendReply and persist.
+      const res1 = await postJson(url, makePayload(), "ipc-token");
+      assert.equal(res1.status, 200);
+      assert.equal(fakeClient.calls.length, 1, "first call sends Feishu reply");
+
+      // Second call with same key on the same server (not a restart).
+      // inFlight was cleaned up after the first call settled, so this must
+      // hit the persisted store path — NOT the in-flight path.
+      const res2 = await postJson(url, makePayload(), "ipc-token");
+      assert.equal(res2.status, 200);
+      const data2 = res2.body as Record<string, unknown>;
+      assert.equal(data2.ok, true);
+      assert.equal(data2.replayed, true, "second call must be deduped via persisted store");
+
+      // Fake client must NOT have been called a second time.
+      assert.equal(fakeClient.calls.length, 1, "second call must NOT send another Feishu reply");
+
+      // store.get was called at least twice: once during the first request's
+      // pre-send store check, and once during the second request's persisted
+      // dedup check. If inFlight had NOT been cleaned up, the second request
+      // would have short-circuited at in-flight check and store.get would
+      // still be 1.
+      assert.ok(storeGetCount >= 2, "store.get was reached on the second request => persisted path, not in-flight");
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("HTTP: replay response and log do not leak full idempotency_key or Authorization", async () => {
   const dir = mkdtempSync(join(tmpdir(), "exec-http-noleak-"));
   try {
