@@ -15,15 +15,29 @@
  * promotion (this tool only produces the score — it never merges).
  */
 
-import { readFileSync, writeFileSync, existsSync, statSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, statSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { execSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { validateFixture, type Fixture } from "./fixture.ts";
 import { scoreFixture, compareFixture, summarize, type FixtureVerdict, type ReplayOutcome } from "./scorer.ts";
 import { resolveRef, buildKernel, runFixtureAgainst } from "./runner.ts";
+
+const FORBIDDEN_PATH_PATTERNS = [
+  ".env",
+  ".agent-core",
+  ".openduck",
+  ".openclaw",
+  "/logs/",
+  "\\logs\\",
+];
+
+/** Reject input/output paths that match forbidden patterns (secrets, config, logs). */
+function isForbiddenPath(filePath: string): boolean {
+  const normalized = filePath.replace(/\\/g, "/");
+  return FORBIDDEN_PATH_PATTERNS.some((pat) => normalized.includes(pat));
+}
 
 interface Args {
   fixture: string;
@@ -44,12 +58,21 @@ function parseArgs(argv: string[]): Args {
     console.error("error: --fixture is required");
     process.exit(2);
   }
+  if (isForbiddenPath(a.fixture)) {
+    console.error(`error: --fixture resolves to a forbidden path (may contain secrets): ${a.fixture}`);
+    process.exit(3);
+  }
   if (!existsSync(a.fixture) || !statSync(a.fixture).isFile()) {
     console.error(`error: --fixture is not a regular file: ${a.fixture}`);
     process.exit(3);
   }
   if (!a.candidate) {
     console.error("error: --candidate (git ref) is required");
+    process.exit(2);
+  }
+  // Reject path-traversal characters in the git ref.
+  if (/[<>|;&$`'"\\]/.test(a.candidate)) {
+    console.error(`error: --candidate contains unsafe characters: ${a.candidate}`);
     process.exit(2);
   }
   return {
@@ -101,6 +124,23 @@ async function main() {
   }
 
   const ipcToken = randomBytes(16).toString("hex");
+
+  // Validate outDir before starting expensive worktrees.
+  if (isForbiddenPath(args.outDir)) {
+    console.error(`error: --out-dir resolves to a forbidden path: ${args.outDir}`);
+    process.exit(4);
+  }
+  const outDirResolved = resolve(args.outDir);
+  try {
+    mkdirSync(outDirResolved, { recursive: true });
+    // Verify we can write by trying to create a temp file.
+    const probe = join(outDirResolved, `.probe-${randomBytes(4).toString("hex")}`);
+    writeFileSync(probe, "");
+    rmSync(probe);
+  } catch {
+    console.error(`error: --out-dir is not writable: ${args.outDir}`);
+    process.exit(4);
+  }
 
   // Build candidate + baseline worktrees.
   let candidateWt: { dir: string; binary: string; commit: string } | null = null;
