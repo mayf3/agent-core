@@ -1,7 +1,7 @@
+use crate::adapters::InvocationAdapter;
 use crate::config::KernelConfig;
 use crate::context::ContextAssembler;
 use crate::domain::*;
-use crate::adapters::InvocationAdapter;
 use crate::gateway::Gateway;
 use crate::journal::JournalStore;
 use crate::llm::{LlmClient, LlmInput};
@@ -35,10 +35,7 @@ where
     L: LlmClient,
 {
     pub fn new(config: KernelConfig, llm: L) -> Self {
-        Self {
-            config,
-            llm,
-        }
+        Self { config, llm }
     }
 
     /// Phase 2 M2d: decide whether an approved invocation is dispatched now or
@@ -105,13 +102,19 @@ where
         session: &Session,
         tool_call: &crate::llm::ToolCall,
     ) -> Result<Option<String>> {
-        let intent = match crate::gateway::validate_tool_call(tool_call, &run.id) {
+        let mut intent = match crate::gateway::validate_tool_call(tool_call, &run.id) {
             Ok(intent) => intent,
             Err(e) => {
                 // Rejection is surfaced as a ToolResult-style note, not a crash.
                 return Ok(Some(format!("tool call rejected: {}", e)));
             }
         };
+        if let Some(arguments) = intent.arguments.as_object_mut() {
+            // The model may ask for a tool, but it must not choose the target
+            // session. The Runtime pins tool-call intents to the current run's
+            // session before the policy pipeline runs.
+            arguments.insert("session_id".to_string(), json!(session.id.0));
+        }
         let correlation_id = intent.invocation_id.0.clone();
         journal.append_event(
             JournalEventKind::InvocationProposed,
@@ -223,10 +226,6 @@ where
         // execute it inline (TimeAdapter) and surface the result. This does
         // not replace the reply path below — a model may emit both a text
         // reply and a tool call.
-        if let Some(tc) = llm.tool_call.as_ref() {
-            let _ = self.handle_inline_tool_call(journal, gateway, &run, &session, tc)?;
-        }
-
         if let Some(tc) = llm.tool_call.as_ref() {
             let _ = self.handle_inline_tool_call(journal, gateway, &run, &session, tc)?;
         }
