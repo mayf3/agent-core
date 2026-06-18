@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "fixture_id": "reply-contains-regression",
+  "description": "Soft reply-content regression fixture: the agent reply must contain at least one of the expected phrases. Useful for catching abrupt reply-style regressions without mandating exact strings.",
+  "source": { "kind": "authored" },
+  "setup": { "agent_id": "main", "channel": "cli", "session_id": "sess_reply_1" },
+  "turns": [
+    { "role": "user", "external_event_id": "msg_reply_1", "text": "hello" }
+  ],
+  "expectations": {
+    "reply_contains_any": ["hello", "hi", "greetings", "hey"],
+    "no_duplicate_reply": true
+  }
+}
