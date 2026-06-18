@@ -84,7 +84,7 @@ When updating this file after an iteration:
 Last reviewed main:
 
 ```text
-2c91738 feat(tools): external audit report harness MVP (#114)
+152d665 docs: Replay/Eval Harness design document (#116)
 ```
 
 Recent work already merged:
