@@ -167,6 +167,27 @@ fact. Expiry runs both at startup recovery and on a periodic background sweep
 (when both `REQUIRE_WRITE_APPROVAL=true` and a non-zero TTL are set). The sweep
 interval is `clamp(ttl, 60s, 3600s)`.
 
+## LLM context blocks
+
+The Runtime assembles a set of context blocks before each model call (visible in
+the `ContextBuilt` Journal event). These are the model's only window into kernel
+state and its available actions:
+
+| Block | Purpose |
+|---|---|
+| `RootSystem` | base system prompt (`system/root.md`). |
+| `RuntimeContract` | the kernel-boundary contract: external actions require approved invocations. |
+| `AgentProfile` | the active agent profile (`agents/main/AGENT.md`). |
+| `SkillCatalog` | installed skills (`skills/`), so the model knows what it can do conversationally. |
+| `ToolCatalog` | the operation catalog (Phase 2): every catalogued operation and its risk class (`ReadOnly`/`Write`). Generated from the single source of truth in `src/domain/operation.rs`. This is how the model learns it may propose e.g. `time.now` (read-only). |
+| `ActiveSkill` | the active skill instructions. |
+| `RecentMessages` | recent user turns (configurable via `AGENT_CORE_CONTEXT_RECENT_MESSAGES`). |
+| `UserMessage` | the current user message. |
+
+Surfacing is additive: seeing an operation in `ToolCatalog` does not let the
+model execute it directly — proposing/executing still goes through the intent →
+policy → adapter chain.
+
 ## Recovery behavior (automatic, on startup)
 
 On startup the kernel reconciles projections to the Journal:
