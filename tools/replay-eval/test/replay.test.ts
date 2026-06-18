@@ -53,7 +53,29 @@ test("validateFixture accepts a smoke fixture (empty expectations)", () => {
   assert.doesNotThrow(() => validateFixture(f));
 });
 
-// --- scorer ---
+// --- fixture validation — edge cases ---
+
+test("validateFixture rejects a null fixture", () => {
+  assert.throws(() => validateFixture(null), /fixture must be a JSON object/);
+});
+
+test("validateFixture rejects a non-object (string)", () => {
+  assert.throws(() => validateFixture("not-a-fixture"), /fixture must be a JSON object/);
+});
+
+test("validateFixture rejects bad source.kind", () => {
+  assert.throws(
+    () => validateFixture({ ...validFixture(), source: { kind: "invalid" } }),
+    /source.kind must be "audited" or "authored"/,
+  );
+});
+
+test("validateFixture rejects missing fixture_id", () => {
+  assert.throws(
+    () => validateFixture({ ...validFixture(), fixture_id: "" }),
+    /fixture_id must be a non-empty string/,
+  );
+});
 
 function goodOutcome(): ReplayOutcome {
   return {
@@ -106,6 +128,65 @@ test("scoreFixture: policy deny when allow expected is a hard fail", () => {
   assert.equal(s.hardFail, true);
 });
 
+// --- scorer — edge cases ---
+
+test("scoreFixture: empty expectations (smoke) scores 1.0, no hard fail", () => {
+  const smokeFixture = validFixture({ expectations: {} });
+  const s = scoreFixture(smokeFixture, goodOutcome());
+  assert.equal(s.score, 1.0);
+  assert.equal(s.hardFail, false);
+});
+
+test("scoreFixture: no duplicate reply in smoke fixture passes", () => {
+  const smokeFixture = validFixture({ expectations: { no_duplicate_reply: true } });
+  const s = scoreFixture(smokeFixture, goodOutcome());
+  assert.equal(s.score, 1.0);
+  assert.equal(s.hardFail, false);
+});
+
+test("scoreFixture: policy_verdict deny passes when policy denied", () => {
+  const denyFixture = validFixture({
+    expectations: { policy_verdict: "deny", reply_operations: [], reply_contains_any: [] },
+  });
+  const o = { ...goodOutcome(), policyAllowed: false };
+  const s = scoreFixture(denyFixture, o);
+  assert.equal(s.hardFail, false);
+  assert.equal(s.fails, 0);
+});
+
+test("scoreFixture: policy_verdict deny fails when policy allowed", () => {
+  const denyFixture = validFixture({
+    expectations: { policy_verdict: "deny", reply_operations: [], reply_contains_any: [] },
+  });
+  const s = scoreFixture(denyFixture, goodOutcome());
+  assert.equal(s.hardFail, false); // deny-wrong is NOT a hard fail
+  assert.ok(s.fails > 0);
+});
+
+test("scoreFixture: max_latency_ms passes when under threshold", () => {
+  const latFixture = validFixture({ expectations: { max_latency_ms: 5000 } });
+  const o = { ...goodOutcome(), latencyMs: 100 };
+  const s = scoreFixture(latFixture, o);
+  assert.equal(s.hardFail, false);
+  assert.equal(s.fails, 0);
+});
+
+test("scoreFixture: max_latency_ms fails when over threshold", () => {
+  const latFixture = validFixture({ expectations: { max_latency_ms: 50 } });
+  const o = { ...goodOutcome(), latencyMs: 500 };
+  const s = scoreFixture(latFixture, o);
+  assert.equal(s.hardFail, false);
+  assert.ok(s.fails > 0);
+});
+
+test("scoreFixture: null latency with max_latency_ms expectation fails", () => {
+  const latFixture = validFixture({ expectations: { max_latency_ms: 100 } });
+  const o = { ...goodOutcome(), latencyMs: null };
+  const s = scoreFixture(latFixture, o);
+  assert.equal(s.hardFail, false);
+  assert.ok(s.fails > 0);
+});
+
 test("compareFixture: candidate better than baseline = improve", () => {
   const cand: FixtureScore = { score: 1.0, passes: 5, fails: 0, details: [], hardFail: false };
   const base: FixtureScore = { score: 0.6, passes: 3, fails: 2, details: [], hardFail: false };
@@ -120,6 +201,16 @@ test("compareFixture: candidate hard-fail vs baseline ok = regress", () => {
   assert.equal(compareFixture(cand, base).verdict, "regress");
 });
 
+test("compareFixture: equal scores, no hard fail = neutral", () => {
+  const s: FixtureScore = { score: 0.8, passes: 4, fails: 1, details: [], hardFail: false };
+  assert.equal(compareFixture(s, s).verdict, "neutral");
+});
+
+test("compareFixture: both hard fail = neutral (no meaningful delta)", () => {
+  const s: FixtureScore = { score: 0.5, passes: 2, fails: 2, details: [], hardFail: true };
+  assert.equal(compareFixture(s, s).verdict, "neutral");
+});
+
 test("summarize: aggregate regress forces regress verdict", () => {
   const ok: FixtureScore = { score: 1, passes: 1, fails: 0, details: [], hardFail: false };
   const bad: FixtureScore = { score: 0, passes: 0, fails: 1, details: [], hardFail: false };
@@ -131,5 +222,52 @@ test("summarize: aggregate regress forces regress verdict", () => {
 test("summarize: all-neutral = neutral", () => {
   const s: FixtureScore = { score: 1, passes: 1, fails: 0, details: [], hardFail: false };
   const v = compareFixture(s, s);
+  assert.equal(summarize([v]).verdict, "neutral");
+});
+
+// --- summarize — edge cases ---
+
+test("summarize: empty verdicts = neutral, score 1.0", () => {
+  const sum = summarize([]);
+  assert.equal(sum.verdict, "neutral");
+  assert.equal(sum.candidateScore, 1);
+  assert.equal(sum.baselineScore, 1);
+});
+
+test("summarize: all improve = improve", () => {
+  const base: FixtureScore = { score: 0.5, passes: 1, fails: 1, details: [], hardFail: false };
+  const cand: FixtureScore = { score: 1.0, passes: 2, fails: 0, details: [], hardFail: false };
+  const v = compareFixture(cand, base);
+  assert.equal(v.verdict, "improve");
+  assert.equal(summarize([v]).verdict, "improve");
+});
+
+test("summarize: candidate hard-fail with same score forces regress", () => {
+  // Candidate hard-failed, baseline did not, but scores are equal.
+  const base: FixtureScore = { score: 1.0, passes: 2, fails: 0, details: [], hardFail: false };
+  const cand: FixtureScore = { score: 1.0, passes: 2, fails: 0, details: [], hardFail: true };
+  const v = compareFixture(cand, base);
+  assert.equal(v.verdict, "regress"); // hard-fail forces per-fixture regress
+  const sum = summarize([v]);
+  assert.equal(sum.verdict, "regress"); // candidate hard-fail must regress overall
+  assert.equal(sum.delta, 0); // score same, but regress from hard-fail
+});
+
+test("summarize: multi-fixture mixed aggregates correctly", () => {
+  const base: FixtureScore = { score: 1.0, passes: 2, fails: 0, details: [], hardFail: false };
+  const candImprove: FixtureScore = { score: 1.0, passes: 2, fails: 0, details: [], hardFail: false };
+  const candRegress: FixtureScore = { score: 0.0, passes: 0, fails: 2, details: [], hardFail: false };
+  const v1 = compareFixture(candImprove, base); // neutral (equal)
+  const v2 = compareFixture(candRegress, base); // regress, delta -1
+  const sum = summarize([v1, v2]);
+  assert.equal(sum.verdict, "regress");
+  assert.ok(sum.delta < 0);
+});
+
+test("summarize: candidate hard-fail + baseline also hard-fail = neutral if scores equal", () => {
+  // Both hard-failed equally — no regression relative to baseline.
+  const s: FixtureScore = { score: 0.5, passes: 1, fails: 1, details: [], hardFail: true };
+  const v = compareFixture(s, s);
+  assert.equal(v.verdict, "neutral"); // both hard-fail cancel at per-fixture level
   assert.equal(summarize([v]).verdict, "neutral");
 });
