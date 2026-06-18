@@ -1,6 +1,7 @@
 use crate::config::KernelConfig;
 use crate::context::ContextAssembler;
 use crate::domain::*;
+use crate::adapters::InvocationAdapter;
 use crate::gateway::Gateway;
 use crate::journal::JournalStore;
 use crate::llm::{LlmClient, LlmInput};
@@ -87,6 +88,74 @@ where
         journal.update_run_status(&run.id, "WaitingDispatch")?;
         Ok(())
     }
+    /// Phase 2 tool-call MVP: if the model emitted a `ReadOnly` tool call,
+    /// validate it, execute `TimeAdapter` inline, and journal the receipt —
+    /// WITHOUT queueing into `outbox_dispatches` (the outbox dispatcher is
+    /// wired to `HttpConnectorAdapter`; a local adapter must not route there).
+    /// Audit facts: `InvocationProposed` + `InvocationApproved` +
+    /// `ReceiptReceived`. `OutboxQueued`/`DispatchStarted` are intentionally
+    /// skipped (see docs/decisions/tool-call-execution-loop.md §4.5).
+    /// Returns the receipt output serialized as text for the run outcome, or
+    /// None if no tool call was emitted / it was rejected.
+    fn handle_inline_tool_call(
+        &self,
+        journal: &JournalStore,
+        gateway: &Gateway,
+        run: &Run,
+        session: &Session,
+        tool_call: &crate::llm::ToolCall,
+    ) -> Result<Option<String>> {
+        let intent = match crate::gateway::validate_tool_call(tool_call, &run.id) {
+            Ok(intent) => intent,
+            Err(e) => {
+                // Rejection is surfaced as a ToolResult-style note, not a crash.
+                return Ok(Some(format!("tool call rejected: {}", e)));
+            }
+        };
+        let correlation_id = intent.invocation_id.0.clone();
+        journal.append_event(
+            JournalEventKind::InvocationProposed,
+            Some(&run.id),
+            Some(&session.id),
+            Some(&correlation_id),
+            json!({
+                "operation": intent.operation,
+                "idempotency_key": intent.idempotency_key,
+                "source": "model_tool_call",
+            }),
+        )?;
+        let approved = gateway.approve_invocation(intent, &run, &session)?;
+        journal.append_event(
+            JournalEventKind::InvocationApproved,
+            Some(&run.id),
+            Some(&session.id),
+            Some(&correlation_id),
+            json!({
+                "decision_id": approved.decision_id,
+                "operation": approved.intent().operation,
+            }),
+        )?;
+        let receipt = crate::adapters::TimeAdapter.execute(&approved)?;
+        journal.append_event(
+            JournalEventKind::ReceiptReceived,
+            Some(&run.id),
+            Some(&session.id),
+            Some(&correlation_id),
+            json!({
+                "invocation_id": approved.intent().invocation_id,
+                "status": format!("{:?}", receipt.status),
+                "output": receipt.output,
+            }),
+        )?;
+        Ok(Some(
+            receipt
+                .output
+                .get("iso")
+                .and_then(|v| v.as_str())
+                .unwrap_or("ok")
+                .to_string(),
+        ))
+    }
 
     pub fn deliver(
         &self,
@@ -149,6 +218,18 @@ where
             None,
             llm.journal_payload,
         )?;
+
+        // Phase 2 tool-call MVP: if the model emitted a ReadOnly tool call,
+        // execute it inline (TimeAdapter) and surface the result. This does
+        // not replace the reply path below — a model may emit both a text
+        // reply and a tool call.
+        if let Some(tc) = llm.tool_call.as_ref() {
+            let _ = self.handle_inline_tool_call(journal, gateway, &run, &session, tc)?;
+        }
+
+        if let Some(tc) = llm.tool_call.as_ref() {
+            let _ = self.handle_inline_tool_call(journal, gateway, &run, &session, tc)?;
+        }
 
         let intent = self.reply_intent(&run, &session, &llm.content, message_id, chat_id);
         let correlation_id = intent.invocation_id.0.clone();
