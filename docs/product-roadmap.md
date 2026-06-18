@@ -206,6 +206,12 @@ Feishu / CLI text
 
 ### Phase 2: Invocation Gateway and Safe Tools
 
+> **状态：完成。** M2a（operation catalog + typed adapter errors）、M2b（run principal
+> execution profile，config-driven grants）、M2c（fixed policy pipeline）、M2d（durable
+> approval state，opt-in；含 HTTP `/v1/approve`+`/v1/deny` 端点与 approval expiry）
+> 已全部落地（PRs #72–#80）。`time.now` 是第一个 `Risk::ReadOnly` 本地 adapter（M2e）。
+> 见 `docs/milestones.md` 与 `docs/decisions/phase2-invocation-gateway-scoping.md`。
+
 目标：让 Agent 能做少量真实工作，但不破坏小内核边界。
 
 用户可感知结果：
