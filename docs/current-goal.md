@@ -25,6 +25,31 @@ Each iteration must:
   phase;
 - finish with a PR, validation results, residual risks, and the next candidate.
 
+## Codex Delegation Mode
+
+Codex should conserve tokens by default.
+
+Codex's default role is:
+
+- clarify architecture and acceptance criteria;
+- write or update task packets in docs;
+- review PRs after worker agents finish;
+- inspect boundary, safety, state-machine, duplicate-reply, and secret risks;
+- decide whether the next worker task is ready.
+
+Codex should not directly implement code changes unless the user explicitly
+asks Codex to do the implementation. When work is needed, Codex should record
+the task in this file or in `docs/agent-dispatch.md`, then delegate to GLM or
+DeepSeek.
+
+Model allocation:
+
+- GLM: use sparingly for boundary-sensitive starts, design-to-implementation
+  scoping, and first-pass skeletons.
+- DeepSeek: use for low-risk follow-up work such as fixtures, tests, docs,
+  validation scripts, and narrow external-harness improvements.
+- Codex: review batched PRs, identify blockers, and update the next goal.
+
 ## Kernel Thinness Gate
 
 Before proposing or implementing any change, answer:
