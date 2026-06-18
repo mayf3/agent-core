@@ -48,6 +48,7 @@ impl ContextAssembler {
                 Compressibility::Never,
             ),
             self.skill_catalog_block(),
+            self.tool_catalog_block(),
             self.file_block(
                 ContextBlockKind::ActiveSkill,
                 "skills/chat/SKILL.md",
@@ -93,6 +94,22 @@ impl ContextAssembler {
             &content,
             Compressibility::DropWhole,
             "skills/",
+            self.max_block_chars,
+        )
+    }
+    fn tool_catalog_block(&self) -> ContextBlock {
+        // Phase 2 tool-surfacing: surface the operation catalog so the model
+        // knows which operations exist and their risk class. Generated from
+        // the single source of truth (src/domain/operation.rs).
+        let content = format!(
+            "Available operations (propose via the kernel; read-only ones run              inline, write ones need approval when enabled):\n{}",
+            crate::domain::operation::catalog_for_context()
+        );
+        block(
+            ContextBlockKind::ToolCatalog,
+            &content,
+            Compressibility::DropWhole,
+            "operation/catalog",
             self.max_block_chars,
         )
     }
