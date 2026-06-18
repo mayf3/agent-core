@@ -184,15 +184,15 @@ Result: replay-eval 50/50, audit-report 7/7, structure + secret-scan + diff --ch
 
 ## Issues To Address Next
 
-1. **External harness productization** (current sprint, in progress).
-   - Replay-eval batch/suite mode (multiple fixtures in one run, one aggregated
-     `score.json`/`report.md`).
-   - Acceptance runbook (`docs/harness-acceptance-runbook.md`): how to run each
-     harness, how to read the reports, the red-lines that block merge
+1. **External harness productization** (sprint complete).
+   - ✅ Replay-eval batch/suite mode (`--fixtures-dir`, one aggregated report).
+   - ✅ Acceptance runbook (`docs/harness-acceptance-runbook.md`): how to run
+     each harness, how to read the reports, the red-lines that block merge
      (hash-chain faulty, unacked unknown dispatch, projection drift, undelivered
-     ingress, duplicate-reply collision, replay hardFail/regress).
+     ingress, duplicate-reply collision, replay hardFail/regress), plus a
+     manual acceptance checklist.
 
-2. **Connector extraction preparation.**
+2. **Connector extraction preparation** (next recommended goal).
    - Feishu remains in `connectors/feishu` inside this repo.
    - Before extraction, implement connector-local execute idempotency
      persistence, symmetric to the reaction store, as scoped in
@@ -225,10 +225,9 @@ Already good enough:
 
 Still missing before it feels like a complete product:
 
-- Replay-eval batch/suite mode + acceptance runbook for user-visible gates.
 - Feishu connector extraction with connector-local execute idempotency.
 - A first practical non-chat workflow built from safe tools and approval.
-- Packaging/service/runbook polish for repeatable installation and upgrades.
+- Packaging/service polish for repeatable installation and upgrades.
 
 Rough estimates, assuming one focused coding agent and quick decisions:
 
