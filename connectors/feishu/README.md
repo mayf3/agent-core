@@ -99,7 +99,11 @@ The Feishu connector **is NOT allowed to**:
 - Call any Kernel IPC endpoint other than `POST /v1/ingress`
 - Execute operations other than `feishu.send_message`
 - Import from `src/` (Kernel code)
-- Access `.env`, `~/.openduck`, `~/.openclaw`, logs, or production databases
+- Access `~/.openduck`, `~/.openclaw`, logs, production databases,
+  secret backup files, or any non-repo-local secret source
+  (repo-root `.env` is supported only as local-development config
+  loading via `loadLocalEnv` in `config.ts`; extraction must decide
+  whether to keep or remove this loader)
 - Introduce Workflow, Multi-Agent, Shell, Browser, or other non-Feishu
   capabilities
 
