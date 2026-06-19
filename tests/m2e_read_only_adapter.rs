@@ -10,7 +10,7 @@ use agent_core_kernel::llm::{LlmClient, LlmInput, LlmOutput, ToolCall};
 use agent_core_kernel::runtime::Runtime;
 use anyhow::Result;
 use serde_json::json;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 fn run_with_time_grant(session_id: &SessionId) -> Run {
     Run {
@@ -39,7 +39,10 @@ fn run_with_time_grant(session_id: &SessionId) -> Run {
 #[test]
 fn time_now_is_catalogued_as_read_only() {
     let spec = agent_core_kernel::domain::operation::lookup("time.now").unwrap();
-    assert_eq!(spec.risk, agent_core_kernel::domain::operation::Risk::ReadOnly);
+    assert_eq!(
+        spec.risk,
+        agent_core_kernel::domain::operation::Risk::ReadOnly
+    );
 }
 
 #[test]
@@ -76,14 +79,18 @@ fn time_now_denied_without_grant() -> Result<()> {
         arguments: json!({ "session_id": session.id.0 }),
         idempotency_key: Some("time:2".to_string()),
     };
-    let err = gateway.approve_invocation(intent, &run, &session).unwrap_err();
+    let err = gateway
+        .approve_invocation(intent, &run, &session)
+        .unwrap_err();
     assert!(err.to_string().contains("capability_not_enabled"));
     Ok(())
 }
 
 // ---- session.recall_recent ----
 
-struct RecallLlm { call_count: Mutex<usize> }
+struct RecallLlm {
+    call_count: Mutex<usize>,
+}
 
 impl LlmClient for RecallLlm {
     fn complete(&self, _input: LlmInput) -> Result<LlmOutput> {
@@ -106,7 +113,12 @@ fn deliver_recall(text: &str) -> Result<(Vec<JournalEvent>, RunId)> {
     let config = common::test_config();
     let journal = JournalStore::in_memory()?;
     let gateway = Gateway::new(config.clone());
-    let runtime = Runtime::new(config, RecallLlm { call_count: Mutex::new(0) });
+    let runtime = Runtime::new(
+        config,
+        RecallLlm {
+            call_count: Mutex::new(0),
+        },
+    );
     let env = gateway.cli_ingress(text.to_string())?;
     let event = gateway.validate_ingress(&journal, env)?;
     let outcome = runtime.deliver(&journal, &gateway, event)?;
@@ -116,23 +128,41 @@ fn deliver_recall(text: &str) -> Result<(Vec<JournalEvent>, RunId)> {
 #[test]
 fn session_recall_writes_audit_facts() -> Result<()> {
     let (events, run_id) = deliver_recall("hello world")?;
-    assert!(events.iter().any(|e| {
-        e.run_id.as_ref() == Some(&run_id)
-            && e.kind == JournalEventKind::ReceiptReceived
-            && e.payload.get("output").and_then(|o| o.get("session_id")).is_some()
-    }), "receipt must be journaled");
+    assert!(
+        events.iter().any(|e| {
+            e.run_id.as_ref() == Some(&run_id)
+                && e.kind == JournalEventKind::ReceiptReceived
+                && e.payload
+                    .get("output")
+                    .and_then(|o| o.get("session_id"))
+                    .is_some()
+        }),
+        "receipt must be journaled"
+    );
     Ok(())
 }
 
 #[test]
 fn session_recall_returns_only_normalized_fields() -> Result<()> {
     let (events, _) = deliver_recall("my secret token is abc123")?;
-    let receipt = events.iter().find(|e| {
-        e.kind == JournalEventKind::ReceiptReceived
-            && e.payload.get("output").and_then(|o| o.get("messages")).is_some()
-    }).unwrap();
-    let messages = receipt.payload.get("output").unwrap()
-        .get("messages").unwrap().as_array().unwrap();
+    let receipt = events
+        .iter()
+        .find(|e| {
+            e.kind == JournalEventKind::ReceiptReceived
+                && e.payload
+                    .get("output")
+                    .and_then(|o| o.get("messages"))
+                    .is_some()
+        })
+        .unwrap();
+    let messages = receipt
+        .payload
+        .get("output")
+        .unwrap()
+        .get("messages")
+        .unwrap()
+        .as_array()
+        .unwrap();
     assert!(!messages.is_empty());
     for msg in messages {
         assert!(msg.get("event_id").is_some());
@@ -152,16 +182,35 @@ fn session_recall_does_not_cross_sessions() -> Result<()> {
     let _ = gateway.validate_ingress(&journal, env_a)?;
     let env_b = gateway.cli_ingress("session B message".into())?;
     let event_b = gateway.validate_ingress(&journal, env_b)?;
-    let runtime = Runtime::new(config, RecallLlm { call_count: Mutex::new(0) });
+    let runtime = Runtime::new(
+        config,
+        RecallLlm {
+            call_count: Mutex::new(0),
+        },
+    );
     let _ = runtime.deliver(&journal, &gateway, event_b)?;
     let events = journal.events()?;
-    let receipt = events.iter().find(|e| {
-        e.kind == JournalEventKind::ReceiptReceived
-            && e.payload.get("output").and_then(|o| o.get("messages")).is_some()
-    }).unwrap();
-    let texts: Vec<&str> = receipt.payload.get("output").unwrap()
-        .get("messages").unwrap().as_array().unwrap()
-        .iter().filter_map(|m| m.get("text").and_then(|t| t.as_str())).collect();
+    let receipt = events
+        .iter()
+        .find(|e| {
+            e.kind == JournalEventKind::ReceiptReceived
+                && e.payload
+                    .get("output")
+                    .and_then(|o| o.get("messages"))
+                    .is_some()
+        })
+        .unwrap();
+    let texts: Vec<&str> = receipt
+        .payload
+        .get("output")
+        .unwrap()
+        .get("messages")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|m| m.get("text").and_then(|t| t.as_str()))
+        .collect();
     assert!(texts.iter().any(|t| t.contains("session B")));
     assert!(!texts.iter().any(|t| t.contains("session A")));
     Ok(())
@@ -171,18 +220,28 @@ fn session_recall_does_not_cross_sessions() -> Result<()> {
 fn validate_accepts_session_recall() {
     use agent_core_kernel::gateway::validate_tool_call;
     assert!(validate_tool_call(
-        &ToolCall { id: "c1".into(), operation: "session.recall_recent".into(), arguments: json!({ "limit": 5 }) },
+        &ToolCall {
+            id: "c1".into(),
+            operation: "session.recall_recent".into(),
+            arguments: json!({ "limit": 5 })
+        },
         &RunId::new(),
-    ).is_ok());
+    )
+    .is_ok());
 }
 
 #[test]
 fn validate_rejects_write_via_tool_call() {
     use agent_core_kernel::gateway::validate_tool_call;
     let err = validate_tool_call(
-        &ToolCall { id: "c1".into(), operation: "feishu.send_message".into(), arguments: json!({}) },
+        &ToolCall {
+            id: "c1".into(),
+            operation: "feishu.send_message".into(),
+            arguments: json!({}),
+        },
         &RunId::new(),
-    ).unwrap_err();
+    )
+    .unwrap_err();
     assert!(err.to_string().contains("write_operation_not_allowed"));
 }
 
@@ -190,7 +249,7 @@ fn validate_rejects_write_via_tool_call() {
 
 #[test]
 fn system_status_is_catalogued_as_read_only() {
-    use agent_core_kernel::domain::operation::{lookup, SYSTEM_STATUS, Risk};
+    use agent_core_kernel::domain::operation::{lookup, Risk, SYSTEM_STATUS};
     let spec = lookup(SYSTEM_STATUS).unwrap();
     assert_eq!(spec.risk, Risk::ReadOnly);
 }
@@ -210,23 +269,34 @@ fn execute_system_status_returns_aggregate_journal_counts() -> Result<()> {
 
 #[test]
 fn system_status_tool_call_is_validated_as_read_only() {
-    use agent_core_kernel::gateway::validate_tool_call;
     use agent_core_kernel::domain::RunId;
+    use agent_core_kernel::gateway::validate_tool_call;
     assert!(validate_tool_call(
-        &ToolCall { id: "c1".into(), operation: "system.status".into(), arguments: json!({}) },
+        &ToolCall {
+            id: "c1".into(),
+            operation: "system.status".into(),
+            arguments: json!({})
+        },
         &RunId::new(),
-    ).is_ok());
+    )
+    .is_ok());
 }
 
 #[test]
 fn system_status_grant_check_passes_with_baseline_profile() -> Result<()> {
     // The baseline CLI profile includes system.status, so the gateway
     // should accept it. We verify the catalog + validate_tool_call chain.
-    use agent_core_kernel::gateway::validate_tool_call;
     use agent_core_kernel::domain::RunId;
-    let tool_call = ToolCall { id: "c2".into(), operation: "system.status".into(), arguments: json!({}) };
-    assert!(validate_tool_call(&tool_call, &RunId::new()).is_ok(),
-        "system.status should be accepted as a read-only tool call");
+    use agent_core_kernel::gateway::validate_tool_call;
+    let tool_call = ToolCall {
+        id: "c2".into(),
+        operation: "system.status".into(),
+        arguments: json!({}),
+    };
+    assert!(
+        validate_tool_call(&tool_call, &RunId::new()).is_ok(),
+        "system.status should be accepted as a read-only tool call"
+    );
     Ok(())
 }
 
@@ -282,21 +352,30 @@ fn system_status_tool_call_runtime_chain() -> Result<()> {
         } else if e.kind == agent_core_kernel::domain::JournalEventKind::InvocationApproved {
             saw_approved = true;
         } else if e.kind == agent_core_kernel::domain::JournalEventKind::ReceiptReceived
-            && e.payload.get("output").and_then(|o| o.get("status")).is_some()
+            && e.payload
+                .get("output")
+                .and_then(|o| o.get("rollup"))
+                .is_some()
         {
             saw_receipt = true;
             // Verify the ReceiptReceived output has system.status fields.
             let output = e.payload.get("output").unwrap();
-            assert!(output.get("event_count").is_some(), "Receipt has event_count");
-            assert!(output.get("outbox").and_then(|o| o.get("pending")).is_some(), "Receipt has outbox.pending");
-            assert!(output.get("summary").is_some(), "Receipt has summary field");
+            assert!(output.get("rollup").is_some(), "Receipt has rollup");
+            assert!(output.get("hash_chain").is_some(), "Receipt has hash_chain");
+            assert!(
+                output.get("outbox_pending").is_some(),
+                "Receipt has outbox_pending"
+            );
         } else if e.kind == agent_core_kernel::domain::JournalEventKind::OutboxQueued {
             saw_outbox = true;
         }
     }
     assert!(saw_proposed, "InvocationProposed in Journal");
     assert!(saw_approved, "InvocationApproved in Journal");
-    assert!(saw_receipt, "ReceiptReceived with system.status output in Journal");
+    assert!(
+        saw_receipt,
+        "ReceiptReceived with system.status output in Journal"
+    );
     assert!(saw_outbox, "OutboxQueued for the reply in Journal");
 
     Ok(())
