@@ -394,42 +394,8 @@ fn parse_kind_round_trips_approval_expired() -> Result<()> {
     Ok(())
 }
 
-// ---- Phase 2 tool-call MVP: inline time.now execution ----
-
-#[test]
-fn validate_tool_call_accepts_time_now_and_rejects_others() {
-    use agent_core_kernel::domain::RunId;
-    use agent_core_kernel::gateway::validate_tool_call;
-    use agent_core_kernel::llm::ToolCall;
-    use serde_json::json;
-    let ok = validate_tool_call(
-        &ToolCall {
-            id: "c1".into(),
-            operation: "time.now".into(),
-            arguments: json!({}),
-        },
-        &RunId::new(),
-    );
-    assert!(ok.is_ok(), "time.now should be accepted");
-    let unknown = validate_tool_call(
-        &ToolCall {
-            id: "c1".into(),
-            operation: "shell.exec".into(),
-            arguments: json!({}),
-        },
-        &RunId::new(),
-    );
-    assert!(unknown.is_err(), "unknown op rejected");
-    let write_op = validate_tool_call(
-        &ToolCall {
-            id: "c1".into(),
-            operation: "feishu.send_message".into(),
-            arguments: json!({}),
-        },
-        &RunId::new(),
-    );
-    assert!(write_op.is_err(), "Write op rejected via tool-call path");
-}
+// validate_tool_call tests are in src/gateway/tool_call.rs unit tests (more
+// comprehensive + covers run-scoped idempotency keys).
 
 struct ToolCallLlm {
     calls: std::sync::Mutex<usize>,

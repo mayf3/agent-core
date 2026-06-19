@@ -139,7 +139,7 @@ High-signal state:
 
 ## Current State
 
-On `main` at `ec66fc7` (after PR #153). Open PR #154 (feat/session-recall-loop) — not merged, candidate only.
+On `main` at `ec66fc7` (after PR #153). Open PR #154 (feat/session-recall-loop) — not merged. PR #154 fixes two Codex-review correctness bugs: (1) tool rejections now use `ReceiptReceived { status: "Failed" }` instead of `LlmCompleted { status: "rejected" }`; (2) tool-call idempotency keys are run-scoped (`tool:{run_id}:{hashed_provider_id}`) to prevent cross-Run collision. Includes a Stub HTTP Server integration test proving the real OpenAI-compatible provider completes a full tool-call loop.
 
 Phase 3 (Connector Extraction Readiness) is complete: connector-local execute
 idempotency persists across restart (PR #139), and the extraction checklist +

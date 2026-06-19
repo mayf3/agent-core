@@ -385,3 +385,107 @@ fn read_http_request_body(stream: &mut TcpStream) -> Result<String> {
     }
     Ok(String::from_utf8(body)?)
 }
+
+// ---- Stub HTTP Server integration: real OpenAI-compatible provider ----
+
+struct StubServer {
+    port: u16,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl StubServer {
+    fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            let mut round = 0usize;
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let body_str = match read_http_request_body(&mut stream) {
+                    Ok(_) | Err(_) => {
+                        let r = round;
+                        round += 1;
+                        if r == 0 {
+                            r#"{"choices":[{"message":{"content":"","tool_calls":[{"id":"call_stub_1","type":"function","function":{"name":"time.now","arguments":"{}"}}]}}],"model":"stub"}"#
+                        } else {
+                            r#"{"choices":[{"message":{"content":"The current time was retrieved successfully."}}],"model":"stub"}"#
+                        }
+                    }
+                };
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body_str.len(), body_str
+                );
+                let _ = stream.write_all(resp.as_bytes());
+                let _ = stream.flush();
+                if round >= 2 {
+                    break;
+                }
+            }
+        });
+        Self {
+            port,
+            handle: Some(handle),
+        }
+    }
+
+    fn base_url(&self) -> String {
+        format!("http://127.0.0.1:{}", self.port)
+    }
+}
+
+impl Drop for StubServer {
+    fn drop(&mut self) {
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+#[test]
+fn stub_http_provider_completes_tool_loop() -> Result<()> {
+    let server = StubServer::start();
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    let mut config = common::test_config();
+    config.openai_base_url = format!("{}/v1", server.base_url());
+    config.openai_api_key = "stub-key".to_string();
+    config.model = "stub".to_string();
+
+    let journal = JournalStore::in_memory()?;
+    let gateway = Gateway::new(config.clone());
+    let llm = OpenAiCompatibleLlm::new(
+        config.openai_base_url.clone(),
+        config.openai_api_key.clone(),
+        config.model.clone(),
+        5000,
+    );
+    let runtime = Runtime::new(config, llm);
+    let envelope = gateway.cli_ingress("what time is it".to_string())?;
+    let event = gateway.validate_ingress(&journal, envelope)?;
+    let outcome = runtime.deliver(&journal, &gateway, event)?;
+
+    assert!(
+        !outcome.output.is_empty(),
+        "final reply must be non-empty, got: '{}'",
+        outcome.output
+    );
+    let events = journal.events()?;
+    assert!(
+        events
+            .iter()
+            .any(|e| e.kind == JournalEventKind::ReceiptReceived),
+        "tool execution receipt must be journaled"
+    );
+    let llm_rounds = events
+        .iter()
+        .filter(|e| e.kind == JournalEventKind::LlmCompleted)
+        .count();
+    assert!(
+        llm_rounds >= 2,
+        "at least 2 LLM rounds expected, got {}",
+        llm_rounds
+    );
+
+    Ok(())
+}

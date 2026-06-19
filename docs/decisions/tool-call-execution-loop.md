@@ -2,12 +2,21 @@
 
 ## Status
 
-**Open candidate.** PR #154 (branch `feat/session-recall-loop`) adds a bounded
-read-only tool-recall loop (Phase 2 tool-call execution MVP). Not yet merged.
-Key properties:
+**Open candidate (PR #154).** A bounded read-only tool-recall loop that is NOT
+a general workflow engine. Key properties:
 
-- At most 2 read-only tool calls execute per Run.
+- At most 2 read-only tool calls execute per Run (`MAX_TOOL_ROUNDS = 2`).
 - The model may propose `time.now`, `session.recall_recent`, or `system.status`.
+- Only `ReadOnly` operations execute via this path; `Write`/unknown are rejected.
+- Tool rejections are journaled as `ReceiptReceived { status: "Failed" }` — NOT
+  as `LlmCompleted` — to preserve the audit distinction between "LLM finished
+  generating" and "tool call attempted + rejected".
+- Tool-call idempotency keys are **run-scoped**: `tool:{run_id}:{hashed_provider_id}`
+  to prevent cross-Run collision when a provider reuses the same `tool_call.id`.
+- The OpenAI-compatible provider sends ReadOnly tool schemas in the request and
+  parses `choices[0].message.tool_calls[0]` from the response. Malformed
+  arguments are rejected before any adapter runs.
+- Proven with a local Stub HTTP Server integration test (not just FakeLLM).
 - All schemas are strict (`additionalProperties: false`).
 - Provider tool-call IDs are hashed (SHA-256) before use — the raw provider
   value is never written to Journal, idempotency keys, errors, or model-visible
