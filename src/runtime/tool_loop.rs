@@ -361,3 +361,7 @@ fn sanitize_rejection(e: &anyhow::Error) -> (&'static str, String) {
     };
     (category, safe_msg)
 }
+
+#[cfg(test)]
+#[path = "tool_loop_tests.rs"]
+mod tool_loop_tests;
