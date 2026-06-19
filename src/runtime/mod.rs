@@ -145,11 +145,11 @@ where
                     (status, output, text)
                 }
                 crate::domain::operation::SYSTEM_STATUS => {
-                    let output = Self::execute_system_status(journal);
+                    let output = crate::capabilities::execute(journal);
                     (
                         crate::domain::ReceiptStatus::Succeeded,
                         output.clone(),
-                        output.get("summary").and_then(|v| v.as_str()).unwrap_or("ok").to_string(),
+                        output.get("summary").and_then(|v: &serde_json::Value| v.as_str()).unwrap_or("ok").to_string(),
                     )
                 }
                 other => {
@@ -244,32 +244,6 @@ where
         };
 
         (crate::domain::ReceiptStatus::Succeeded, output, text)
-    }
-
-    /// Execute `system.status`: query journal for aggregate health counts.
-    /// Never returns secrets, payloads, or raw event content — only aggregate
-    /// numbers and a rollup string. Exposed to the model as a ReadOnly catalog
-    /// operation; the model decides when to call it and how to format the reply
-    /// (which goes through the normal outbox → dispatcher → connector path).
-    pub fn execute_system_status(journal: &JournalStore) -> serde_json::Value {
-        let h = |v: Result<i64, _>| v.unwrap_or(0);
-        let hash_ok = journal.verify_hash_chain().ok().unwrap_or(false);
-        let pending = h(journal.outbox_status_count(crate::domain::OutboxDispatchStatus::Pending));
-        let unknown = h(journal.outbox_unknown_unacked_count());
-        let dispatching = h(journal.outbox_status_count(crate::domain::OutboxDispatchStatus::Dispatching));
-        let drift = h(journal.outbox_projection_drift_count());
-        let undelivered = journal.undelivered_ingress_events().ok().map(|v| v.len() as i64).unwrap_or(0);
-        let awaiting_approval = h(journal.awaiting_approval_count());
-        let event_count = h(journal.event_count());
-        let stale_dispatching = h(journal.outbox_stale_dispatching_count());
-        let rollup = if !hash_ok { "corrupt" } else if unknown > 0 || drift > 0 || undelivered > 0 { "degraded" } else { "ok" };
-        json!({
-            "status": rollup, "hash_chain_ok": hash_ok, "event_count": event_count,
-            "outbox": { "pending": pending, "dispatching": dispatching, "unknown_unacked": unknown, "stale_dispatching": stale_dispatching, "projection_drift": drift },
-            "ingress": { "undelivered": undelivered },
-            "approval": { "awaiting": awaiting_approval },
-            "summary": format!("status={rollup} events={event_count} pending={pending} drift={drift} undelivered={undelivered}"),
-        })
     }
 
     pub fn deliver(

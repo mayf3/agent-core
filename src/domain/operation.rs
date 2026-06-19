@@ -138,11 +138,11 @@ impl ExecutionProfile {
                     operation: SESSION_RECALL_RECENT.to_string(),
                     scope: "current_session".to_string(),
                 },
-                // The agent may query system health without approval (read-only).
-                CapabilityGrant {
-                    operation: SYSTEM_STATUS.to_string(),
-                    scope: "current_session".to_string(),
-                },
+                // NOTE: system.status is NOT granted here. It is added via
+                // KernelConfig.extra_allowed_operations in the default config.
+                // This ensures the grant is a per-Agent configuration choice,
+                // not a channel-level permission. Future agents must explicitly
+                // configure the grant via extra_allowed_operations.
             ],
         }
     }
@@ -276,13 +276,15 @@ mod tests {
     #[test]
     fn execution_profile_for_cli_grants_stdout_send_text_and_recall() {
         // The CLI channel baseline includes the reply operation + the
-        // session.recall_recent and system.status read-only tools.
+        // session.recall_recent read-only tool (scoped to current session).
+        // system.status is NOT in the baseline — it is granted via
+        // extra_allowed_operations in the default config (see config.rs).
         let profile = ExecutionProfile::for_channel(ChannelKind::Cli);
-        assert_eq!(profile.grants.len(), 3);
+        assert_eq!(profile.grants.len(), 2);
         let ops: Vec<&str> = profile.grants.iter().map(|g| g.operation.as_str()).collect();
         assert!(ops.contains(&STDOUT_SEND_TEXT));
         assert!(ops.contains(&SESSION_RECALL_RECENT));
-        assert!(ops.contains(&SYSTEM_STATUS));
+        assert!(!ops.contains(&SYSTEM_STATUS), "system.status is NOT a channel-level grant");
         for grant in &profile.grants {
             assert_eq!(grant.scope, "current_session");
         }
@@ -291,11 +293,11 @@ mod tests {
     #[test]
     fn execution_profile_for_feishu_grants_feishu_send_message_and_recall() {
         let profile = ExecutionProfile::for_channel(ChannelKind::Feishu);
-        assert_eq!(profile.grants.len(), 3);
+        assert_eq!(profile.grants.len(), 2);
         let ops: Vec<&str> = profile.grants.iter().map(|g| g.operation.as_str()).collect();
         assert!(ops.contains(&FEISHU_SEND_MESSAGE));
         assert!(ops.contains(&SESSION_RECALL_RECENT));
-        assert!(ops.contains(&SYSTEM_STATUS));
+        assert!(!ops.contains(&SYSTEM_STATUS), "system.status is NOT a channel-level grant");
         for grant in &profile.grants {
             assert_eq!(grant.scope, "current_session");
         }
@@ -326,7 +328,8 @@ mod tests {
         let augmented = ExecutionProfile::for_channel(ChannelKind::Cli).with_extra(&[]);
         assert_eq!(baseline.grants.len(), augmented.grants.len());
         assert_eq!(augmented.grants[0].operation, STDOUT_SEND_TEXT);
-        assert!(augmented.grants.iter().any(|g| g.operation == SYSTEM_STATUS));
+        // No extra operations added by empty config.
+        assert!(!augmented.grants.iter().any(|g| g.operation == FEISHU_SEND_MESSAGE));
     }
 
     #[test]
@@ -335,11 +338,11 @@ mod tests {
         // grant, scoped to current_session.
         let extra = vec![FEISHU_SEND_MESSAGE.to_string()];
         let profile = ExecutionProfile::for_channel(ChannelKind::Cli).with_extra(&extra);
-        // Baseline is 3 (reply + recall + status), + 1 extra = 4.
-        assert_eq!(profile.grants.len(), 4);
+        // Baseline is 2 (reply + recall), + 1 extra = 3.
+        assert_eq!(profile.grants.len(), 3);
         assert_eq!(profile.grants[0].operation, STDOUT_SEND_TEXT);
-        assert_eq!(profile.grants[3].operation, FEISHU_SEND_MESSAGE);
-        assert_eq!(profile.grants[3].scope, "current_session");
+        assert_eq!(profile.grants[2].operation, FEISHU_SEND_MESSAGE);
+        assert_eq!(profile.grants[2].scope, "current_session");
     }
 
     #[test]
@@ -353,9 +356,9 @@ mod tests {
             STDOUT_SEND_TEXT.to_string(), // duplicate of baseline → dropped
         ];
         let profile = ExecutionProfile::for_channel(ChannelKind::Cli).with_extra(&extra);
-        // Baseline is 3 (stdout + recall + status); the extra STDOUT_SEND_TEXT is a
-        // duplicate (dropped), unknown/empty dropped → still 3.
-        assert_eq!(profile.grants.len(), 3);
+        // Baseline is 2 (stdout + recall); the extra STDOUT_SEND_TEXT is a
+        // duplicate (dropped), unknown/empty dropped → still 2.
+        assert_eq!(profile.grants.len(), 2);
         assert_eq!(profile.grants[0].operation, STDOUT_SEND_TEXT);
     }
 }

@@ -30,7 +30,11 @@ pub fn test_config() -> KernelConfig {
         context_max_block_chars: 4_000,
         outbox_dispatcher_enabled: false,
         outbox_dispatcher_poll_interval_ms: 100,
-        extra_allowed_operations: vec![],
+        // system.status is part of the dogfood agent's profile, not a
+        // channel grant. It's granted here so that in-tests (which also
+        // behave as a dogfood agent) can exercise the capability. See
+        // KernelConfig::from_cli for the production default.
+        extra_allowed_operations: vec!["system.status".to_string()],
         require_write_approval: false,
         write_approval_ttl_secs: 0,
     }
