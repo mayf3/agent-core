@@ -1,9 +1,9 @@
 # Decision: Agent home-directory structure and isolation rules
 
 Freezes the Agent home-directory layout, isolation boundaries, and identity
-model. Rules established here constrain Phase 2+3 implementation.
-Multi-Agent runtime loading, routing, isolation enforcement, spawn, and
-delegation are explicitly deferred.
+model for future implementation. Multi-Agent runtime loading, routing,
+isolation enforcement, spawn, and delegation are explicitly deferred;
+Phase 2 and Phase 3 deliverables do not include them.
 
 ## Rules
 
@@ -23,8 +23,8 @@ delegation are explicitly deferred.
    not grant automatic cross-Agent data access.
 
 4. **Shared infrastructure.** Kernel config, global SQLite (journal, outbox,
-   approval state), Connector state, and logs live at the shared root. There
-   is not one Kernel/Journal/Connector/schema per Agent.
+   approval state), Connector operational state, and logs live at the shared
+   root. There is not one Kernel/Journal/Connector/schema per Agent.
 
 5. **Agent identity in every record.** `agent_id` is part of Session, Run,
    and RunPrincipal identity. Session keys are namespaced, e.g.
@@ -41,7 +41,8 @@ delegation are explicitly deferred.
 8. **Default deny across Agents.** Private Sessions, Context, workspace,
    Skills, and Journal views are denied across Agents by default. Future
    cooperation uses explicit `session.spawn` and `event.deliver` — never
-   direct file or database access.
+   direct file or database access. Note: the primitive is `event.deliver`,
+   not `session.deliver`.
 
 9. **Credentials are references, not values.** Manifests contain credential
    references only. Secret values come from an OS keychain, environment
@@ -56,9 +57,10 @@ delegation are explicitly deferred.
     user's live runtime data.
 
 12. **Multi-Agent is future work.** Full multi-Agent loading, routing,
-    isolation enforcement, `session.spawn`, and `session.deliver` are
+    isolation enforcement, `session.spawn`, and `event.deliver` are
     explicitly not implemented now. This document establishes the boundary
-    they must respect when implemented.
+    they must respect when implemented. Phase 2 and Phase 3 deliverables
+    do not include multi-Agent isolation; that remains a future invariant.
 
 ## Proposed directory tree
 
@@ -66,7 +68,8 @@ delegation are explicitly deferred.
 ~/.agent-core/
   config.toml               # Shared global config
   routes.toml               # Source identity -> agent_id mapping
-  agent-core.db             # Global SQLite (journal, outbox, approval, runs)
+  data/
+    agent-core.db           # Global SQLite (journal, outbox, approval, runs)
   agents/
     {agent_id}/
       agent.toml            # Identity, model, skills, grants, limits
@@ -77,9 +80,8 @@ delegation are explicitly deferred.
     {skill_name}/
       SKILL.md
       src/
-  connectors/               # Connector state snapshots (read-only)
-    feishu/
-      execute-store.jsonl
+  state/
+    connector/              # Connector operational state (implementation-defined)
   logs/
 ```
 
@@ -92,15 +94,20 @@ model = "claude-sonnet-4-20250514"
 
 [grants]
 operations = ["time.now", "feishu.send_message", "stdout.send_text"]
-context_limit = 128000
+
+[limits]
+context_window = 128000
 
 [skills]
-shared = ["web-search", "calculator"]
-private = []
+enable = ["web-search", "calculator"]
+
+[credentials]
+# References only — actual values come from OS keychain / env injection.
+openai_api_key = "$REF:env:OPENAI_API_KEY"
 
 [workspace]
 max_storage_mb = 100
-allowed_paths = ["~/agent-core/agents/assistant-alpha/workspace/"]
+allowed_paths = ["~/.agent-core/agents/assistant-alpha/workspace/"]
 ```
 
 ## Example `AGENT.md`
@@ -131,6 +138,6 @@ agent_id = "assistant-alpha"
 - Multi-Agent runtime loading and lifecycle management
 - Cross-Agent routing (only single-Agent routing is supported)
 - Isolation enforcement at the filesystem/process level
-- `session.spawn` and `session.deliver` primitives
+- `session.spawn` and `event.deliver` primitives
 - Agent-level resource quotas (CPU, memory, rate limits)
 - Secret provider integration (keychain, vault, etc.)
