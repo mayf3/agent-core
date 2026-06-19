@@ -75,6 +75,8 @@ export interface EvalEvidence {
     exitCode: number | null;
     summary?: { verdict?: "improve" | "regress" | "neutral" | "no-fixtures" };
     anyHardFail?: boolean;
+    /** Whitelisted driver error categories from score.json.errors[].category. */
+    errorCategories?: string[];
   };
   audit: {
     ran: boolean;
@@ -118,20 +120,30 @@ export function runEvaluation(inputs: EvalInputs, runner: CommandRunner = defaul
       "--out-dir", replayOut,
     ];
     const startedAt = new Date().toISOString();
-    // runner does not throw; errors are classified via result.errorCode
     const r = runner(argv, inputs.repoRoot);
     const finishedAt = new Date().toISOString();
-    const errorCategory: string | null = r.errorCode;
+    // Non-zero child exit without a spawn error is a driver/infrastructure failure.
+    let errorCategory: string | null = r.errorCode;
+    if (r.status !== 0 && errorCategory === null) errorCategory = "driver_failure";
     evidence.replay = { ran: true, exitCode: r.status };
     const scorePath = join(replayOut, "score.json");
     const reportPath = join(replayOut, "report.md");
     let artifactsProduced = 0;
     // Discover artifacts by existence regardless of exit code.
+    const replayErrors: string[] = [];
     if (existsSync(scorePath)) {
       try {
         const score = JSON.parse(readFileSync(scorePath, "utf8"));
         evidence.replay.summary = score.summary;
         evidence.replay.anyHardFail = Array.isArray(score.fixtures) && score.fixtures.some((f: any) => f.candidate?.hardFail);
+        // Surface per-fixture driver error categories from score.json.
+        if (Array.isArray(score.errors)) {
+          for (const e of score.errors) {
+            if (typeof e.category === "string" && e.category.length > 0) {
+              replayErrors.push(e.category);
+            }
+          }
+        }
       } catch {
         // malformed score.json — leave summary undefined; decision stays conservative.
       }
@@ -142,6 +154,7 @@ export function runEvaluation(inputs: EvalInputs, runner: CommandRunner = defaul
       evidence.artifacts.push({ path: "replay/report.md", kind: "replay-report" });
       artifactsProduced++;
     }
+    evidence.replay.errorCategories = replayErrors.length > 0 ? replayErrors : undefined;
     children.push({
       command: "replay-eval",
       argv,
@@ -207,22 +220,19 @@ export function runEvaluation(inputs: EvalInputs, runner: CommandRunner = defaul
   return { evidence, decision };
 }
 
-/** Derive pass/blocked from the evidence. Conservative: any red-line or any
- *  non-zero exit or missing summary blocks. */
+/** Derive pass/blocked from the evidence. Conservative: any evaluated red-line
+ *  blocks. Infrastructure/driver errors are classified as internal_error at
+ *  the CLI layer; here we only look at what evidence was produced. */
 export function decide(evidence: EvalEvidence): Decision {
-  // replay red-lines: regress verdict, any hardFail, non-zero exit, or
-  // "no-fixtures" (all fixtures were driver-failures).
+  // replay red-lines: anyHardFail, regress verdict, no-fixtures, or no summary.
   if (evidence.replay.ran) {
-    if (evidence.replay.exitCode !== 0) return "blocked";
     if (evidence.replay.anyHardFail) return "blocked";
     if (evidence.replay.summary?.verdict === "regress") return "blocked";
     if (evidence.replay.summary?.verdict === "no-fixtures") return "blocked";
-    // If replay ran but produced no parseable summary, block conservatively.
     if (!evidence.replay.summary) return "blocked";
   }
   // audit red-lines.
   if (evidence.audit.ran) {
-    if (evidence.audit.exitCode !== 0) return "blocked";
     const rl = evidence.audit.redLines;
     if (!rl) return "blocked";
     if (rl.hashChainFaulty || rl.unknownDispatches || rl.projectionDrift || rl.undeliveredIngress) return "blocked";

@@ -130,7 +130,10 @@ function loadFixturesFromDir(dir: string): Fixture[] {
 
 const EXIT_DRIVER_ERROR = 4;
 
-function buildWorktree(ref: string): { dir: string; binary: string; commit: string } {
+export function buildWorktree(
+  ref: string,
+  buildFn: (worktreeDir: string) => string = buildKernel,
+): { dir: string; binary: string; commit: string } {
   const commit = resolveRef(ref);
   const dir = mkdtempSync(join(tmpdir(), "replay-wt-"));
   try {
@@ -140,7 +143,7 @@ function buildWorktree(ref: string): { dir: string; binary: string; commit: stri
     throw new Error(`cannot create worktree for ${ref}: ${(e as Error).message}`);
   }
   try {
-    const binary = buildKernel(dir);
+    const binary = buildFn(dir);
     return { dir, binary, commit };
   } catch (e) {
     cleanupWorktree(dir);
@@ -148,7 +151,7 @@ function buildWorktree(ref: string): { dir: string; binary: string; commit: stri
   }
 }
 
-function cleanupWorktree(dir: string): void {
+export function cleanupWorktree(dir: string): void {
   try {
     execFileSync("git", ["worktree", "remove", "--force", dir], { stdio: "pipe" });
   } catch {
@@ -350,7 +353,10 @@ function toMarkdown(r: any): string {
   return lines.join("\n");
 }
 
-main().catch((e) => {
-  console.error(`fatal: ${(e as Error).message}`);
-  process.exit(1);
-});
+// Run as a CLI entry only when invoked directly (not when imported by tests).
+if (process.argv[1] && resolve(process.argv[1]).endsWith(join("tools", "replay-eval", "cli.ts"))) {
+  main().catch((e) => {
+    console.error(`fatal: ${(e as Error).message}`);
+    process.exit(1);
+  });
+}

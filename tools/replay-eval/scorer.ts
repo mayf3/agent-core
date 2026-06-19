@@ -145,7 +145,7 @@ export interface FixtureVerdict {
   candidate: FixtureScore;
   baseline: FixtureScore;
   delta: number;
-  verdict: "improve" | "regress" | "neutral" | "no-fixtures";
+  verdict: "improve" | "regress" | "neutral";
 }
 
 /** Compare a candidate score against a baseline score for one fixture. */

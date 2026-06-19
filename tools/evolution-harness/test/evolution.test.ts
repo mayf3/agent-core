@@ -190,6 +190,8 @@ test("CLI rejects --evaluate without --fixtures-dir and --audit-db (prevents sil
   try {
     const err = runCli(["--goal", goalPath, "--candidate", "main", "--evaluate"], true);
     assert.match(err, /--evaluate requires at least one of --fixtures-dir or --audit-db/i);
+    // Verify no run directory was created.
+    assert.equal(existsSync(join(dir, "out")), false, "no run directory must be created on invalid args");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

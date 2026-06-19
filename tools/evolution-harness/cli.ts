@@ -182,6 +182,12 @@ export function main(): RunManifest {
     fail((e as Error).message, EXIT_FORBIDDEN_OR_MISSING);
   }
 
+  // Validate evaluate args BEFORE creating a run directory so that invalid
+  // combinations never leave stray artifacts.
+  if (args.evaluate && !args.fixturesDir && !args.auditDb) {
+    fail("--evaluate requires at least one of --fixtures-dir or --audit-db", EXIT_BAD_ARG);
+  }
+
   const id = runId();
   const runDir = join(resolve(args.outDir), id);
   mkdirSync(runDir, { recursive: true });
@@ -221,9 +227,6 @@ export function main(): RunManifest {
   let evidence: EvalEvidence | null = null;
   const evalArtifacts: { path: string; kind: string }[] = [];
   if (args.evaluate) {
-    if (!args.fixturesDir && !args.auditDb) {
-      fail("--evaluate requires at least one of --fixtures-dir or --audit-db", EXIT_BAD_ARG);
-    }
     const result = runEvaluation({
       repoRoot: process.cwd(),
       candidateRef: args.candidate,
@@ -240,11 +243,9 @@ export function main(): RunManifest {
   }
 
   const blockedReasons: string[] = [];
-  const replayChild = evidence?.children.find((c) => c.command === "replay-eval");
   if (evidence?.replay.ran && decision === "blocked") {
     const r = evidence.replay;
-    if (r.exitCode !== 0) blockedReasons.push(`replay-eval exited ${r.exitCode} (non-zero)`);
-    else if (r.anyHardFail) blockedReasons.push("replay: candidate hardFail detected");
+    if (r.anyHardFail) blockedReasons.push("replay: candidate hardFail detected");
     else if (r.summary?.verdict === "regress") blockedReasons.push(`replay: verdict = regress (candidate ${r.summary.candidateScore.toFixed(2)} vs baseline ${r.summary.baselineScore.toFixed(2)})`);
     else if (r.summary?.verdict === "no-fixtures") blockedReasons.push("replay: zero fixtures scored (all driver failures)");
     else if (!r.summary) blockedReasons.push("replay: no parseable summary (score.json malformed)");
@@ -302,6 +303,17 @@ export function main(): RunManifest {
       reportLines.push(`| ${c.command} | ${c.exit_code ?? "?"} | ${c.error_category ?? "-"} | ${c.artifacts_produced} |`);
     }
     reportLines.push("");
+    // Show per-fixture driver error categories when replay had infrastructure failures.
+    const replayErrCats = evidence?.replay.errorCategories;
+    if (replayErrCats && replayErrCats.length > 0) {
+      const unique = [...new Set(replayErrCats)];
+      reportLines.push("### Driver error categories");
+      reportLines.push("");
+      for (const cat of unique) {
+        reportLines.push(`- ${cat}`);
+      }
+      reportLines.push("");
+    }
   }
   if (evalArtifacts.length > 0) {
     reportLines.push("### Artifact links");

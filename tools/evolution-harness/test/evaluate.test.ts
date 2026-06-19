@@ -243,8 +243,65 @@ test("evaluate: spawn failure produces error_category on child (internal_error a
   }
 });
 
-test("evaluate: runner cwd comes from inputs.repoRoot", () => {
-  // The runner receives the COMMIT, not the ref, as --candidate/--baseline.
+test("evaluate: non-zero child exit sets driver_failure error_category", () => {
+  const dir = mkdtempSync(join(tmpdir(), "eval-driverfail-"));
+  try {
+    const runner: CommandRunner = (_argv, _cwd) => {
+      return { stdout: "", stderr: "", status: 4, errorCode: null };
+    };
+    const { evidence } = runEvaluation(
+      { ...inputs(dir, { auditDb: null }), fixturesDir: join(dir, "fixtures") },
+      runner,
+    );
+    assert.equal(evidence.children.length, 1);
+    assert.equal(evidence.children[0].error_category, "driver_failure",
+      "non-zero child exit without errorCode must be classified as driver_failure");
+    assert.equal(evidence.children[0].exit_code, 4);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("evaluate: non-zero child with score.json evidence still links artifacts", () => {
+  const dir = mkdtempSync(join(tmpdir(), "eval-driver-evidence-"));
+  try {
+    const runner: CommandRunner = (argv, _cwd) => {
+      const outIdx = argv.indexOf("--out-dir");
+      const outDir = outIdx >= 0 ? argv[outIdx + 1] : "";
+      if (outDir) {
+        mkdirSync(outDir, { recursive: true });
+        // Write a score.json on non-zero exit (simulates real replay-eval behavior).
+        writeFileSync(join(outDir, "score.json"), JSON.stringify({
+          summary: { verdict: "no-fixtures" },
+          fixtures: [],
+          errors: [{ fixture_id: "f1", category: "ingress_failed", message: "safe" }],
+        }));
+        writeFileSync(join(outDir, "report.md"), "# replay report\n");
+      }
+      return { stdout: "", stderr: "", status: 4, errorCode: null };
+    };
+    const { decision, evidence } = runEvaluation(
+      { ...inputs(dir, { auditDb: null }), fixturesDir: join(dir, "fixtures") },
+      runner,
+    );
+    // Evidence was parsed from score.json even though child exited non-zero.
+    assert.equal(evidence.replay.summary?.verdict, "no-fixtures");
+    assert.equal(evidence.replay.exitCode, 4);
+    assert.ok(evidence.artifacts.some((a) => a.kind === "replay-score"), "score.json must be linked");
+    assert.ok(evidence.artifacts.some((a) => a.kind === "replay-report"), "report.md must be linked");
+    // Error categories from score.json must be surfaced.
+    assert.ok(evidence.replay.errorCategories?.includes("ingress_failed"), "error categories from score.json must be surfaced");
+    // Decide() still blocks because verdict is no-fixtures.
+    assert.equal(decision, "blocked");
+    // Child has driver_failure error_category for CLI exit code classification.
+    assert.equal(evidence.children[0].error_category, "driver_failure");
+    assert.equal(evidence.children[0].artifacts_produced, 2);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("evaluate: pins candidate/base to resolved commits (no ref drift)", () => {
   const dir = mkdtempSync(join(tmpdir(), "eval-pin-"));
   let seenCandidate = "";
   let seenBase = "";
