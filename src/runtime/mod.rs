@@ -138,7 +138,33 @@ where
                 "operation": approved.intent().operation,
             }),
         )?;
-        let receipt = crate::adapters::TimeAdapter.execute(&approved)?;
+        // Route to the correct inline executor by operation name.
+        let (receipt_status, receipt_output, result_text) =
+            match approved.intent().operation.as_str() {
+                crate::domain::operation::TIME_NOW => {
+                    let receipt = crate::adapters::TimeAdapter.execute(&approved)?;
+                    let text = receipt
+                        .output
+                        .get("iso")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("ok")
+                        .to_string();
+                    (receipt.status, receipt.output, text)
+                }
+                crate::domain::operation::SESSION_RECALL_RECENT => {
+                    let (status, output, text) =
+                        Self::execute_session_recall(journal, &session.id, &approved);
+                    (status, output, text)
+                }
+                other => {
+                    // A read-only operation not yet wired for inline execution.
+                    (
+                        crate::domain::ReceiptStatus::Failed,
+                        json!({ "error": format!("inline execution not implemented for {other}") }),
+                        format!("tool not implemented: {other}"),
+                    )
+                }
+            };
         journal.append_event(
             JournalEventKind::ReceiptReceived,
             Some(&run.id),
@@ -146,18 +172,88 @@ where
             Some(&correlation_id),
             json!({
                 "invocation_id": approved.intent().invocation_id,
-                "status": format!("{:?}", receipt.status),
-                "output": receipt.output,
+                "status": format!("{:?}", receipt_status),
+                "output": receipt_output,
             }),
         )?;
-        Ok(Some(
-            receipt
-                .output
-                .get("iso")
-                .and_then(|v| v.as_str())
-                .unwrap_or("ok")
-                .to_string(),
-        ))
+        Ok(Some(result_text))
+    }
+
+    /// Execute `session.recall_recent`: read recent user messages from the
+    /// **current session only** and return a normalized, sanitized result.
+    ///
+    /// Security invariants:
+    /// - Only reads the current session (`session_id` is pinned by the caller).
+    /// - Never returns raw `payload_json`; only normalized `event_id` + `role`
+    ///   + `text` (truncated to `MAX_RECALL_CHARS` per message).
+    /// - `limit` is clamped to `1..=MAX_RECALL_LIMIT` (default 5).
+    /// - Optional `query` filters by case-insensitive substring on text.
+    /// - No cross-session access, no file system, no network.
+    fn execute_session_recall(
+        journal: &JournalStore,
+        session_id: &SessionId,
+        approved: &ApprovedInvocation,
+    ) -> (crate::domain::ReceiptStatus, serde_json::Value, String) {
+        const MAX_RECALL_LIMIT: usize = 20;
+        const MAX_RECALL_CHARS: usize = 500;
+
+        let args = &approved.intent().arguments;
+        let limit = args
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .map(|n| n.clamp(1, MAX_RECALL_LIMIT as u64) as usize)
+            .unwrap_or(5);
+        let query = args
+            .get("query")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_lowercase());
+
+        let messages = match journal.recent_user_messages(session_id, limit) {
+            Ok(msgs) => msgs,
+            Err(_) => {
+                return (
+                    crate::domain::ReceiptStatus::Failed,
+                    json!({ "error": "failed to read session history" }),
+                    "session recall failed".to_string(),
+                );
+            }
+        };
+
+        let mut results: Vec<serde_json::Value> = Vec::new();
+        for (event_id, text) in &messages {
+            // Optional case-insensitive substring filter.
+            if let Some(ref q) = query {
+                if !text.to_lowercase().contains(q) {
+                    continue;
+                }
+            }
+            // Truncate per-message text to the safety limit.
+            let truncated: String = text.chars().take(MAX_RECALL_CHARS).collect();
+            results.push(json!({
+                "event_id": event_id,
+                "role": "user",
+                "text": truncated,
+            }));
+        }
+
+        let output = json!({
+            "session_id": session_id.0,
+            "count": results.len(),
+            "messages": results,
+        });
+
+        // A compact text summary for the run outcome / ToolResult context.
+        let text = if results.is_empty() {
+            "no matching messages found".to_string()
+        } else {
+            results
+                .iter()
+                .filter_map(|m| m.get("text").and_then(|t| t.as_str()))
+                .collect::<Vec<_>>()
+                .join(" | ")
+        };
+
+        (crate::domain::ReceiptStatus::Succeeded, output, text)
     }
 
     pub fn deliver(
