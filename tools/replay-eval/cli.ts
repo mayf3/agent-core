@@ -220,9 +220,9 @@ async function main() {
       let baselineOutcome: ReplayOutcome;
       try {
         console.error(`replaying fixture ${fixture.fixture_id} against candidate...`);
-        candidateOutcome = await runFixtureAgainst(candidateWt!.binary, fixture, ipcToken);
+        candidateOutcome = await runFixtureAgainst(candidateWt!.binary, fixture, ipcToken, candidateWt!.dir);
         console.error(`replaying fixture ${fixture.fixture_id} against baseline...`);
-        baselineOutcome = await runFixtureAgainst(baselineWt!.binary, fixture, ipcToken);
+        baselineOutcome = await runFixtureAgainst(baselineWt!.binary, fixture, ipcToken, baselineWt!.dir);
       } catch (e) {
         const category = e instanceof DriverError ? e.category : "driver_crash";
         const safe = category === "ingress_failed" ? "ingress rejected" : `driver ${category}`;

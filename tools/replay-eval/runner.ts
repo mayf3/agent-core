@@ -98,9 +98,9 @@ export async function freePort(): Promise<number> {
  * Build the minimal environment for a candidate kernel process.
  * Exported for test verification of ambient isolation.
  *
- * The candidate gets PATH, a synthetic HOME pointing to its temporary runtime
- * directory, and stub credentials.  The operator's real HOME, shell config,
- * .env, tokens, and API keys are never inherited.
+ * HOME points to the fresh runtime directory (temp), not the operator's
+ * real home.  The candidate's cwd is its worktree so runtime-relative
+ * assets come from the correct revision.
  *
  * This is ambient-configuration isolation, not a security sandbox.
  * Candidate refs must still be trusted/reviewed until an external sandbox
@@ -124,9 +124,10 @@ export function buildCandidateEnv(runtimeDir: string, ipcToken: string): Record<
 /**
  * Start a Kernel build on an ephemeral port + ephemeral DB. Returns a handle
  * the caller must stop(). The DB is a fresh temp file (never production).
+ * @param worktreeCwd - the candidate/baseline worktree directory (for cwd).
  * Throws DriverError on infrastructure failures.
  */
-export async function startKernel(binaryPath: string, ipcToken: string): Promise<RunHandle> {
+export async function startKernel(binaryPath: string, ipcToken: string, worktreeCwd?: string): Promise<RunHandle> {
   const dir = mkdtempSync(join(tmpdir(), "replay-kernel-"));
   const dbPath = join(dir, "ephemeral.db");
   let port: number;
@@ -139,7 +140,7 @@ export async function startKernel(binaryPath: string, ipcToken: string): Promise
   let child: ReturnType<typeof spawn>;
   try {
     child = spawn(binaryPath, ["serve", "--db", dbPath, "--port", String(port)], {
-      cwd: dir,
+      cwd: worktreeCwd ?? dir,
       stdio: "pipe",
       env: buildCandidateEnv(dir, ipcToken),
     });
@@ -196,25 +197,38 @@ export async function postTurn(handle: RunHandle, fixture: Fixture, turnIndex: n
   }
 }
 
-/** Health snapshot fields the runner consumes. */
-interface HealthSnapshot {
-  recent_runs_total?: number;
-  completed_runs?: number;
-  failed_runs?: number;
-  worker_jobs?: { pending?: number; running?: number; retryable?: number };
-  outbox_dispatches?: { pending?: number; dispatching?: number; retryable?: number };
-  ok?: boolean;
+/**
+ * Sum the numeric values of a status-count map (worker_jobs or
+ * outbox_dispatches in the Kernel's /health snapshot).
+ */
+function sumCounts(m: Record<string, number> | undefined): number {
+  if (!m) return 0;
+  let s = 0;
+  for (const v of Object.values(m)) {
+    if (typeof v === "number") s += v;
+  }
+  return s;
 }
+
+/** The real Kernel /health exposes worker_jobs and outbox_dispatches as
+ *  status-count maps (e.g. {"queued": 0, "running": 0, "succeeded": 1}) */
+interface HealthSnapshot {
+  worker_jobs?: Record<string, number>;
+  outbox_dispatches?: Record<string, number>;
+}
+
+const ACTIVE_WORKER_KEYS = new Set(["queued", "running", "retryable_failed"]);
+const ACTIVE_OUTBOX_KEYS = new Set(["pending", "dispatching", "retryable_failed"]);
 
 /**
  * Poll /health until the Kernel has settled for a multi-turn fixture, or
  * timeout.  Settlement means:
- *   - the expected number of turns are represented by worker jobs/runs;
- *   - no worker job is queued/running/retryable;
- *   - no outbox dispatch is pending/dispatching/retryable.
+ *   - the expected number of turns are represented by total worker_jobs;
+ *   - no worker job is queued/running/retryable_failed;
+ *   - no outbox dispatch is pending/dispatching/retryable_failed.
  *
- * Terminal/dead/failed/unknown states are treated as settled evidence, not
- * active work.
+ * Terminal/succeeded/failed/unknown counts are treated as settled
+ * evidence, not active work.
  */
 export async function pollUntilTerminal(
   handle: RunHandle,
@@ -230,26 +244,18 @@ export async function pollUntilTerminal(
         continue;
       }
       const health = (await res.json()) as HealthSnapshot;
-      const totalRuns = (health.recent_runs_total ?? 0) +
-                        (health.completed_runs ?? 0) +
-                        (health.failed_runs ?? 0);
+      const totalJobs = sumCounts(health.worker_jobs);
       const hasExpectedTurns = expectedTurns
-        ? totalRuns >= expectedTurns
-        : totalRuns > 0;
+        ? totalJobs >= expectedTurns
+        : totalJobs > 0;
       if (!hasExpectedTurns) {
         await sleep(POLL_INTERVAL_MS);
         continue;
       }
       const wj = health.worker_jobs ?? {};
       const od = health.outbox_dispatches ?? {};
-      const hasActiveJobs =
-        (wj.pending ?? 0) > 0 ||
-        (wj.running ?? 0) > 0 ||
-        (wj.retryable ?? 0) > 0;
-      const hasActiveDispatches =
-        (od.pending ?? 0) > 0 ||
-        (od.dispatching ?? 0) > 0 ||
-        (od.retryable ?? 0) > 0;
+      const hasActiveJobs = [...ACTIVE_WORKER_KEYS].some((k) => (wj[k] ?? 0) > 0);
+      const hasActiveDispatches = [...ACTIVE_OUTBOX_KEYS].some((k) => (od[k] ?? 0) > 0);
       if (!hasActiveJobs && !hasActiveDispatches) {
         return { completed: true, latencyMs: Date.now() - start };
       }
@@ -339,8 +345,9 @@ export async function runFixtureAgainst(
   binaryPath: string,
   fixture: Fixture,
   ipcToken: string,
+  worktreeDir?: string,
 ): Promise<ReplayOutcome> {
-  const handle = await startKernel(binaryPath, ipcToken);
+  const handle = await startKernel(binaryPath, ipcToken, worktreeDir);
   try {
     await waitForReady(handle);
     for (let i = 0; i < fixture.turns.length; i++) {

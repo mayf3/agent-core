@@ -15,7 +15,7 @@ import { join, resolve } from "node:path";
 const ALLOWED_DRIVER_CATEGORIES = new Set([
   "port_binding", "kernel_startup", "kernel_not_ready",
   "ingress_failed", "driver_crash", "driver_failure",
-  "spawn_failure", "timeout",
+  "spawn_failure", "timeout", "internal_driver_error",
 ]);
 
 export function sanitizeCategory(raw: string): string {
@@ -25,11 +25,12 @@ export function sanitizeCategory(raw: string): string {
 /**
  * Classify a subprocess result into a stable sanitized error category.
  * Invariant: every non-zero/errored child gets a non-null category.
+ * errorCode from the runner is routed through the whitelist so arbitrary
+ * OS/runtime details are never persisted.
  */
 export function classifyChildError(r: RunnerResult): string | null {
   if (r.errorCode !== null) {
-    // errorCode is already stable (spawn_failure, timeout from defaultRunner).
-    return r.errorCode;
+    return sanitizeCategory(r.errorCode);
   }
   if (r.status === null) {
     return "timeout";
@@ -131,6 +132,53 @@ export interface EvalEvidence {
 
 export type Decision = "pass" | "blocked";
 
+/** Strict parser for score.json.summary.  Returns undefined for any
+ *  malformed/unknown/incomplete value so the caller blocks conservatively. */
+export function parseSummary(raw: unknown): ReplaySummary | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const o = raw as Record<string, unknown>;
+  const verdict = o.verdict;
+  if (verdict !== "improve" && verdict !== "regress" && verdict !== "neutral" && verdict !== "no-fixtures") {
+    return undefined;
+  }
+  // For no-fixtures, numeric fields are not required.
+  if (verdict === "no-fixtures") {
+    return { verdict };
+  }
+  // For other verdicts, candidateScore and baselineScore must be finite numbers.
+  const cs = o.candidateScore;
+  const bs = o.baselineScore;
+  if (typeof cs !== "number" || !Number.isFinite(cs)) return undefined;
+  if (typeof bs !== "number" || !Number.isFinite(bs)) return undefined;
+  const delta = typeof o.delta === "number" && Number.isFinite(o.delta) ? o.delta : cs - bs;
+  return { verdict, candidateScore: cs, baselineScore: bs, delta };
+}
+
+export interface HarnessExit {
+  code: number;
+}
+
+/**
+ * Classify the overall harness exit code from evidence and decision.
+ * Publically exported for testability of exact 0/5/10 values.
+ *
+ * - Any child infrastructure/driver error -> exit 5 (internal_error).
+ * - Genuine parsed candidate regression / hard fail / audit red-line with
+ *   children successfully executed -> exit 10 (blocked).
+ * - Clean evidence -> exit 0.
+ *
+ * Internal error wins if both appear (the harness itself failed).
+ */
+export function classifyHarnessExit(evidence: EvalEvidence | null, decision: Decision | null): HarnessExit {
+  if (evidence?.children.some((c) => c.error_category !== null)) {
+    return { code: 5 };
+  }
+  if (decision === "blocked") {
+    return { code: 10 };
+  }
+  return { code: 0 };
+}
+
 /**
  * Run replay-eval (if fixturesDir) and audit-report (if auditDb) via the
  * runner, copy their outputs into runDir, and derive a decision. NEVER
@@ -169,7 +217,7 @@ export function runEvaluation(inputs: EvalInputs, runner: CommandRunner = defaul
     if (existsSync(scorePath)) {
       try {
         const score = JSON.parse(readFileSync(scorePath, "utf8"));
-        evidence.replay.summary = score.summary;
+        evidence.replay.summary = parseSummary(score.summary);
         evidence.replay.anyHardFail = Array.isArray(score.fixtures) && score.fixtures.some((f: any) => f.candidate?.hardFail);
         // Surface per-fixture driver error categories from score.json.
         if (Array.isArray(score.errors)) {

@@ -25,7 +25,7 @@ import { readFileSync, writeFileSync, existsSync, statSync, mkdirSync } from "no
 import { resolve, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { runEvaluation, type Decision, type EvalEvidence } from "./evaluate.ts";
+import { runEvaluation, classifyHarnessExit, type Decision, type EvalEvidence } from "./evaluate.ts";
 
 const FORBIDDEN_SEGMENTS = [".env", ".agent-core", ".openduck", ".openclaw", "logs"];
 
@@ -349,15 +349,7 @@ export function main(): RunManifest {
   reportLines.push("");
   writeFileSync(join(runDir, "evolution-report.md"), reportLines.join("\n"));
 
-  let exitCode = 0;
-  // internal_error (spawn failure, timeout) wins over blocked — a child that
-  // couldn't start at all is an infrastructure problem, not a candidate
-  // regression.
-  if (evidence?.children.some((c) => c.error_category !== null)) {
-    exitCode = EXIT_INTERNAL_ERROR;
-  } else if (decision === "blocked") {
-    exitCode = EXIT_BLOCKED;
-  }
+  const { code: exitCode } = classifyHarnessExit(evidence, decision);
 
   const manifest: RunManifest = {
     run_id: id,

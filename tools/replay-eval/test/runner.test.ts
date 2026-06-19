@@ -88,19 +88,15 @@ test("no additional worktrees leaked at repo level", () => {
 // --- pollUntilTerminal ---
 
 test("pollUntilTerminal with synthetic single-turn health returns completed", async () => {
-  // Use freePort to get a real port; we intercept fetch in a local server.
   const port = await freePort();
   const handle = { port, process: null as any, dbPath: "/tmp/fake.db", ipcToken: "t" };
 
-  // Start a tiny HTTP server that returns a settled health snapshot.
-  const { createServer } = await import("node:net");
   const http = await import("node:http");
   const server = http.createServer((_req, res) => {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({
-      recent_runs_total: 1,
-      worker_jobs: { pending: 0, running: 0, retryable: 0 },
-      outbox_dispatches: { pending: 0, dispatching: 0, retryable: 0 },
+      worker_jobs: { queued: 0, running: 0, succeeded: 1, failed: 0, retryable_failed: 0 },
+      outbox_dispatches: { pending: 0, dispatching: 0, succeeded: 1, failed: 0, retryable_failed: 0 },
     }));
   });
   await new Promise<void>((resolve) => server.listen(port, "127.0.0.1", resolve));
@@ -123,11 +119,11 @@ test("pollUntilTerminal with two-turn fixture does not settle after first turn",
   const server = http.createServer((_req, res) => {
     callCount++;
     res.writeHead(200, { "Content-Type": "application/json" });
-    // First response: only 1 run (not enough for 2-turn fixture).
-    // Second+: settled.
+    // First: only 1 total worker_job (not enough for 2-turn fixture).
+    // Second: 2 total jobs, no active queue/outbox -> settled.
     const snapshot = callCount <= 1
-      ? { recent_runs_total: 1, worker_jobs: { pending: 0, running: 0 }, outbox_dispatches: { pending: 0 } }
-      : { recent_runs_total: 2, worker_jobs: { pending: 0, running: 0 }, outbox_dispatches: { pending: 0 } };
+      ? { worker_jobs: { queued: 0, running: 0, succeeded: 1, failed: 0, retryable_failed: 0 }, outbox_dispatches: { pending: 0, dispatching: 0, succeeded: 0 } }
+      : { worker_jobs: { queued: 0, running: 0, succeeded: 2, failed: 0, retryable_failed: 0 }, outbox_dispatches: { pending: 0, dispatching: 0, succeeded: 2 } };
     res.end(JSON.stringify(snapshot));
   });
   await new Promise<void>((resolve) => server.listen(port, "127.0.0.1", resolve));
@@ -144,13 +140,15 @@ test("pollUntilTerminal with two-turn fixture does not settle after first turn",
 
 // --- environment isolation ---
 
-test("buildCandidateEnv sets HOME to runtime dir and does not leak process.env", async () => {
+test("buildCandidateEnv sets HOME to runtime dir, cwd is separate worktree", async () => {
   const { buildCandidateEnv } = await import("../runner.ts");
   const runtimeDir = "/tmp/test-runtime-123";
   const env = buildCandidateEnv(runtimeDir, "test-token");
   // HOME must be the synthetic runtime dir, not the real $HOME.
   assert.equal(env.HOME, runtimeDir, "HOME must be synthetic runtime dir");
   assert.notEqual(env.HOME, process.env.HOME, "must not leak real HOME");
+  // No ambient secret variables inherited.
+  assert.equal(env.AGENT_CORE_IPC_TOKEN, "test-token");
   // Only allowed env vars present.
   const allowed = ["PATH", "HOME", "AGENT_CORE_IPC_TOKEN",
     "AGENT_CORE_OPENAI_API_KEY", "AGENT_CORE_FALLBACK_OPENAI_API_KEY",
@@ -165,4 +163,6 @@ test("buildCandidateEnv sets HOME to runtime dir and does not leak process.env",
   assert.match(env.AGENT_CORE_OPENAI_API_KEY, /^replay-stub-key/);
   assert.match(env.AGENT_CORE_FALLBACK_OPENAI_API_KEY, /^replay-stub-key/);
   assert.equal(env.AGENT_CORE_MODEL, "local");
+  // cwd is NOT part of env — it is set separately via spawn() cwd option.
+  // The caller (startKernel) passes worktreeCwd as spawn cwd.
 });

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { runEvaluation, decide, classifyChildError, sanitizeCategory, type RunnerResult, type EvalEvidence, type CommandRunner } from "../evaluate.ts";
+import { runEvaluation, decide, classifyChildError, sanitizeCategory, classifyHarnessExit, parseSummary, type RunnerResult, type EvalEvidence, type CommandRunner } from "../evaluate.ts";
 
 /** A fake runner that simulates replay-eval/audit-report writing outputs. */
 function fakeRunner(overrides: {
@@ -64,7 +64,7 @@ test("evaluate: clean replay + clean audit => pass", () => {
     // Provide an auditDb so the audit branch actually runs (the fake runner
     // ignores the path content; it just needs runEvaluation to invoke audit).
     const { decision, evidence } = runEvaluation(inputs(dir, { auditDb: join(dir, "snap.db") }), fakeRunner({
-      replay: { status: 0, score: { summary: { verdict: "neutral" }, fixtures: [{ candidate: { hardFail: false } }] } },
+      replay: { status: 0, score: { summary: { verdict: "neutral", candidateScore: 1, baselineScore: 1 }, fixtures: [{ candidate: { hardFail: false } }] } },
       audit: { status: 0, report: { hash_chain: { integrity: "ok" }, unknown_dispatches: { count: 0 }, projection_drift: { count: 0 }, undelivered_ingress: { count: 0 } } },
     }));
     assert.equal(decision, "pass");
@@ -82,7 +82,7 @@ test("evaluate: replay regress => blocked", () => {
   try {
     mkdirSync(join(dir, "fixtures"));
     const { decision } = runEvaluation(inputs(dir), fakeRunner({
-      replay: { status: 0, score: { summary: { verdict: "regress" }, fixtures: [{ candidate: { hardFail: false } }] } },
+      replay: { status: 0, score: { summary: { verdict: "regress", candidateScore: 0.5, baselineScore: 0.8 }, fixtures: [{ candidate: { hardFail: false } }] } },
     }));
     assert.equal(decision, "blocked");
   } finally {
@@ -95,7 +95,7 @@ test("evaluate: replay hardFail => blocked", () => {
   try {
     mkdirSync(join(dir, "fixtures"));
     const { decision } = runEvaluation(inputs(dir), fakeRunner({
-      replay: { status: 0, score: { summary: { verdict: "neutral" }, fixtures: [{ candidate: { hardFail: true } }] } },
+      replay: { status: 0, score: { summary: { verdict: "neutral", candidateScore: 1, baselineScore: 1 }, fixtures: [{ candidate: { hardFail: true } }] } },
     }));
     assert.equal(decision, "blocked");
   } finally {
@@ -205,14 +205,20 @@ test("evaluate: runner cwd comes from inputs.repoRoot", () => {
   mkdirSync(rootDir, { recursive: true });
   mkdirSync(join(dir, "fixtures"));
   let capturedCwd = "";
-  const runner: CommandRunner = (argv, cwd) => {
-    if (argv.join(" ").includes("replay-eval")) {
-      capturedCwd = cwd ?? "";
-    }
-    return { stdout: "", stderr: "", status: 0, errorCode: null };
-  };
-  runEvaluation({
-    repoRoot: rootDir,
+    const runner: CommandRunner = (argv, cwd) => {
+      if (argv.join(" ").includes("replay-eval")) {
+        capturedCwd = cwd ?? "";
+        // Must write score.json so parseSummary gets valid data.
+        const outIdx = argv.indexOf("--out-dir");
+        const outDir = outIdx >= 0 ? argv[outIdx + 1] : join(dir, "out");
+        mkdirSync(outDir, { recursive: true });
+        writeFileSync(join(outDir, "score.json"), JSON.stringify({ summary: { verdict: "neutral", candidateScore: 1, baselineScore: 1 }, fixtures: [] }));
+        writeFileSync(join(outDir, "report.md"), "# replay\n");
+      }
+      return { stdout: "", stderr: "", status: 0, errorCode: null };
+    };
+    runEvaluation({
+      repoRoot: rootDir,
     candidateRef: "main",
     candidateCommit: "abc",
     baseRef: "main",
@@ -328,6 +334,11 @@ test("classifyChildError: non-zero status with errorCode preserves errorCode", (
   assert.equal(classifyChildError({ status: 1, errorCode: "spawn_failure" } as RunnerResult), "spawn_failure");
 });
 
+test("classifyChildError: arbitrary errorCode is sanitized through whitelist", () => {
+  assert.equal(classifyChildError({ status: 1, errorCode: "arbitrary-os-detail" } as RunnerResult), "internal_driver_error");
+  assert.equal(classifyChildError({ status: null, errorCode: "unknown-error" } as RunnerResult), "internal_driver_error");
+});
+
 // --- sanitizeCategory ---
 
 test("sanitizeCategory: known categories pass through", () => {
@@ -339,6 +350,68 @@ test("sanitizeCategory: known categories pass through", () => {
 test("sanitizeCategory: unknown category maps to internal_driver_error", () => {
   assert.equal(sanitizeCategory("arbitrary stderr text"), "internal_driver_error");
   assert.equal(sanitizeCategory(""), "internal_driver_error");
+});
+
+// --- parseSummary ---
+
+test("parseSummary: valid regress with scores succeeds", () => {
+  const s = parseSummary({ verdict: "regress", candidateScore: 0.5, baselineScore: 0.8 });
+  assert.ok(s, "valid regress must parse");
+  assert.equal(s!.verdict, "regress");
+  assert.equal(s!.candidateScore, 0.5);
+  assert.equal(s!.baselineScore, 0.8);
+  assert.ok(typeof s!.delta === "number");
+  assert.ok(Math.abs(s!.delta - (-0.3)) < 0.001, `delta ${s!.delta} !== -0.3`);
+});
+
+test("parseSummary: valid no-fixtures succeeds without numeric fields", () => {
+  const s = parseSummary({ verdict: "no-fixtures" });
+  assert.ok(s, "valid no-fixtures must parse");
+  assert.equal(s!.verdict, "no-fixtures");
+  assert.equal(s!.candidateScore, undefined);
+});
+
+test("parseSummary: unknown verdict returns undefined", () => {
+  assert.equal(parseSummary({ verdict: "bogus" }), undefined);
+  assert.equal(parseSummary({ verdict: "impossible" }), undefined);
+  assert.equal(parseSummary({ verdict: "pass" }), undefined);
+});
+
+test("parseSummary: string score returns undefined", () => {
+  assert.equal(parseSummary({ verdict: "regress", candidateScore: "0.5", baselineScore: 0.8 }), undefined);
+});
+
+test("parseSummary: missing scores on regress returns undefined", () => {
+  assert.equal(parseSummary({ verdict: "regress" }), undefined);
+});
+
+test("parseSummary: null/undefined/invalid input returns undefined", () => {
+  assert.equal(parseSummary(null), undefined);
+  assert.equal(parseSummary(undefined), undefined);
+  assert.equal(parseSummary("string"), undefined);
+});
+
+// --- classifyHarnessExit ---
+
+test("classifyHarnessExit: clean evidence -> exit 0", () => {
+  const evidence = { children: [] } as unknown as EvalEvidence;
+  assert.equal(classifyHarnessExit(evidence, "pass").code, 0);
+  assert.equal(classifyHarnessExit(null, null).code, 0);
+});
+
+test("classifyHarnessExit: any child error -> exit 5", () => {
+  const evidence = {
+    children: [{ error_category: "driver_failure" }],
+  } as unknown as EvalEvidence;
+  assert.equal(classifyHarnessExit(evidence, "blocked").code, 5, "error wins over blocked");
+  assert.equal(classifyHarnessExit(evidence, "pass").code, 5);
+});
+
+test("classifyHarnessExit: genuine red-line with clean children -> exit 10", () => {
+  const evidence = {
+    children: [{ error_category: null }],
+  } as unknown as EvalEvidence;
+  assert.equal(classifyHarnessExit(evidence, "blocked").code, 10);
 });
 
 // --- audit non-zero exit classification ---
@@ -379,7 +452,7 @@ test("evaluate: runner cwd comes from inputs.repoRoot", () => {
       const bIdx = argv.indexOf("--baseline");
       if (cIdx >= 0) seenCandidate = argv[cIdx + 1];
       if (bIdx >= 0) seenBase = argv[bIdx + 1];
-      return fakeRunner({ replay: { status: 0, score: { summary: { verdict: "neutral" }, fixtures: [] } } })(argv);
+      return fakeRunner({ replay: { status: 0, score: { summary: { verdict: "neutral", candidateScore: 1, baselineScore: 1 }, fixtures: [] } } })(argv);
     };
     runEvaluation({ ...inputs(dir), candidateCommit: "deadbee", baseCommit: "feedface" }, runner);
     assert.equal(seenCandidate, "deadbee", "candidate pinned to commit");
