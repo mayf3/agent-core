@@ -95,6 +95,33 @@ export async function freePort(): Promise<number> {
 }
 
 /**
+ * Build the minimal environment for a candidate kernel process.
+ * Exported for test verification of ambient isolation.
+ *
+ * The candidate gets PATH, a synthetic HOME pointing to its temporary runtime
+ * directory, and stub credentials.  The operator's real HOME, shell config,
+ * .env, tokens, and API keys are never inherited.
+ *
+ * This is ambient-configuration isolation, not a security sandbox.
+ * Candidate refs must still be trusted/reviewed until an external sandbox
+ * harness exists.  Do not spread process.env.
+ */
+export function buildCandidateEnv(runtimeDir: string, ipcToken: string): Record<string, string> {
+  return {
+    PATH: process.env.PATH ?? "",
+    HOME: runtimeDir,
+    AGENT_CORE_IPC_TOKEN: ipcToken,
+    AGENT_CORE_OPENAI_API_KEY: "replay-stub-key",
+    AGENT_CORE_FALLBACK_OPENAI_API_KEY: "replay-stub-key",
+    AGENT_CORE_MODEL: "local",
+    AGENT_CORE_OPENAI_BASE_URL: "http://127.0.0.1:0/v1",
+    AGENT_CORE_FALLBACK_OPENAI_BASE_URL: "http://127.0.0.1:0/v1",
+    AGENT_CORE_OUTBOX_DISPATCHER_ENABLED: "true",
+    AGENT_CORE_CONNECTOR_EXECUTE_URL: "http://127.0.0.1:0/v1/execute",
+  };
+}
+
+/**
  * Start a Kernel build on an ephemeral port + ephemeral DB. Returns a handle
  * the caller must stop(). The DB is a fresh temp file (never production).
  * Throws DriverError on infrastructure failures.
@@ -112,24 +139,9 @@ export async function startKernel(binaryPath: string, ipcToken: string): Promise
   let child: ReturnType<typeof spawn>;
   try {
     child = spawn(binaryPath, ["serve", "--db", dbPath, "--port", String(port)], {
+      cwd: dir,
       stdio: "pipe",
-      // Minimal, explicit env only — do NOT spread process.env. Spreading would
-      // leak the operator's real secrets (OPENAI_API_KEY, IPC_TOKEN, etc. from
-      // .env or shell) into the candidate process, violating the harness's
-      // "never touch secrets" boundary. The candidate uses LocalEchoLlm (the
-      // stub key below is never a real credential) and a fresh ephemeral DB.
-      env: {
-        PATH: process.env.PATH ?? "",
-        HOME: process.env.HOME ?? "",
-        AGENT_CORE_IPC_TOKEN: ipcToken,
-        AGENT_CORE_OPENAI_API_KEY: "replay-stub-key",
-        AGENT_CORE_FALLBACK_OPENAI_API_KEY: "replay-stub-key",
-        AGENT_CORE_MODEL: "local",
-        AGENT_CORE_OPENAI_BASE_URL: "http://127.0.0.1:0/v1",
-        AGENT_CORE_FALLBACK_OPENAI_BASE_URL: "http://127.0.0.1:0/v1",
-        AGENT_CORE_OUTBOX_DISPATCHER_ENABLED: "true",
-        AGENT_CORE_CONNECTOR_EXECUTE_URL: "http://127.0.0.1:0/v1/execute",
-      },
+      env: buildCandidateEnv(dir, ipcToken),
     });
   } catch (e) {
     rmSync(dir, { recursive: true, force: true });
@@ -184,21 +196,62 @@ export async function postTurn(handle: RunHandle, fixture: Fixture, turnIndex: n
   }
 }
 
-/** Poll /health until the run appears terminal or timeout. */
-export async function pollUntilTerminal(handle: RunHandle): Promise<{ completed: boolean; latencyMs: number }> {
+/** Health snapshot fields the runner consumes. */
+interface HealthSnapshot {
+  recent_runs_total?: number;
+  completed_runs?: number;
+  failed_runs?: number;
+  worker_jobs?: { pending?: number; running?: number; retryable?: number };
+  outbox_dispatches?: { pending?: number; dispatching?: number; retryable?: number };
+  ok?: boolean;
+}
+
+/**
+ * Poll /health until the Kernel has settled for a multi-turn fixture, or
+ * timeout.  Settlement means:
+ *   - the expected number of turns are represented by worker jobs/runs;
+ *   - no worker job is queued/running/retryable;
+ *   - no outbox dispatch is pending/dispatching/retryable.
+ *
+ * Terminal/dead/failed/unknown states are treated as settled evidence, not
+ * active work.
+ */
+export async function pollUntilTerminal(
+  handle: RunHandle,
+  expectedTurns?: number,
+): Promise<{ completed: boolean; latencyMs: number }> {
   const start = Date.now();
   const deadline = start + POLL_TIMEOUT_MS;
   while (Date.now() < deadline) {
     try {
       const res = await fetch(`http://127.0.0.1:${handle.port}/health`);
-      if (res.ok) {
-        const health = (await res.json()) as { recent_runs_total?: number; completed_runs?: number };
-        // The Kernel processes synchronously; once health responds the turn is
-        // settled. A real MVP would inspect the run status; we approximate
-        // completion by the absence of a 5xx and a non-zero run count.
-        if ((health.recent_runs_total ?? 0) > 0) {
-          return { completed: true, latencyMs: Date.now() - start };
-        }
+      if (!res.ok) {
+        await sleep(POLL_INTERVAL_MS);
+        continue;
+      }
+      const health = (await res.json()) as HealthSnapshot;
+      const totalRuns = (health.recent_runs_total ?? 0) +
+                        (health.completed_runs ?? 0) +
+                        (health.failed_runs ?? 0);
+      const hasExpectedTurns = expectedTurns
+        ? totalRuns >= expectedTurns
+        : totalRuns > 0;
+      if (!hasExpectedTurns) {
+        await sleep(POLL_INTERVAL_MS);
+        continue;
+      }
+      const wj = health.worker_jobs ?? {};
+      const od = health.outbox_dispatches ?? {};
+      const hasActiveJobs =
+        (wj.pending ?? 0) > 0 ||
+        (wj.running ?? 0) > 0 ||
+        (wj.retryable ?? 0) > 0;
+      const hasActiveDispatches =
+        (od.pending ?? 0) > 0 ||
+        (od.dispatching ?? 0) > 0 ||
+        (od.retryable ?? 0) > 0;
+      if (!hasActiveJobs && !hasActiveDispatches) {
+        return { completed: true, latencyMs: Date.now() - start };
       }
     } catch {
       // transient
@@ -293,7 +346,7 @@ export async function runFixtureAgainst(
     for (let i = 0; i < fixture.turns.length; i++) {
       await postTurn(handle, fixture, i);
     }
-    await pollUntilTerminal(handle);
+    await pollUntilTerminal(handle, fixture.turns.length);
     return readOutcome(handle.dbPath, fixture);
   } catch (e) {
     if (e instanceof DriverError) throw e;

@@ -246,8 +246,12 @@ export function main(): RunManifest {
   if (evidence?.replay.ran && decision === "blocked") {
     const r = evidence.replay;
     if (r.anyHardFail) blockedReasons.push("replay: candidate hardFail detected");
-    else if (r.summary?.verdict === "regress") blockedReasons.push(`replay: verdict = regress (candidate ${r.summary.candidateScore.toFixed(2)} vs baseline ${r.summary.baselineScore.toFixed(2)})`);
-    else if (r.summary?.verdict === "no-fixtures") blockedReasons.push("replay: zero fixtures scored (all driver failures)");
+    else if (r.summary?.verdict === "regress") {
+      // Guard: candidateScore/baselineScore may be undefined for no-fixtures.
+      const cs = typeof r.summary.candidateScore === "number" ? r.summary.candidateScore.toFixed(2) : "?";
+      const bs = typeof r.summary.baselineScore === "number" ? r.summary.baselineScore.toFixed(2) : "?";
+      blockedReasons.push(`replay: verdict = regress (candidate ${cs} vs baseline ${bs})`);
+    } else if (r.summary?.verdict === "no-fixtures") blockedReasons.push("replay: zero fixtures scored (all driver failures)");
     else if (!r.summary) blockedReasons.push("replay: no parseable summary (score.json malformed)");
   }
   if (evidence?.audit.ran && decision === "blocked") {
@@ -381,6 +385,7 @@ export function main(): RunManifest {
   console.log(`  plan.json + evolution-report.md + manifest.json${decision ? ` (decision: ${decision})` : ""}`);
 
   if (exitCode !== 0) process.exit(exitCode);
+  return manifest;
 }
 
 // Run as a CLI entry only when invoked directly (not when imported by tests).

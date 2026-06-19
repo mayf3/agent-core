@@ -84,3 +84,85 @@ test("no additional worktrees leaked at repo level", () => {
   assert.equal(worktreeCountAfter, worktreeCountBefore,
     `worktree count unchanged (before=${worktreeCountBefore}, after=${worktreeCountAfter})`);
 });
+
+// --- pollUntilTerminal ---
+
+test("pollUntilTerminal with synthetic single-turn health returns completed", async () => {
+  // Use freePort to get a real port; we intercept fetch in a local server.
+  const port = await freePort();
+  const handle = { port, process: null as any, dbPath: "/tmp/fake.db", ipcToken: "t" };
+
+  // Start a tiny HTTP server that returns a settled health snapshot.
+  const { createServer } = await import("node:net");
+  const http = await import("node:http");
+  const server = http.createServer((_req, res) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({
+      recent_runs_total: 1,
+      worker_jobs: { pending: 0, running: 0, retryable: 0 },
+      outbox_dispatches: { pending: 0, dispatching: 0, retryable: 0 },
+    }));
+  });
+  await new Promise<void>((resolve) => server.listen(port, "127.0.0.1", resolve));
+
+  try {
+    const { pollUntilTerminal } = await import("../runner.ts");
+    const result = await pollUntilTerminal(handle as any, 1);
+    assert.equal(result.completed, true, "single settled turn must complete");
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("pollUntilTerminal with two-turn fixture does not settle after first turn", async () => {
+  const port = await freePort();
+  const handle = { port, process: null as any, dbPath: "/tmp/fake.db", ipcToken: "t" };
+  let callCount = 0;
+
+  const http = await import("node:http");
+  const server = http.createServer((_req, res) => {
+    callCount++;
+    res.writeHead(200, { "Content-Type": "application/json" });
+    // First response: only 1 run (not enough for 2-turn fixture).
+    // Second+: settled.
+    const snapshot = callCount <= 1
+      ? { recent_runs_total: 1, worker_jobs: { pending: 0, running: 0 }, outbox_dispatches: { pending: 0 } }
+      : { recent_runs_total: 2, worker_jobs: { pending: 0, running: 0 }, outbox_dispatches: { pending: 0 } };
+    res.end(JSON.stringify(snapshot));
+  });
+  await new Promise<void>((resolve) => server.listen(port, "127.0.0.1", resolve));
+
+  try {
+    const { pollUntilTerminal } = await import("../runner.ts");
+    const result = await pollUntilTerminal(handle as any, 2);
+    assert.equal(result.completed, true, "two-turn fixture must settle after both turns");
+    assert.ok(callCount >= 2, `expected at least 2 health calls, got ${callCount}`);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+// --- environment isolation ---
+
+test("buildCandidateEnv sets HOME to runtime dir and does not leak process.env", async () => {
+  const { buildCandidateEnv } = await import("../runner.ts");
+  const runtimeDir = "/tmp/test-runtime-123";
+  const env = buildCandidateEnv(runtimeDir, "test-token");
+  // HOME must be the synthetic runtime dir, not the real $HOME.
+  assert.equal(env.HOME, runtimeDir, "HOME must be synthetic runtime dir");
+  assert.notEqual(env.HOME, process.env.HOME, "must not leak real HOME");
+  // Only allowed env vars present.
+  const allowed = ["PATH", "HOME", "AGENT_CORE_IPC_TOKEN",
+    "AGENT_CORE_OPENAI_API_KEY", "AGENT_CORE_FALLBACK_OPENAI_API_KEY",
+    "AGENT_CORE_MODEL", "AGENT_CORE_OPENAI_BASE_URL",
+    "AGENT_CORE_FALLBACK_OPENAI_BASE_URL",
+    "AGENT_CORE_OUTBOX_DISPATCHER_ENABLED",
+    "AGENT_CORE_CONNECTOR_EXECUTE_URL"];
+  for (const key of Object.keys(env)) {
+    assert.ok(allowed.includes(key), `unexpected env var: ${key}`);
+  }
+  // Stub credentials, not real values.
+  assert.match(env.AGENT_CORE_OPENAI_API_KEY, /^replay-stub-key/);
+  assert.match(env.AGENT_CORE_FALLBACK_OPENAI_API_KEY, /^replay-stub-key/);
+  assert.equal(env.AGENT_CORE_MODEL, "local");
+});

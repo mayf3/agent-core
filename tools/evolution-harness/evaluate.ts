@@ -12,6 +12,34 @@ import { spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 
+const ALLOWED_DRIVER_CATEGORIES = new Set([
+  "port_binding", "kernel_startup", "kernel_not_ready",
+  "ingress_failed", "driver_crash", "driver_failure",
+  "spawn_failure", "timeout",
+]);
+
+export function sanitizeCategory(raw: string): string {
+  return ALLOWED_DRIVER_CATEGORIES.has(raw) ? raw : "internal_driver_error";
+}
+
+/**
+ * Classify a subprocess result into a stable sanitized error category.
+ * Invariant: every non-zero/errored child gets a non-null category.
+ */
+export function classifyChildError(r: RunnerResult): string | null {
+  if (r.errorCode !== null) {
+    // errorCode is already stable (spawn_failure, timeout from defaultRunner).
+    return r.errorCode;
+  }
+  if (r.status === null) {
+    return "timeout";
+  }
+  if (r.status !== 0) {
+    return "driver_failure";
+  }
+  return null;
+}
+
 export interface RunnerResult {
   stdout: string;
   stderr: string;
@@ -69,11 +97,20 @@ export interface ChildRunInfo {
   artifacts_produced: number;
 }
 
+/** Shape of replay-eval score.json.summary. All verdicts except no-fixtures
+ *  carry numeric scores. */
+export interface ReplaySummary {
+  verdict: "improve" | "regress" | "neutral" | "no-fixtures";
+  candidateScore?: number;
+  baselineScore?: number;
+  delta?: number;
+}
+
 export interface EvalEvidence {
   replay: {
     ran: boolean;
     exitCode: number | null;
-    summary?: { verdict?: "improve" | "regress" | "neutral" | "no-fixtures" };
+    summary?: ReplaySummary;
     anyHardFail?: boolean;
     /** Whitelisted driver error categories from score.json.errors[].category. */
     errorCategories?: string[];
@@ -122,9 +159,7 @@ export function runEvaluation(inputs: EvalInputs, runner: CommandRunner = defaul
     const startedAt = new Date().toISOString();
     const r = runner(argv, inputs.repoRoot);
     const finishedAt = new Date().toISOString();
-    // Non-zero child exit without a spawn error is a driver/infrastructure failure.
-    let errorCategory: string | null = r.errorCode;
-    if (r.status !== 0 && errorCategory === null) errorCategory = "driver_failure";
+    const errorCategory = classifyChildError(r);
     evidence.replay = { ran: true, exitCode: r.status };
     const scorePath = join(replayOut, "score.json");
     const reportPath = join(replayOut, "report.md");
@@ -140,7 +175,7 @@ export function runEvaluation(inputs: EvalInputs, runner: CommandRunner = defaul
         if (Array.isArray(score.errors)) {
           for (const e of score.errors) {
             if (typeof e.category === "string" && e.category.length > 0) {
-              replayErrors.push(e.category);
+              replayErrors.push(sanitizeCategory(e.category));
             }
           }
         }
@@ -178,9 +213,7 @@ export function runEvaluation(inputs: EvalInputs, runner: CommandRunner = defaul
     const startedAt = new Date().toISOString();
     const r = runner(argv, inputs.repoRoot);
     const finishedAt = new Date().toISOString();
-    let errorCategory: string | null = r.errorCode;
-    // If no errorCode but status is null (e.g. timeout), classify.
-    if (r.status === null && errorCategory === null) errorCategory = "timeout";
+    const errorCategory = classifyChildError(r);
     evidence.audit = { ran: true, exitCode: r.status };
     const reportJsonPath = join(auditOut, "report.json");
     const reportMdPath = join(auditOut, "report.md");

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { runEvaluation, decide, type EvalEvidence, type CommandRunner } from "../evaluate.ts";
+import { runEvaluation, decide, classifyChildError, sanitizeCategory, type RunnerResult, type EvalEvidence, type CommandRunner } from "../evaluate.ts";
 
 /** A fake runner that simulates replay-eval/audit-report writing outputs. */
 function fakeRunner(overrides: {
@@ -301,7 +301,74 @@ test("evaluate: non-zero child with score.json evidence still links artifacts", 
   }
 });
 
-test("evaluate: pins candidate/base to resolved commits (no ref drift)", () => {
+// --- classifyChildError exact exit-code matrix ---
+
+test("classifyChildError: zero-exit ok returns null", () => {
+  assert.equal(classifyChildError({ status: 0, errorCode: null } as RunnerResult), null);
+});
+
+test("classifyChildError: spawn_failure returns spawn_failure", () => {
+  assert.equal(classifyChildError({ status: null, errorCode: "spawn_failure" } as RunnerResult), "spawn_failure");
+});
+
+test("classifyChildError: timeout errorCode returns timeout", () => {
+  assert.equal(classifyChildError({ status: null, errorCode: "timeout" } as RunnerResult), "timeout");
+});
+
+test("classifyChildError: status null with no errorCode returns timeout", () => {
+  assert.equal(classifyChildError({ status: null, errorCode: null } as RunnerResult), "timeout");
+});
+
+test("classifyChildError: non-zero status with no errorCode returns driver_failure", () => {
+  assert.equal(classifyChildError({ status: 4, errorCode: null } as RunnerResult), "driver_failure");
+  assert.equal(classifyChildError({ status: 1, errorCode: null } as RunnerResult), "driver_failure");
+});
+
+test("classifyChildError: non-zero status with errorCode preserves errorCode", () => {
+  assert.equal(classifyChildError({ status: 1, errorCode: "spawn_failure" } as RunnerResult), "spawn_failure");
+});
+
+// --- sanitizeCategory ---
+
+test("sanitizeCategory: known categories pass through", () => {
+  assert.equal(sanitizeCategory("ingress_failed"), "ingress_failed");
+  assert.equal(sanitizeCategory("port_binding"), "port_binding");
+  assert.equal(sanitizeCategory("driver_failure"), "driver_failure");
+});
+
+test("sanitizeCategory: unknown category maps to internal_driver_error", () => {
+  assert.equal(sanitizeCategory("arbitrary stderr text"), "internal_driver_error");
+  assert.equal(sanitizeCategory(""), "internal_driver_error");
+});
+
+// --- audit non-zero exit classification ---
+
+test("evaluate: non-zero audit exit classified as driver_failure (consistent with replay)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "eval-audit-driver-"));
+  try {
+    const runner: CommandRunner = (argv, _cwd) => {
+      if (argv.join(" ").includes("audit-report")) {
+        return { stdout: "", stderr: "", status: 1, errorCode: null };
+      }
+      return { stdout: "", stderr: "", status: 0, errorCode: null };
+    };
+    const { evidence } = runEvaluation(
+      { ...inputs(dir), fixturesDir: null, auditDb: join(dir, "snap.db") },
+      runner,
+    );
+    assert.equal(evidence.children.length, 1);
+    assert.equal(evidence.children[0].command, "audit-report");
+    assert.equal(evidence.children[0].error_category, "driver_failure",
+      "audit non-zero must be classified as driver_failure like replay");
+    assert.equal(evidence.children[0].exit_code, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --- replay environment isolation ---
+
+test("evaluate: runner cwd comes from inputs.repoRoot", () => {
   const dir = mkdtempSync(join(tmpdir(), "eval-pin-"));
   let seenCandidate = "";
   let seenBase = "";
