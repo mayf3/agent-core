@@ -51,6 +51,11 @@ Phase 2 and Phase 3 deliverables do not include them.
 10. **Harness stays external.** Harness code remains outside `src/` and
     outside `~/.agent-core/`. `~/.agent-core/` may contain harness endpoint
     or command configuration, but never imported harness source.
+    Harnesses may temporarily exist under repository `tools/` during active
+    development, but the final product boundary is a separate repository,
+    package, or process. Kernel `src/` and `~/.agent-core/` must never import
+    or contain harness source code; the runtime root holds only endpoint or
+    command references.
 
 11. **Repository content is example/test data only.** Agent/Skill content
     committed in this repository is example or test-fixture data, not the
@@ -90,21 +95,17 @@ Phase 2 and Phase 3 deliverables do not include them.
 ```toml
 [agent]
 id = "assistant-alpha"
-model = "claude-sonnet-4-20250514"
+display_name = "Assistant Alpha"
+model = "deepseek-v4"
+system_profile = "default"
+credential_ref = "llm.deepseek.default"
+enabled_skills = ["shared:system-status", "private:coding-handoff"]
 
 [grants]
 operations = ["time.now", "feishu.send_message", "stdout.send_text"]
 
 [limits]
 context_window = 128000
-
-[skills]
-enable = ["shared:web-search", "private:coding-handoff"]
-
-[credentials]
-# References only — actual values come from OS keychain / env injection.
-llm = "llm.deepseek.default"
-feishu = "connector.feishu.production"
 
 [workspace]
 max_storage_mb = 100
@@ -118,7 +119,7 @@ You are assistant-alpha. You have access to:
 - time.now to check the current time
 - feishu.send_message to reply via Feishu
 - stdout.send_text for debug output
-- Shared Skills: shared:web-search, private:coding-handoff
+- enabled_skills: shared:system-status, private:coding-handoff
 
 You cannot read other Agents' sessions or workspace files.
 Never ask for or read credentials; they are configured externally.
@@ -127,7 +128,7 @@ Never ask for or read credentials; they are configured externally.
 ## Example `routes.toml`
 
 ```toml
-[routes."feishu:dm:u_abc123"]
+[routes."feishu:dm:open_id:ou_xxx"]
 agent_id = "assistant-alpha"
 
 [routes."cli:stdin:local"]
