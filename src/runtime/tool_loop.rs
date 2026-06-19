@@ -109,42 +109,49 @@ impl<L: LlmClient> super::Runtime<L> {
         let mut intent = match crate::gateway::validate_tool_call(tool_call, &run.id) {
             Ok(intent) => intent,
             Err(e) => {
+                // Tool rejection is recorded as a FAILED ReceiptReceived, NOT
+                // as LlmCompleted — these are semantically different events
+                // ("LLM finished generating" vs "tool call attempted + rejected").
+                // No InvocationProposed/InvocationApproved (we never proposed an
+                // invocation for a rejected tool). The rejection payload is
+                // sanitized: only the error category + operation name, no raw
+                // error internals.
+                let sanitized = sanitize_rejection(&e);
                 journal.append_event(
-                    JournalEventKind::LlmCompleted,
+                    JournalEventKind::ReceiptReceived,
                     Some(&run.id),
                     Some(&session.id),
                     None,
                     json!({
-                        "provider": "tool_call_validation",
-                        "status": "rejected",
-                        "error_category": "tool_call_rejected",
+                        "invocation_id": format!("tool_call_rejected:{}", tool_call.id),
+                        "status": "Failed",
+                        "error_category": sanitized.0,
                         "operation": tool_call.operation,
-                        "rejection": format!("{:?}", e),
                     }),
                 )?;
                 return Ok(Some((
-                    format!("tool call rejected: {}", e),
-                    json!({ "error": format!("tool call rejected: {}", e) }),
+                    format!("tool call rejected: {}", sanitized.1),
+                    json!({ "error": sanitized.1 }),
                 )));
             }
         };
         if let Err(e) = validate_model_arguments(&intent.operation, &intent.arguments) {
+            let sanitized = sanitize_rejection(&e);
             journal.append_event(
-                JournalEventKind::LlmCompleted,
+                JournalEventKind::ReceiptReceived,
                 Some(&run.id),
                 Some(&session.id),
                 None,
                 json!({
-                    "provider": "tool_call_validation",
-                    "status": "rejected",
-                    "error_category": "invalid_arguments",
+                    "invocation_id": format!("tool_call_rejected:{}", tool_call.id),
+                    "status": "Failed",
+                    "error_category": sanitized.0,
                     "operation": intent.operation,
-                    "rejection": format!("{:?}", e),
                 }),
             )?;
             return Ok(Some((
-                format!("tool call rejected: invalid arguments: {}", e),
-                json!({ "error": format!("tool call rejected: invalid arguments: {}", e) }),
+                format!("tool call rejected: invalid arguments: {}", sanitized.1),
+                json!({ "error": sanitized.1 }),
             )));
         }
         if let Some(arguments) = intent.arguments.as_object_mut() {
@@ -165,6 +172,20 @@ impl<L: LlmClient> super::Runtime<L> {
         let approved = match gateway.approve_invocation(intent, &run, &session) {
             Ok(a) => a,
             Err(_e) => {
+                // Gateway denial (capability_not_enabled / policy deny) is
+                // recorded as a FAILED ReceiptReceived — not swallowed silently.
+                journal.append_event(
+                    JournalEventKind::ReceiptReceived,
+                    Some(&run.id),
+                    Some(&session.id),
+                    Some(&correlation_id),
+                    json!({
+                        "invocation_id": correlation_id,
+                        "status": "Failed",
+                        "error_category": "policy_denied",
+                        "operation": "tool_call",
+                    }),
+                )?;
                 return Ok(Some((
                     "tool call rejected: not permitted".to_string(),
                     json!({ "error": "tool call rejected: not permitted" }),
@@ -281,7 +302,10 @@ impl<L: LlmClient> super::Runtime<L> {
     }
 }
 
-pub fn validate_model_arguments(operation: &str, arguments: &serde_json::Value) -> anyhow::Result<()> {
+pub fn validate_model_arguments(
+    operation: &str,
+    arguments: &serde_json::Value,
+) -> anyhow::Result<()> {
     let Some(map) = arguments.as_object() else {
         anyhow::bail!("arguments must be a JSON object");
     };
@@ -314,4 +338,26 @@ pub fn validate_model_arguments(operation: &str, arguments: &serde_json::Value) 
         _ => anyhow::bail!("unknown operation"),
     }
     Ok(())
+}
+
+/// Sanitize a rejection error into a (category, safe_message) pair. The category
+/// is a stable enum-like string; the message is limited to 200 chars and never
+/// includes anyhow internals, database paths, or raw error objects.
+fn sanitize_rejection(e: &anyhow::Error) -> (&'static str, String) {
+    let msg = e.to_string();
+    let category = if msg.contains("unknown_operation") {
+        "unknown_operation"
+    } else if msg.contains("write_operation_not_allowed") {
+        "write_operation_not_allowed"
+    } else if msg.contains("invalid_arguments") || msg.contains("must be a JSON object") {
+        "invalid_arguments"
+    } else {
+        "tool_call_rejected"
+    };
+    let safe_msg = if msg.len() > 200 {
+        format!("{}...", &msg[..200])
+    } else {
+        msg
+    };
+    (category, safe_msg)
 }

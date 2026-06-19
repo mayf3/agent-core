@@ -35,12 +35,18 @@ pub fn validate_tool_call(call: &ToolCall, run_id: &RunId) -> Result<InvocationI
             call.operation
         );
     }
+    // The idempotency key MUST be scoped to the run to prevent cross-Run
+    // collisions when a provider reuses the same tool_call.id across
+    // different runs. Format: tool:{run_id}:{hashed_provider_id}.
+    // The raw provider ID is never stored directly — only its hash.
+    let hashed_provider_id = crate::llm::tool_call_id_hash(&call.id);
+    let idempotency_key = format!("tool:{}:{}", run_id.0, hashed_provider_id);
     Ok(InvocationIntent {
         invocation_id: InvocationId::new(),
         run_id: run_id.clone(),
         operation: call.operation.clone(),
         arguments: call.arguments.clone(),
-        idempotency_key: Some(format!("tool:{}", call.id)),
+        idempotency_key: Some(idempotency_key),
     })
 }
 
@@ -51,7 +57,7 @@ mod tests {
 
     fn call(op: &str) -> ToolCall {
         ToolCall {
-            id: crate::llm::tool_call_id_hash("call_1"),
+            id: "call_1".to_string(),
             operation: op.to_string(),
             arguments: json!({}),
         }
@@ -59,13 +65,65 @@ mod tests {
 
     #[test]
     fn accepts_valid_readonly_operation() {
-        let intent = validate_tool_call(&call("time.now"), &RunId::new()).unwrap();
+        let run_id = RunId::new();
+        let intent = validate_tool_call(&call("time.now"), &run_id).unwrap();
         assert_eq!(intent.operation, "time.now");
-        let expected_key = format!("tool:{}", crate::llm::tool_call_id_hash("call_1"));
+        // Key must be run-scoped: tool:{run_id}:{hashed_provider_id}
+        let expected_key = format!(
+            "tool:{}:{}",
+            run_id.0,
+            crate::llm::tool_call_id_hash("call_1")
+        );
         assert_eq!(
             intent.idempotency_key.as_deref(),
             Some(expected_key.as_str())
         );
+    }
+
+    #[test]
+    fn same_provider_id_different_run_produces_different_keys() {
+        // Two different runs with the same provider tool_call.id must NOT
+        // produce the same idempotency key (cross-Run collision prevention).
+        let c = call("time.now");
+        let run_a = RunId::new();
+        let run_b = RunId::new();
+        let intent_a = validate_tool_call(&c, &run_a).unwrap();
+        let intent_b = validate_tool_call(&c, &run_b).unwrap();
+        assert_ne!(
+            intent_a.idempotency_key, intent_b.idempotency_key,
+            "same provider_id + different run_id must produce different keys"
+        );
+    }
+
+    #[test]
+    fn same_run_same_call_produces_stable_key() {
+        // Replaying the same (run_id, tool_call.id) must produce the same key.
+        let c = call("time.now");
+        let run = RunId::new();
+        let intent_1 = validate_tool_call(&c, &run).unwrap();
+        let intent_2 = validate_tool_call(&c, &run).unwrap();
+        assert_eq!(
+            intent_1.idempotency_key, intent_2.idempotency_key,
+            "same run_id + same call must be stable"
+        );
+    }
+
+    #[test]
+    fn raw_provider_id_not_in_idempotency_key() {
+        // The raw provider ID (before hashing) must never appear in the key.
+        let raw_id = "provider_id_raw_12345";
+        let c = ToolCall {
+            id: raw_id.to_string(),
+            operation: "time.now".to_string(),
+            arguments: json!({}),
+        };
+        let intent = validate_tool_call(&c, &RunId::new()).unwrap();
+        let key = intent.idempotency_key.unwrap();
+        assert!(
+            !key.contains(raw_id),
+            "raw provider ID must not leak into key"
+        );
+        assert!(key.starts_with("tool:"), "key should start with tool:");
     }
 
     #[test]
@@ -115,11 +173,23 @@ mod tests {
             "call\u{0000}null",
             &long_id,
         ];
-        let hashes: Vec<String> = ids.iter().map(|id| crate::llm::tool_call_id_hash(id)).collect();
+        let hashes: Vec<String> = ids
+            .iter()
+            .map(|id| crate::llm::tool_call_id_hash(id))
+            .collect();
         // All hashes should be exactly 64 hex chars (SHA-256 digest length).
         for h in &hashes {
-            assert_eq!(h.len(), 64, "hash should be 64 hex chars, got {} for input", h.len());
-            assert!(h.chars().all(|c| c.is_ascii_hexdigit()), "hash should be hex: {}", h);
+            assert_eq!(
+                h.len(),
+                64,
+                "hash should be 64 hex chars, got {} for input",
+                h.len()
+            );
+            assert!(
+                h.chars().all(|c| c.is_ascii_hexdigit()),
+                "hash should be hex: {}",
+                h
+            );
         }
         // Distinct inputs must produce distinct hashes.
         for i in 0..hashes.len() {
@@ -138,20 +208,5 @@ mod tests {
         let long_input = "x".repeat(10_000);
         let h = crate::llm::tool_call_id_hash(&long_input);
         assert_eq!(h.len(), 64);
-    }
-
-    #[test]
-    fn raw_provider_id_not_in_idempotency_key() {
-        // The idempotency_key is seeded by the HASHED tool_call.id.
-        // Verify the raw "provider_id_raw" never appears in the keys.
-        let tool_call = ToolCall {
-            id: crate::llm::tool_call_id_hash("provider_id_raw"),
-            operation: "time.now".to_string(),
-            arguments: json!({}),
-        };
-        let intent = validate_tool_call(&tool_call, &RunId::new()).unwrap();
-        let key = intent.idempotency_key.unwrap();
-        assert!(!key.contains("provider_id_raw"), "raw provider ID must not leak into idempotency_key");
-        assert!(key.starts_with("tool:"), "idempotency_key should start with tool: prefix");
     }
 }
