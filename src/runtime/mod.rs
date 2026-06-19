@@ -5,6 +5,7 @@ use crate::domain::*;
 use crate::gateway::Gateway;
 use crate::journal::JournalStore;
 use crate::llm::{LlmClient, LlmInput};
+use crate::server::DispatcherMetrics;
 use anyhow::{bail, Result};
 use chrono::Utc;
 use serde_json::json;
@@ -261,6 +262,7 @@ where
         journal: &JournalStore,
         gateway: &Gateway,
         event: ValidatedEvent,
+        dispatcher_metrics: Option<&DispatcherMetrics>,
     ) -> Result<RuntimeOutcome> {
         let session = journal.get_or_create_session(&event.session_target)?;
         journal.append_event(
@@ -294,6 +296,24 @@ where
             message_id,
             chat_id,
         } = event.payload.clone();
+
+        // Dogfood Loop 1: status keyword → bypass LLM, return journal summary.
+        if let Some(status_text) = Self::maybe_status_reply(&text, journal, dispatcher_metrics)? {
+            journal.append_event(JournalEventKind::ContextBuilt, Some(&run.id), Some(&session.id), None,
+                json!({"block_count": 0, "status_shortcut": true}))?;
+            journal.append_event(JournalEventKind::LlmCompleted, Some(&run.id), Some(&session.id), None,
+                json!({"provider": "status-shortcut", "status": "ok", "context_blocks": 0}))?;
+            let intent = self.reply_intent(&run, &session, &status_text, message_id, chat_id);
+            let correlation_id = intent.invocation_id.0.clone();
+            journal.append_event(JournalEventKind::InvocationProposed, Some(&run.id), Some(&session.id), Some(&correlation_id),
+                json!({"operation": intent.operation, "idempotency_key": intent.idempotency_key, "source": "status_shortcut"}))?;
+            let approved = gateway.approve_invocation(intent, &run, &session)?;
+            journal.append_event(JournalEventKind::InvocationApproved, Some(&run.id), Some(&session.id), Some(&correlation_id),
+                json!({"decision_id": approved.decision_id, "operation": approved.intent().operation}))?;
+            self.enqueue_or_pause(journal, &approved, &run, &session, &correlation_id)?;
+            return Ok(RuntimeOutcome { run_id: run.id, session_id: session.id, output: status_text });
+        }
+
         let blocks =
             ContextAssembler::from_config(&self.config).build(journal, &session, &event, &text)?;
         journal.append_event(
@@ -475,5 +495,57 @@ where
                 idempotency_key: Some(format!("stdout-reply:{}", run.id.0)),
             }
         }
+    }
+
+    /// Dogfood Loop 1: detect a status-query keyword and return a deterministic
+    /// health summary from the Journal, bypassing the LLM. Only aggregate counts
+    /// — never secrets, payloads, or raw journal content.
+    fn maybe_status_reply(
+        text: &str,
+        journal: &JournalStore,
+        dispatcher_metrics: Option<&DispatcherMetrics>,
+    ) -> Result<Option<String>> {
+        let lower = text.trim().to_lowercase();
+        let is_status_query = [
+            "状态怎么样", "现在状态", "系统状态", "健康状况", "健康状态",
+            "status", "health", "how are you", "how's it going",
+        ]
+        .iter()
+        .any(|kw| lower.contains(kw));
+        if !is_status_query {
+            return Ok(None);
+        }
+        let hash_ok = journal.verify_hash_chain()?;
+        let pending = journal.outbox_status_count(crate::domain::OutboxDispatchStatus::Pending)?;
+        let unknown = journal.outbox_unknown_unacked_count()?;
+        let dispatching = journal.outbox_status_count(crate::domain::OutboxDispatchStatus::Dispatching)?;
+        let drift = journal.outbox_projection_drift_count()?;
+        let undelivered = journal.undelivered_ingress_events()?.len() as i64;
+        let awaiting_approval = journal.awaiting_approval_count()?;
+        let event_count = journal.event_count()?;
+        let stale_dispatching = journal.outbox_stale_dispatching_count()?;
+        let rollup = if !hash_ok { "corrupt" } else if unknown > 0 || drift > 0 || undelivered > 0 { "degraded" } else { "ok" };
+        let dispatcher_running = dispatcher_metrics.map(|m: &DispatcherMetrics| m.is_running());
+        let last_tick = dispatcher_metrics.and_then(|m: &DispatcherMetrics| m.last_tick_at());
+        let last_error = dispatcher_metrics.and_then(|m: &DispatcherMetrics| m.last_error_category());
+        let mut reply = format!(
+            "📊 Agent Core 状态\n\
+             Rollup: {rollup}   Hash: {hash_status}\n\
+             Events: {event_count}   Outbox dispatcher: {disp_status}\n\
+             Outbox — pending: {pending}  dispatching: {dispatching}\n\
+             unknown: {unknown}  stale: {stale_dispatching}   drift: {drift}\n\
+             Ingress undelivered: {undelivered}\n\
+             Approval awaiting: {awaiting_approval}",
+            rollup = rollup,
+            hash_status = if hash_ok { "✅" } else { "❌" },
+            event_count = event_count,
+            disp_status = match dispatcher_running { Some(true) => "✅", Some(false) => "❌", None => "N/A" },
+            pending = pending, dispatching = dispatching, unknown = unknown,
+            stale_dispatching = stale_dispatching, drift = drift,
+            undelivered = undelivered, awaiting_approval = awaiting_approval,
+        );
+        if let Some(lt) = &last_tick { reply.push_str(&format!("\nLast dispatch tick: {lt}")); }
+        if let Some(le) = &last_error { reply.push_str(&format!("\nLast error: {le}")); }
+        Ok(Some(reply))
     }
 }

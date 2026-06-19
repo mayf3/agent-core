@@ -21,10 +21,11 @@ pub(crate) fn start_worker_loop(
     journal: Arc<JournalStore>,
     gateway: Arc<Gateway>,
     running: Arc<AtomicBool>,
+    metrics: Arc<DispatcherMetrics>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         while running.load(Ordering::SeqCst) {
-            match process_next_worker_job(&config, &journal, &gateway) {
+            match process_next_worker_job(&config, &journal, &gateway, &metrics) {
                 Ok(true) => {}
                 Ok(false) => thread::sleep(Duration::from_millis(100)),
                 Err(error) => {
@@ -55,12 +56,13 @@ fn process_next_worker_job(
     config: &KernelConfig,
     journal: &JournalStore,
     gateway: &Gateway,
+    metrics: &DispatcherMetrics,
 ) -> Result<bool> {
     let Some(source_event_id) = journal.lease_next_worker_job()? else {
         return Ok(false);
     };
     let event_id = source_event_id.0.clone();
-    let result = deliver_worker_event(config.clone(), journal, gateway, &source_event_id);
+    let result = deliver_worker_event(config.clone(), journal, gateway, &source_event_id, metrics);
     if let Err(error) = result {
         let category = error_category(&error);
         eprintln!(
@@ -95,12 +97,13 @@ fn deliver_worker_event(
     journal: &JournalStore,
     gateway: &Gateway,
     source_event_id: &EventId,
+    metrics: &DispatcherMetrics,
 ) -> Result<()> {
     let event = journal
         .ingress_event_by_event_id(&source_event_id.0)?
         .ok_or_else(|| anyhow::anyhow!("missing_ingress_event"))?;
     let validated = gateway.recover_validated_event(&event)?;
-    deliver_event(config, journal, gateway, validated)
+    deliver_event(config, journal, gateway, validated, metrics)
 }
 
 fn deliver_event(
@@ -108,6 +111,7 @@ fn deliver_event(
     journal: &JournalStore,
     gateway: &Gateway,
     validated: ValidatedEvent,
+    metrics: &DispatcherMetrics,
 ) -> Result<()> {
     let llm = OpenAiCompatibleLlm::new(
         config.openai_base_url.clone(),
@@ -122,7 +126,7 @@ fn deliver_event(
     );
     let llm = Box::new(llm);
     let runtime = Runtime::new(config.clone(), llm);
-    runtime.deliver(journal, gateway, validated)?;
+    runtime.deliver(journal, gateway, validated, Some(metrics))?;
     Ok(())
 }
 

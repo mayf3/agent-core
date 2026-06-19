@@ -56,6 +56,7 @@ pub fn serve(config: KernelConfig) -> Result<()> {
         Arc::clone(&journal),
         Arc::clone(&gateway),
         Arc::clone(&running),
+        Arc::clone(&dispatcher_metrics),
     );
     let outbox_dispatcher = start_outbox_dispatcher_loop(
         config.clone(),

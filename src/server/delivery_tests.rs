@@ -424,7 +424,7 @@ fn paused_run_for_sweep(ttl: u64) -> Result<(String, Arc<JournalStore>)> {
     let runtime = Runtime::new(config, LocalEchoLlm);
     let envelope = gateway.cli_ingress("hi".to_string())?;
     let event = gateway.validate_ingress(&journal, envelope)?;
-    let outcome = runtime.deliver(&journal, &gateway, event)?;
+    let outcome = runtime.deliver(&journal, &gateway, event, None)?;
     assert_eq!(
         journal.run_status(&outcome.run_id)?.as_deref(),
         Some("AwaitingApproval")

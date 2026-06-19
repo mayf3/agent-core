@@ -17,7 +17,7 @@ fn m0_cli_vertical_slice_writes_journal_and_receipt() -> Result<()> {
     let runtime = Runtime::new(config, LocalEchoLlm);
     let envelope = gateway.cli_ingress("你好".to_string())?;
     let event = gateway.validate_ingress(&journal, envelope)?;
-    let outcome = runtime.deliver(&journal, &gateway, event)?;
+    let outcome = runtime.deliver(&journal, &gateway, event, None)?;
     let events = journal.events()?;
     assert_eq!(outcome.output, "收到：你好");
     assert!(journal.verify_hash_chain()?);
@@ -100,7 +100,7 @@ fn hash_chain_detects_tampering() -> Result<()> {
     let gateway = Gateway::new(config.clone());
     let runtime = Runtime::new(config, LocalEchoLlm);
     let event = gateway.validate_ingress(&journal, gateway.cli_ingress("hash".to_string())?)?;
-    runtime.deliver(&journal, &gateway, event)?;
+    runtime.deliver(&journal, &gateway, event, None)?;
     assert!(journal.verify_hash_chain()?);
     journal.tamper_first_event_for_test()?;
     assert!(!journal.verify_hash_chain()?);
@@ -299,7 +299,7 @@ fn feishu_deliver_wraps_llm_output_as_send_message() -> Result<()> {
         &journal,
         feishu_envelope_with_message("evt_llm", "om_llm", "p2p", true)?,
     )?;
-    let outcome = runtime.deliver(&journal, &gateway, event)?;
+    let outcome = runtime.deliver(&journal, &gateway, event, None)?;
     assert_eq!(outcome.output, "收到：你好");
     assert!(journal.events()?.iter().any(|event| {
         event.kind == JournalEventKind::InvocationProposed
