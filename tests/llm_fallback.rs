@@ -46,7 +46,8 @@ fn serve_once(status: u16, body: Value) -> Result<String> {
     let addr = listener.local_addr()?;
     thread::spawn(move || {
         if let Ok((mut stream, _)) = listener.accept() {
-            let _ = read_http_request_body(&mut stream);
+            let mut _buf = [0u8; 8192];
+            let _ = stream.read(&mut _buf);
             let body_str = body.to_string();
             let st = if status == 200 { "OK" } else { "Error" };
             let resp = format!("HTTP/1.1 {status} {st}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body_str.len(), body_str);
@@ -350,44 +351,7 @@ fn recall_loop_is_noop_when_no_tool_call() -> Result<()> {
     Ok(())
 }
 
-fn read_http_request_body(stream: &mut TcpStream) -> Result<String> {
-    let mut buf = Vec::new();
-    loop {
-        let mut b = [0u8; 1];
-        let n = stream.read(&mut b)?;
-        if n == 0 {
-            anyhow::bail!("eof");
-        }
-        buf.push(b[0]);
-        if buf.len() >= 4 && buf[buf.len() - 4..] == [b'\r', b'\n', b'\r', b'\n'] {
-            break;
-        }
-    }
-    let header = String::from_utf8_lossy(&buf);
-    let content_len: usize = header
-        .lines()
-        .find_map(|line| {
-            line.to_lowercase()
-                .strip_prefix("content-length:")
-                .and_then(|v| v.trim().parse().ok())
-        })
-        .unwrap_or(0);
-    let mut body = vec![0u8; content_len];
-    if content_len > 0 {
-        let mut offset = 0;
-        while offset < content_len {
-            let n = stream.read(&mut body[offset..])?;
-            if n == 0 {
-                anyhow::bail!("eof");
-            }
-            offset += n;
-        }
-    }
-    Ok(String::from_utf8(body)?)
-}
-
-// ---- Stub HTTP Server integration: real OpenAI-compatible provider ----
-
+// ---- Stub HTTP Server: real OpenAI-compatible provider ----
 struct StubServer {
     port: u16,
     handle: Option<std::thread::JoinHandle<()>>,
@@ -401,15 +365,16 @@ impl StubServer {
             let mut round = 0usize;
             for stream in listener.incoming() {
                 let mut stream = stream.unwrap();
-                let body_str = match read_http_request_body(&mut stream) {
-                    Ok(_) | Err(_) => {
-                        let r = round;
-                        round += 1;
-                        if r == 0 {
-                            r#"{"choices":[{"message":{"content":"","tool_calls":[{"id":"call_stub_1","type":"function","function":{"name":"time.now","arguments":"{}"}}]}}],"model":"stub"}"#
-                        } else {
-                            r#"{"choices":[{"message":{"content":"The current time was retrieved successfully."}}],"model":"stub"}"#
-                        }
+                // Read and discard the request (just need the connection).
+                let mut buf = [0u8; 8192];
+                let _ = stream.read(&mut buf);
+                let body_str = {
+                    let r = round;
+                    round += 1;
+                    if r == 0 {
+                        r#"{"choices":[{"message":{"content":"","tool_calls":[{"id":"call_stub_1","type":"function","function":{"name":"time.now","arguments":"{}"}}]}}],"model":"stub"}"#
+                    } else {
+                        r#"{"choices":[{"message":{"content":"The current time was retrieved successfully."}}],"model":"stub"}"#
                     }
                 };
                 let resp = format!(
@@ -486,6 +451,30 @@ fn stub_http_provider_completes_tool_loop() -> Result<()> {
         "at least 2 LLM rounds expected, got {}",
         llm_rounds
     );
+
+    // Codex #3: raw provider tool_call.id ("call_stub_1") must NOT appear in
+    // any Journal event payload; idempotency_key must be run-scoped.
+    let journal_json = serde_json::to_string(&events)?;
+    assert!(
+        !journal_json.contains("call_stub_1"),
+        "raw provider ID leaked"
+    );
+    let proposed = events.iter().find(|e| {
+        e.kind == JournalEventKind::InvocationProposed
+            && e.payload.get("source").and_then(|s| s.as_str()) == Some("model_tool_call")
+    });
+    if let Some(p) = proposed {
+        let key = p
+            .payload
+            .get("idempotency_key")
+            .and_then(|k| k.as_str())
+            .unwrap_or("");
+        assert!(
+            key.starts_with("tool:") && key.len() > 10,
+            "key not run-scoped: {}",
+            key
+        );
+    }
 
     Ok(())
 }
