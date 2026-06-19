@@ -145,7 +145,7 @@ export interface FixtureVerdict {
   candidate: FixtureScore;
   baseline: FixtureScore;
   delta: number;
-  verdict: "improve" | "regress" | "neutral";
+  verdict: "improve" | "regress" | "neutral" | "no-fixtures";
 }
 
 /** Compare a candidate score against a baseline score for one fixture. */
@@ -163,7 +163,7 @@ export interface RunSummary {
   candidateScore: number;
   baselineScore: number;
   delta: number;
-  verdict: "improve" | "regress" | "neutral";
+  verdict: "improve" | "regress" | "neutral" | "no-fixtures";
 }
 
 /** Aggregate per-fixture verdicts into an overall run verdict. */

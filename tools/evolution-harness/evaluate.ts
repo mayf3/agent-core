@@ -12,20 +12,35 @@ import { spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 
-/** A child-command runner. Injectable for tests (returns stdout + exit code). */
-export type CommandRunner = (argv: string[]) => { stdout: string; stderr: string; status: number | null };
+export interface RunnerResult {
+  stdout: string;
+  stderr: string;
+  status: number | null;
+  /** Error code from spawnSync (e.g. "ENOENT", "ETIMEDOUT") or null on success. */
+  errorCode: string | null;
+}
 
-/** Default runner: spawnSync + argv, NO shell, with cwd/timeout/maxBuffer. */
-export const defaultRunner: CommandRunner = (argv) => {
+/** A child-command runner. Injectable for tests. */
+export type CommandRunner = (argv: string[], cwd?: string) => RunnerResult;
+
+/** Default runner: spawnSync + argv, NO shell, with repo cwd/timeout/maxBuffer. */
+export const defaultRunner: CommandRunner = (argv, cwd) => {
   const [cmd, ...rest] = argv;
   const r = spawnSync(cmd, rest, {
     encoding: "utf8",
     stdio: ["pipe", "pipe", "pipe"],
-    cwd: process.cwd(),
+    cwd: cwd ?? process.cwd(),
     timeout: 600_000,
     maxBuffer: 10 * 1024 * 1024,
   });
-  return { stdout: r.stdout ?? "", stderr: r.stderr ?? "", status: r.status };
+  let errorCode: string | null = null;
+  if (r.error) {
+    errorCode = r.error.code === "ENOENT" ? "spawn_failure" : (r.error.code ?? "spawn_failure");
+  }
+  if (r.signal === "SIGTERM") {
+    errorCode = "timeout";
+  }
+  return { stdout: r.stdout ?? "", stderr: r.stderr ?? "", status: r.status, errorCode };
 };
 
 export interface EvalInputs {
@@ -58,7 +73,7 @@ export interface EvalEvidence {
   replay: {
     ran: boolean;
     exitCode: number | null;
-    summary?: { verdict?: string };
+    summary?: { verdict?: "improve" | "regress" | "neutral" | "no-fixtures" };
     anyHardFail?: boolean;
   };
   audit: {
@@ -103,36 +118,29 @@ export function runEvaluation(inputs: EvalInputs, runner: CommandRunner = defaul
       "--out-dir", replayOut,
     ];
     const startedAt = new Date().toISOString();
-    let r: { stdout: string; stderr: string; status: number | null };
-    let errorCategory: string | null = null;
-    try {
-      r = runner(argv);
-    } catch (e) {
-      const m = (e as Error).message ?? "";
-      errorCategory = m.includes("timeout") ? "timeout" : "spawn_failure";
-      r = { stdout: "", stderr: "", status: null };
-    }
+    // runner does not throw; errors are classified via result.errorCode
+    const r = runner(argv, inputs.repoRoot);
     const finishedAt = new Date().toISOString();
+    const errorCategory: string | null = r.errorCode;
     evidence.replay = { ran: true, exitCode: r.status };
     const scorePath = join(replayOut, "score.json");
     const reportPath = join(replayOut, "report.md");
     let artifactsProduced = 0;
-    if (r.status === 0 && existsSync(scorePath)) {
+    // Discover artifacts by existence regardless of exit code.
+    if (existsSync(scorePath)) {
       try {
         const score = JSON.parse(readFileSync(scorePath, "utf8"));
         evidence.replay.summary = score.summary;
         evidence.replay.anyHardFail = Array.isArray(score.fixtures) && score.fixtures.some((f: any) => f.candidate?.hardFail);
       } catch {
-        // malformed score.json — leave summary undefined; decision stays conservative (blocked).
+        // malformed score.json — leave summary undefined; decision stays conservative.
       }
-      if (existsSync(scorePath)) {
-        evidence.artifacts.push({ path: "replay/score.json", kind: "replay-score" });
-        artifactsProduced++;
-      }
-      if (existsSync(reportPath)) {
-        evidence.artifacts.push({ path: "replay/report.md", kind: "replay-report" });
-        artifactsProduced++;
-      }
+      evidence.artifacts.push({ path: "replay/score.json", kind: "replay-score" });
+      artifactsProduced++;
+    }
+    if (existsSync(reportPath)) {
+      evidence.artifacts.push({ path: "replay/report.md", kind: "replay-report" });
+      artifactsProduced++;
     }
     children.push({
       command: "replay-eval",
@@ -155,21 +163,17 @@ export function runEvaluation(inputs: EvalInputs, runner: CommandRunner = defaul
       "--out-dir", auditOut,
     ];
     const startedAt = new Date().toISOString();
-    let r: { stdout: string; stderr: string; status: number | null };
-    let errorCategory: string | null = null;
-    try {
-      r = runner(argv);
-    } catch (e) {
-      const m = (e as Error).message ?? "";
-      errorCategory = m.includes("timeout") ? "timeout" : "spawn_failure";
-      r = { stdout: "", stderr: "", status: null };
-    }
+    const r = runner(argv, inputs.repoRoot);
     const finishedAt = new Date().toISOString();
+    let errorCategory: string | null = r.errorCode;
+    // If no errorCode but status is null (e.g. timeout), classify.
+    if (r.status === null && errorCategory === null) errorCategory = "timeout";
     evidence.audit = { ran: true, exitCode: r.status };
     const reportJsonPath = join(auditOut, "report.json");
     const reportMdPath = join(auditOut, "report.md");
     let artifactsProduced = 0;
-    if (r.status === 0 && existsSync(reportJsonPath)) {
+    // Discover artifacts by existence regardless of exit code.
+    if (existsSync(reportJsonPath)) {
       try {
         const rep = JSON.parse(readFileSync(reportJsonPath, "utf8"));
         evidence.audit.redLines = {
@@ -181,14 +185,12 @@ export function runEvaluation(inputs: EvalInputs, runner: CommandRunner = defaul
       } catch {
         // malformed — leave redLines undefined; conservative blocked.
       }
-      if (existsSync(reportJsonPath)) {
-        evidence.artifacts.push({ path: "audit/report.json", kind: "audit-report" });
-        artifactsProduced++;
-      }
-      if (existsSync(reportMdPath)) {
-        evidence.artifacts.push({ path: "audit/report.md", kind: "audit-report-md" });
-        artifactsProduced++;
-      }
+      evidence.artifacts.push({ path: "audit/report.json", kind: "audit-report" });
+      artifactsProduced++;
+    }
+    if (existsSync(reportMdPath)) {
+      evidence.artifacts.push({ path: "audit/report.md", kind: "audit-report-md" });
+      artifactsProduced++;
     }
     children.push({
       command: "audit-report",
@@ -208,11 +210,13 @@ export function runEvaluation(inputs: EvalInputs, runner: CommandRunner = defaul
 /** Derive pass/blocked from the evidence. Conservative: any red-line or any
  *  non-zero exit or missing summary blocks. */
 export function decide(evidence: EvalEvidence): Decision {
-  // replay red-lines: regress verdict, any hardFail, or non-zero exit.
+  // replay red-lines: regress verdict, any hardFail, non-zero exit, or
+  // "no-fixtures" (all fixtures were driver-failures).
   if (evidence.replay.ran) {
     if (evidence.replay.exitCode !== 0) return "blocked";
     if (evidence.replay.anyHardFail) return "blocked";
     if (evidence.replay.summary?.verdict === "regress") return "blocked";
+    if (evidence.replay.summary?.verdict === "no-fixtures") return "blocked";
     // If replay ran but produced no parseable summary, block conservatively.
     if (!evidence.replay.summary) return "blocked";
   }

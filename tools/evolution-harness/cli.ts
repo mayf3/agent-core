@@ -240,11 +240,13 @@ export function main(): RunManifest {
   }
 
   const blockedReasons: string[] = [];
+  const replayChild = evidence?.children.find((c) => c.command === "replay-eval");
   if (evidence?.replay.ran && decision === "blocked") {
     const r = evidence.replay;
     if (r.exitCode !== 0) blockedReasons.push(`replay-eval exited ${r.exitCode} (non-zero)`);
     else if (r.anyHardFail) blockedReasons.push("replay: candidate hardFail detected");
     else if (r.summary?.verdict === "regress") blockedReasons.push(`replay: verdict = regress (candidate ${r.summary.candidateScore.toFixed(2)} vs baseline ${r.summary.baselineScore.toFixed(2)})`);
+    else if (r.summary?.verdict === "no-fixtures") blockedReasons.push("replay: zero fixtures scored (all driver failures)");
     else if (!r.summary) blockedReasons.push("replay: no parseable summary (score.json malformed)");
   }
   if (evidence?.audit.ran && decision === "blocked") {
@@ -332,10 +334,13 @@ export function main(): RunManifest {
   writeFileSync(join(runDir, "evolution-report.md"), reportLines.join("\n"));
 
   let exitCode = 0;
-  if (decision === "blocked") {
-    exitCode = EXIT_BLOCKED;
-  } else if (evidence?.children.some((c) => c.error_category !== null)) {
+  // internal_error (spawn failure, timeout) wins over blocked — a child that
+  // couldn't start at all is an infrastructure problem, not a candidate
+  // regression.
+  if (evidence?.children.some((c) => c.error_category !== null)) {
     exitCode = EXIT_INTERNAL_ERROR;
+  } else if (decision === "blocked") {
+    exitCode = EXIT_BLOCKED;
   }
 
   const manifest: RunManifest = {

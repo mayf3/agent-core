@@ -222,9 +222,9 @@ async function main() {
         baselineOutcome = await runFixtureAgainst(baselineWt!.binary, fixture, ipcToken);
       } catch (e) {
         const category = e instanceof DriverError ? e.category : "driver_crash";
-        const message = (e as Error).message.slice(0, 200);
-        console.error(`error: replay driver failed for ${fixture.fixture_id} (${category}): ${message}`);
-        errors.push({ fixture_id: fixture.fixture_id, category, message });
+        const safe = category === "ingress_failed" ? "ingress rejected" : `driver ${category}`;
+        console.error(`error: replay driver failed for ${fixture.fixture_id} (${category})`);
+        errors.push({ fixture_id: fixture.fixture_id, category, message: safe });
         driverFailed = true;
         continue;
       }
@@ -299,7 +299,7 @@ function toMarkdown(r: any): string {
       lines.push("## Errors");
       lines.push("");
       for (const e of r.errors) {
-        lines.push(`- **${e.fixture_id}** (${e.category}): ${e.message}`);
+        lines.push(`- **${e.fixture_id}** (${e.category})`);
       }
       lines.push("");
     }
@@ -343,7 +343,7 @@ function toMarkdown(r: any): string {
     lines.push("## Errors");
     lines.push("");
     for (const e of r.errors) {
-      lines.push(`- **${e.fixture_id}** (${e.category}): ${e.message}`);
+      lines.push(`- **${e.fixture_id}** (${e.category})`);
     }
     lines.push("");
   }

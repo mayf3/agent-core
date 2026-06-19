@@ -10,7 +10,7 @@ function fakeRunner(overrides: {
   replay?: { status: number; score?: any };
   audit?: { status: number; report?: any };
 } = {}): CommandRunner {
-  return (argv: string[]) => {
+  return (argv: string[], _cwd?: string) => {
     const joined = argv.join(" ");
     // replay-eval writes score.json + report.md into its --out-dir.
     if (joined.includes("replay-eval")) {
@@ -22,9 +22,9 @@ function fakeRunner(overrides: {
           writeFileSync(join(outDir, "score.json"), JSON.stringify(overrides.replay.score ?? { summary: { verdict: "neutral" }, fixtures: [] }));
           writeFileSync(join(outDir, "report.md"), "# replay\n");
         }
-        return { stdout: "", stderr: "", status: overrides.replay.status };
+        return { stdout: "", stderr: "", status: overrides.replay.status, errorCode: null };
       }
-      return { stdout: "", stderr: "", status: 1 };
+      return { stdout: "", stderr: "", status: 1, errorCode: null };
     }
     // audit-report writes report.json + report.md into its --out-dir.
     if (joined.includes("audit-report")) {
@@ -36,11 +36,11 @@ function fakeRunner(overrides: {
           writeFileSync(join(outDir, "report.json"), JSON.stringify(overrides.audit.report ?? { hash_chain: { integrity: "ok" }, unknown_dispatches: { count: 0 }, projection_drift: { count: 0 }, undelivered_ingress: { count: 0 } }));
           writeFileSync(join(outDir, "report.md"), "# audit\n");
         }
-        return { stdout: "", stderr: "", status: overrides.audit.status };
+        return { stdout: "", stderr: "", status: overrides.audit.status, errorCode: null };
       }
-      return { stdout: "", stderr: "", status: 1 };
+      return { stdout: "", stderr: "", status: 1, errorCode: null };
     }
-    return { stdout: "", stderr: "", status: 0 };
+    return { stdout: "", stderr: "", status: 0, errorCode: null };
   };
 }
 
@@ -186,14 +186,71 @@ test("evaluate: no fixtures + no audit => no evaluation (decision null at CLI la
   }
 });
 
-test("evaluate: pins candidate/base to resolved commits (no ref drift)", () => {
+test("evaluate: no-fixtures summary verdict blocks the decision", () => {
+  const dir = mkdtempSync(join(tmpdir(), "eval-nofixtures-"));
+  try {
+    const { decision } = runEvaluation(
+      { ...inputs(dir, { auditDb: null }), fixturesDir: join(dir, "fixtures") },
+      fakeRunner({ replay: { status: 0, score: { summary: { verdict: "no-fixtures" }, fixtures: [] } } }),
+    );
+    assert.equal(decision, "blocked", "no-fixtures must block");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("evaluate: runner cwd comes from inputs.repoRoot", () => {
+  const dir = mkdtempSync(join(tmpdir(), "eval-cwd-"));
+  const rootDir = join(dir, "repo");
+  mkdirSync(rootDir, { recursive: true });
+  mkdirSync(join(dir, "fixtures"));
+  let capturedCwd = "";
+  const runner: CommandRunner = (argv, cwd) => {
+    if (argv.join(" ").includes("replay-eval")) {
+      capturedCwd = cwd ?? "";
+    }
+    return { stdout: "", stderr: "", status: 0, errorCode: null };
+  };
+  runEvaluation({
+    repoRoot: rootDir,
+    candidateRef: "main",
+    candidateCommit: "abc",
+    baseRef: "main",
+    baseCommit: "abc",
+    fixturesDir: join(dir, "fixtures"),
+    auditDb: null,
+    runDir: join(dir, "out"),
+  }, runner);
+  assert.equal(capturedCwd, rootDir, "runner must use inputs.repoRoot as cwd");
+  assert.notEqual(capturedCwd, process.cwd(), "must not fall back to process.cwd()");
+});
+
+test("evaluate: spawn failure produces error_category on child (internal_error at CLI layer)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "eval-spawnfail-"));
+  try {
+    const runner: CommandRunner = (_argv, _cwd) => {
+      return { stdout: "", stderr: "", status: null, errorCode: "spawn_failure" };
+    };
+    const { evidence } = runEvaluation(
+      { ...inputs(dir, { auditDb: null }), fixturesDir: join(dir, "fixtures") },
+      runner,
+    );
+    assert.equal(evidence.children.length, 1);
+    assert.equal(evidence.children[0].error_category, "spawn_failure");
+    assert.equal(evidence.children[0].exit_code, null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("evaluate: runner cwd comes from inputs.repoRoot", () => {
   // The runner receives the COMMIT, not the ref, as --candidate/--baseline.
   const dir = mkdtempSync(join(tmpdir(), "eval-pin-"));
   let seenCandidate = "";
   let seenBase = "";
   try {
     mkdirSync(join(dir, "fixtures"));
-    const runner: CommandRunner = (argv) => {
+    const runner: CommandRunner = (argv, _cwd) => {
       const cIdx = argv.indexOf("--candidate");
       const bIdx = argv.indexOf("--baseline");
       if (cIdx >= 0) seenCandidate = argv[cIdx + 1];

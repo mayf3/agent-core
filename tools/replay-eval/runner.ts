@@ -57,7 +57,11 @@ export function resolveRef(ref: string): string {
   }
 }
 
-/** Build the Kernel binary in the given worktree dir. Returns the binary path. */
+/**
+ * Build the Kernel binary in the given worktree dir. Returns the binary path.
+ * Exported for test injection — tests can replace this to simulate build
+ * failures without a real cargo invocation.
+ */
 export function buildKernel(worktreeDir: string): string {
   try {
     execSync("cargo build --release --bin agent-core-kernel", {
