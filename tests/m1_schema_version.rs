@@ -47,7 +47,9 @@ fn newer_schema_version_is_rejected_cleanly() -> Result<()> {
     // CURRENT_SCHEMA_VERSION of 1) using a raw connection.
     {
         let conn = Connection::open(&db_path)?;
-        conn.execute_batch(include_str!("../migrations/0001_init.sql"))?;
+        conn.execute_batch(include_str!(
+            "../migrations/0001_init.sql"
+        ))?;
         conn.pragma_update(None, "user_version", 2)?;
     }
 
@@ -76,5 +78,9 @@ fn unique_temp_path() -> PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-    std::env::temp_dir().join(format!("agent-core-schema-{}-{}.db", std::process::id(), n))
+    std::env::temp_dir().join(format!(
+        "agent-core-schema-{}-{}.db",
+        std::process::id(),
+        n
+    ))
 }

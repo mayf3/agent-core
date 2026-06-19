@@ -159,25 +159,21 @@ fn journal_recovery_marks_unknown_invocations() -> Result<()> {
         event.kind == JournalEventKind::OutboxDispatchUnknown
             && event.correlation_id.as_deref() == Some("invocation_recovery")
     }));
-    assert!(
-        journal
-            .events()?
-            .iter()
-            .filter(|event| {
-                event.kind == JournalEventKind::ReceiptReceived
-                    && event.correlation_id.as_deref() == Some("invocation_recovery")
-            })
-            .count()
-            == 0
-    );
-    assert!(
-        journal
-            .events()?
-            .iter()
-            .filter(|event| event.kind == JournalEventKind::RunCompleted)
-            .count()
-            == 0
-    );
+    assert!(journal
+        .events()?
+        .iter()
+        .filter(|event| {
+            event.kind == JournalEventKind::ReceiptReceived
+                && event.correlation_id.as_deref() == Some("invocation_recovery")
+        })
+        .count()
+        == 0);
+    assert!(journal
+        .events()?
+        .iter()
+        .filter(|event| event.kind == JournalEventKind::RunCompleted)
+        .count()
+        == 0);
     Ok(())
 }
 #[test]
@@ -412,11 +408,11 @@ fn test_config() -> KernelConfig {
         model_timeout_ms: 100,
         context_recent_messages: 6,
         context_max_block_chars: 4_000,
-        outbox_dispatcher_enabled: false,
-        outbox_dispatcher_poll_interval_ms: 100,
-        extra_allowed_operations: vec![],
-        require_write_approval: false,
-        write_approval_ttl_secs: 0,
+            outbox_dispatcher_enabled: false,
+            outbox_dispatcher_poll_interval_ms: 100,
+            extra_allowed_operations: vec![],
+            require_write_approval: false,
+            write_approval_ttl_secs: 0,
     }
 }
 fn cli_principal() -> RunPrincipal {

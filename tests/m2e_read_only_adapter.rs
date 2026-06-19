@@ -396,9 +396,8 @@ fn validate_model_arguments_rejects_extra_fields() -> Result<()> {
         arguments: json!({"extra_field": "should_not_pass"}),
     };
     let intent = validate_tool_call(&tc, &RunId::new())?;
-    let result = agent_core_kernel::runtime::validate_model_arguments(
-        &intent.operation, &intent.arguments
-    );
+    let result =
+        agent_core_kernel::runtime::validate_model_arguments(&intent.operation, &intent.arguments);
     assert!(result.is_err(), "extra fields should be rejected");
     assert!(result.unwrap_err().to_string().contains("no arguments"));
     Ok(())
@@ -415,9 +414,8 @@ fn validate_model_arguments_rejects_missing_required_for_recall() -> Result<()> 
         arguments: json!({"limit": 0}),
     };
     let intent = validate_tool_call(&tc, &RunId::new())?;
-    let result = agent_core_kernel::runtime::validate_model_arguments(
-        &intent.operation, &intent.arguments
-    );
+    let result =
+        agent_core_kernel::runtime::validate_model_arguments(&intent.operation, &intent.arguments);
     assert!(result.is_err(), "limit=0 should be rejected");
     Ok(())
 }
@@ -430,10 +428,10 @@ fn session_recall_sql_error_not_empty_result() -> Result<()> {
     // This test verifies the error IS propagated by calling
     // recent_user_messages on an in-memory journal that was already dropped
     // (the journal's events() query fails).
-    use agent_core_kernel::domain::SessionId;
-    use agent_core_kernel::journal::JournalStore;
     use agent_core_kernel::domain::RunId;
+    use agent_core_kernel::domain::SessionId;
     use agent_core_kernel::gateway::Gateway;
+    use agent_core_kernel::journal::JournalStore;
     use serde_json::json;
 
     // 1. Create a session + run with some messages.
@@ -457,7 +455,10 @@ fn session_recall_sql_error_not_empty_result() -> Result<()> {
         conversation_key: "local".into(),
     })?;
     let msgs = journal.recent_user_messages(&session.id, 5)?;
-    assert!(msgs.len() > 0, "should have at least one message after deliver()");
+    assert!(
+        msgs.len() > 0,
+        "should have at least one message after deliver()"
+    );
 
     // 3. We cannot easily close an in-memory journal. But the contract is:
     //    recent_user_messages() returns Result<Vec> — errors must NOT be

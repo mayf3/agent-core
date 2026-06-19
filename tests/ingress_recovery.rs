@@ -90,7 +90,7 @@ fn health_reports_undelivered_ingress_count() -> Result<()> {
         health_snapshot(&journal, false, &DispatcherMetrics::new())?
             .get("undelivered_ingress_count")
             .and_then(|value| value.as_u64()),
-        Some(0)
+            Some(0)
     );
     Ok(())
 }
@@ -139,10 +139,10 @@ fn test_config() -> KernelConfig {
         model_timeout_ms: 100,
         context_recent_messages: 6,
         context_max_block_chars: 4_000,
-        outbox_dispatcher_enabled: false,
-        outbox_dispatcher_poll_interval_ms: 100,
-        extra_allowed_operations: vec![],
-        require_write_approval: false,
-        write_approval_ttl_secs: 0,
+            outbox_dispatcher_enabled: false,
+            outbox_dispatcher_poll_interval_ms: 100,
+            extra_allowed_operations: vec![],
+            require_write_approval: false,
+            write_approval_ttl_secs: 0,
     }
 }
