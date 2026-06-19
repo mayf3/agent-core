@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "fixture_id": "system-status-tool",
+  "description": "The model sees system.status in the tool catalog. When a user asks about system health, the model may call system.status — a ReadOnly catalog operation that reads aggregate journal counts and returns them as structured data. The model formats the user-facing reply (via the normal outbox → dispatcher → connector path). No secrets, payloads, or raw event content are returned.",
+  "source": { "kind": "authored" },
+  "setup": { "agent_id": "main", "channel": "cli", "session_id": "sess_sysstatus_1" },
+  "turns": [
+    { "role": "user", "external_event_id": "msg_sysstatus_1", "text": "what is the system status" }
+  ],
+  "expectations": {
+    "no_duplicate_reply": true
+  }
+}

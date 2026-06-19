@@ -5,7 +5,6 @@ use crate::domain::*;
 use crate::gateway::Gateway;
 use crate::journal::JournalStore;
 use crate::llm::{LlmClient, LlmInput};
-use crate::server::DispatcherMetrics;
 use anyhow::{bail, Result};
 use chrono::Utc;
 use serde_json::json;
@@ -40,16 +39,8 @@ where
     }
 
     /// Phase 2 M2d: decide whether an approved invocation is dispatched now or
-    /// paused for human approval, and persist the outcome.
-    ///
-    /// - `Risk::ReadOnly`, or `Risk::Write` when the operator has **not** opted
-    ///   in (`require_write_approval == false`): queue the dispatch and mark the
-    ///   run `WaitingDispatch` (the pre-M2d behavior, byte-identical).
-    /// - `Risk::Write` when the operator **has** opted in: do NOT queue. Append
-    ///   an `ApprovalRequested` fact carrying an `intent_snapshot` (so an
-    ///   approve can reconstruct and queue the dispatch without re-running the
-    ///   LLM) and mark the run `AwaitingApproval`. The run resumes later via
-    ///   `Gateway::approve_run` / `Gateway::deny_run`.
+    /// paused for human approval. ReadOnly ops queue immediately; Write ops
+    /// pause when require_write_approval is enabled.
     fn enqueue_or_pause(
         &self,
         journal: &JournalStore,
@@ -87,14 +78,10 @@ where
         Ok(())
     }
     /// Phase 2 tool-call MVP: if the model emitted a `ReadOnly` tool call,
-    /// validate it, execute `TimeAdapter` inline, and journal the receipt —
-    /// WITHOUT queueing into `outbox_dispatches` (the outbox dispatcher is
-    /// wired to `HttpConnectorAdapter`; a local adapter must not route there).
-    /// Audit facts: `InvocationProposed` + `InvocationApproved` +
-    /// `ReceiptReceived`. `OutboxQueued`/`DispatchStarted` are intentionally
-    /// skipped (see docs/decisions/tool-call-execution-loop.md §4.5).
-    /// Returns the receipt output serialized as text for the run outcome, or
-    /// None if no tool call was emitted / it was rejected.
+    /// validate it, execute inline, and journal the receipt — WITHOUT queueing
+    /// into `outbox_dispatches`. Audit facts: InvocationProposed +
+    /// InvocationApproved + ReceiptReceived. Returns the receipt output text,
+    /// or None if no tool call was emitted / rejected.
     fn handle_inline_tool_call(
         &self,
         journal: &JournalStore,
@@ -157,6 +144,14 @@ where
                         Self::execute_session_recall(journal, &session.id, &approved);
                     (status, output, text)
                 }
+                crate::domain::operation::SYSTEM_STATUS => {
+                    let output = Self::execute_system_status(journal);
+                    (
+                        crate::domain::ReceiptStatus::Succeeded,
+                        output.clone(),
+                        output.get("summary").and_then(|v| v.as_str()).unwrap_or("ok").to_string(),
+                    )
+                }
                 other => {
                     // A read-only operation not yet wired for inline execution.
                     (
@@ -182,14 +177,8 @@ where
 
     /// Execute `session.recall_recent`: read recent user messages from the
     /// **current session only** and return a normalized, sanitized result.
-    ///
-    /// Security invariants:
-    /// - Only reads the current session (`session_id` is pinned by the caller).
-    /// - Never returns raw `payload_json`; only normalized `event_id` + `role`
-    ///   + `text` (truncated to `MAX_RECALL_CHARS` per message).
-    /// - `limit` is clamped to `1..=MAX_RECALL_LIMIT` (default 5).
-    /// - Optional `query` filters by case-insensitive substring on text.
-    /// - No cross-session access, no file system, no network.
+    /// Only returns event_id + role + text (truncated to 500 chars per msg).
+    /// No raw payload, no cross-session, no filesystem, no network.
     fn execute_session_recall(
         journal: &JournalStore,
         session_id: &SessionId,
@@ -257,12 +246,37 @@ where
         (crate::domain::ReceiptStatus::Succeeded, output, text)
     }
 
+    /// Execute `system.status`: query journal for aggregate health counts.
+    /// Never returns secrets, payloads, or raw event content — only aggregate
+    /// numbers and a rollup string. Exposed to the model as a ReadOnly catalog
+    /// operation; the model decides when to call it and how to format the reply
+    /// (which goes through the normal outbox → dispatcher → connector path).
+    pub fn execute_system_status(journal: &JournalStore) -> serde_json::Value {
+        let h = |v: Result<i64, _>| v.unwrap_or(0);
+        let hash_ok = journal.verify_hash_chain().ok().unwrap_or(false);
+        let pending = h(journal.outbox_status_count(crate::domain::OutboxDispatchStatus::Pending));
+        let unknown = h(journal.outbox_unknown_unacked_count());
+        let dispatching = h(journal.outbox_status_count(crate::domain::OutboxDispatchStatus::Dispatching));
+        let drift = h(journal.outbox_projection_drift_count());
+        let undelivered = journal.undelivered_ingress_events().ok().map(|v| v.len() as i64).unwrap_or(0);
+        let awaiting_approval = h(journal.awaiting_approval_count());
+        let event_count = h(journal.event_count());
+        let stale_dispatching = h(journal.outbox_stale_dispatching_count());
+        let rollup = if !hash_ok { "corrupt" } else if unknown > 0 || drift > 0 || undelivered > 0 { "degraded" } else { "ok" };
+        json!({
+            "status": rollup, "hash_chain_ok": hash_ok, "event_count": event_count,
+            "outbox": { "pending": pending, "dispatching": dispatching, "unknown_unacked": unknown, "stale_dispatching": stale_dispatching, "projection_drift": drift },
+            "ingress": { "undelivered": undelivered },
+            "approval": { "awaiting": awaiting_approval },
+            "summary": format!("status={rollup} events={event_count} pending={pending} drift={drift} undelivered={undelivered}"),
+        })
+    }
+
     pub fn deliver(
         &self,
         journal: &JournalStore,
         gateway: &Gateway,
         event: ValidatedEvent,
-        dispatcher_metrics: Option<&DispatcherMetrics>,
     ) -> Result<RuntimeOutcome> {
         let session = journal.get_or_create_session(&event.session_target)?;
         journal.append_event(
@@ -296,23 +310,6 @@ where
             message_id,
             chat_id,
         } = event.payload.clone();
-
-        // Dogfood Loop 1: status keyword → bypass LLM, return journal summary.
-        if let Some(status_text) = Self::maybe_status_reply(&text, journal, dispatcher_metrics)? {
-            journal.append_event(JournalEventKind::ContextBuilt, Some(&run.id), Some(&session.id), None,
-                json!({"block_count": 0, "status_shortcut": true}))?;
-            journal.append_event(JournalEventKind::LlmCompleted, Some(&run.id), Some(&session.id), None,
-                json!({"provider": "status-shortcut", "status": "ok", "context_blocks": 0}))?;
-            let intent = self.reply_intent(&run, &session, &status_text, message_id, chat_id);
-            let correlation_id = intent.invocation_id.0.clone();
-            journal.append_event(JournalEventKind::InvocationProposed, Some(&run.id), Some(&session.id), Some(&correlation_id),
-                json!({"operation": intent.operation, "idempotency_key": intent.idempotency_key, "source": "status_shortcut"}))?;
-            let approved = gateway.approve_invocation(intent, &run, &session)?;
-            journal.append_event(JournalEventKind::InvocationApproved, Some(&run.id), Some(&session.id), Some(&correlation_id),
-                json!({"decision_id": approved.decision_id, "operation": approved.intent().operation}))?;
-            self.enqueue_or_pause(journal, &approved, &run, &session, &correlation_id)?;
-            return Ok(RuntimeOutcome { run_id: run.id, session_id: session.id, output: status_text });
-        }
 
         let blocks =
             ContextAssembler::from_config(&self.config).build(journal, &session, &event, &text)?;
@@ -495,57 +492,5 @@ where
                 idempotency_key: Some(format!("stdout-reply:{}", run.id.0)),
             }
         }
-    }
-
-    /// Dogfood Loop 1: detect a status-query keyword and return a deterministic
-    /// health summary from the Journal, bypassing the LLM. Only aggregate counts
-    /// — never secrets, payloads, or raw journal content.
-    fn maybe_status_reply(
-        text: &str,
-        journal: &JournalStore,
-        dispatcher_metrics: Option<&DispatcherMetrics>,
-    ) -> Result<Option<String>> {
-        let lower = text.trim().to_lowercase();
-        let is_status_query = [
-            "状态怎么样", "现在状态", "系统状态", "健康状况", "健康状态",
-            "status", "health", "how are you", "how's it going",
-        ]
-        .iter()
-        .any(|kw| lower.contains(kw));
-        if !is_status_query {
-            return Ok(None);
-        }
-        let hash_ok = journal.verify_hash_chain()?;
-        let pending = journal.outbox_status_count(crate::domain::OutboxDispatchStatus::Pending)?;
-        let unknown = journal.outbox_unknown_unacked_count()?;
-        let dispatching = journal.outbox_status_count(crate::domain::OutboxDispatchStatus::Dispatching)?;
-        let drift = journal.outbox_projection_drift_count()?;
-        let undelivered = journal.undelivered_ingress_events()?.len() as i64;
-        let awaiting_approval = journal.awaiting_approval_count()?;
-        let event_count = journal.event_count()?;
-        let stale_dispatching = journal.outbox_stale_dispatching_count()?;
-        let rollup = if !hash_ok { "corrupt" } else if unknown > 0 || drift > 0 || undelivered > 0 { "degraded" } else { "ok" };
-        let dispatcher_running = dispatcher_metrics.map(|m: &DispatcherMetrics| m.is_running());
-        let last_tick = dispatcher_metrics.and_then(|m: &DispatcherMetrics| m.last_tick_at());
-        let last_error = dispatcher_metrics.and_then(|m: &DispatcherMetrics| m.last_error_category());
-        let mut reply = format!(
-            "📊 Agent Core 状态\n\
-             Rollup: {rollup}   Hash: {hash_status}\n\
-             Events: {event_count}   Outbox dispatcher: {disp_status}\n\
-             Outbox — pending: {pending}  dispatching: {dispatching}\n\
-             unknown: {unknown}  stale: {stale_dispatching}   drift: {drift}\n\
-             Ingress undelivered: {undelivered}\n\
-             Approval awaiting: {awaiting_approval}",
-            rollup = rollup,
-            hash_status = if hash_ok { "✅" } else { "❌" },
-            event_count = event_count,
-            disp_status = match dispatcher_running { Some(true) => "✅", Some(false) => "❌", None => "N/A" },
-            pending = pending, dispatching = dispatching, unknown = unknown,
-            stale_dispatching = stale_dispatching, drift = drift,
-            undelivered = undelivered, awaiting_approval = awaiting_approval,
-        );
-        if let Some(lt) = &last_tick { reply.push_str(&format!("\nLast dispatch tick: {lt}")); }
-        if let Some(le) = &last_error { reply.push_str(&format!("\nLast error: {le}")); }
-        Ok(Some(reply))
     }
 }

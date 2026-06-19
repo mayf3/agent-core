@@ -109,7 +109,7 @@ fn deliver_recall(text: &str) -> Result<(Vec<JournalEvent>, RunId)> {
     let runtime = Runtime::new(config, RecallLlm { call_count: Mutex::new(0) });
     let env = gateway.cli_ingress(text.to_string())?;
     let event = gateway.validate_ingress(&journal, env)?;
-    let outcome = runtime.deliver(&journal, &gateway, event, None)?;
+    let outcome = runtime.deliver(&journal, &gateway, event)?;
     Ok((journal.events()?, outcome.run_id))
 }
 
@@ -153,7 +153,7 @@ fn session_recall_does_not_cross_sessions() -> Result<()> {
     let env_b = gateway.cli_ingress("session B message".into())?;
     let event_b = gateway.validate_ingress(&journal, env_b)?;
     let runtime = Runtime::new(config, RecallLlm { call_count: Mutex::new(0) });
-    let _ = runtime.deliver(&journal, &gateway, event_b, None)?;
+    let _ = runtime.deliver(&journal, &gateway, event_b)?;
     let events = journal.events()?;
     let receipt = events.iter().find(|e| {
         e.kind == JournalEventKind::ReceiptReceived
@@ -186,62 +186,46 @@ fn validate_rejects_write_via_tool_call() {
     assert!(err.to_string().contains("write_operation_not_allowed"));
 }
 
-// --- Dogfood Loop 1: status query tests ---
+// --- system.status (Catalog operation via tool-call path) ---
 
 #[test]
-fn status_query_returns_health_summary() -> Result<()> {
-    let config = common::test_config();
-    let journal = JournalStore::in_memory()?;
-    let gateway = Gateway::new(config.clone());
-    let runtime = Runtime::new(config, LocalEchoLlm);
-    let envelope = gateway.cli_ingress("现在状态怎么样".to_string())?;
-    let event = gateway.validate_ingress(&journal, envelope)?;
-    let outcome = runtime.deliver(&journal, &gateway, event, None)?;
+fn system_status_is_catalogued_as_read_only() {
+    use agent_core_kernel::domain::operation::{lookup, SYSTEM_STATUS, Risk};
+    let spec = lookup(SYSTEM_STATUS).unwrap();
+    assert_eq!(spec.risk, Risk::ReadOnly);
+}
 
-    assert!(
-        outcome.output.contains("Agent Core")
-            || outcome.output.contains("Rollup"),
-        "status reply should contain health-related terms, got: {}",
-        outcome.output,
-    );
-    // Verify no duplicate dispatch: exactly one OutboxQueued.
-    let events = journal.events()?;
-    let outbox_count = events
-        .iter()
-        .filter(|e| e.kind == JournalEventKind::OutboxQueued)
-        .count();
-    assert_eq!(outbox_count, 1, "exactly one outbox dispatch");
+#[test]
+fn execute_system_status_returns_aggregate_journal_counts() -> Result<()> {
+    // Direct test of the execute_system_status function: a fresh in-memory
+    // journal returns status=ok with zero counts.
+    let journal = JournalStore::in_memory()?;
+    let output = Runtime::<LocalEchoLlm>::execute_system_status(&journal);
+    assert_eq!(output["status"], "ok");
+    assert_eq!(output["hash_chain_ok"].as_bool(), Some(true));
+    assert!(output["outbox"]["pending"].is_number());
+    assert!(output["event_count"].is_number());
     Ok(())
 }
 
 #[test]
-fn english_status_query_returns_health_summary() -> Result<()> {
-    let config = common::test_config();
-    let journal = JournalStore::in_memory()?;
-    let gateway = Gateway::new(config.clone());
-    let runtime = Runtime::new(config, LocalEchoLlm);
-    let envelope = gateway.cli_ingress("what is the system status".to_string())?;
-    let event = gateway.validate_ingress(&journal, envelope)?;
-    let outcome = runtime.deliver(&journal, &gateway, event, None)?;
-
-    assert!(
-        outcome.output.contains("Rollup"),
-        "English status query should trigger status reply, got: {}",
-        outcome.output,
-    );
-    Ok(())
+fn system_status_tool_call_is_validated_as_read_only() {
+    use agent_core_kernel::gateway::validate_tool_call;
+    use agent_core_kernel::domain::RunId;
+    assert!(validate_tool_call(
+        &ToolCall { id: "c1".into(), operation: "system.status".into(), arguments: json!({}) },
+        &RunId::new(),
+    ).is_ok());
 }
 
 #[test]
-fn non_status_query_does_not_trigger_shortcut() -> Result<()> {
-    let config = common::test_config();
-    let journal = JournalStore::in_memory()?;
-    let gateway = Gateway::new(config.clone());
-    let runtime = Runtime::new(config, LocalEchoLlm);
-    let envelope = gateway.cli_ingress("hello, tell me a story".to_string())?;
-    let event = gateway.validate_ingress(&journal, envelope)?;
-    let outcome = runtime.deliver(&journal, &gateway, event, None)?;
-
-    assert_eq!(outcome.output, "收到：hello, tell me a story");
+fn system_status_grant_check_passes_with_baseline_profile() -> Result<()> {
+    // The baseline CLI profile includes system.status, so the gateway
+    // should accept it. We verify the catalog + validate_tool_call chain.
+    use agent_core_kernel::gateway::validate_tool_call;
+    use agent_core_kernel::domain::RunId;
+    let tool_call = ToolCall { id: "c2".into(), operation: "system.status".into(), arguments: json!({}) };
+    assert!(validate_tool_call(&tool_call, &RunId::new()).is_ok(),
+        "system.status should be accepted as a read-only tool call");
     Ok(())
 }

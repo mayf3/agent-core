@@ -60,6 +60,10 @@ pub const CATALOG: &[OperationSpec] = &[
         name: SESSION_RECALL_RECENT,
         risk: Risk::ReadOnly,
     },
+    OperationSpec {
+        name: SYSTEM_STATUS,
+        risk: Risk::ReadOnly,
+    },
 ];
 
 pub const STDOUT_SEND_TEXT: &str = "stdout.send_text";
@@ -74,6 +78,11 @@ pub const TIME_NOW: &str = "time.now";
 /// Runtime via `JournalStore::recent_user_messages`. The first *practical*
 /// read-only tool: lets the agent recall earlier context the user mentioned.
 pub const SESSION_RECALL_RECENT: &str = "session.recall_recent";
+/// Read-only: return a snapshot of system health and projection state.
+/// Returns aggregate journal counts (outbox, ingress, hash chain) — never
+/// secrets, payloads, tokens, or raw event content. Implemented inline via
+/// `execute_system_status` in the Runtime.
+pub const SYSTEM_STATUS: &str = "system.status";
 
 /// Look up an operation spec by name. Returns `None` for unknown operations.
 pub fn lookup(name: &str) -> Option<&'static OperationSpec> {
@@ -127,6 +136,11 @@ impl ExecutionProfile {
                 // recall messages from its own session without approval.
                 CapabilityGrant {
                     operation: SESSION_RECALL_RECENT.to_string(),
+                    scope: "current_session".to_string(),
+                },
+                // The agent may query system health without approval (read-only).
+                CapabilityGrant {
+                    operation: SYSTEM_STATUS.to_string(),
                     scope: "current_session".to_string(),
                 },
             ],
@@ -186,6 +200,7 @@ pub fn catalog_for_context() -> String {
                 FEISHU_SEND_MESSAGE => "send a message reply to the Feishu chat.",
                 TIME_NOW => "read the current kernel wall-clock time (no side effect).",
                 SESSION_RECALL_RECENT => "recall recent messages from the current session (read-only, current session only, no cross-session access).",
+                SYSTEM_STATUS => "read system health and projection state (aggregate journal counts only, no secrets or payloads).",
                 _ => "catalogued operation.",
             };
             format!("{} (risk: {}) — {}", spec.name, risk, desc)
@@ -221,6 +236,7 @@ mod tests {
         assert!(names.contains(&FEISHU_SEND_MESSAGE));
         assert!(names.contains(&TIME_NOW));
         assert!(names.contains(&SESSION_RECALL_RECENT));
+        assert!(names.contains(&SYSTEM_STATUS));
     }
 
     #[test]
@@ -241,7 +257,7 @@ mod tests {
         // effect, may execute inline). The two reply operations are Write.
         for spec in CATALOG {
             match spec.name {
-                TIME_NOW | SESSION_RECALL_RECENT => assert_eq!(
+                TIME_NOW | SESSION_RECALL_RECENT | SYSTEM_STATUS => assert_eq!(
                     spec.risk,
                     Risk::ReadOnly,
                     "{} should be ReadOnly",
@@ -260,12 +276,13 @@ mod tests {
     #[test]
     fn execution_profile_for_cli_grants_stdout_send_text_and_recall() {
         // The CLI channel baseline includes the reply operation + the
-        // session.recall_recent read-only tool (scoped to current session).
+        // session.recall_recent and system.status read-only tools.
         let profile = ExecutionProfile::for_channel(ChannelKind::Cli);
-        assert_eq!(profile.grants.len(), 2);
+        assert_eq!(profile.grants.len(), 3);
         let ops: Vec<&str> = profile.grants.iter().map(|g| g.operation.as_str()).collect();
         assert!(ops.contains(&STDOUT_SEND_TEXT));
         assert!(ops.contains(&SESSION_RECALL_RECENT));
+        assert!(ops.contains(&SYSTEM_STATUS));
         for grant in &profile.grants {
             assert_eq!(grant.scope, "current_session");
         }
@@ -274,10 +291,11 @@ mod tests {
     #[test]
     fn execution_profile_for_feishu_grants_feishu_send_message_and_recall() {
         let profile = ExecutionProfile::for_channel(ChannelKind::Feishu);
-        assert_eq!(profile.grants.len(), 2);
+        assert_eq!(profile.grants.len(), 3);
         let ops: Vec<&str> = profile.grants.iter().map(|g| g.operation.as_str()).collect();
         assert!(ops.contains(&FEISHU_SEND_MESSAGE));
         assert!(ops.contains(&SESSION_RECALL_RECENT));
+        assert!(ops.contains(&SYSTEM_STATUS));
         for grant in &profile.grants {
             assert_eq!(grant.scope, "current_session");
         }
@@ -308,6 +326,7 @@ mod tests {
         let augmented = ExecutionProfile::for_channel(ChannelKind::Cli).with_extra(&[]);
         assert_eq!(baseline.grants.len(), augmented.grants.len());
         assert_eq!(augmented.grants[0].operation, STDOUT_SEND_TEXT);
+        assert!(augmented.grants.iter().any(|g| g.operation == SYSTEM_STATUS));
     }
 
     #[test]
@@ -316,11 +335,11 @@ mod tests {
         // grant, scoped to current_session.
         let extra = vec![FEISHU_SEND_MESSAGE.to_string()];
         let profile = ExecutionProfile::for_channel(ChannelKind::Cli).with_extra(&extra);
-        // Baseline is 2 (reply + recall), + 1 extra = 3.
-        assert_eq!(profile.grants.len(), 3);
+        // Baseline is 3 (reply + recall + status), + 1 extra = 4.
+        assert_eq!(profile.grants.len(), 4);
         assert_eq!(profile.grants[0].operation, STDOUT_SEND_TEXT);
-        assert_eq!(profile.grants[2].operation, FEISHU_SEND_MESSAGE);
-        assert_eq!(profile.grants[2].scope, "current_session");
+        assert_eq!(profile.grants[3].operation, FEISHU_SEND_MESSAGE);
+        assert_eq!(profile.grants[3].scope, "current_session");
     }
 
     #[test]
@@ -334,9 +353,9 @@ mod tests {
             STDOUT_SEND_TEXT.to_string(), // duplicate of baseline → dropped
         ];
         let profile = ExecutionProfile::for_channel(ChannelKind::Cli).with_extra(&extra);
-        // Baseline is 2 (stdout + recall); the extra STDOUT_SEND_TEXT is a
-        // duplicate (dropped), unknown/empty dropped → still 2.
-        assert_eq!(profile.grants.len(), 2);
+        // Baseline is 3 (stdout + recall + status); the extra STDOUT_SEND_TEXT is a
+        // duplicate (dropped), unknown/empty dropped → still 3.
+        assert_eq!(profile.grants.len(), 3);
         assert_eq!(profile.grants[0].operation, STDOUT_SEND_TEXT);
     }
 }

@@ -27,7 +27,7 @@ fn run_cli(args: &[String]) -> Result<()> {
     let runtime = Runtime::new(config, LocalEchoLlm);
     let envelope = gateway.cli_ingress(options.text)?;
     let validated = gateway.validate_ingress(&journal, envelope)?;
-    let outcome = runtime.deliver(&journal, &gateway, validated, None)?;
+    let outcome = runtime.deliver(&journal, &gateway, validated)?;
     if options.json {
         println!(
             "{}",

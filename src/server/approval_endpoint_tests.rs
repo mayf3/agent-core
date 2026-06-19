@@ -68,7 +68,7 @@ fn paused_run() -> anyhow::Result<(String, Arc<JournalStore>, Arc<crate::gateway
     let runtime = Runtime::new(config, LocalEchoLlm);
     let envelope = gateway.cli_ingress("hi".to_string())?;
     let event = gateway.validate_ingress(&journal, envelope)?;
-    let outcome = runtime.deliver(&journal, &gateway, event, None)?;
+    let outcome = runtime.deliver(&journal, &gateway, event)?;
     assert_eq!(
         journal.run_status(&outcome.run_id)?.as_deref(),
         Some("AwaitingApproval")

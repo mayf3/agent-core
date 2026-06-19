@@ -43,7 +43,7 @@ fn run_deliver_cli(required: bool) -> Result<(JournalStore, Gateway, Runtime<Loc
     let runtime = Runtime::new(config, LocalEchoLlm);
     let envelope = gateway.cli_ingress("hello".to_string())?;
     let event = gateway.validate_ingress(&journal, envelope)?;
-    let outcome = runtime.deliver(&journal, &gateway, event, None)?;
+    let outcome = runtime.deliver(&journal, &gateway, event)?;
     Ok((journal, gateway, runtime, outcome.run_id))
 }
 
@@ -157,7 +157,7 @@ fn approval_state_is_durable_across_reopen() -> Result<()> {
         let runtime = Runtime::new(config, LocalEchoLlm);
         let envelope = gateway.cli_ingress("hi".to_string())?;
         let event = gateway.validate_ingress(&journal, envelope)?;
-        let outcome = runtime.deliver(&journal, &gateway, event, None)?;
+        let outcome = runtime.deliver(&journal, &gateway, event)?;
         outcome.run_id
     };
 
@@ -244,7 +244,7 @@ fn paused_run(ttl: u64) -> Result<(RunId, JournalStore)> {
     let runtime = Runtime::new(config, FixedLlm);
     let envelope = gateway.cli_ingress("hi".to_string())?;
     let event = gateway.validate_ingress(&journal, envelope)?;
-    let outcome = runtime.deliver(&journal, &gateway, event, None)?;
+    let outcome = runtime.deliver(&journal, &gateway, event)?;
     assert_eq!(
         journal.run_status(&outcome.run_id)?.as_deref(),
         Some("AwaitingApproval")
@@ -393,7 +393,7 @@ fn time_now_tool_call_executes_once_inline() -> Result<()> {
     let runtime = Runtime::new(config, ToolCallLlm);
     let envelope = gateway.cli_ingress("what time is it?".to_string())?;
     let event = gateway.validate_ingress(&journal, envelope)?;
-    let outcome = runtime.deliver(&journal, &gateway, event, None)?;
+    let outcome = runtime.deliver(&journal, &gateway, event)?;
     let events = journal.events()?;
 
     let time_now_proposed = events
