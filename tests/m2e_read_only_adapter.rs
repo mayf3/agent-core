@@ -448,14 +448,16 @@ fn session_recall_sql_error_not_empty_result() -> Result<()> {
     drop(runtime);
     drop(gateway);
 
-    // 2. recent_user_messages on the journal should succeed (in-memory).
+    // 2. recent_user_messages on the journal with the delivery session
+    // should succeed (in-memory with messages).
+    // The CLI ingress creates a session with conversation_key "local".
     let session = journal.get_or_create_session(&SessionTarget {
         agent_id: AgentId("main".into()),
         channel: ChannelKind::Cli,
-        conversation_key: "cli:test".into(),
+        conversation_key: "local".into(),
     })?;
     let msgs = journal.recent_user_messages(&session.id, 5)?;
-    assert!(msgs.len() > 0, "should have at least one message");
+    assert!(msgs.len() > 0, "should have at least one message after deliver()");
 
     // 3. We cannot easily close an in-memory journal. But the contract is:
     //    recent_user_messages() returns Result<Vec> — errors must NOT be
