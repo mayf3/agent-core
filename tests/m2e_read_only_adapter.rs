@@ -6,11 +6,11 @@ use agent_core_kernel::adapters::InvocationAdapter;
 use agent_core_kernel::domain::*;
 use agent_core_kernel::gateway::Gateway;
 use agent_core_kernel::journal::JournalStore;
-use agent_core_kernel::llm::{LlmClient, LlmInput, LlmOutput, ToolCall};
+use agent_core_kernel::llm::{LlmClient, LlmInput, LlmOutput, ToolCall, ToolCallResult};
 use agent_core_kernel::runtime::Runtime;
 use anyhow::Result;
 use serde_json::json;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 fn run_with_time_grant(session_id: &SessionId) -> Run {
     Run {
@@ -100,8 +100,8 @@ impl LlmClient for RecallLlm {
             model: "recall-test".into(),
             content: "Recalling...".into(),
             journal_payload: json!({}),
-            tool_call: Some(ToolCall {
-                id: "call_1".into(),
+            tool_call: ToolCallResult::Valid(ToolCall {
+                id: agent_core_kernel::llm::tool_call_id_hash("call_1"),
                 operation: "session.recall_recent".into(),
                 arguments: json!({ "limit": 10 }),
             }),
@@ -311,8 +311,8 @@ impl LlmClient for StatusLlm {
             model: "status-test".into(),
             content: "system status tool called".into(),
             journal_payload: json!({"status": "ok", "tool_call": "system.status"}),
-            tool_call: Some(ToolCall {
-                id: "call_status_1".into(),
+            tool_call: ToolCallResult::Valid(ToolCall {
+                id: agent_core_kernel::llm::tool_call_id_hash("call_status_1"),
                 operation: "system.status".into(),
                 arguments: json!({}),
             }),
@@ -354,17 +354,20 @@ fn system_status_tool_call_runtime_chain() -> Result<()> {
         } else if e.kind == agent_core_kernel::domain::JournalEventKind::ReceiptReceived
             && e.payload
                 .get("output")
-                .and_then(|o| o.get("rollup"))
+                .and_then(|o| o.get("status"))
                 .is_some()
         {
             saw_receipt = true;
-            // Verify the ReceiptReceived output has system.status fields.
+            // Verify the ReceiptReceived output matches capabilities::execute schema.
             let output = e.payload.get("output").unwrap();
-            assert!(output.get("rollup").is_some(), "Receipt has rollup");
-            assert!(output.get("hash_chain").is_some(), "Receipt has hash_chain");
+            assert!(output.get("status").is_some(), "Receipt has status");
             assert!(
-                output.get("outbox_pending").is_some(),
-                "Receipt has outbox_pending"
+                output.get("hash_chain_ok").is_some(),
+                "Receipt has hash_chain_ok"
+            );
+            assert!(
+                output.pointer("/outbox/pending").is_some(),
+                "Receipt has outbox.pending"
             );
         } else if e.kind == agent_core_kernel::domain::JournalEventKind::OutboxQueued {
             saw_outbox = true;

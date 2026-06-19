@@ -2,22 +2,27 @@
 
 ## Status
 
-**Implemented.** PR #154 adds a bounded read-only tool-recall loop
-(Phase 2 tool-call execution MVP). Key properties:
+**Open candidate.** PR #154 (branch `feat/session-recall-loop`) adds a bounded
+read-only tool-recall loop (Phase 2 tool-call execution MVP). Not yet merged.
+Key properties:
 
 - At most 2 read-only tool calls execute per Run.
 - The model may propose `time.now`, `session.recall_recent`, or `system.status`.
 - All schemas are strict (`additionalProperties: false`).
-- Malformed arguments (invalid JSON, extra fields, wrong types) are rejected
-  without executing the tool.
+- Provider tool-call IDs are hashed (SHA-256) before use — the raw provider
+  value is never written to Journal, idempotency keys, errors, or model-visible
+  text.
+- Malformed arguments (invalid JSON, non-object, missing fields) produce a
+  stable `ToolCallResult::Malformed` that never executes and returns a
+  non-empty user-safe fallback.
 - Infrastructure failures (Journal/SQLite/Gateway integrity) propagate and fail
   the Run. Expected business rejections (unknown operation, forbidden Write,
   invalid arguments) become a sanitized ToolResult so the model can recover.
 - Real OpenAI-compatible provider support: `tools` array with `tool_choice: auto`
   is sent in every request. The first tool call is parsed; malformed arguments
-  are silently rejected (no tool executes, text reply is used).
+  produce a ToolResult block so the model can recover (not silently dropped).
 - The Journal records only bounded/sanitized metadata (operation + id hash).
-  Raw arguments, raw provider responses, and SDK errors are never journaled.
+  Raw arguments, raw provider IDs, and SDK errors are never journaled.
 
 See the PR body for the full invariant list.
 

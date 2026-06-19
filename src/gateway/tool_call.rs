@@ -51,7 +51,7 @@ mod tests {
 
     fn call(op: &str) -> ToolCall {
         ToolCall {
-            id: "call_1".to_string(),
+            id: crate::llm::tool_call_id_hash("call_1"),
             operation: op.to_string(),
             arguments: json!({}),
         }
@@ -61,7 +61,11 @@ mod tests {
     fn accepts_valid_readonly_operation() {
         let intent = validate_tool_call(&call("time.now"), &RunId::new()).unwrap();
         assert_eq!(intent.operation, "time.now");
-        assert_eq!(intent.idempotency_key.as_deref(), Some("tool:call_1"));
+        let expected_key = format!("tool:{}", crate::llm::tool_call_id_hash("call_1"));
+        assert_eq!(
+            intent.idempotency_key.as_deref(),
+            Some(expected_key.as_str())
+        );
     }
 
     #[test]

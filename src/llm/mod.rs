@@ -1,6 +1,7 @@
 use crate::domain::ContextBlock;
 use anyhow::Result;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::time::Duration;
 
 pub trait LlmClient {
@@ -17,11 +18,39 @@ pub struct LlmOutput {
     pub model: String,
     pub content: String,
     pub journal_payload: serde_json::Value,
-    /// Optional structured tool call emitted by the model (Phase 2 tool-call
-    /// execution MVP). When present, the Runtime validates + executes it
-    /// inline for `ReadOnly` operations (see `src/gateway/tool_call.rs`).
-    /// `None` preserves the text-only flow (byte-identical to pre-MVP).
-    pub tool_call: Option<ToolCall>,
+    /// Parsed tool call from the provider response. Three-way state:
+    /// - `Absent` — no tool call in the response (text-only flow).
+    /// - `Valid(tc)` — a parseable tool call to execute.
+    /// - `Malformed(reason)` — the provider sent tool_calls but arguments
+    ///   were unparseable; never executes, produces a stable ToolResult.
+    pub tool_call: ToolCallResult,
+}
+
+/// The result of parsing a provider tool-call response.
+#[derive(Debug, Clone)]
+pub enum ToolCallResult {
+    /// No tool call in the provider response (text-only).
+    Absent,
+    /// A valid, parseable tool call.
+    Valid(ToolCall),
+    /// Provider sent tool_calls but arguments were malformed. The model
+    /// receives a ToolResult with the sanitized error and can recover.
+    Malformed(String),
+}
+
+impl ToolCallResult {
+    pub fn is_absent(&self) -> bool {
+        matches!(self, ToolCallResult::Absent)
+    }
+}
+
+/// Deterministic bounded hash of a provider tool-call ID. The provider value
+/// is untrusted/unbounded; we never write it raw into Journal, idempotency keys,
+/// errors, or model-visible text.
+pub fn tool_call_id_hash(provider_id: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(provider_id.as_bytes());
+    hex::encode(hasher.finalize())
 }
 
 /// A structured tool call the model wishes to execute (Phase 2 tool-call MVP).
@@ -29,8 +58,9 @@ pub struct LlmOutput {
 /// rejected before any adapter runs.
 #[derive(Debug, Clone)]
 pub struct ToolCall {
-    /// Stable id the model assigns (e.g. OpenAI tool_call id); used as the
-    /// idempotency-key seed.
+    /// Deterministic bounded digest of the provider-assigned id. Never the raw
+    /// provider value — the raw value is untrusted and never written to Journal,
+    /// idempotency keys, errors, or model-visible text.
     pub id: String,
     /// Catalogued operation name (e.g. `time.now`).
     pub operation: String,
@@ -52,7 +82,7 @@ impl LlmClient for LocalEchoLlm {
             provider: "local".to_string(),
             model: "local-echo".to_string(),
             content: format!("收到：{}", input.user_text),
-            tool_call: None,
+            tool_call: ToolCallResult::Absent,
             journal_payload: json!({
                 "provider": "local",
                 "model": "local-echo",
@@ -216,7 +246,7 @@ fn config_required_output(model: &str, context_blocks: usize) -> LlmOutput {
             "status": "needs_config",
             "error_category": "model_config_required",
         }),
-        tool_call: None,
+        tool_call: ToolCallResult::Absent,
     }
 }
 
@@ -232,7 +262,7 @@ fn request_failed_output(model: &str, context_blocks: usize, category: &str) -> 
             "status": "error",
             "error_category": category,
         }),
-        tool_call: None,
+        tool_call: ToolCallResult::Absent,
     }
 }
 
@@ -244,68 +274,102 @@ fn success_output(model: &str, context_blocks: usize, value: Value) -> LlmOutput
         .filter(|text| !text.is_empty())
         .unwrap_or("")
         .to_string();
-    // Parse tool_calls[0] from the OpenAI-compatible response. If the model
-    // emitted a tool call, extract the id + function name + arguments. Malformed
-    // arguments (non-object JSON) are rejected: tool_call stays None and the
-    // model's text reply (if any) is used. The Journal records only sanitized
-    // metadata (operation name + id), never the raw response or full arguments.
+    // Parse tool_calls[0] from the OpenAI-compatible response.
     let tool_call = parse_tool_call(&value);
+    // When the provider returns a malformed tool call with no text content,
+    // ensure a non-empty user-safe fallback so the reply is never silently empty.
+    let content = match &tool_call {
+        ToolCallResult::Malformed(_) if content.is_empty() => {
+            "The tool call could not be parsed. Please try again.".to_string()
+        }
+        ToolCallResult::Valid(_) if content.is_empty() => "正在调用工具查询信息…".to_string(),
+        _ => content,
+    };
     LlmOutput {
         provider: "openai-compatible".to_string(),
         model: model.to_string(),
-        content: if content.is_empty() && tool_call.is_some() {
-            "正在调用工具查询信息…".to_string()
-        } else {
-            content
-        },
+        content,
         journal_payload: json!({
             "provider": "openai-compatible",
             "model": value.get("model").and_then(Value::as_str).unwrap_or(model),
             "context_blocks": context_blocks,
             "status": "ok",
             "usage": sanitize_usage(value.get("usage")),
-            "tool_call": tool_call.as_ref().map(|tc| json!({
-                "operation": tc.operation,
-                "id": tc.id,
-            })),
+            "tool_call": match &tool_call {
+                ToolCallResult::Valid(tc) => json!({
+                    "operation": tc.operation,
+                    "id": tc.id,
+                }),
+                ToolCallResult::Malformed(reason) => json!({
+                    "malformed": reason,
+                }),
+                ToolCallResult::Absent => Value::Null,
+            },
         }),
         tool_call,
     }
 }
 
 /// Parse `choices[0].message.tool_calls[0]` from an OpenAI-compatible response.
-/// Returns `None` when no tool call is present or the arguments are malformed.
-/// Never returns raw arguments — the caller (validate_tool_call) re-checks
-/// them before execution.
+/// Returns `ToolCallResult` — three-way state distinguishing absent, valid,
+/// and malformed tool calls. Never returns raw provider IDs or arguments.
 ///
-/// Malformed `function.arguments` (invalid JSON, non-object JSON) is rejected:
-/// the function returns `None` so no tool executes. This prevents silently
-/// falling back to `{}` and executing a tool with empty arguments.
-fn parse_tool_call(value: &Value) -> Option<ToolCall> {
-    let tool_call_json = value.pointer("/choices/0/message/tool_calls/0")?;
-    let function = tool_call_json.get("function")?;
-    let id = tool_call_json
+/// Malformed `function.arguments` (invalid JSON, non-object JSON) is rejected
+/// as `Malformed(reason)` — the model receives a ToolResult and can recover.
+fn parse_tool_call(value: &Value) -> ToolCallResult {
+    let tool_call_json = match value.pointer("/choices/0/message/tool_calls/0") {
+        Some(v) if !v.is_null() => v,
+        _ => return ToolCallResult::Absent,
+    };
+    let function = match tool_call_json.get("function") {
+        Some(f) => f,
+        None => return ToolCallResult::Malformed("missing function block".to_string()),
+    };
+    let raw_id = tool_call_json
         .get("id")
         .and_then(Value::as_str)
-        .unwrap_or("unknown")
-        .to_string();
-    let operation = function.get("name").and_then(Value::as_str)?.to_string();
-    let arguments_str = function
-        .get("arguments")
-        .and_then(Value::as_str)
-        .unwrap_or("{}");
-    // Parse arguments as JSON; reject malformed (invalid JSON) and
-    // non-object JSON (string, number, array). This prevents silently
-    // falling back to `{}` and executing a tool the model did not intend.
-    let arguments: Value = serde_json::from_str(arguments_str).ok()?;
-    if !arguments.is_object() {
-        return None;
-    }
-    Some(ToolCall {
+        .unwrap_or("unknown");
+    let id = tool_call_id_hash(raw_id);
+    let operation = match function.get("name").and_then(Value::as_str) {
+        Some(n) => n.to_string(),
+        None => {
+            return ToolCallResult::Malformed("missing function name".to_string());
+        }
+    };
+    let arguments_str = function.get("arguments").and_then(Value::as_str);
+    let arguments_val = match arguments_str {
+        Some(s) => match serde_json::from_str::<Value>(s) {
+            Ok(v) if v.is_object() => v,
+            Ok(v) => {
+                return ToolCallResult::Malformed(format!(
+                    "arguments must be a JSON object, got {}",
+                    type_name(&v)
+                ));
+            }
+            Err(e) => {
+                return ToolCallResult::Malformed(format!("arguments JSON parse error: {}", e));
+            }
+        },
+        None => {
+            return ToolCallResult::Malformed("missing arguments".to_string());
+        }
+    };
+    ToolCallResult::Valid(ToolCall {
         id,
         operation,
-        arguments,
+        arguments: arguments_val,
     })
+}
+
+fn type_name(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
 }
 
 /// Build the OpenAI-compatible `tools` array for the request — only ReadOnly

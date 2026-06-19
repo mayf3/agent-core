@@ -266,7 +266,7 @@ impl agent_core_kernel::llm::LlmClient for FixedLlm {
             model: "fixed".to_string(),
             content: "reply".to_string(),
             journal_payload: serde_json::json!({}),
-            tool_call: None,
+            tool_call: agent_core_kernel::llm::ToolCallResult::Absent,
         })
     }
 }
@@ -390,7 +390,136 @@ fn parse_kind_round_trips_approval_expired() -> Result<()> {
     let kinds: Vec<_> = journal2.events()?.iter().map(|e| e.kind.clone()).collect();
     assert_eq!(kinds, vec![JournalEventKind::ApprovalExpired]);
     assert!(journal2.verify_hash_chain()?);
-
     let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
+}
+
+// ---- Phase 2 tool-call MVP: inline time.now execution ----
+
+#[test]
+fn validate_tool_call_accepts_time_now_and_rejects_others() {
+    use agent_core_kernel::domain::RunId;
+    use agent_core_kernel::gateway::validate_tool_call;
+    use agent_core_kernel::llm::ToolCall;
+    use serde_json::json;
+    let ok = validate_tool_call(
+        &ToolCall {
+            id: "c1".into(),
+            operation: "time.now".into(),
+            arguments: json!({}),
+        },
+        &RunId::new(),
+    );
+    assert!(ok.is_ok(), "time.now should be accepted");
+    let unknown = validate_tool_call(
+        &ToolCall {
+            id: "c1".into(),
+            operation: "shell.exec".into(),
+            arguments: json!({}),
+        },
+        &RunId::new(),
+    );
+    assert!(unknown.is_err(), "unknown op rejected");
+    let write_op = validate_tool_call(
+        &ToolCall {
+            id: "c1".into(),
+            operation: "feishu.send_message".into(),
+            arguments: json!({}),
+        },
+        &RunId::new(),
+    );
+    assert!(write_op.is_err(), "Write op rejected via tool-call path");
+}
+
+struct ToolCallLlm {
+    calls: std::sync::Mutex<usize>,
+}
+
+impl agent_core_kernel::llm::LlmClient for ToolCallLlm {
+    fn complete(
+        &self,
+        _input: agent_core_kernel::llm::LlmInput,
+    ) -> Result<agent_core_kernel::llm::LlmOutput> {
+        let mut c = self.calls.lock().unwrap();
+        let round = *c;
+        *c += 1;
+        if round == 0 {
+            Ok(agent_core_kernel::llm::LlmOutput {
+                provider: "local".into(),
+                model: "tool-call-test".into(),
+                content: "tool call complete".into(),
+                journal_payload: json!({ "status": "ok", "tool_call": "time.now" }),
+                tool_call: agent_core_kernel::llm::ToolCallResult::Valid(
+                    agent_core_kernel::llm::ToolCall {
+                        id: agent_core_kernel::llm::tool_call_id_hash("call_time_once"),
+                        operation: "time.now".into(),
+                        arguments: json!({}),
+                    },
+                ),
+            })
+        } else {
+            Ok(agent_core_kernel::llm::LlmOutput {
+                provider: "local".into(),
+                model: "tool-call-test".into(),
+                content: "time is now retrieved".into(),
+                journal_payload: json!({ "status": "ok" }),
+                tool_call: agent_core_kernel::llm::ToolCallResult::Absent,
+            })
+        }
+    }
+}
+
+#[test]
+fn time_now_tool_call_executes_once_inline() -> Result<()> {
+    let mut config = common::test_config();
+    config.extra_allowed_operations = vec!["time.now".to_string()];
+    let journal = JournalStore::in_memory()?;
+    let gateway = Gateway::new(config.clone());
+    let runtime = Runtime::new(
+        config,
+        ToolCallLlm {
+            calls: Default::default(),
+        },
+    );
+    let envelope = gateway.cli_ingress("what time is it?".to_string())?;
+    let event = gateway.validate_ingress(&journal, envelope)?;
+    let outcome = runtime.deliver(&journal, &gateway, event)?;
+    let events = journal.events()?;
+    let rid = &outcome.run_id;
+
+    let proposed = events
+        .iter()
+        .filter(|e| {
+            e.run_id.as_ref() == Some(rid)
+                && e.kind == JournalEventKind::InvocationProposed
+                && e.payload.get("operation").and_then(|v| v.as_str()) == Some("time.now")
+        })
+        .count();
+    let approved = events
+        .iter()
+        .filter(|e| {
+            e.run_id.as_ref() == Some(rid)
+                && e.kind == JournalEventKind::InvocationApproved
+                && e.payload.get("operation").and_then(|v| v.as_str()) == Some("time.now")
+        })
+        .count();
+
+    assert_eq!(proposed, 1, "time.now proposed once");
+    assert_eq!(approved, 1, "time.now approved once");
+    assert_eq!(
+        count_kind(&journal, rid, JournalEventKind::ReceiptReceived),
+        1,
+        "one receipt"
+    );
+    assert_eq!(
+        count_kind(&journal, rid, JournalEventKind::DispatchStarted),
+        0,
+        "no dispatch"
+    );
+    assert_eq!(
+        count_kind(&journal, rid, JournalEventKind::OutboxQueued),
+        1,
+        "reply queued"
+    );
     Ok(())
 }
