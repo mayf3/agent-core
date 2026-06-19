@@ -88,7 +88,18 @@ impl KernelConfig {
             context_max_block_chars: env_usize("AGENT_CORE_CONTEXT_MAX_BLOCK_CHARS", 4_000),
             outbox_dispatcher_enabled: env_bool("AGENT_CORE_OUTBOX_DISPATCHER_ENABLED", true),
             outbox_dispatcher_poll_interval_ms: env_u64("AGENT_CORE_OUTBOX_DISPATCHER_POLL_MS", 500),
-            extra_allowed_operations: env_list("AGENT_CORE_EXTRA_ALLOWED_OPERATIONS"),
+            // system.status is part of the dogfood agent's profile (not a
+            // channel grant, see ExecutionProfile::for_channel). It is granted
+            // here in the default config so the dogfood agent can query system
+            // health. Future agents must explicitly configure this grant via
+            // extra_allowed_operations.
+            extra_allowed_operations: {
+                let mut ops = env_list("AGENT_CORE_EXTRA_ALLOWED_OPERATIONS");
+                if !ops.contains(&"system.status".to_string()) {
+                    ops.push("system.status".to_string());
+                }
+                ops
+            },
             require_write_approval: env_bool("AGENT_CORE_REQUIRE_WRITE_APPROVAL", false),
             write_approval_ttl_secs: env_u64("AGENT_CORE_WRITE_APPROVAL_TTL_SECS", 0),
         }

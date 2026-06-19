@@ -60,6 +60,10 @@ pub const CATALOG: &[OperationSpec] = &[
         name: SESSION_RECALL_RECENT,
         risk: Risk::ReadOnly,
     },
+    OperationSpec {
+        name: SYSTEM_STATUS,
+        risk: Risk::ReadOnly,
+    },
 ];
 
 pub const STDOUT_SEND_TEXT: &str = "stdout.send_text";
@@ -74,6 +78,11 @@ pub const TIME_NOW: &str = "time.now";
 /// Runtime via `JournalStore::recent_user_messages`. The first *practical*
 /// read-only tool: lets the agent recall earlier context the user mentioned.
 pub const SESSION_RECALL_RECENT: &str = "session.recall_recent";
+/// Read-only: return a snapshot of system health and projection state.
+/// Returns aggregate journal counts (outbox, ingress, hash chain) — never
+/// secrets, payloads, tokens, or raw event content. Implemented inline via
+/// `execute_system_status` in the Runtime.
+pub const SYSTEM_STATUS: &str = "system.status";
 
 /// Look up an operation spec by name. Returns `None` for unknown operations.
 pub fn lookup(name: &str) -> Option<&'static OperationSpec> {
@@ -129,6 +138,11 @@ impl ExecutionProfile {
                     operation: SESSION_RECALL_RECENT.to_string(),
                     scope: "current_session".to_string(),
                 },
+                // NOTE: system.status is NOT granted here. It is added via
+                // KernelConfig.extra_allowed_operations in the default config.
+                // This ensures the grant is a per-Agent configuration choice,
+                // not a channel-level permission. Future agents must explicitly
+                // configure the grant via extra_allowed_operations.
             ],
         }
     }
@@ -186,6 +200,7 @@ pub fn catalog_for_context() -> String {
                 FEISHU_SEND_MESSAGE => "send a message reply to the Feishu chat.",
                 TIME_NOW => "read the current kernel wall-clock time (no side effect).",
                 SESSION_RECALL_RECENT => "recall recent messages from the current session (read-only, current session only, no cross-session access).",
+                SYSTEM_STATUS => "read system health and projection state (aggregate journal counts only, no secrets or payloads).",
                 _ => "catalogued operation.",
             };
             format!("{} (risk: {}) — {}", spec.name, risk, desc)
@@ -221,6 +236,7 @@ mod tests {
         assert!(names.contains(&FEISHU_SEND_MESSAGE));
         assert!(names.contains(&TIME_NOW));
         assert!(names.contains(&SESSION_RECALL_RECENT));
+        assert!(names.contains(&SYSTEM_STATUS));
     }
 
     #[test]
@@ -241,7 +257,7 @@ mod tests {
         // effect, may execute inline). The two reply operations are Write.
         for spec in CATALOG {
             match spec.name {
-                TIME_NOW | SESSION_RECALL_RECENT => assert_eq!(
+                TIME_NOW | SESSION_RECALL_RECENT | SYSTEM_STATUS => assert_eq!(
                     spec.risk,
                     Risk::ReadOnly,
                     "{} should be ReadOnly",
@@ -261,11 +277,14 @@ mod tests {
     fn execution_profile_for_cli_grants_stdout_send_text_and_recall() {
         // The CLI channel baseline includes the reply operation + the
         // session.recall_recent read-only tool (scoped to current session).
+        // system.status is NOT in the baseline — it is granted via
+        // extra_allowed_operations in the default config (see config.rs).
         let profile = ExecutionProfile::for_channel(ChannelKind::Cli);
         assert_eq!(profile.grants.len(), 2);
         let ops: Vec<&str> = profile.grants.iter().map(|g| g.operation.as_str()).collect();
         assert!(ops.contains(&STDOUT_SEND_TEXT));
         assert!(ops.contains(&SESSION_RECALL_RECENT));
+        assert!(!ops.contains(&SYSTEM_STATUS), "system.status is NOT a channel-level grant");
         for grant in &profile.grants {
             assert_eq!(grant.scope, "current_session");
         }
@@ -278,6 +297,7 @@ mod tests {
         let ops: Vec<&str> = profile.grants.iter().map(|g| g.operation.as_str()).collect();
         assert!(ops.contains(&FEISHU_SEND_MESSAGE));
         assert!(ops.contains(&SESSION_RECALL_RECENT));
+        assert!(!ops.contains(&SYSTEM_STATUS), "system.status is NOT a channel-level grant");
         for grant in &profile.grants {
             assert_eq!(grant.scope, "current_session");
         }
@@ -308,6 +328,8 @@ mod tests {
         let augmented = ExecutionProfile::for_channel(ChannelKind::Cli).with_extra(&[]);
         assert_eq!(baseline.grants.len(), augmented.grants.len());
         assert_eq!(augmented.grants[0].operation, STDOUT_SEND_TEXT);
+        // No extra operations added by empty config.
+        assert!(!augmented.grants.iter().any(|g| g.operation == FEISHU_SEND_MESSAGE));
     }
 
     #[test]
