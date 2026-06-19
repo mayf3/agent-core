@@ -33,6 +33,21 @@ a general workflow engine. Key properties:
 - The Journal records only bounded/sanitized metadata (operation + id hash).
   Raw arguments, raw provider IDs, and SDK errors are never journaled.
 
+### LlmCompleted count in a tool-loop run
+
+A single tool-loop run produces exactly **2 LlmCompleted** events (not 3):
+
+1. `LlmCompleted #1` — after the initial LLM call (round 1, which may emit a
+   `tool_call`). Written by `deliver()` at line 138.
+2. `LlmCompleted #2` — after the re-invocation with the `ToolResult` context
+   block (round 2, which produces the final text reply). Written by
+   `run_tool_recall_loop()`.
+
+There is no third LLM call: the final reply is simply `llm.content` from round
+2 — no additional LLM invocation is made after the tool loop returns. The test
+`deliver_with_tool_loop_exact_counts` asserts `exactly 2 LlmCompleted` and
+`≤2 ReceiptReceived`.
+
 See the PR body for the full invariant list.
 
 ## 1. Problem
