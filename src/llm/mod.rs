@@ -148,6 +148,8 @@ impl OpenAiCompatibleLlm {
                 },
             ],
             "temperature": 0.2,
+            "tools": read_only_tool_schemas(),
+            "tool_choice": "auto",
         });
         let agent = ureq::Agent::config_builder()
             .timeout_global(Some(self.timeout))
@@ -240,21 +242,121 @@ fn success_output(model: &str, context_blocks: usize, value: Value) -> LlmOutput
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|text| !text.is_empty())
-        .unwrap_or("模型没有返回文本内容。")
+        .unwrap_or("")
         .to_string();
+    // Parse tool_calls[0] from the OpenAI-compatible response. If the model
+    // emitted a tool call, extract the id + function name + arguments. Malformed
+    // arguments (non-object JSON) are rejected: tool_call stays None and the
+    // model's text reply (if any) is used. The Journal records only sanitized
+    // metadata (operation name + id), never the raw response or full arguments.
+    let tool_call = parse_tool_call(&value);
     LlmOutput {
         provider: "openai-compatible".to_string(),
         model: model.to_string(),
-        content,
+        content: if content.is_empty() && tool_call.is_some() {
+            "正在调用工具查询信息…".to_string()
+        } else {
+            content
+        },
         journal_payload: json!({
             "provider": "openai-compatible",
             "model": value.get("model").and_then(Value::as_str).unwrap_or(model),
             "context_blocks": context_blocks,
             "status": "ok",
             "usage": sanitize_usage(value.get("usage")),
+            "tool_call": tool_call.as_ref().map(|tc| json!({
+                "operation": tc.operation,
+                "id": tc.id,
+            })),
         }),
-        tool_call: None,
+        tool_call,
     }
+}
+
+/// Parse `choices[0].message.tool_calls[0]` from an OpenAI-compatible response.
+/// Returns `None` when no tool call is present or the arguments are malformed.
+/// Never returns raw arguments — the caller (validate_tool_call) re-checks
+/// them before execution.
+///
+/// Malformed `function.arguments` (invalid JSON, non-object JSON) is rejected:
+/// the function returns `None` so no tool executes. This prevents silently
+/// falling back to `{}` and executing a tool with empty arguments.
+fn parse_tool_call(value: &Value) -> Option<ToolCall> {
+    let tool_call_json = value.pointer("/choices/0/message/tool_calls/0")?;
+    let function = tool_call_json.get("function")?;
+    let id = tool_call_json
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    let operation = function.get("name").and_then(Value::as_str)?.to_string();
+    let arguments_str = function
+        .get("arguments")
+        .and_then(Value::as_str)
+        .unwrap_or("{}");
+    // Parse arguments as JSON; reject malformed (invalid JSON) and
+    // non-object JSON (string, number, array). This prevents silently
+    // falling back to `{}` and executing a tool the model did not intend.
+    let arguments: Value = serde_json::from_str(arguments_str).ok()?;
+    if !arguments.is_object() {
+        return None;
+    }
+    Some(ToolCall {
+        id,
+        operation,
+        arguments,
+    })
+}
+
+/// Build the OpenAI-compatible `tools` array for the request — only ReadOnly
+/// operations are exposed to the model, with strict parameter schemas. Every
+/// schema has `additionalProperties: false` so the model cannot inject extra
+/// fields that bypass validation.
+fn read_only_tool_schemas() -> Value {
+    json!([
+        {
+            "type": "function",
+            "function": {
+                "name": "time.now",
+                "description": "Return the current kernel wall-clock time (ISO-8601 + epoch ms).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                    "additionalProperties": false
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "session.recall_recent",
+                "description": "Recall recent messages from the current session (read-only, current session only).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "limit": { "type": "integer", "minimum": 1, "maximum": 20, "description": "Max messages to recall (default 5)." },
+                        "query": { "type": "string", "description": "Optional case-insensitive substring filter." }
+                    },
+                    "required": [],
+                    "additionalProperties": false
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "system.status",
+                "description": "Return system health and projection summary (aggregate counts only, no secrets).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                    "additionalProperties": false
+                }
+            }
+        }
+    ])
 }
 
 fn mark_fallback(mut output: LlmOutput, primary_model: &str, primary_error: &str) -> LlmOutput {

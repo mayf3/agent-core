@@ -1,4 +1,3 @@
-use crate::adapters::InvocationAdapter;
 use crate::config::KernelConfig;
 use crate::context::ContextAssembler;
 use crate::domain::*;
@@ -11,8 +10,6 @@ use serde_json::json;
 
 pub mod outbox_dispatcher;
 mod tool_loop;
-
-use tool_loop::MAX_TOOL_ROUNDS;
 
 pub struct Runtime<L> {
     config: KernelConfig,

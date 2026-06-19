@@ -40,12 +40,14 @@ impl<L: LlmClient> super::Runtime<L> {
         user_text: &str,
         mut llm: LlmOutput,
     ) -> Result<LlmOutput> {
-        for round in 0..MAX_TOOL_ROUNDS {
+        for _round in 0..MAX_TOOL_ROUNDS {
             let Some(tool_call) = llm.tool_call.clone() else {
                 return Ok(llm);
             };
-            // Execute the tool inline. Errors become a structured ToolResult
-            // (error note) rather than aborting the run.
+            // Execute the tool inline. Expected rejections (unknown operation,
+            // forbidden Write, invalid arguments) become a structured ToolResult
+            // so the model can recover. Infrastructure failures (Journal/SQLite/
+            // Gateway integrity) propagate and fail the Run.
             let (result_text, result_json) =
                 match self.handle_inline_tool_call(journal, gateway, run, session, &tool_call) {
                     Ok(Some(tuple)) => tuple,
@@ -53,10 +55,7 @@ impl<L: LlmClient> super::Runtime<L> {
                         "tool call produced no result".to_string(),
                         json!({ "error": "tool call produced no result" }),
                     ),
-                    Err(e) => (
-                        format!("tool call failed: {}", e),
-                        json!({ "error": format!("tool call failed: {}", e) }),
-                    ),
+                    Err(e) => return Err(e),
                 };
             // Append the result as a context block the next round sees. We embed
             // both the summary and the structured JSON so the model can fold a
@@ -107,7 +106,14 @@ impl<L: LlmClient> super::Runtime<L> {
     /// execute it inline, and journal the receipt (InvocationProposed →
     /// InvocationApproved → ReceiptReceived) WITHOUT queueing into
     /// `outbox_dispatches`. Returns `(result_text, result_json)`, or `None` if
-    /// no tool call was emitted / rejected.
+    /// no tool call was emitted.
+    ///
+    /// Expected rejections (unknown operation, forbidden Write, invalid
+    /// arguments) become `Ok(Some(...))` — a stable ToolResult the model can
+    /// recover from. Infrastructure failures (Journal/SQLite/Gateway integrity)
+    /// propagate as `Err` and fail the Run. Sanitized messages are used in
+    /// ToolResult content; raw error text is never exposed to the model or
+    /// Journal.
     pub(crate) fn handle_inline_tool_call(
         &self,
         journal: &JournalStore,
@@ -118,15 +124,27 @@ impl<L: LlmClient> super::Runtime<L> {
     ) -> Result<Option<(String, serde_json::Value)>> {
         let mut intent = match crate::gateway::validate_tool_call(tool_call, &run.id) {
             Ok(intent) => intent,
-            Err(e) => {
-                // Rejection is surfaced as a structured failure so a follow-up
-                // round can explain the rejection to the model — never a crash.
+            Err(_e) => {
+                // Expected business rejection (unknown op, forbidden Write):
+                // surface as a structured sanitized ToolResult so the model
+                // can recover. Never expose raw error text or user-supplied
+                // operation names.
                 return Ok(Some((
-                    format!("tool call rejected: {}", e),
-                    json!({ "error": format!("tool call rejected: {}", e) }),
+                    "tool call rejected: operation is not available".to_string(),
+                    json!({ "error": "tool call rejected" }),
                 )));
             }
         };
+        // Validate model-supplied arguments before injecting session context.
+        // time.now and system.status accept no model arguments; any extra
+        // field is rejected. session.recall_recent accepts only optional
+        // limit (integer 1..20) and optional query (string).
+        if let Err(_e) = validate_model_arguments(&intent.operation, &intent.arguments) {
+            return Ok(Some((
+                "tool call rejected: invalid arguments".to_string(),
+                json!({ "error": "tool call rejected: invalid arguments" }),
+            )));
+        }
         if let Some(arguments) = intent.arguments.as_object_mut() {
             arguments.insert("session_id".to_string(), json!(session.id.0));
         }
@@ -142,7 +160,18 @@ impl<L: LlmClient> super::Runtime<L> {
                 "source": "model_tool_call",
             }),
         )?;
-        let approved = gateway.approve_invocation(intent, &run, &session)?;
+        // Gateway approval failure (policy rejection) is an expected business
+        // outcome — surface as ToolResult so the model can recover, not as an
+        // infrastructure failure.
+        let approved = match gateway.approve_invocation(intent, &run, &session) {
+            Ok(a) => a,
+            Err(_e) => {
+                return Ok(Some((
+                    "tool call rejected: not permitted".to_string(),
+                    json!({ "error": "tool call rejected: not permitted" }),
+                )));
+            }
+        };
         journal.append_event(
             JournalEventKind::InvocationApproved,
             Some(&run.id),
@@ -171,10 +200,7 @@ impl<L: LlmClient> super::Runtime<L> {
                         Self::execute_session_recall(journal, &session.id, &approved);
                     (status, output, text)
                 }
-                crate::domain::operation::SYSTEM_STATUS => {
-                    let (status, output, text) = Self::execute_system_status(journal);
-                    (status, output, text)
-                }
+                crate::domain::operation::SYSTEM_STATUS => Self::execute_system_status(journal)?,
                 other => (
                     crate::domain::ReceiptStatus::Failed,
                     json!({ "error": format!("inline execution not implemented for {other}") }),
@@ -265,20 +291,16 @@ impl<L: LlmClient> super::Runtime<L> {
 
     /// Execute `system.status`: return a deterministic health/projection summary
     /// from the Journal. Only aggregate counts — never secrets, payloads, or
-    /// raw event content.
+    /// raw event content. Infrastructure failures (Journal/SQLite) propagate
+    /// as `Err` — they must fail the run, not silently claim healthy/zero.
     pub(crate) fn execute_system_status(
         journal: &JournalStore,
-    ) -> (crate::domain::ReceiptStatus, serde_json::Value, String) {
-        let hash_ok = journal.verify_hash_chain().unwrap_or(false);
-        let pending = journal
-            .outbox_status_count(crate::domain::OutboxDispatchStatus::Pending)
-            .unwrap_or(0);
-        let unknown = journal.outbox_unknown_unacked_count().unwrap_or(0);
-        let drift = journal.outbox_projection_drift_count().unwrap_or(0);
-        let undelivered = journal
-            .undelivered_ingress_events()
-            .map(|v| v.len() as i64)
-            .unwrap_or(0);
+    ) -> Result<(crate::domain::ReceiptStatus, serde_json::Value, String)> {
+        let hash_ok = journal.verify_hash_chain()?;
+        let pending = journal.outbox_status_count(crate::domain::OutboxDispatchStatus::Pending)?;
+        let unknown = journal.outbox_unknown_unacked_count()?;
+        let drift = journal.outbox_projection_drift_count()?;
+        let undelivered = journal.undelivered_ingress_events()?.len() as i64;
 
         let rollup = if !hash_ok {
             "corrupt"
@@ -307,6 +329,49 @@ impl<L: LlmClient> super::Runtime<L> {
             undelivered,
         );
 
-        (crate::domain::ReceiptStatus::Succeeded, output, text)
+        Ok((crate::domain::ReceiptStatus::Succeeded, output, text))
     }
+}
+
+/// Validate model-supplied tool-call arguments before the Runtime injects
+/// trusted session context. Rejects extra fields, wrong types, and out-of-range
+/// values so malformed model output never executes a tool.
+///
+/// * `time.now` — no model arguments allowed.
+/// * `system.status` — no model arguments allowed.
+/// * `session.recall_recent` — optional `limit` (integer 1..20), optional
+///   `query` (string); any other field is rejected.
+fn validate_model_arguments(operation: &str, arguments: &serde_json::Value) -> anyhow::Result<()> {
+    let Some(map) = arguments.as_object() else {
+        anyhow::bail!("arguments must be a JSON object");
+    };
+    match operation {
+        crate::domain::operation::TIME_NOW | crate::domain::operation::SYSTEM_STATUS => {
+            if !map.is_empty() {
+                anyhow::bail!("operation takes no arguments");
+            }
+        }
+        crate::domain::operation::SESSION_RECALL_RECENT => {
+            for (key, value) in map {
+                match key.as_str() {
+                    "limit" => {
+                        let n = value
+                            .as_u64()
+                            .ok_or_else(|| anyhow::anyhow!("limit must be a positive integer"))?;
+                        if n < 1 || n > 20 {
+                            anyhow::bail!("limit must be between 1 and 20");
+                        }
+                    }
+                    "query" => {
+                        if !value.is_string() {
+                            anyhow::bail!("query must be a string");
+                        }
+                    }
+                    _ => anyhow::bail!("unexpected argument: {key}"),
+                }
+            }
+        }
+        _ => anyhow::bail!("unknown operation"),
+    }
+    Ok(())
 }
