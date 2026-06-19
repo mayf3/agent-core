@@ -118,18 +118,18 @@ impl JournalStore {
                  now.as_str(),
              ],
          )?;
-        if changed == 1 {
-            append_worker_event_tx(
-                &tx,
-                JournalEventKind::WorkerJobQueued,
-                &job_id,
-                &event.event_id,
-                json!({ "status": WorkerJobStatus::Queued.as_str() }),
-            )?;
-        }
-        tx.commit()?;
-        Ok(job_id)
-    }
+         if changed == 1 {
+             append_worker_event_tx(
+                 &tx,
+                 JournalEventKind::WorkerJobQueued,
+                 &job_id,
+                 &event.event_id,
+                 json!({ "status": WorkerJobStatus::Queued.as_str() }),
+             )?;
+         }
+         tx.commit()?;
+         Ok(job_id)
+     }
 
     pub fn enqueue_worker_job(&self, source_event_id: &EventId) -> Result<String> {
         let job_id = worker_job_id(source_event_id);
@@ -219,24 +219,17 @@ impl JournalStore {
             .lock()
             .map_err(|_| anyhow!("journal mutex poisoned"))?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let attempts: i64 = tx
-            .query_row(
-                "SELECT attempts FROM worker_jobs WHERE job_id = ?1",
-                params![job_id],
-                |row| row.get(0),
-            )
-            .optional()?
-            .unwrap_or(0);
+        let attempts: i64 = tx.query_row(
+            "SELECT attempts FROM worker_jobs WHERE job_id = ?1",
+            params![job_id],
+            |row| row.get(0),
+        ).optional()?.unwrap_or(0);
         if attempts >= policy.max_worker_attempts {
             drop(tx);
             drop(conn);
             return self.mark_worker_dead(source_event_id, error, policy);
         }
-        let delay_ms = next_retry_delay_ms(
-            attempts + 1,
-            policy.base_retry_delay_ms,
-            policy.max_retry_delay_ms,
-        );
+        let delay_ms = next_retry_delay_ms(attempts + 1, policy.base_retry_delay_ms, policy.max_retry_delay_ms);
         let available_at = now + chrono::Duration::milliseconds(delay_ms);
         let available_at_text = available_at.to_rfc3339();
         append_worker_event_tx(
@@ -296,7 +289,12 @@ impl JournalStore {
             "UPDATE worker_jobs SET status = ?1, last_error = ?2,
              locked_by = NULL, locked_until = NULL, updated_at = ?3
              WHERE job_id = ?4",
-            params![WorkerJobStatus::Dead.as_str(), error, now_text, job_id,],
+            params![
+                WorkerJobStatus::Dead.as_str(),
+                error,
+                now_text,
+                job_id,
+            ],
         )?;
         tx.commit()?;
         Ok(())
@@ -322,12 +320,7 @@ impl JournalStore {
                 "UPDATE worker_jobs
                  SET status = ?1, attempts = attempts + 1, updated_at = ?2
                  WHERE job_id = ?3 AND status != ?4",
-                params![
-                    status_str,
-                    now,
-                    job_id.as_str(),
-                    WorkerJobStatus::Succeeded.as_str()
-                ],
+                params![status_str, now, job_id.as_str(), WorkerJobStatus::Succeeded.as_str()],
             )?
         } else {
             tx.execute(

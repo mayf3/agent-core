@@ -32,39 +32,39 @@ impl JournalStore {
              (dispatch_id, invocation_id, run_id, session_id, operation, arguments_json,
               idempotency_key, decision_id, status, attempts, available_at, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?10, 0, ?9, ?9, ?9)",
-            params![
-                dispatch_id.as_str(),
-                intent.invocation_id.0.as_str(),
-                intent.run_id.0.as_str(),
-                session_id.map(|id| id.0.as_str()),
-                intent.operation.as_str(),
-                arguments_json.as_str(),
-                idempotency_key.as_str(),
-                approved.decision_id.as_str(),
-                now.as_str(),
-                OutboxDispatchStatus::Pending.as_str(),
-            ],
-        )?;
-        if changed == 1 {
-            append_event_tx(
-                &tx,
-                JournalEventKind::OutboxQueued,
-                Some(&intent.run_id),
-                session_id,
-                Some(&intent.invocation_id.0),
-                json!({
-                    "dispatch_id": dispatch_id,
-                    "invocation_id": intent.invocation_id.0.as_str(),
-                    "decision_id": approved.decision_id.as_str(),
-                    "operation": intent.operation.as_str(),
-                    "idempotency_key": idempotency_key,
-                    "status": OutboxDispatchStatus::Pending.as_str(),
-                }),
-            )?;
-        }
-        tx.commit()?;
-        Ok(dispatch_id)
-    }
+             params![
+                 dispatch_id.as_str(),
+                 intent.invocation_id.0.as_str(),
+                 intent.run_id.0.as_str(),
+                 session_id.map(|id| id.0.as_str()),
+                 intent.operation.as_str(),
+                 arguments_json.as_str(),
+                 idempotency_key.as_str(),
+                 approved.decision_id.as_str(),
+                 now.as_str(),
+                 OutboxDispatchStatus::Pending.as_str(),
+             ],
+         )?;
+         if changed == 1 {
+             append_event_tx(
+                 &tx,
+                 JournalEventKind::OutboxQueued,
+                 Some(&intent.run_id),
+                 session_id,
+                 Some(&intent.invocation_id.0),
+                 json!({
+                     "dispatch_id": dispatch_id,
+                     "invocation_id": intent.invocation_id.0.as_str(),
+                     "decision_id": approved.decision_id.as_str(),
+                     "operation": intent.operation.as_str(),
+                     "idempotency_key": idempotency_key,
+                     "status": OutboxDispatchStatus::Pending.as_str(),
+                 }),
+             )?;
+         }
+         tx.commit()?;
+         Ok(dispatch_id)
+     }
 
     pub fn outbox_dispatch_status(
         &self,
@@ -301,24 +301,17 @@ impl JournalStore {
             .lock()
             .map_err(|_| anyhow!("journal mutex poisoned"))?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let attempts: i64 = tx
-            .query_row(
-                "SELECT attempts FROM outbox_dispatches WHERE invocation_id = ?1",
-                params![invocation_id.0],
-                |row| row.get(0),
-            )
-            .optional()?
-            .unwrap_or(0);
+        let attempts: i64 = tx.query_row(
+            "SELECT attempts FROM outbox_dispatches WHERE invocation_id = ?1",
+            params![invocation_id.0],
+            |row| row.get(0),
+        ).optional()?.unwrap_or(0);
         if attempts >= policy.max_outbox_attempts {
             drop(tx);
             drop(conn);
             return self.mark_outbox_dead(invocation_id, run_id, session_id, error, policy);
         }
-        let delay_ms = next_retry_delay_ms(
-            attempts + 1,
-            policy.base_retry_delay_ms,
-            policy.max_retry_delay_ms,
-        );
+        let delay_ms = next_retry_delay_ms(attempts + 1, policy.base_retry_delay_ms, policy.max_retry_delay_ms);
         let available_at = now + chrono::Duration::milliseconds(delay_ms);
         let available_at_text = available_at.to_rfc3339();
         append_event_tx(
@@ -395,3 +388,4 @@ impl JournalStore {
         Ok(())
     }
 }
+

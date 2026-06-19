@@ -227,9 +227,7 @@ fn acknowledging_terminal_unknown_clears_health_degraded() -> Result<()> {
     // Before ack: terminal-unknown degrades health.
     let snapshot = health_snapshot(&journal, true, &DispatcherMetrics::new())?;
     assert_eq!(
-        snapshot
-            .get("outbox_unknown_count")
-            .and_then(|v| v.as_u64()),
+        snapshot.get("outbox_unknown_count").and_then(|v| v.as_u64()),
         Some(1),
         "unacked terminal-unknown is counted"
     );
@@ -246,9 +244,7 @@ fn acknowledging_terminal_unknown_clears_health_degraded() -> Result<()> {
     // returns to ok (no other degraded conditions present).
     let snapshot = health_snapshot(&journal, true, &DispatcherMetrics::new())?;
     assert_eq!(
-        snapshot
-            .get("outbox_unknown_count")
-            .and_then(|v| v.as_u64()),
+        snapshot.get("outbox_unknown_count").and_then(|v| v.as_u64()),
         Some(0),
         "acked terminal-unknown is not counted"
     );

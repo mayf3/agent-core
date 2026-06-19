@@ -98,7 +98,6 @@ impl JournalStore {
                 requested_at,
             })
         })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Into::into)
+        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
     }
 }

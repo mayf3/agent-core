@@ -206,10 +206,7 @@ mod tests {
             let conn = journal.conn.lock().unwrap();
             conn.execute(
                 "UPDATE outbox_dispatches SET status = ?1 WHERE invocation_id = ?2",
-                params![
-                    OutboxDispatchStatus::Unknown.as_str(),
-                    a_unknown.intent().invocation_id.0
-                ],
+                params![OutboxDispatchStatus::Unknown.as_str(), a_unknown.intent().invocation_id.0],
             )?;
         }
 

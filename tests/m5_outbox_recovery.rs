@@ -333,21 +333,9 @@ fn stale_dispatching_routes_by_terminal_fact_not_all_unknown() -> Result<()> {
     let run = common::test_run(&config, &session);
 
     let cases = [
-        (
-            "reply:succeeded",
-            JournalEventKind::ReceiptReceived,
-            json!({ "status": "Succeeded", "output_kind": "text" }),
-        ),
-        (
-            "reply:failed",
-            JournalEventKind::ReceiptReceived,
-            json!({ "status": "Failed", "output_kind": "error" }),
-        ),
-        (
-            "reply:unknown",
-            JournalEventKind::OutboxDispatchUnknown,
-            json!({ "error": "previous_recovery_incomplete" }),
-        ),
+        ("reply:succeeded", JournalEventKind::ReceiptReceived, json!({ "status": "Succeeded", "output_kind": "text" })),
+        ("reply:failed", JournalEventKind::ReceiptReceived, json!({ "status": "Failed", "output_kind": "error" })),
+        ("reply:unknown", JournalEventKind::OutboxDispatchUnknown, json!({ "error": "previous_recovery_incomplete" })),
     ];
     let mut invocation_ids = Vec::new();
     for (suffix, _kind, _payload) in &cases {
@@ -400,6 +388,7 @@ fn stale_dispatching_routes_by_terminal_fact_not_all_unknown() -> Result<()> {
     assert!(journal.verify_hash_chain()?);
     Ok(())
 }
+
 #[test]
 fn health_fields_expose_dispatcher_state() -> Result<()> {
     let config = common::test_config();
@@ -408,6 +397,7 @@ fn health_fields_expose_dispatcher_state() -> Result<()> {
     let session = common::test_session(&config);
     let run = common::test_run(&config, &session);
     let approved = common::approved_stdout_invocation(&gateway, &run, &session)?;
+
     journal.queue_outbox_dispatch(&approved, Some(&session.id))?;
     let snapshot_disabled = health_snapshot(&journal, false, &DispatcherMetrics::new())?;
     assert_eq!(
@@ -434,6 +424,8 @@ fn health_fields_expose_dispatcher_state() -> Result<()> {
             .and_then(|v| v.as_u64()),
         Some(0)
     );
+    // The three observability fields (HANDOVER §4.4) are present. With a fresh
+    // metrics handle the loop is not running and no tick/error is recorded.
     assert_eq!(
         snapshot_disabled
             .get("outbox_dispatcher_running")
@@ -445,15 +437,16 @@ fn health_fields_expose_dispatcher_state() -> Result<()> {
             .get("last_dispatch_tick_at")
             .map(|v| v.is_null())
             .unwrap_or(true),
-        "last_dispatch_tick_at must be null when no tick"
+        "last_dispatch_tick_at must be null when the loop has not ticked"
     );
     assert!(
         snapshot_disabled
             .get("last_dispatch_error_category")
             .map(|v| v.is_null())
             .unwrap_or(true),
-        "last_dispatch_error_category must be null when no error"
+        "last_dispatch_error_category must be null when no error recorded"
     );
+
     let snapshot_enabled = health_snapshot(&journal, true, &DispatcherMetrics::new())?;
     assert_eq!(
         snapshot_enabled
@@ -463,8 +456,11 @@ fn health_fields_expose_dispatcher_state() -> Result<()> {
     );
     Ok(())
 }
+
 #[test]
 fn health_fields_reflect_populated_dispatcher_metrics() -> Result<()> {
+    // A metrics handle written to by the loop must surface its state in
+    // /health: running flag, last tick timestamp, last error category.
     let config = common::test_config();
     let gateway = Gateway::new(config.clone());
     let journal = JournalStore::in_memory()?;
@@ -476,6 +472,7 @@ fn health_fields_reflect_populated_dispatcher_metrics() -> Result<()> {
     metrics.record_tick("2026-06-15T12:00:00Z".to_string());
     metrics.record_error_category("timeout".to_string());
     metrics.mark_started();
+
     let snapshot = health_snapshot(&journal, true, &metrics)?;
     assert_eq!(
         snapshot

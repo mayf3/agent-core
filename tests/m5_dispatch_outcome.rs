@@ -141,11 +141,13 @@ fn dispatch_success_completes_run() -> Result<()> {
     );
     assert_eq!(journal.run_status(&run_id)?.as_deref(), Some("Completed"));
     assert!(journal.events()?.iter().any(|event| {
-        event.kind == JournalEventKind::RunCompleted && event.run_id.as_ref() == Some(&run_id)
+        event.kind == JournalEventKind::RunCompleted
+            && event.run_id.as_ref() == Some(&run_id)
     }));
     assert!(journal.events()?.iter().any(|event| {
         event.kind == JournalEventKind::ReceiptReceived
-            && event.correlation_id.as_deref() == Some(approved.intent().invocation_id.0.as_str())
+            && event.correlation_id.as_deref()
+                == Some(approved.intent().invocation_id.0.as_str())
     }));
     assert!(journal.verify_hash_chain()?);
     Ok(())
@@ -177,7 +179,8 @@ fn dispatch_definite_failure_fails_run() -> Result<()> {
     );
     assert_eq!(journal.run_status(&run_id)?.as_deref(), Some("Failed"));
     assert!(journal.events()?.iter().any(|event| {
-        event.kind == JournalEventKind::RunFailed && event.run_id.as_ref() == Some(&run_id)
+        event.kind == JournalEventKind::RunFailed
+            && event.run_id.as_ref() == Some(&run_id)
     }));
     assert_eq!(
         journal
