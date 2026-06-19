@@ -39,16 +39,8 @@ where
     }
 
     /// Phase 2 M2d: decide whether an approved invocation is dispatched now or
-    /// paused for human approval, and persist the outcome.
-    ///
-    /// - `Risk::ReadOnly`, or `Risk::Write` when the operator has **not** opted
-    ///   in (`require_write_approval == false`): queue the dispatch and mark the
-    ///   run `WaitingDispatch` (the pre-M2d behavior, byte-identical).
-    /// - `Risk::Write` when the operator **has** opted in: do NOT queue. Append
-    ///   an `ApprovalRequested` fact carrying an `intent_snapshot` (so an
-    ///   approve can reconstruct and queue the dispatch without re-running the
-    ///   LLM) and mark the run `AwaitingApproval`. The run resumes later via
-    ///   `Gateway::approve_run` / `Gateway::deny_run`.
+    /// paused for human approval. ReadOnly ops queue immediately; Write ops
+    /// pause when require_write_approval is enabled.
     fn enqueue_or_pause(
         &self,
         journal: &JournalStore,
@@ -86,14 +78,10 @@ where
         Ok(())
     }
     /// Phase 2 tool-call MVP: if the model emitted a `ReadOnly` tool call,
-    /// validate it, execute `TimeAdapter` inline, and journal the receipt —
-    /// WITHOUT queueing into `outbox_dispatches` (the outbox dispatcher is
-    /// wired to `HttpConnectorAdapter`; a local adapter must not route there).
-    /// Audit facts: `InvocationProposed` + `InvocationApproved` +
-    /// `ReceiptReceived`. `OutboxQueued`/`DispatchStarted` are intentionally
-    /// skipped (see docs/decisions/tool-call-execution-loop.md §4.5).
-    /// Returns the receipt output serialized as text for the run outcome, or
-    /// None if no tool call was emitted / it was rejected.
+    /// validate it, execute inline, and journal the receipt — WITHOUT queueing
+    /// into `outbox_dispatches`. Audit facts: InvocationProposed +
+    /// InvocationApproved + ReceiptReceived. Returns the receipt output text,
+    /// or None if no tool call was emitted / rejected.
     fn handle_inline_tool_call(
         &self,
         journal: &JournalStore,
@@ -156,6 +144,14 @@ where
                         Self::execute_session_recall(journal, &session.id, &approved);
                     (status, output, text)
                 }
+                crate::domain::operation::SYSTEM_STATUS => {
+                    let output = crate::capabilities::execute(journal);
+                    (
+                        crate::domain::ReceiptStatus::Succeeded,
+                        output.clone(),
+                        output.get("summary").and_then(|v: &serde_json::Value| v.as_str()).unwrap_or("ok").to_string(),
+                    )
+                }
                 other => {
                     // A read-only operation not yet wired for inline execution.
                     (
@@ -181,14 +177,8 @@ where
 
     /// Execute `session.recall_recent`: read recent user messages from the
     /// **current session only** and return a normalized, sanitized result.
-    ///
-    /// Security invariants:
-    /// - Only reads the current session (`session_id` is pinned by the caller).
-    /// - Never returns raw `payload_json`; only normalized `event_id` + `role`
-    ///   + `text` (truncated to `MAX_RECALL_CHARS` per message).
-    /// - `limit` is clamped to `1..=MAX_RECALL_LIMIT` (default 5).
-    /// - Optional `query` filters by case-insensitive substring on text.
-    /// - No cross-session access, no file system, no network.
+    /// Only returns event_id + role + text (truncated to 500 chars per msg).
+    /// No raw payload, no cross-session, no filesystem, no network.
     fn execute_session_recall(
         journal: &JournalStore,
         session_id: &SessionId,
@@ -294,6 +284,7 @@ where
             message_id,
             chat_id,
         } = event.payload.clone();
+
         let blocks =
             ContextAssembler::from_config(&self.config).build(journal, &session, &event, &text)?;
         journal.append_event(

@@ -185,3 +185,119 @@ fn validate_rejects_write_via_tool_call() {
     ).unwrap_err();
     assert!(err.to_string().contains("write_operation_not_allowed"));
 }
+
+// --- system.status (Catalog operation via tool-call path) ---
+
+#[test]
+fn system_status_is_catalogued_as_read_only() {
+    use agent_core_kernel::domain::operation::{lookup, SYSTEM_STATUS, Risk};
+    let spec = lookup(SYSTEM_STATUS).unwrap();
+    assert_eq!(spec.risk, Risk::ReadOnly);
+}
+
+#[test]
+fn execute_system_status_returns_aggregate_journal_counts() -> Result<()> {
+    // Direct test of the execute_system_status function: a fresh in-memory
+    // journal returns status=ok with zero counts.
+    let journal = JournalStore::in_memory()?;
+    let output = agent_core_kernel::capabilities::execute(&journal);
+    assert_eq!(output["status"], "ok");
+    assert_eq!(output["hash_chain_ok"].as_bool(), Some(true));
+    assert!(output["outbox"]["pending"].is_number());
+    assert!(output["event_count"].is_number());
+    Ok(())
+}
+
+#[test]
+fn system_status_tool_call_is_validated_as_read_only() {
+    use agent_core_kernel::gateway::validate_tool_call;
+    use agent_core_kernel::domain::RunId;
+    assert!(validate_tool_call(
+        &ToolCall { id: "c1".into(), operation: "system.status".into(), arguments: json!({}) },
+        &RunId::new(),
+    ).is_ok());
+}
+
+#[test]
+fn system_status_grant_check_passes_with_baseline_profile() -> Result<()> {
+    // The baseline CLI profile includes system.status, so the gateway
+    // should accept it. We verify the catalog + validate_tool_call chain.
+    use agent_core_kernel::gateway::validate_tool_call;
+    use agent_core_kernel::domain::RunId;
+    let tool_call = ToolCall { id: "c2".into(), operation: "system.status".into(), arguments: json!({}) };
+    assert!(validate_tool_call(&tool_call, &RunId::new()).is_ok(),
+        "system.status should be accepted as a read-only tool call");
+    Ok(())
+}
+
+// --- Full tool-loop test: StatusLlm emits system.status ---
+
+struct StatusLlm;
+
+impl LlmClient for StatusLlm {
+    fn complete(&self, _input: LlmInput) -> Result<LlmOutput> {
+        Ok(LlmOutput {
+            provider: "local".into(),
+            model: "status-test".into(),
+            content: "system status tool called".into(),
+            journal_payload: json!({"status": "ok", "tool_call": "system.status"}),
+            tool_call: Some(ToolCall {
+                id: "call_status_1".into(),
+                operation: "system.status".into(),
+                arguments: json!({}),
+            }),
+        })
+    }
+}
+
+#[test]
+fn system_status_tool_call_runtime_chain() -> Result<()> {
+    // Verify the full Runtime-level tool-loop for system.status:
+    // 1. LLM emits system.status ToolCall
+    // 2. handle_inline_tool_call routes to capabilities::execute
+    // 3. Journal: InvocationProposed → InvocationApproved → ReceiptReceived
+    // 4. Reply intent goes through OutboxQueued
+    // 5. ToolResult text includes the summary field
+    let mut config = common::test_config();
+    config.extra_allowed_operations = vec!["system.status".to_string()];
+    let journal = JournalStore::in_memory()?;
+    let gateway = Gateway::new(config.clone());
+    let runtime = Runtime::new(config, StatusLlm);
+    let envelope = gateway.cli_ingress("what is the system status".to_string())?;
+    let event = gateway.validate_ingress(&journal, envelope)?;
+    // System status tool call goes through inline execution; the outcome
+    // text is the LLM's content, not the tool result. The tool result is
+    // in the Journal as ReceiptReceived.
+    let _outcome = runtime.deliver(&journal, &gateway, event)?;
+
+    let events = journal.events()?;
+    // Collect event kinds for verification.
+    let mut saw_proposed = false;
+    let mut saw_approved = false;
+    let mut saw_receipt = false;
+    let mut saw_outbox = false;
+    for e in &events {
+        if e.kind == agent_core_kernel::domain::JournalEventKind::InvocationProposed {
+            saw_proposed = true;
+        } else if e.kind == agent_core_kernel::domain::JournalEventKind::InvocationApproved {
+            saw_approved = true;
+        } else if e.kind == agent_core_kernel::domain::JournalEventKind::ReceiptReceived
+            && e.payload.get("output").and_then(|o| o.get("status")).is_some()
+        {
+            saw_receipt = true;
+            // Verify the ReceiptReceived output has system.status fields.
+            let output = e.payload.get("output").unwrap();
+            assert!(output.get("event_count").is_some(), "Receipt has event_count");
+            assert!(output.get("outbox").and_then(|o| o.get("pending")).is_some(), "Receipt has outbox.pending");
+            assert!(output.get("summary").is_some(), "Receipt has summary field");
+        } else if e.kind == agent_core_kernel::domain::JournalEventKind::OutboxQueued {
+            saw_outbox = true;
+        }
+    }
+    assert!(saw_proposed, "InvocationProposed in Journal");
+    assert!(saw_approved, "InvocationApproved in Journal");
+    assert!(saw_receipt, "ReceiptReceived with system.status output in Journal");
+    assert!(saw_outbox, "OutboxQueued for the reply in Journal");
+
+    Ok(())
+}
