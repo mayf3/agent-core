@@ -19,6 +19,7 @@ import { mkdtempSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execSync, execFileSync, spawn } from "node:child_process";
+import { createServer } from "node:net";
 import type { Fixture } from "./fixture.ts";
 import type { ReplayOutcome } from "./scorer.ts";
 
@@ -32,6 +33,21 @@ export interface RunHandle {
   ipcToken: string;
 }
 
+/**
+ * Structured error for infrastructure failures during replay.
+ * Separate from candidate-process crashes — these are driver-level
+ * failures (port binding, kernel startup, etc.) that should be
+ * reported distinctly in score.json.
+ */
+export class DriverError extends Error {
+  category: string;
+  constructor(category: string, message: string) {
+    super(message);
+    this.name = "DriverError";
+    this.category = category;
+  }
+}
+
 /** Resolve a git ref to a short commit hash. Throws if unresolvable. */
 export function resolveRef(ref: string): string {
   try {
@@ -41,7 +57,11 @@ export function resolveRef(ref: string): string {
   }
 }
 
-/** Build the Kernel binary in the given worktree dir. Returns the binary path. */
+/**
+ * Build the Kernel binary in the given worktree dir. Returns the binary path.
+ * Exported for test injection — tests can replace this to simulate build
+ * failures without a real cargo invocation.
+ */
 export function buildKernel(worktreeDir: string): string {
   try {
     execSync("cargo build --release --bin agent-core-kernel", {
@@ -55,66 +75,83 @@ export function buildKernel(worktreeDir: string): string {
   return join(worktreeDir, "target", "release", "agent-core-kernel");
 }
 
-/** Find a free TCP port by asking the OS. */
-export function freePort(): number {
-  // A lightweight, dependency-free way: open a server socket on :0 and read
-  // the assigned port, then close it. There's a small race window, acceptable
-  // for an ephemeral test instance.
-  const { Server } = require("node:net");
+/** Find a free TCP port by asking the OS. Pure ESM, no require(). */
+export async function freePort(): Promise<number> {
+  const srv = createServer();
+  srv.unref();
   return new Promise<number>((resolve, reject) => {
-    const srv = new Server();
-    srv.unref();
     srv.on("error", reject);
     srv.listen(0, "127.0.0.1", () => {
       const addr = srv.address();
-      if (addr && typeof addr === "object") resolve(addr.port);
-      else reject(new Error("could not bind ephemeral port"));
-      srv.close();
+      if (addr && typeof addr === "object") {
+        const port = addr.port;
+        srv.close();
+        resolve(port);
+      } else {
+        reject(new Error("could not bind ephemeral port"));
+      }
     });
-  }) as unknown as number;
+  });
+}
+
+/**
+ * Build the minimal environment for a candidate kernel process.
+ * Exported for test verification of ambient isolation.
+ *
+ * HOME points to the fresh runtime directory (temp), not the operator's
+ * real home.  The candidate's cwd is its worktree so runtime-relative
+ * assets come from the correct revision.
+ *
+ * This is ambient-configuration isolation, not a security sandbox.
+ * Candidate refs must still be trusted/reviewed until an external sandbox
+ * harness exists.  Do not spread process.env.
+ */
+export function buildCandidateEnv(runtimeDir: string, ipcToken: string): Record<string, string> {
+  return {
+    PATH: process.env.PATH ?? "",
+    HOME: runtimeDir,
+    AGENT_CORE_IPC_TOKEN: ipcToken,
+    AGENT_CORE_OPENAI_API_KEY: "replay-stub-key",
+    AGENT_CORE_FALLBACK_OPENAI_API_KEY: "replay-stub-key",
+    AGENT_CORE_MODEL: "local",
+    AGENT_CORE_OPENAI_BASE_URL: "http://127.0.0.1:0/v1",
+    AGENT_CORE_FALLBACK_OPENAI_BASE_URL: "http://127.0.0.1:0/v1",
+    AGENT_CORE_OUTBOX_DISPATCHER_ENABLED: "true",
+    AGENT_CORE_CONNECTOR_EXECUTE_URL: "http://127.0.0.1:0/v1/execute",
+  };
 }
 
 /**
  * Start a Kernel build on an ephemeral port + ephemeral DB. Returns a handle
  * the caller must stop(). The DB is a fresh temp file (never production).
+ * @param worktreeCwd - the candidate/baseline worktree directory (for cwd).
+ * Throws DriverError on infrastructure failures.
  */
-export function startKernel(binaryPath: string, ipcToken: string): RunHandle {
+export async function startKernel(binaryPath: string, ipcToken: string, worktreeCwd?: string): Promise<RunHandle> {
   const dir = mkdtempSync(join(tmpdir(), "replay-kernel-"));
   const dbPath = join(dir, "ephemeral.db");
-  // sync freePort (the promise variant above is awkward to await in a sync
-  // start; use a direct socket binding instead).
-  const port = bindEphemeralPort();
-  const child = spawn(binaryPath, ["serve", "--db", dbPath, "--port", String(port)], {
-    stdio: "pipe",
-    // Minimal, explicit env only — do NOT spread process.env. Spreading would
-    // leak the operator's real secrets (OPENAI_API_KEY, IPC_TOKEN, etc. from
-    // .env or shell) into the candidate process, violating the harness's
-    // "never touch secrets" boundary. The candidate uses LocalEchoLlm (the
-    // stub key below is never a real credential) and a fresh ephemeral DB.
-    env: {
-      PATH: process.env.PATH ?? "",
-      HOME: process.env.HOME ?? "",
-      AGENT_CORE_IPC_TOKEN: ipcToken,
-      AGENT_CORE_OPENAI_API_KEY: "replay-stub-key", // LocalEchoLlm ignores it; never a real key
-      AGENT_CORE_FALLBACK_OPENAI_API_KEY: "replay-stub-key",
-      AGENT_CORE_MODEL: "local",
-      AGENT_CORE_OPENAI_BASE_URL: "http://127.0.0.1:0/v1",
-      AGENT_CORE_FALLBACK_OPENAI_BASE_URL: "http://127.0.0.1:0/v1",
-      AGENT_CORE_OUTBOX_DISPATCHER_ENABLED: "true",
-      AGENT_CORE_CONNECTOR_EXECUTE_URL: "http://127.0.0.1:0/v1/execute",
-    },
+  let port: number;
+  try {
+    port = await freePort();
+  } catch (e) {
+    rmSync(dir, { recursive: true, force: true });
+    throw new DriverError("port_binding", `failed to bind ephemeral port: ${(e as Error).message}`);
+  }
+  let child: ReturnType<typeof spawn>;
+  try {
+    child = spawn(binaryPath, ["serve", "--db", dbPath, "--port", String(port)], {
+      cwd: worktreeCwd ?? dir,
+      stdio: "pipe",
+      env: buildCandidateEnv(dir, ipcToken),
+    });
+  } catch (e) {
+    rmSync(dir, { recursive: true, force: true });
+    throw new DriverError("kernel_startup", `failed to spawn kernel: ${(e as Error).message}`);
+  }
+  child.on("error", () => {
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
   });
   return { process: child, port, dbPath, ipcToken };
-}
-
-function bindEphemeralPort(): number {
-  const { Server } = require("node:net");
-  const srv = new Server();
-  srv.listen(0, "127.0.0.1");
-  const addr = srv.address() as { port: number } | null;
-  const port = addr?.port ?? 0;
-  srv.close();
-  return port;
 }
 
 /** Wait for the Kernel's /health endpoint to respond 200. */
@@ -129,23 +166,21 @@ export async function waitForReady(handle: RunHandle, timeoutMs = 10_000): Promi
     }
     await sleep(200);
   }
-  throw new Error(`kernel did not become ready on port ${handle.port}`);
+  throw new DriverError("kernel_not_ready", `kernel did not become ready on port ${handle.port}`);
 }
 
 /** POST a single ingress turn to the Kernel. */
 export async function postTurn(handle: RunHandle, fixture: Fixture, turnIndex: number): Promise<void> {
   const turn = fixture.turns[turnIndex];
+  const sourceKind = fixture.setup.channel === "feishu" ? "Feishu" : "Cli";
   const envelope = {
     protocol_version: "v1",
-    source: fixture.setup.channel,
+    source: sourceKind,
     external_event_id: turn.external_event_id,
     received_at: new Date().toISOString(),
+    auth_context: { authenticated: true },
     payload: {
-      type: "message",
-      message_id: turn.external_event_id,
-      chat_id: fixture.setup.session_id,
       text: turn.text,
-      chat_type: "p2p",
     },
     routing_hint: { session_id: fixture.setup.session_id },
   };
@@ -158,25 +193,71 @@ export async function postTurn(handle: RunHandle, fixture: Fixture, turnIndex: n
     body: JSON.stringify(envelope),
   });
   if (!res.ok) {
-    throw new Error(`/v1/ingress failed (${res.status})`);
+    throw new DriverError("ingress_failed", `/v1/ingress failed (${res.status})`);
   }
 }
 
-/** Poll /health until the run appears terminal or timeout. */
-export async function pollUntilTerminal(handle: RunHandle): Promise<{ completed: boolean; latencyMs: number }> {
+/**
+ * Sum the numeric values of a status-count map (worker_jobs or
+ * outbox_dispatches in the Kernel's /health snapshot).
+ */
+function sumCounts(m: Record<string, number> | undefined): number {
+  if (!m) return 0;
+  let s = 0;
+  for (const v of Object.values(m)) {
+    if (typeof v === "number") s += v;
+  }
+  return s;
+}
+
+/** The real Kernel /health exposes worker_jobs and outbox_dispatches as
+ *  status-count maps (e.g. {"queued": 0, "running": 0, "succeeded": 1}) */
+interface HealthSnapshot {
+  worker_jobs?: Record<string, number>;
+  outbox_dispatches?: Record<string, number>;
+}
+
+const ACTIVE_WORKER_KEYS = new Set(["queued", "running", "retryable_failed"]);
+const ACTIVE_OUTBOX_KEYS = new Set(["pending", "dispatching", "retryable_failed"]);
+
+/**
+ * Poll /health until the Kernel has settled for a multi-turn fixture, or
+ * timeout.  Settlement means:
+ *   - the expected number of turns are represented by total worker_jobs;
+ *   - no worker job is queued/running/retryable_failed;
+ *   - no outbox dispatch is pending/dispatching/retryable_failed.
+ *
+ * Terminal/succeeded/failed/unknown counts are treated as settled
+ * evidence, not active work.
+ */
+export async function pollUntilTerminal(
+  handle: RunHandle,
+  expectedTurns?: number,
+): Promise<{ completed: boolean; latencyMs: number }> {
   const start = Date.now();
   const deadline = start + POLL_TIMEOUT_MS;
   while (Date.now() < deadline) {
     try {
       const res = await fetch(`http://127.0.0.1:${handle.port}/health`);
-      if (res.ok) {
-        const health = (await res.json()) as { recent_runs_total?: number; completed_runs?: number };
-        // The Kernel processes synchronously; once health responds the turn is
-        // settled. A real MVP would inspect the run status; we approximate
-        // completion by the absence of a 5xx and a non-zero run count.
-        if ((health.recent_runs_total ?? 0) > 0) {
-          return { completed: true, latencyMs: Date.now() - start };
-        }
+      if (!res.ok) {
+        await sleep(POLL_INTERVAL_MS);
+        continue;
+      }
+      const health = (await res.json()) as HealthSnapshot;
+      const totalJobs = sumCounts(health.worker_jobs);
+      const hasExpectedTurns = expectedTurns
+        ? totalJobs >= expectedTurns
+        : totalJobs > 0;
+      if (!hasExpectedTurns) {
+        await sleep(POLL_INTERVAL_MS);
+        continue;
+      }
+      const wj = health.worker_jobs ?? {};
+      const od = health.outbox_dispatches ?? {};
+      const hasActiveJobs = [...ACTIVE_WORKER_KEYS].some((k) => (wj[k] ?? 0) > 0);
+      const hasActiveDispatches = [...ACTIVE_OUTBOX_KEYS].some((k) => (od[k] ?? 0) > 0);
+      if (!hasActiveJobs && !hasActiveDispatches) {
+        return { completed: true, latencyMs: Date.now() - start };
       }
     } catch {
       // transient
@@ -254,23 +335,28 @@ function sleep(ms: number): Promise<void> {
 
 /**
  * Run one fixture against one build (candidate or baseline). Returns the
- * observed outcome. Throws on an unrecoverable driver error (the caller maps
- * that to a crashed=true outcome).
+ * observed outcome.
+ *
+ * Infrastructure errors (port binding, kernel not ready, ingress failure)
+ * throw DriverError so the caller can distinguish them from candidate-process
+ * crashes and report them distinctly in score.json.
  */
 export async function runFixtureAgainst(
   binaryPath: string,
   fixture: Fixture,
   ipcToken: string,
+  worktreeDir?: string,
 ): Promise<ReplayOutcome> {
-  const handle = startKernel(binaryPath, ipcToken);
+  const handle = await startKernel(binaryPath, ipcToken, worktreeDir);
   try {
     await waitForReady(handle);
     for (let i = 0; i < fixture.turns.length; i++) {
       await postTurn(handle, fixture, i);
     }
-    await pollUntilTerminal(handle);
+    await pollUntilTerminal(handle, fixture.turns.length);
     return readOutcome(handle.dbPath, fixture);
   } catch (e) {
+    if (e instanceof DriverError) throw e;
     return { ...emptyOutcome(), crashed: true };
   } finally {
     stopKernel(handle);

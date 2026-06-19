@@ -246,11 +246,11 @@ test("summarize: all-neutral = neutral", () => {
 
 // --- summarize — edge cases ---
 
-test("summarize: empty verdicts = neutral, score 1.0", () => {
+test("summarize: empty verdicts = no-fixtures, score 0", () => {
   const sum = summarize([]);
-  assert.equal(sum.verdict, "neutral");
-  assert.equal(sum.candidateScore, 1);
-  assert.equal(sum.baselineScore, 1);
+  assert.equal(sum.verdict, "no-fixtures");
+  assert.equal(sum.candidateScore, 0);
+  assert.equal(sum.baselineScore, 0);
 });
 
 test("summarize: all improve = improve", () => {

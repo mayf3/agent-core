@@ -163,13 +163,13 @@ export interface RunSummary {
   candidateScore: number;
   baselineScore: number;
   delta: number;
-  verdict: "improve" | "regress" | "neutral";
+  verdict: "improve" | "regress" | "neutral" | "no-fixtures";
 }
 
 /** Aggregate per-fixture verdicts into an overall run verdict. */
 export function summarize(verdicts: FixtureVerdict[]): RunSummary {
   if (verdicts.length === 0) {
-    return { candidateScore: 1, baselineScore: 1, delta: 0, verdict: "neutral" };
+    return { candidateScore: 0, baselineScore: 0, delta: 0, verdict: "no-fixtures" };
   }
   const candidateScore = verdicts.reduce((s, v) => s + v.candidate.score, 0) / verdicts.length;
   const baselineScore = verdicts.reduce((s, v) => s + v.baseline.score, 0) / verdicts.length;
