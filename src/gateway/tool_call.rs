@@ -87,4 +87,71 @@ mod tests {
         let err = validate_tool_call(&c, &RunId::new()).unwrap_err();
         assert!(err.to_string().contains("invalid_arguments"));
     }
+
+    // --- tool_call_id_hash edge cases ---
+
+    #[test]
+    fn hash_control_chars_does_not_panic() {
+        // Control characters, newlines, path separators, unicode — all
+        // valid UTF-8 that should produce a stable hash.
+        let ids = vec![
+            "call\nwith\nnewlines",
+            "call\twith\ttab",
+            "call/with/path/separators",
+            "call\\with\\backslash",
+            "call.with.dots",
+            "call🔥unicode",
+            "call\u{0000}null",
+        ];
+        // 256-char id
+        let long_id = format!("call_{}", "a".repeat(250));
+        let ids = vec![
+            "call\nwith\nnewlines",
+            "call\twith\ttab",
+            "call/with/path/separators",
+            "call\\with\\backslash",
+            "call.with.dots",
+            "call🔥unicode",
+            "call\u{0000}null",
+            &long_id,
+        ];
+        let hashes: Vec<String> = ids.iter().map(|id| crate::llm::tool_call_id_hash(id)).collect();
+        // All hashes should be exactly 64 hex chars (SHA-256 digest length).
+        for h in &hashes {
+            assert_eq!(h.len(), 64, "hash should be 64 hex chars, got {} for input", h.len());
+            assert!(h.chars().all(|c| c.is_ascii_hexdigit()), "hash should be hex: {}", h);
+        }
+        // Distinct inputs must produce distinct hashes.
+        for i in 0..hashes.len() {
+            for j in (i + 1)..hashes.len() {
+                assert_ne!(hashes[i], hashes[j], "distinct inputs should not collide");
+            }
+        }
+        // Same input produces same hash (deterministic).
+        let repeat = crate::llm::tool_call_id_hash("call\nwith\nnewlines");
+        assert_eq!(hashes[0], repeat, "hash should be deterministic");
+    }
+
+    #[test]
+    fn hash_provides_bounded_output() {
+        // Even a maximally long input produces a 64-char hex hash.
+        let long_input = "x".repeat(10_000);
+        let h = crate::llm::tool_call_id_hash(&long_input);
+        assert_eq!(h.len(), 64);
+    }
+
+    #[test]
+    fn raw_provider_id_not_in_idempotency_key() {
+        // The idempotency_key is seeded by the HASHED tool_call.id.
+        // Verify the raw "provider_id_raw" never appears in the keys.
+        let tool_call = ToolCall {
+            id: crate::llm::tool_call_id_hash("provider_id_raw"),
+            operation: "time.now".to_string(),
+            arguments: json!({}),
+        };
+        let intent = validate_tool_call(&tool_call, &RunId::new()).unwrap();
+        let key = intent.idempotency_key.unwrap();
+        assert!(!key.contains("provider_id_raw"), "raw provider ID must not leak into idempotency_key");
+        assert!(key.starts_with("tool:"), "idempotency_key should start with tool: prefix");
+    }
 }

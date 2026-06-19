@@ -108,17 +108,43 @@ impl<L: LlmClient> super::Runtime<L> {
     ) -> Result<Option<(String, serde_json::Value)>> {
         let mut intent = match crate::gateway::validate_tool_call(tool_call, &run.id) {
             Ok(intent) => intent,
-            Err(_e) => {
+            Err(e) => {
+                journal.append_event(
+                    JournalEventKind::LlmCompleted,
+                    Some(&run.id),
+                    Some(&session.id),
+                    None,
+                    json!({
+                        "provider": "tool_call_validation",
+                        "status": "rejected",
+                        "error_category": "tool_call_rejected",
+                        "operation": tool_call.operation,
+                        "rejection": format!("{:?}", e),
+                    }),
+                )?;
                 return Ok(Some((
-                    "tool call rejected: operation is not available".to_string(),
-                    json!({ "error": "tool call rejected" }),
+                    format!("tool call rejected: {}", e),
+                    json!({ "error": format!("tool call rejected: {}", e) }),
                 )));
             }
         };
-        if let Err(_e) = validate_model_arguments(&intent.operation, &intent.arguments) {
+        if let Err(e) = validate_model_arguments(&intent.operation, &intent.arguments) {
+            journal.append_event(
+                JournalEventKind::LlmCompleted,
+                Some(&run.id),
+                Some(&session.id),
+                None,
+                json!({
+                    "provider": "tool_call_validation",
+                    "status": "rejected",
+                    "error_category": "invalid_arguments",
+                    "operation": intent.operation,
+                    "rejection": format!("{:?}", e),
+                }),
+            )?;
             return Ok(Some((
-                "tool call rejected: invalid arguments".to_string(),
-                json!({ "error": "tool call rejected: invalid arguments" }),
+                format!("tool call rejected: invalid arguments: {}", e),
+                json!({ "error": format!("tool call rejected: invalid arguments: {}", e) }),
             )));
         }
         if let Some(arguments) = intent.arguments.as_object_mut() {
@@ -255,7 +281,7 @@ impl<L: LlmClient> super::Runtime<L> {
     }
 }
 
-fn validate_model_arguments(operation: &str, arguments: &serde_json::Value) -> anyhow::Result<()> {
+pub fn validate_model_arguments(operation: &str, arguments: &serde_json::Value) -> anyhow::Result<()> {
     let Some(map) = arguments.as_object() else {
         anyhow::bail!("arguments must be a JSON object");
     };
