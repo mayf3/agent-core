@@ -99,11 +99,12 @@ operations = ["time.now", "feishu.send_message", "stdout.send_text"]
 context_window = 128000
 
 [skills]
-enable = ["web-search", "calculator"]
+enable = ["shared:web-search", "private:coding-handoff"]
 
 [credentials]
 # References only — actual values come from OS keychain / env injection.
-openai_api_key = "$REF:env:OPENAI_API_KEY"
+llm = "llm.deepseek.default"
+feishu = "connector.feishu.production"
 
 [workspace]
 max_storage_mb = 100
@@ -117,7 +118,7 @@ You are assistant-alpha. You have access to:
 - time.now to check the current time
 - feishu.send_message to reply via Feishu
 - stdout.send_text for debug output
-- Shared Skills: web-search, calculator
+- Shared Skills: shared:web-search, private:coding-handoff
 
 You cannot read other Agents' sessions or workspace files.
 Never ask for or read credentials; they are configured externally.
