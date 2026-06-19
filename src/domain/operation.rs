@@ -281,10 +281,17 @@ mod tests {
         // extra_allowed_operations in the default config (see config.rs).
         let profile = ExecutionProfile::for_channel(ChannelKind::Cli);
         assert_eq!(profile.grants.len(), 2);
-        let ops: Vec<&str> = profile.grants.iter().map(|g| g.operation.as_str()).collect();
+        let ops: Vec<&str> = profile
+            .grants
+            .iter()
+            .map(|g| g.operation.as_str())
+            .collect();
         assert!(ops.contains(&STDOUT_SEND_TEXT));
         assert!(ops.contains(&SESSION_RECALL_RECENT));
-        assert!(!ops.contains(&SYSTEM_STATUS), "system.status is NOT a channel-level grant");
+        assert!(
+            !ops.contains(&SYSTEM_STATUS),
+            "system.status is NOT a channel-level grant"
+        );
         for grant in &profile.grants {
             assert_eq!(grant.scope, "current_session");
         }
@@ -294,10 +301,17 @@ mod tests {
     fn execution_profile_for_feishu_grants_feishu_send_message_and_recall() {
         let profile = ExecutionProfile::for_channel(ChannelKind::Feishu);
         assert_eq!(profile.grants.len(), 2);
-        let ops: Vec<&str> = profile.grants.iter().map(|g| g.operation.as_str()).collect();
+        let ops: Vec<&str> = profile
+            .grants
+            .iter()
+            .map(|g| g.operation.as_str())
+            .collect();
         assert!(ops.contains(&FEISHU_SEND_MESSAGE));
         assert!(ops.contains(&SESSION_RECALL_RECENT));
-        assert!(!ops.contains(&SYSTEM_STATUS), "system.status is NOT a channel-level grant");
+        assert!(
+            !ops.contains(&SYSTEM_STATUS),
+            "system.status is NOT a channel-level grant"
+        );
         for grant in &profile.grants {
             assert_eq!(grant.scope, "current_session");
         }
@@ -329,7 +343,10 @@ mod tests {
         assert_eq!(baseline.grants.len(), augmented.grants.len());
         assert_eq!(augmented.grants[0].operation, STDOUT_SEND_TEXT);
         // No extra operations added by empty config.
-        assert!(!augmented.grants.iter().any(|g| g.operation == FEISHU_SEND_MESSAGE));
+        assert!(!augmented
+            .grants
+            .iter()
+            .any(|g| g.operation == FEISHU_SEND_MESSAGE));
     }
 
     #[test]

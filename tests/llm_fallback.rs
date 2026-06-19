@@ -16,23 +16,12 @@ fn fallback_endpoint_is_used_after_primary_http_error() -> Result<()> {
             "usage": { "prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3 }
         }),
     )?;
-    let llm = OpenAiCompatibleLlm::new(
-        primary,
-        "primary-key".to_string(),
-        "bad-primary".to_string(),
-        2_000,
-    )
-    .with_fallback(
-        fallback,
-        "fallback-key".to_string(),
-        "deepseek-v4-flash".to_string(),
-    );
-
+    let llm = OpenAiCompatibleLlm::new(primary, "primary-key".into(), "bad-primary".into(), 2_000)
+        .with_fallback(fallback, "fallback-key".into(), "deepseek-v4-flash".into());
     let output = llm.complete(LlmInput {
         blocks: vec![],
-        user_text: "hello".to_string(),
+        user_text: "hello".into(),
     })?;
-
     assert_eq!(output.model, "deepseek-v4-flash");
     assert_eq!(output.content, "fallback ok");
     assert_eq!(
@@ -59,21 +48,17 @@ fn serve_once(status: u16, body: Value) -> Result<String> {
         if let Ok((mut stream, _)) = listener.accept() {
             let _ = read_http_request(&mut stream);
             let body = body.to_string();
-            let status_text = if status == 200 { "OK" } else { "Error" };
-            let response = format!(
-                "HTTP/1.1 {status} {status_text}\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            let _ = stream.write_all(response.as_bytes());
+            let st = if status == 200 { "OK" } else { "Error" };
+            let resp = format!("HTTP/1.1 {status} {st}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+            let _ = stream.write_all(resp.as_bytes());
         }
     });
     Ok(format!("http://{addr}/v1"))
 }
 
 fn read_http_request(stream: &mut TcpStream) -> Result<()> {
-    let mut buffer = [0_u8; 2048];
-    let _ = stream.read(&mut buffer)?;
+    let mut buf = [0_u8; 2048];
+    let _ = stream.read(&mut buf)?;
     Ok(())
 }
 
@@ -86,17 +71,6 @@ use agent_core_kernel::llm::{LlmOutput, ToolCall};
 use agent_core_kernel::runtime::Runtime;
 use std::sync::{Arc, Mutex};
 
-// ---- Session Recall Loop (Task 1) ----
-//
-// These tests cover the recall loop added to `Runtime::deliver`: when the first
-// LLM round emits a read-only tool call, the Runtime executes it inline,
-// appends the result as a `ToolResult` context block, and re-invokes the LLM so
-// it can fold the tool output into its reply. The loop is bounded by
-// `MAX_TOOL_ROUNDS` (== 2). Tool failures are fed back as ToolResult blocks
-// rather than crashing the run.
-
-/// LLM that proposes `session.recall_recent` on round 0 and replies with the
-/// recalled text on round 1. Verifies the second-round reply is used.
 struct RecallThenAnswerLlm {
     round: Arc<Mutex<usize>>,
     saw_tool_result_block: Arc<Mutex<bool>>,
@@ -107,13 +81,11 @@ impl LlmClient for RecallThenAnswerLlm {
         let mut round = self.round.lock().unwrap();
         let current = *round;
         *round += 1;
-        // Detect whether the Runtime fed back a ToolResult block (round >= 1).
         if current >= 1 {
-            let saw = input
+            *self.saw_tool_result_block.lock().unwrap() = input
                 .blocks
                 .iter()
                 .any(|b| matches!(b.kind, ContextBlockKind::ToolResult));
-            *self.saw_tool_result_block.lock().unwrap() = saw;
         }
         if current == 0 {
             Ok(LlmOutput {
@@ -152,12 +124,9 @@ fn recall_loop_uses_second_round_reply() -> Result<()> {
     let envelope = gateway.cli_ingress("what was the PR5 risk".to_string())?;
     let event = gateway.validate_ingress(&journal, envelope)?;
     let outcome = runtime.deliver(&journal, &gateway, event)?;
-
-    // The final reply must be the SECOND round's text (which folds in the
-    // recalled content), not the first round's "let me recall".
     assert!(
         outcome.output.contains("WaitingDispatch"),
-        "final reply should come from the second LLM round, got: {}",
+        "reply must be from second LLM round: {}",
         outcome.output
     );
     assert!(
@@ -181,17 +150,13 @@ fn recall_loop_appends_tool_result_block_before_second_round() -> Result<()> {
     let envelope = gateway.cli_ingress("what was the PR5 risk".to_string())?;
     let event = gateway.validate_ingress(&journal, envelope)?;
     let _ = runtime.deliver(&journal, &gateway, event)?;
-
-    // The LLM observed a ToolResult context block on its second call.
     assert!(
         *saw.lock().unwrap(),
-        "second LLM round must receive a ToolResult context block"
+        "second LLM round must see ToolResult block"
     );
     Ok(())
 }
 
-/// LLM that ALWAYS proposes `session.recall_recent`, no matter the round. Used
-/// to verify `MAX_TOOL_ROUNDS` caps the loop — the tool must not run forever.
 struct AlwaysRecallLlm {
     calls: Mutex<usize>,
 }
@@ -227,37 +192,35 @@ fn recall_loop_is_bounded_by_max_tool_rounds() -> Result<()> {
     let envelope = gateway.cli_ingress("keep recalling".to_string())?;
     let event = gateway.validate_ingress(&journal, envelope)?;
     let outcome = runtime.deliver(&journal, &gateway, event)?;
-
-    // MAX_TOOL_ROUNDS == 2: the LLM is invoked at most 3 times total
-    // (1 initial + up to 2 recall rounds). The exact constant is private to the
-    // Runtime, so we assert the loop terminates with a bounded, small number of
-    // LLM calls and that the run does not hang or panic.
-    let llm_completed = journal
-        .events()?
+    let events = journal.events()?;
+    let re: Vec<_> = events
         .iter()
-        .filter(|e| {
-            e.run_id.as_ref() == Some(&outcome.run_id) && e.kind == JournalEventKind::LlmCompleted
-        })
+        .filter(|e| e.run_id.as_ref() == Some(&outcome.run_id))
+        .collect();
+    let llm = re
+        .iter()
+        .filter(|e| e.kind == JournalEventKind::LlmCompleted)
         .count();
-    assert!(
-        llm_completed <= 3,
-        "recall loop must be bounded; saw {} LlmCompleted events",
-        llm_completed
-    );
-    assert!(
-        llm_completed >= 2,
-        "recall loop must perform at least the initial + one recall round; saw {}",
-        llm_completed
-    );
-    // The run still completes normally and produces a reply.
-    assert!(!outcome.output.is_empty());
+    let rec = re
+        .iter()
+        .filter(|e| e.kind == JournalEventKind::ReceiptReceived)
+        .count();
+    let oq = re
+        .iter()
+        .filter(|e| e.kind == JournalEventKind::OutboxQueued)
+        .count();
+    let ip = re
+        .iter()
+        .filter(|e| e.kind == JournalEventKind::InvocationProposed)
+        .count();
+    assert_eq!(llm, 3, "LlmCompleted");
+    assert_eq!(rec, 2, "ReceiptReceived");
+    assert_eq!(ip, 3, "InvocationProposed");
+    assert_eq!(oq, 1, "OutboxQueued");
+    assert!(!outcome.output.is_empty(), "final reply");
     Ok(())
 }
 
-/// LLM whose first-round tool call targets an operation that the inline
-/// executor reports as not-implemented (`other =>` arm in
-/// `handle_inline_tool_call`). Verifies the error is fed back as a ToolResult
-/// and the run does not crash.
 struct ProposeUnknownToolLlm {
     round: Arc<Mutex<usize>>,
     saw_error_block: Arc<Mutex<bool>>,
@@ -269,10 +232,9 @@ impl LlmClient for ProposeUnknownToolLlm {
         let current = *round;
         *round += 1;
         if current >= 1 {
-            let saw_error = input.blocks.iter().any(|b| {
+            *self.saw_error_block.lock().unwrap() = input.blocks.iter().any(|b| {
                 matches!(b.kind, ContextBlockKind::ToolResult) && b.content.contains("error")
             });
-            *self.saw_error_block.lock().unwrap() = saw_error;
             return Ok(LlmOutput {
                 provider: "test".into(),
                 model: "unknown-tool".into(),
@@ -281,9 +243,6 @@ impl LlmClient for ProposeUnknownToolLlm {
                 tool_call: None,
             });
         }
-        // Propose a deliberately uncatalogued name to hit the rejection branch
-        // in validate_tool_call (unknown_operation), which handle_inline_tool_call
-        // converts into a rejected ToolResult rather than crashing.
         Ok(LlmOutput {
             provider: "test".into(),
             model: "unknown-tool".into(),
@@ -312,24 +271,17 @@ fn recall_loop_does_not_crash_on_tool_failure() -> Result<()> {
     let envelope = gateway.cli_ingress("run something dangerous".to_string())?;
     let event = gateway.validate_ingress(&journal, envelope)?;
     let outcome = runtime.deliver(&journal, &gateway, event)?;
-
-    // The run must complete without panicking and produce a graceful reply.
     assert!(
         outcome.output.contains("unavailable"),
-        "model should recover from the rejected tool call, got: {}",
+        "model recovers: {}",
         outcome.output
     );
-    assert!(
-        *saw_error.lock().unwrap(),
-        "the rejected tool call must be fed back as a ToolResult block"
-    );
+    assert!(*saw_error.lock().unwrap(), "ToolResult block fed back");
     Ok(())
 }
 
 #[test]
 fn recall_loop_is_noop_when_no_tool_call() -> Result<()> {
-    // Backwards-compatibility: when the LLM emits no tool call, the loop must
-    // be a no-op and the original first-round reply is used unchanged.
     struct PlainLlm;
     impl LlmClient for PlainLlm {
         fn complete(&self, _input: LlmInput) -> Result<LlmOutput> {
@@ -349,16 +301,199 @@ fn recall_loop_is_noop_when_no_tool_call() -> Result<()> {
     let envelope = gateway.cli_ingress("hi".to_string())?;
     let event = gateway.validate_ingress(&journal, envelope)?;
     let outcome = runtime.deliver(&journal, &gateway, event)?;
-
     assert_eq!(outcome.output, "hello back");
-    // Exactly one LlmCompleted event (no extra recall round).
-    let llm_completed = journal
-        .events()?
+    let events = journal.events()?;
+    let re: Vec<_> = events
         .iter()
-        .filter(|e| {
-            e.run_id.as_ref() == Some(&outcome.run_id) && e.kind == JournalEventKind::LlmCompleted
+        .filter(|e| e.run_id.as_ref() == Some(&outcome.run_id))
+        .collect();
+    assert_eq!(
+        re.iter()
+            .filter(|e| e.kind == JournalEventKind::LlmCompleted)
+            .count(),
+        1,
+        "LlmCompleted"
+    );
+    assert_eq!(
+        re.iter()
+            .filter(|e| e.kind == JournalEventKind::ReceiptReceived)
+            .count(),
+        0,
+        "ReceiptReceived"
+    );
+    assert_eq!(
+        re.iter()
+            .filter(|e| e.kind == JournalEventKind::OutboxQueued)
+            .count(),
+        1,
+        "OutboxQueued"
+    );
+    Ok(())
+}
+
+fn read_http_request_body(stream: &mut TcpStream) -> Result<String> {
+    let mut buf = Vec::new();
+    loop {
+        let mut b = [0u8; 1];
+        let n = stream.read(&mut b)?;
+        if n == 0 {
+            anyhow::bail!("eof");
+        }
+        buf.push(b[0]);
+        if buf.len() >= 4 && buf[buf.len() - 4..] == [b'\r', b'\n', b'\r', b'\n'] {
+            break;
+        }
+    }
+    let header = String::from_utf8_lossy(&buf);
+    let content_len: usize = header
+        .lines()
+        .find_map(|line| {
+            line.to_lowercase()
+                .strip_prefix("content-length:")
+                .and_then(|v| v.trim().parse().ok())
         })
-        .count();
-    assert_eq!(llm_completed, 1, "no tool call → exactly one LLM round");
+        .unwrap_or(0);
+    let mut body = vec![0u8; content_len];
+    if content_len > 0 {
+        let mut offset = 0;
+        while offset < content_len {
+            let n = stream.read(&mut body[offset..])?;
+            if n == 0 {
+                anyhow::bail!("eof");
+            }
+            offset += n;
+        }
+    }
+    Ok(String::from_utf8(body)?)
+}
+
+struct StubServer {
+    port: u16,
+    requests: Arc<Mutex<Vec<Value>>>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl StubServer {
+    fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let requests: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let r = Arc::clone(&requests);
+        let handle = std::thread::spawn(move || {
+            for round in 0..2 {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(c) => c,
+                    Err(_) => return,
+                };
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+                let body = match read_http_request_body(&mut stream) {
+                    Ok(b) => b,
+                    Err(_) => return,
+                };
+                if let Ok(body_val) = serde_json::from_str::<Value>(&body) {
+                    r.lock().unwrap().push(body_val);
+                }
+                let response_body = if round == 0 {
+                    r#"{"choices":[{"message":{"content":"","tool_calls":[{"id":"call_stub_1","type":"function","function":{"name":"time.now","arguments":"{}"}}]}}],"model":"stub"}"#
+                } else {
+                    r#"{"choices":[{"message":{"content":"The current time was retrieved."}}],"model":"stub"}"#
+                };
+                let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", response_body.len(), response_body);
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+        Self {
+            port,
+            requests,
+            handle: Some(handle),
+        }
+    }
+    fn url(&self) -> String {
+        format!("http://127.0.0.1:{}/v1", self.port)
+    }
+}
+
+impl Drop for StubServer {
+    fn drop(&mut self) {
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+#[test]
+fn stub_http_provider_completes_tool_loop() -> Result<()> {
+    let server = StubServer::start();
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    let mut config = common::test_config();
+    config.openai_base_url = server.url();
+    config.openai_api_key = "stub-key".into();
+    config.model = "stub".into();
+    config.extra_allowed_operations = vec!["system.status".into(), "time.now".into()];
+    let journal = JournalStore::in_memory()?;
+    let gateway = Gateway::new(config.clone());
+    let llm = OpenAiCompatibleLlm::new(
+        config.openai_base_url.clone(),
+        config.openai_api_key.clone(),
+        config.model.clone(),
+        5000,
+    );
+    let runtime = Runtime::new(config, llm);
+    let envelope = gateway.cli_ingress("what time is it".into())?;
+    let event = gateway.validate_ingress(&journal, envelope)?;
+    let outcome = runtime.deliver(&journal, &gateway, event)?;
+    assert_eq!(outcome.output, "The current time was retrieved.");
+
+    let events = journal.events()?;
+    let re: Vec<_> = events
+        .iter()
+        .filter(|e| e.run_id.as_ref() == Some(&outcome.run_id))
+        .collect();
+    assert_eq!(
+        re.iter()
+            .filter(|e| e.kind == JournalEventKind::LlmCompleted)
+            .count(),
+        2,
+        "LlmCompleted"
+    );
+    assert_eq!(
+        re.iter()
+            .filter(|e| e.kind == JournalEventKind::ReceiptReceived)
+            .count(),
+        1,
+        "ReceiptReceived"
+    );
+
+    let captured = server.requests.lock().unwrap();
+    assert!(captured.len() >= 2, "HTTP requests");
+    let req1 = &captured[0];
+    assert_eq!(req1.get("model").and_then(Value::as_str), Some("stub"));
+    let tools = req1.get("tools").and_then(Value::as_array).unwrap();
+    assert_eq!(tools.len(), 3, "3 tool schemas");
+    let names: Vec<&str> = tools
+        .iter()
+        .filter_map(|t| t.pointer("/function/name").and_then(Value::as_str))
+        .collect();
+    assert!(names.contains(&"time.now"));
+    assert!(names.contains(&"session.recall_recent"));
+    assert!(names.contains(&"system.status"));
+    assert!(!names.contains(&"feishu.send_message") && !names.contains(&"stdout.send_text"));
+    assert_eq!(
+        req1.get("tool_choice").and_then(Value::as_str),
+        Some("auto"),
+        "tool_choice"
+    );
+
+    let req2 = &captured[1];
+    let sys = req2
+        .pointer("/messages")
+        .and_then(Value::as_array)
+        .unwrap()
+        .iter()
+        .find(|m| m.get("role").and_then(Value::as_str) == Some("system"))
+        .unwrap();
+    let c = sys.get("content").and_then(Value::as_str).unwrap_or("");
+    assert!(c.contains("ToolResult"), "ToolResult in sys msg");
+    assert!(c.contains("time.now"), "tool ref in sys msg");
     Ok(())
 }

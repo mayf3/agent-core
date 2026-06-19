@@ -120,11 +120,9 @@ impl Gateway {
                 principal_id: PrincipalId("cli:local".to_string()),
                 subject: PrincipalSubject::LocalUser,
                 source: PrincipalSource::Cli,
-                grants: crate::domain::operation::ExecutionProfile::for_channel(
-                    ChannelKind::Cli,
-                )
-                .with_extra(&self.config.extra_allowed_operations)
-                .grants,
+                grants: crate::domain::operation::ExecutionProfile::for_channel(ChannelKind::Cli)
+                    .with_extra(&self.config.extra_allowed_operations)
+                    .grants,
                 requester_id: Some("cli:local".to_string()),
             },
             session_target: SessionTarget {

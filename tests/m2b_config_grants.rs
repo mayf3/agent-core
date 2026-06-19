@@ -55,6 +55,9 @@ fn gateway_cli_ingress_drops_uncatalogued_extra_operations() -> Result<()> {
         .iter()
         .map(|g| g.operation.as_str())
         .collect();
-    assert_eq!(operations, vec!["stdout.send_text", "session.recall_recent"]);
+    assert_eq!(
+        operations,
+        vec!["stdout.send_text", "session.recall_recent"]
+    );
     Ok(())
 }

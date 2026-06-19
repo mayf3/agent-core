@@ -1,9 +1,25 @@
-# Decision: Tool-Call Execution Loop — smallest safe design
+# Decision: Tool-Call Execution Loop — bounded read-only recall
 
 ## Status
 
-Design document. No `src/` change. **Requires maintainer sign-off before
-implementation begins** — see §4.6.
+**Implemented.** PR #154 adds a bounded read-only tool-recall loop
+(Phase 2 tool-call execution MVP). Key properties:
+
+- At most 2 read-only tool calls execute per Run.
+- The model may propose `time.now`, `session.recall_recent`, or `system.status`.
+- All schemas are strict (`additionalProperties: false`).
+- Malformed arguments (invalid JSON, extra fields, wrong types) are rejected
+  without executing the tool.
+- Infrastructure failures (Journal/SQLite/Gateway integrity) propagate and fail
+  the Run. Expected business rejections (unknown operation, forbidden Write,
+  invalid arguments) become a sanitized ToolResult so the model can recover.
+- Real OpenAI-compatible provider support: `tools` array with `tool_choice: auto`
+  is sent in every request. The first tool call is parsed; malformed arguments
+  are silently rejected (no tool executes, text reply is used).
+- The Journal records only bounded/sanitized metadata (operation + id hash).
+  Raw arguments, raw provider responses, and SDK errors are never journaled.
+
+See the PR body for the full invariant list.
 
 ## 1. Problem
 

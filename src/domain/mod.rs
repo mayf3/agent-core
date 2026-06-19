@@ -4,12 +4,12 @@ use serde_json::Value;
 use std::path::PathBuf;
 use uuid::Uuid;
 
-pub mod status;
-pub mod retry;
 pub mod operation;
-pub use status::*;
-pub use retry::*;
+pub mod retry;
+pub mod status;
 pub use operation::*;
+pub use retry::*;
+pub use status::*;
 
 macro_rules! id_type {
     ($name:ident, $prefix:literal) => {

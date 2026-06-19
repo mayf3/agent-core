@@ -21,9 +21,8 @@ use anyhow::{bail, Result};
 /// The resulting intent is associated with the current run (Option B in the
 /// design doc) and carries an idempotency key seeded by the tool-call id.
 pub fn validate_tool_call(call: &ToolCall, run_id: &RunId) -> Result<InvocationIntent> {
-    let spec = operation::lookup(&call.operation).ok_or_else(|| {
-        anyhow::anyhow!("unknown_operation: {}", call.operation)
-    })?;
+    let spec = operation::lookup(&call.operation)
+        .ok_or_else(|| anyhow::anyhow!("unknown_operation: {}", call.operation))?;
     if spec.risk != Risk::ReadOnly {
         bail!(
             "write_operation_not_allowed: {} is a Write operation; the MVP tool-call path is ReadOnly-only",
@@ -73,8 +72,7 @@ mod tests {
 
     #[test]
     fn rejects_write_operation() {
-        let err = validate_tool_call(&call("feishu.send_message"), &RunId::new())
-            .unwrap_err();
+        let err = validate_tool_call(&call("feishu.send_message"), &RunId::new()).unwrap_err();
         assert!(err.to_string().contains("write_operation_not_allowed"));
     }
 

@@ -139,7 +139,7 @@ High-signal state:
 
 ## Current State
 
-On `main` after PR #146. No open PRs at the time of this update.
+On `main` after PR #146. Open PR #154 (feat/session-recall-loop) at the time of this update.
 
 Phase 3 (Connector Extraction Readiness) is complete: connector-local execute
 idempotency persists across restart (PR #139), and the extraction checklist +
@@ -150,7 +150,7 @@ that pins candidate/base commits, composes `tools/replay-eval` (+ optional
 and derives a `pass`/`blocked` decision from the red-lines (PRs #142–#146).
 Merge is always manual.
 
-Phase 0/1/2 are dogfood-ready: durable Feishu/CLI chat kernel, Journal/hash-chain/projection recovery, conservative duplicate-reply handling, health + recovery surfaces, operation catalog + policy pipeline + read-only adapter proof, durable approval state + approval endpoints, `ToolCatalog` visible to the model, and one model-emitted read-only tool (`time.now`).
+Phase 0/1/2 are dogfood-ready: durable Feishu/CLI chat kernel, Journal/hash-chain/projection recovery, conservative duplicate-reply handling, health + recovery surfaces, operation catalog + policy pipeline + read-only adapter proof, durable approval state + approval endpoints, `ToolCatalog` visible to the model, and a bounded read-only tool-recall loop (PR #154) exposing three tools (`time.now`, `session.recall_recent`, `system.status`) with strict schemas, real provider support, and sanitized error boundaries.
 
 External harness state (productization sprint complete, PRs #135/#136/#137):
 
@@ -193,6 +193,8 @@ Result: replay-eval 50/50, audit-report 7/7, structure + secret-scan + diff --ch
 - PR #130: replay-eval synthetic fixture pack.
 - PR #131: audit-report `projection_drift` + `undelivered_ingress` Rust-semantics alignment.
 - PR #132/#134: replay-eval hard-fail details structured-object fix + regression coverage.
+- PR #154: bounded read-only tool-recall loop with real provider support, strict schemas,
+  argument validation, sanitized error boundaries, and exact bounded-loop tests.
 
 ## Issues To Address Next
 
@@ -213,7 +215,7 @@ Result: replay-eval 50/50, audit-report 7/7, structure + secret-scan + diff --ch
    - Extraction target should be a separate repo/package; do not move runtime,
      gateway, journal, or policy into TypeScript.
 
-3. **First safe practical tool / broader tool loop.**
+3. **First safe practical tool / broader tool loop.** Implemented in PR #154.
    - `time.now` proves the minimum read-only path.
    - More tools require strict schemas, session scoping, audit facts, and
      approval for write/external effects.

@@ -87,7 +87,10 @@ impl KernelConfig {
             context_recent_messages: env_usize("AGENT_CORE_CONTEXT_RECENT_MESSAGES", 6),
             context_max_block_chars: env_usize("AGENT_CORE_CONTEXT_MAX_BLOCK_CHARS", 4_000),
             outbox_dispatcher_enabled: env_bool("AGENT_CORE_OUTBOX_DISPATCHER_ENABLED", true),
-            outbox_dispatcher_poll_interval_ms: env_u64("AGENT_CORE_OUTBOX_DISPATCHER_POLL_MS", 500),
+            outbox_dispatcher_poll_interval_ms: env_u64(
+                "AGENT_CORE_OUTBOX_DISPATCHER_POLL_MS",
+                500,
+            ),
             // system.status is part of the dogfood agent's profile (not a
             // channel grant, see ExecutionProfile::for_channel). It is granted
             // here in the default config so the dogfood agent can query system

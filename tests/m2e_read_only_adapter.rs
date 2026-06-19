@@ -259,7 +259,7 @@ fn execute_system_status_returns_aggregate_journal_counts() -> Result<()> {
     // Direct test of the execute_system_status function: a fresh in-memory
     // journal returns status=ok with zero counts.
     let journal = JournalStore::in_memory()?;
-    let output = agent_core_kernel::capabilities::execute(&journal);
+    let output = agent_core_kernel::capabilities::execute(&journal)?;
     assert_eq!(output["status"], "ok");
     assert_eq!(output["hash_chain_ok"].as_bool(), Some(true));
     assert!(output["outbox"]["pending"].is_number());
