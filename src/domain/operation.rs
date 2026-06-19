@@ -56,6 +56,10 @@ pub const CATALOG: &[OperationSpec] = &[
         name: TIME_NOW,
         risk: Risk::ReadOnly,
     },
+    OperationSpec {
+        name: SESSION_RECALL_RECENT,
+        risk: Risk::ReadOnly,
+    },
 ];
 
 pub const STDOUT_SEND_TEXT: &str = "stdout.send_text";
@@ -64,6 +68,12 @@ pub const FEISHU_SEND_MESSAGE: &str = "feishu.send_message";
 /// `Risk::ReadOnly` operation (Phase 2 M2e) — it produces no side effect and
 /// so may execute inline without approval. Implemented by `TimeAdapter`.
 pub const TIME_NOW: &str = "time.now";
+/// Read-only: recall recent messages from the **current session only**.
+/// Returns normalized text/role/event_id/created_at — never raw payload JSON,
+/// Authorization, tokens, or cross-session data. Implemented inline in the
+/// Runtime via `JournalStore::recent_user_messages`. The first *practical*
+/// read-only tool: lets the agent recall earlier context the user mentioned.
+pub const SESSION_RECALL_RECENT: &str = "session.recall_recent";
 
 /// Look up an operation spec by name. Returns `None` for unknown operations.
 pub fn lookup(name: &str) -> Option<&'static OperationSpec> {
@@ -103,15 +113,23 @@ impl ExecutionProfile {
     /// session). This is the single source of truth referenced by every
     /// gateway ingress branch.
     pub fn for_channel(channel: ChannelKind) -> Self {
-        let operation = match channel {
+        let reply_operation = match channel {
             ChannelKind::Cli => STDOUT_SEND_TEXT,
             ChannelKind::Feishu => FEISHU_SEND_MESSAGE,
         };
         Self {
-            grants: vec![CapabilityGrant {
-                operation: operation.to_string(),
-                scope: "current_session".to_string(),
-            }],
+            grants: vec![
+                CapabilityGrant {
+                    operation: reply_operation.to_string(),
+                    scope: "current_session".to_string(),
+                },
+                // Read-only tools available on every channel: the agent may
+                // recall messages from its own session without approval.
+                CapabilityGrant {
+                    operation: SESSION_RECALL_RECENT.to_string(),
+                    scope: "current_session".to_string(),
+                },
+            ],
         }
     }
 
@@ -167,6 +185,7 @@ pub fn catalog_for_context() -> String {
                 STDOUT_SEND_TEXT => "send a text reply to the user (stdout).",
                 FEISHU_SEND_MESSAGE => "send a message reply to the Feishu chat.",
                 TIME_NOW => "read the current kernel wall-clock time (no side effect).",
+                SESSION_RECALL_RECENT => "recall recent messages from the current session (read-only, current session only, no cross-session access).",
                 _ => "catalogued operation.",
             };
             format!("{} (risk: {}) — {}", spec.name, risk, desc)
@@ -201,6 +220,7 @@ mod tests {
         assert!(names.contains(&STDOUT_SEND_TEXT));
         assert!(names.contains(&FEISHU_SEND_MESSAGE));
         assert!(names.contains(&TIME_NOW));
+        assert!(names.contains(&SESSION_RECALL_RECENT));
     }
 
     #[test]
@@ -208,18 +228,20 @@ mod tests {
         assert!(is_allowed(STDOUT_SEND_TEXT));
         assert!(is_allowed(FEISHU_SEND_MESSAGE));
         assert!(is_allowed(TIME_NOW));
+        assert!(is_allowed(SESSION_RECALL_RECENT));
+        assert!(is_allowed(FEISHU_SEND_MESSAGE));
+        assert!(is_allowed(TIME_NOW));
         assert!(!is_allowed("shell.exec"));
         assert!(!is_allowed(""));
     }
 
     #[test]
-    fn write_operations_are_marked_write_and_time_now_is_read_only() {
-        // M2e: `time.now` is the first ReadOnly operation (no side effect,
-        // may execute inline without approval). The two reply operations
-        // remain Write.
+    fn write_operations_are_marked_write_and_read_only_ops_are_read_only() {
+        // ReadOnly operations: `time.now` + `session.recall_recent` (no side
+        // effect, may execute inline). The two reply operations are Write.
         for spec in CATALOG {
             match spec.name {
-                TIME_NOW => assert_eq!(
+                TIME_NOW | SESSION_RECALL_RECENT => assert_eq!(
                     spec.risk,
                     Risk::ReadOnly,
                     "{} should be ReadOnly",
@@ -236,27 +258,29 @@ mod tests {
     }
 
     #[test]
-    fn execution_profile_for_cli_grants_stdout_send_text() {
-        // M2b: the CLI channel baseline grant must match the grant the
-        // gateway previously hardcoded inline (`stdout.send_text` scoped to
-        // the current session), so this change is behavior-preserving.
+    fn execution_profile_for_cli_grants_stdout_send_text_and_recall() {
+        // The CLI channel baseline includes the reply operation + the
+        // session.recall_recent read-only tool (scoped to current session).
         let profile = ExecutionProfile::for_channel(ChannelKind::Cli);
-        assert_eq!(profile.grants.len(), 1);
-        let grant = &profile.grants[0];
-        assert_eq!(grant.operation, STDOUT_SEND_TEXT);
-        assert_eq!(grant.scope, "current_session");
+        assert_eq!(profile.grants.len(), 2);
+        let ops: Vec<&str> = profile.grants.iter().map(|g| g.operation.as_str()).collect();
+        assert!(ops.contains(&STDOUT_SEND_TEXT));
+        assert!(ops.contains(&SESSION_RECALL_RECENT));
+        for grant in &profile.grants {
+            assert_eq!(grant.scope, "current_session");
+        }
     }
 
     #[test]
-    fn execution_profile_for_feishu_grants_feishu_send_message() {
-        // M2b: the Feishu channel baseline grant must match the grant the
-        // gateway previously hardcoded inline (`feishu.send_message` scoped
-        // to the current session), so this change is behavior-preserving.
+    fn execution_profile_for_feishu_grants_feishu_send_message_and_recall() {
         let profile = ExecutionProfile::for_channel(ChannelKind::Feishu);
-        assert_eq!(profile.grants.len(), 1);
-        let grant = &profile.grants[0];
-        assert_eq!(grant.operation, FEISHU_SEND_MESSAGE);
-        assert_eq!(grant.scope, "current_session");
+        assert_eq!(profile.grants.len(), 2);
+        let ops: Vec<&str> = profile.grants.iter().map(|g| g.operation.as_str()).collect();
+        assert!(ops.contains(&FEISHU_SEND_MESSAGE));
+        assert!(ops.contains(&SESSION_RECALL_RECENT));
+        for grant in &profile.grants {
+            assert_eq!(grant.scope, "current_session");
+        }
     }
 
     #[test]
@@ -292,10 +316,11 @@ mod tests {
         // grant, scoped to current_session.
         let extra = vec![FEISHU_SEND_MESSAGE.to_string()];
         let profile = ExecutionProfile::for_channel(ChannelKind::Cli).with_extra(&extra);
-        assert_eq!(profile.grants.len(), 2);
+        // Baseline is 2 (reply + recall), + 1 extra = 3.
+        assert_eq!(profile.grants.len(), 3);
         assert_eq!(profile.grants[0].operation, STDOUT_SEND_TEXT);
-        assert_eq!(profile.grants[1].operation, FEISHU_SEND_MESSAGE);
-        assert_eq!(profile.grants[1].scope, "current_session");
+        assert_eq!(profile.grants[2].operation, FEISHU_SEND_MESSAGE);
+        assert_eq!(profile.grants[2].scope, "current_session");
     }
 
     #[test]
@@ -309,7 +334,9 @@ mod tests {
             STDOUT_SEND_TEXT.to_string(), // duplicate of baseline → dropped
         ];
         let profile = ExecutionProfile::for_channel(ChannelKind::Cli).with_extra(&extra);
-        assert_eq!(profile.grants.len(), 1);
+        // Baseline is 2 (stdout + recall); the extra STDOUT_SEND_TEXT is a
+        // duplicate (dropped), unknown/empty dropped → still 2.
+        assert_eq!(profile.grants.len(), 2);
         assert_eq!(profile.grants[0].operation, STDOUT_SEND_TEXT);
     }
 }
