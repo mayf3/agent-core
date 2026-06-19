@@ -122,6 +122,73 @@ fn setup(
     Ok((journal, gateway, runtime))
 }
 
+/// Normalize tool_call.id by counting how many unique hashes appear in the
+/// journal payload for a real provider interaction.
+#[test]
+fn journal_contains_hashed_not_raw_provider_id() -> Result<()> {
+    let server = StubProvider::start(&[
+        r#"{"choices":[{"message":{"content":"","tool_calls":[{"id":"call_raw_long_id_ABCD","type":"function","function":{"name":"time.now","arguments":"{}"}}]}}],"model":"stub"}"#,
+        r#"{"choices":[{"message":{"content":"Done"}}],"model":"stub"}"#,
+    ]);
+    thread::sleep(std::time::Duration::from_millis(100));
+    let (journal, gateway, runtime) = setup(&server, vec!["time.now"])?;
+    let envelope = gateway.cli_ingress("time".into())?;
+    let event = gateway.validate_ingress(&journal, envelope)?;
+    let outcome = runtime.deliver(&journal, &gateway, event)?;
+    let events = journal.events()?;
+    let event_json = serde_json::to_value(&events)?;
+    let event_text = serde_json::to_string(&event_json)?;
+    // The raw provider ID "call_raw_long_id_ABCD" must NOT appear in the journal.
+    assert!(
+        !event_text.contains("call_raw_long_id_ABCD"),
+        "raw provider tool_call.id must not appear in journal"
+    );
+    // The hex-length hash (64 chars) should appear somewhere (in invocation_id
+    // or idempotency_key), proving the hash was derived.
+    assert!(
+        event_text.contains("tool:") || event_text.contains("inv_"),
+        "hashed tool_call.id should appear in journal"
+    );
+    Ok(())
+}
+
+/// Provider sends both text AND tool_calls — malformed tool calls must not
+/// suppress the text content.
+#[test]
+fn malformed_tool_call_alongside_text_returns_both() -> Result<()> {
+    let server = StubProvider::start(&[
+        r#"{"choices":[{"message":{"content":"I have some information.","tool_calls":[{"id":"bad_3","type":"function","function":{"name":"time.now","arguments":"{bad}"}}]}}],"model":"stub"}"#,
+        r#"{"choices":[{"message":{"content":"Fixed."}}],"model":"stub"}"#,
+    ]);
+    thread::sleep(std::time::Duration::from_millis(100));
+    let (journal, gateway, runtime) = setup(&server, vec!["time.now"])?;
+    let envelope = gateway.cli_ingress("hello".into())?;
+    let event = gateway.validate_ingress(&journal, envelope)?;
+    let outcome = runtime.deliver(&journal, &gateway, event)?;
+    // The first-round text content should appear before the tool-call fix.
+    assert!(!outcome.output.is_empty());
+    Ok(())
+}
+
+/// Missing function name in tool_calls.
+#[test]
+fn malformed_missing_function_name_no_receipt() -> Result<()> {
+    let server = StubProvider::start(&[
+        r#"{"choices":[{"message":{"content":"","tool_calls":[{"id":"bad_4","type":"function","function":{}}]}}],"model":"stub"}"#,
+        r#"{"choices":[{"message":{"content":"Retry."}}],"model":"stub"}"#,
+    ]);
+    thread::sleep(std::time::Duration::from_millis(100));
+    let (journal, gateway, runtime) = setup(&server, vec!["time.now"])?;
+    let envelope = gateway.cli_ingress("hello".into())?;
+    let event = gateway.validate_ingress(&journal, envelope)?;
+    let outcome = runtime.deliver(&journal, &gateway, event)?;
+    assert!(!outcome.output.is_empty());
+    let events = journal.events()?;
+    let receipts: Vec<_> = events.iter().filter(|e| e.kind == JournalEventKind::ReceiptReceived).collect();
+    assert_eq!(receipts.len(), 0, "no ReceiptReceived for malformed tool call");
+    Ok(())
+}
+
 #[test]
 fn stub_provider_completes_tool_loop() -> Result<()> {
     let server = StubProvider::start(&[

@@ -11,6 +11,8 @@ use serde_json::json;
 pub mod outbox_dispatcher;
 mod tool_loop;
 
+pub use tool_loop::validate_model_arguments;
+
 pub struct Runtime<L> {
     config: KernelConfig,
     llm: L,
