@@ -22,7 +22,7 @@ import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { validateFixture, type Fixture } from "./fixture.ts";
 import { scoreFixture, compareFixture, summarize, type FixtureVerdict, type ReplayOutcome } from "./scorer.ts";
-import { resolveRef, buildKernel, runFixtureAgainst } from "./runner.ts";
+import { resolveRef, buildKernel, runFixtureAgainst, DriverError } from "./runner.ts";
 
 /** Reject input/output paths that match forbidden patterns (secrets, config, logs).
  *
@@ -139,8 +139,13 @@ function buildWorktree(ref: string): { dir: string; binary: string; commit: stri
     rmSync(dir, { recursive: true, force: true });
     throw new Error(`cannot create worktree for ${ref}: ${(e as Error).message}`);
   }
-  const binary = buildKernel(dir);
-  return { dir, binary, commit };
+  try {
+    const binary = buildKernel(dir);
+    return { dir, binary, commit };
+  } catch (e) {
+    cleanupWorktree(dir);
+    throw e;
+  }
 }
 
 function cleanupWorktree(dir: string): void {
@@ -204,6 +209,7 @@ async function main() {
     delta: number;
     verdict: "improve" | "regress" | "neutral";
   }> = [];
+  const errors: Array<{ fixture_id: string; category: string; message: string }> = [];
   let driverFailed = false;
   try {
     for (const fixture of fixtures) {
@@ -211,11 +217,14 @@ async function main() {
       let baselineOutcome: ReplayOutcome;
       try {
         console.error(`replaying fixture ${fixture.fixture_id} against candidate...`);
-        candidateOutcome = await runFixtureAgainst(candidateWt.binary, fixture, ipcToken);
+        candidateOutcome = await runFixtureAgainst(candidateWt!.binary, fixture, ipcToken);
         console.error(`replaying fixture ${fixture.fixture_id} against baseline...`);
-        baselineOutcome = await runFixtureAgainst(baselineWt.binary, fixture, ipcToken);
+        baselineOutcome = await runFixtureAgainst(baselineWt!.binary, fixture, ipcToken);
       } catch (e) {
-        console.error(`error: replay driver failed for ${fixture.fixture_id}: ${(e as Error).message}`);
+        const category = e instanceof DriverError ? e.category : "driver_crash";
+        const message = (e as Error).message.slice(0, 200);
+        console.error(`error: replay driver failed for ${fixture.fixture_id} (${category}): ${message}`);
+        errors.push({ fixture_id: fixture.fixture_id, category, message });
         driverFailed = true;
         continue;
       }
@@ -231,8 +240,8 @@ async function main() {
       });
     }
   } finally {
-    cleanupWorktree(candidateWt.dir);
-    cleanupWorktree(baselineWt.dir);
+    if (candidateWt) cleanupWorktree(candidateWt.dir);
+    if (baselineWt) cleanupWorktree(baselineWt.dir);
   }
   if (driverFailed) {
     console.error("error: one or more fixture replays failed; partial report written");
@@ -250,13 +259,16 @@ async function main() {
     meta: {
       generated_at: new Date().toISOString(),
       candidate: args.candidate,
-      candidate_commit: candidateWt.commit,
+      candidate_commit: candidateWt!.commit,
       baseline: args.baseline,
-      baseline_commit: baselineWt.commit,
-      fixture_count: fixtureResults.length,
+      baseline_commit: baselineWt!.commit,
+      fixture_count_total: fixtures.length,
+      fixture_count_scored: fixtureResults.length,
+      fixture_errors: errors.length,
     },
     summary,
     fixtures: fixtureResults,
+    ...(errors.length > 0 ? { errors } : {}),
   };
 
   const dir = resolve(args.outDir);
@@ -265,6 +277,11 @@ async function main() {
   writeFileSync(join(dir, "report.md"), toMarkdown(report));
   console.error(`replay/eval report written to ${dir}/report.md and score.json`);
   console.log(report.summary.verdict);
+
+  if (driverFailed) {
+    console.error("replay/eval completed with driver errors — exiting non-zero");
+    process.exitCode = EXIT_DRIVER_ERROR;
+  }
 }
 
 function toMarkdown(r: any): string {
@@ -273,6 +290,21 @@ function toMarkdown(r: any): string {
   lines.push("");
   lines.push(`Candidate: ${r.meta.candidate} (${r.meta.candidate_commit})  Baseline: ${r.meta.baseline} (${r.meta.baseline_commit})`);
   lines.push("");
+  if (r.summary.verdict === "no-fixtures") {
+    lines.push("## Summary");
+    lines.push("");
+    lines.push("**SKIPPED** — no fixtures were scored. The driver may have failed for all fixtures.");
+    lines.push("");
+    if (r.errors && r.errors.length > 0) {
+      lines.push("## Errors");
+      lines.push("");
+      for (const e of r.errors) {
+        lines.push(`- **${e.fixture_id}** (${e.category}): ${e.message}`);
+      }
+      lines.push("");
+    }
+    return lines.join("\n");
+  }
   lines.push("## Summary");
   lines.push("");
   lines.push(`Verdict: **${r.summary.verdict}** (candidate ${r.summary.candidateScore.toFixed(2)} vs baseline ${r.summary.baselineScore.toFixed(2)}, Δ ${r.summary.delta >= 0 ? "+" : ""}${r.summary.delta.toFixed(2)})`);
@@ -299,13 +331,22 @@ function toMarkdown(r: any): string {
       lines.push("");
     }
   }
-  lines.push("");
-  lines.push("## Candidate expectation details");
-  lines.push("");
-  for (const d of r.fixtures[0].candidate.details) {
-    lines.push(`- [${d.pass ? "x" : " "}] ${d.name}: ${d.detail}`);
+  if (r.fixtures.length > 0) {
+    lines.push("## Candidate expectation details");
+    lines.push("");
+    for (const d of r.fixtures[0].candidate.details) {
+      lines.push(`- [${d.pass ? "x" : " "}] ${d.name}: ${d.detail}`);
+    }
+    lines.push("");
   }
-  lines.push("");
+  if (r.errors && r.errors.length > 0) {
+    lines.push("## Errors");
+    lines.push("");
+    for (const e of r.errors) {
+      lines.push(`- **${e.fixture_id}** (${e.category}): ${e.message}`);
+    }
+    lines.push("");
+  }
   return lines.join("\n");
 }
 

@@ -19,6 +19,7 @@ import { mkdtempSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execSync, execFileSync, spawn } from "node:child_process";
+import { createServer } from "node:net";
 import type { Fixture } from "./fixture.ts";
 import type { ReplayOutcome } from "./scorer.ts";
 
@@ -30,6 +31,21 @@ export interface RunHandle {
   port: number;
   dbPath: string;
   ipcToken: string;
+}
+
+/**
+ * Structured error for infrastructure failures during replay.
+ * Separate from candidate-process crashes — these are driver-level
+ * failures (port binding, kernel startup, etc.) that should be
+ * reported distinctly in score.json.
+ */
+export class DriverError extends Error {
+  category: string;
+  constructor(category: string, message: string) {
+    super(message);
+    this.name = "DriverError";
+    this.category = category;
+  }
 }
 
 /** Resolve a git ref to a short commit hash. Throws if unresolvable. */
@@ -55,66 +71,70 @@ export function buildKernel(worktreeDir: string): string {
   return join(worktreeDir, "target", "release", "agent-core-kernel");
 }
 
-/** Find a free TCP port by asking the OS. */
-export function freePort(): number {
-  // A lightweight, dependency-free way: open a server socket on :0 and read
-  // the assigned port, then close it. There's a small race window, acceptable
-  // for an ephemeral test instance.
-  const { Server } = require("node:net");
+/** Find a free TCP port by asking the OS. Pure ESM, no require(). */
+export async function freePort(): Promise<number> {
+  const srv = createServer();
+  srv.unref();
   return new Promise<number>((resolve, reject) => {
-    const srv = new Server();
-    srv.unref();
     srv.on("error", reject);
     srv.listen(0, "127.0.0.1", () => {
       const addr = srv.address();
-      if (addr && typeof addr === "object") resolve(addr.port);
-      else reject(new Error("could not bind ephemeral port"));
-      srv.close();
+      if (addr && typeof addr === "object") {
+        const port = addr.port;
+        srv.close();
+        resolve(port);
+      } else {
+        reject(new Error("could not bind ephemeral port"));
+      }
     });
-  }) as unknown as number;
+  });
 }
 
 /**
  * Start a Kernel build on an ephemeral port + ephemeral DB. Returns a handle
  * the caller must stop(). The DB is a fresh temp file (never production).
+ * Throws DriverError on infrastructure failures.
  */
-export function startKernel(binaryPath: string, ipcToken: string): RunHandle {
+export async function startKernel(binaryPath: string, ipcToken: string): Promise<RunHandle> {
   const dir = mkdtempSync(join(tmpdir(), "replay-kernel-"));
   const dbPath = join(dir, "ephemeral.db");
-  // sync freePort (the promise variant above is awkward to await in a sync
-  // start; use a direct socket binding instead).
-  const port = bindEphemeralPort();
-  const child = spawn(binaryPath, ["serve", "--db", dbPath, "--port", String(port)], {
-    stdio: "pipe",
-    // Minimal, explicit env only — do NOT spread process.env. Spreading would
-    // leak the operator's real secrets (OPENAI_API_KEY, IPC_TOKEN, etc. from
-    // .env or shell) into the candidate process, violating the harness's
-    // "never touch secrets" boundary. The candidate uses LocalEchoLlm (the
-    // stub key below is never a real credential) and a fresh ephemeral DB.
-    env: {
-      PATH: process.env.PATH ?? "",
-      HOME: process.env.HOME ?? "",
-      AGENT_CORE_IPC_TOKEN: ipcToken,
-      AGENT_CORE_OPENAI_API_KEY: "replay-stub-key", // LocalEchoLlm ignores it; never a real key
-      AGENT_CORE_FALLBACK_OPENAI_API_KEY: "replay-stub-key",
-      AGENT_CORE_MODEL: "local",
-      AGENT_CORE_OPENAI_BASE_URL: "http://127.0.0.1:0/v1",
-      AGENT_CORE_FALLBACK_OPENAI_BASE_URL: "http://127.0.0.1:0/v1",
-      AGENT_CORE_OUTBOX_DISPATCHER_ENABLED: "true",
-      AGENT_CORE_CONNECTOR_EXECUTE_URL: "http://127.0.0.1:0/v1/execute",
-    },
+  let port: number;
+  try {
+    port = await freePort();
+  } catch (e) {
+    rmSync(dir, { recursive: true, force: true });
+    throw new DriverError("port_binding", `failed to bind ephemeral port: ${(e as Error).message}`);
+  }
+  let child: ReturnType<typeof spawn>;
+  try {
+    child = spawn(binaryPath, ["serve", "--db", dbPath, "--port", String(port)], {
+      stdio: "pipe",
+      // Minimal, explicit env only — do NOT spread process.env. Spreading would
+      // leak the operator's real secrets (OPENAI_API_KEY, IPC_TOKEN, etc. from
+      // .env or shell) into the candidate process, violating the harness's
+      // "never touch secrets" boundary. The candidate uses LocalEchoLlm (the
+      // stub key below is never a real credential) and a fresh ephemeral DB.
+      env: {
+        PATH: process.env.PATH ?? "",
+        HOME: process.env.HOME ?? "",
+        AGENT_CORE_IPC_TOKEN: ipcToken,
+        AGENT_CORE_OPENAI_API_KEY: "replay-stub-key",
+        AGENT_CORE_FALLBACK_OPENAI_API_KEY: "replay-stub-key",
+        AGENT_CORE_MODEL: "local",
+        AGENT_CORE_OPENAI_BASE_URL: "http://127.0.0.1:0/v1",
+        AGENT_CORE_FALLBACK_OPENAI_BASE_URL: "http://127.0.0.1:0/v1",
+        AGENT_CORE_OUTBOX_DISPATCHER_ENABLED: "true",
+        AGENT_CORE_CONNECTOR_EXECUTE_URL: "http://127.0.0.1:0/v1/execute",
+      },
+    });
+  } catch (e) {
+    rmSync(dir, { recursive: true, force: true });
+    throw new DriverError("kernel_startup", `failed to spawn kernel: ${(e as Error).message}`);
+  }
+  child.on("error", () => {
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
   });
   return { process: child, port, dbPath, ipcToken };
-}
-
-function bindEphemeralPort(): number {
-  const { Server } = require("node:net");
-  const srv = new Server();
-  srv.listen(0, "127.0.0.1");
-  const addr = srv.address() as { port: number } | null;
-  const port = addr?.port ?? 0;
-  srv.close();
-  return port;
 }
 
 /** Wait for the Kernel's /health endpoint to respond 200. */
@@ -129,23 +149,21 @@ export async function waitForReady(handle: RunHandle, timeoutMs = 10_000): Promi
     }
     await sleep(200);
   }
-  throw new Error(`kernel did not become ready on port ${handle.port}`);
+  throw new DriverError("kernel_not_ready", `kernel did not become ready on port ${handle.port}`);
 }
 
 /** POST a single ingress turn to the Kernel. */
 export async function postTurn(handle: RunHandle, fixture: Fixture, turnIndex: number): Promise<void> {
   const turn = fixture.turns[turnIndex];
+  const sourceKind = fixture.setup.channel === "feishu" ? "Feishu" : "Cli";
   const envelope = {
     protocol_version: "v1",
-    source: fixture.setup.channel,
+    source: sourceKind,
     external_event_id: turn.external_event_id,
     received_at: new Date().toISOString(),
+    auth_context: { authenticated: true },
     payload: {
-      type: "message",
-      message_id: turn.external_event_id,
-      chat_id: fixture.setup.session_id,
       text: turn.text,
-      chat_type: "p2p",
     },
     routing_hint: { session_id: fixture.setup.session_id },
   };
@@ -158,7 +176,7 @@ export async function postTurn(handle: RunHandle, fixture: Fixture, turnIndex: n
     body: JSON.stringify(envelope),
   });
   if (!res.ok) {
-    throw new Error(`/v1/ingress failed (${res.status})`);
+    throw new DriverError("ingress_failed", `/v1/ingress failed (${res.status})`);
   }
 }
 
@@ -254,15 +272,18 @@ function sleep(ms: number): Promise<void> {
 
 /**
  * Run one fixture against one build (candidate or baseline). Returns the
- * observed outcome. Throws on an unrecoverable driver error (the caller maps
- * that to a crashed=true outcome).
+ * observed outcome.
+ *
+ * Infrastructure errors (port binding, kernel not ready, ingress failure)
+ * throw DriverError so the caller can distinguish them from candidate-process
+ * crashes and report them distinctly in score.json.
  */
 export async function runFixtureAgainst(
   binaryPath: string,
   fixture: Fixture,
   ipcToken: string,
 ): Promise<ReplayOutcome> {
-  const handle = startKernel(binaryPath, ipcToken);
+  const handle = await startKernel(binaryPath, ipcToken);
   try {
     await waitForReady(handle);
     for (let i = 0; i < fixture.turns.length; i++) {
@@ -271,6 +292,7 @@ export async function runFixtureAgainst(
     await pollUntilTerminal(handle);
     return readOutcome(handle.dbPath, fixture);
   } catch (e) {
+    if (e instanceof DriverError) throw e;
     return { ...emptyOutcome(), crashed: true };
   } finally {
     stopKernel(handle);

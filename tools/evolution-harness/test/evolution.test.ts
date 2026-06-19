@@ -183,16 +183,27 @@ test("CLI requires --goal and --candidate", () => {
   }
 });
 
-test("CLI accepts --evaluate flag (still plan-only until Batch 2 wires it)", () => {
-  const dir = mkdtempSync(join(tmpdir(), "evo-eval-"));
+test("CLI rejects --evaluate without --fixtures-dir and --audit-db (prevents silent plan-only)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "evo-eval-rej-"));
   const goalPath = join(dir, "goal.md");
   writeFileSync(goalPath, "# Goal\n");
   try {
-    runCli(["--goal", goalPath, "--candidate", "main", "--evaluate", "--out-dir", join(dir, "out")]);
-    const runs = readdirSync(join(dir, "out"));
-    const runDir = join(dir, "out", runs[0]);
-    const plan = JSON.parse(readFileSync(join(runDir, "plan.json"), "utf8"));
-    assert.equal(plan.evaluate, true);
+    const err = runCli(["--goal", goalPath, "--candidate", "main", "--evaluate"], true);
+    assert.match(err, /--evaluate requires at least one of --fixtures-dir or --audit-db/i);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("CLI rejects --evaluate with empty --fixtures-dir (non-zero exit, no cargo hang)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "evo-eval-empty-"));
+  const goalPath = join(dir, "goal.md");
+  writeFileSync(goalPath, "# Goal\n");
+  const fixturesDir = join(dir, "fixtures");
+  mkdirSync(fixturesDir);
+  try {
+    const err = runCli(["--goal", goalPath, "--candidate", "main", "--evaluate", "--fixtures-dir", fixturesDir, "--out-dir", join(dir, "out")], true);
+    assert.ok(err.length > 0, "CLI exited non-zero (expected)");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

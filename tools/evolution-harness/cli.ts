@@ -25,7 +25,7 @@ import { readFileSync, writeFileSync, existsSync, statSync, mkdirSync } from "no
 import { resolve, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { runEvaluation, type Decision } from "./evaluate.ts";
+import { runEvaluation, type Decision, type EvalEvidence } from "./evaluate.ts";
 
 const FORBIDDEN_SEGMENTS = [".env", ".agent-core", ".openduck", ".openclaw", "logs"];
 
@@ -79,6 +79,10 @@ interface Args {
 const EXIT_BAD_ARG = 2;
 const EXIT_FORBIDDEN_OR_MISSING = 3;
 const EXIT_NOT_IMPLEMENTED = 4;
+/** Evaluation blocked by a red-line (replay regress/hardFail or audit fault). */
+const EXIT_BLOCKED = 10;
+/** Harness internal error (spawn failure, timeout, etc.), not a candidate problem. */
+const EXIT_INTERNAL_ERROR = 5;
 
 function fail(msg: string, code: number): never {
   console.error(`error: ${msg}`);
@@ -155,6 +159,8 @@ export interface RunManifest {
   base: { ref: string; commit: string };
   /** "pass" / "blocked" when evaluation ran; null when plan-only. */
   decision: "pass" | "blocked" | null;
+  /** Per-child subcommand provenance (replay-eval, audit-report). */
+  children: { command: string; argv: string[]; exit_code: number | null; started_at: string; finished_at: string; error_category: string | null; artifacts_produced: number }[];
   artifacts: { path: string; kind: string }[];
   git_push_invoked: boolean;
   git_merge_invoked: boolean;
@@ -212,8 +218,12 @@ export function main(): RunManifest {
   // Batch 2: real evaluation composition. Only when --evaluate; pins to the
   // resolved commits (no ref drift). NEVER commits/merges/pushes.
   let decision: Decision | null = null;
+  let evidence: EvalEvidence | null = null;
   const evalArtifacts: { path: string; kind: string }[] = [];
-  if (args.evaluate && (args.fixturesDir || args.auditDb)) {
+  if (args.evaluate) {
+    if (!args.fixturesDir && !args.auditDb) {
+      fail("--evaluate requires at least one of --fixtures-dir or --audit-db", EXIT_BAD_ARG);
+    }
     const result = runEvaluation({
       repoRoot: process.cwd(),
       candidateRef: args.candidate,
@@ -225,8 +235,32 @@ export function main(): RunManifest {
       runDir,
     });
     decision = result.decision;
+    evidence = result.evidence;
     evalArtifacts.push(...result.evidence.artifacts);
   }
+
+  const blockedReasons: string[] = [];
+  if (evidence?.replay.ran && decision === "blocked") {
+    const r = evidence.replay;
+    if (r.exitCode !== 0) blockedReasons.push(`replay-eval exited ${r.exitCode} (non-zero)`);
+    else if (r.anyHardFail) blockedReasons.push("replay: candidate hardFail detected");
+    else if (r.summary?.verdict === "regress") blockedReasons.push(`replay: verdict = regress (candidate ${r.summary.candidateScore.toFixed(2)} vs baseline ${r.summary.baselineScore.toFixed(2)})`);
+    else if (!r.summary) blockedReasons.push("replay: no parseable summary (score.json malformed)");
+  }
+  if (evidence?.audit.ran && decision === "blocked") {
+    const a = evidence.audit;
+    if (a.exitCode !== 0) blockedReasons.push(`audit-report exited ${a.exitCode} (non-zero)`);
+    else if (a.redLines) {
+      if (a.redLines.hashChainFaulty) blockedReasons.push("audit: hash-chain faulty");
+      if (a.redLines.unknownDispatches) blockedReasons.push("audit: unknown dispatches > 0");
+      if (a.redLines.projectionDrift) blockedReasons.push("audit: projection drift > 0");
+      if (a.redLines.undeliveredIngress) blockedReasons.push("audit: undelivered ingress > 0");
+    } else {
+      blockedReasons.push("audit: no parseable report (report.json malformed)");
+    }
+  }
+
+  const reportChildren = evidence?.children ?? [];
 
   const reportLines: string[] = [
     "# Evolution Rehearsal Report",
@@ -256,30 +290,64 @@ export function main(): RunManifest {
     `- replay-eval: ${args.fixturesDir ? `requested (--fixtures-dir ${args.fixturesDir})` : "skipped (no --fixtures-dir)"}`,
     `- audit-report: ${args.auditDb ? `requested (--audit-db ${args.auditDb})` : "skipped (no --audit-db)"}`,
     "",
-    "## Decision",
-    "",
-    decision === null
-      ? (args.evaluate
-          ? "Evaluate requested but no --fixtures-dir/--audit-db was provided; nothing to evaluate (plan-only)."
-          : "Dry-run: no evaluation ran. Re-run with `--evaluate` (+ `--fixtures-dir` and/or `--audit-db`) for real evaluation.")
-      : `**${decision.toUpperCase()}** — ${decision === "pass"
-          ? "no red-line triggered; a human may merge after reviewing the evidence."
-          : "a red-line triggered (replay regress/hardFail or audit fault). Do NOT merge."}`,
-    "",
-    "_Merge is always manual._",
+    "## Evidence",
     "",
   ];
+  if (reportChildren.length > 0) {
+    reportLines.push("| Command | Exit | Error | Artifacts |");
+    reportLines.push("|---|---|---|---|");
+    for (const c of reportChildren) {
+      reportLines.push(`| ${c.command} | ${c.exit_code ?? "?"} | ${c.error_category ?? "-"} | ${c.artifacts_produced} |`);
+    }
+    reportLines.push("");
+  }
+  if (evalArtifacts.length > 0) {
+    reportLines.push("### Artifact links");
+    reportLines.push("");
+    for (const a of evalArtifacts) {
+      reportLines.push(`- [${a.kind}](${a.path})`);
+    }
+    reportLines.push("");
+  }
+  reportLines.push("## Decision");
+  reportLines.push("");
+  reportLines.push(
+    decision === null
+      ? (args.evaluate
+          ? "No evaluation ran (no --fixtures-dir/--audit-db provided)."
+          : "Dry-run: no evaluation ran. Re-run with `--evaluate` (+ `--fixtures-dir` and/or `--audit-db`) for real evaluation.")
+      : `**${decision.toUpperCase()}**`,
+  );
+  if (blockedReasons.length > 0) {
+    reportLines.push("");
+    reportLines.push(`${blockedReasons.length} red-line(s) triggered:`);
+    reportLines.push("");
+    for (const reason of blockedReasons) {
+      reportLines.push(`- ${reason}`);
+    }
+  }
+  reportLines.push("");
+  reportLines.push("_Merge is always manual._");
+  reportLines.push("");
   writeFileSync(join(runDir, "evolution-report.md"), reportLines.join("\n"));
+
+  let exitCode = 0;
+  if (decision === "blocked") {
+    exitCode = EXIT_BLOCKED;
+  } else if (evidence?.children.some((c) => c.error_category !== null)) {
+    exitCode = EXIT_INTERNAL_ERROR;
+  }
 
   const manifest: RunManifest = {
     run_id: id,
     argv: process.argv.slice(2),
     started_at: startedAt,
     finished_at: new Date().toISOString(),
-    exit_code: decision === "blocked" ? 0 : 0, // non-zero exit reserved for harness-internal errors; the decision is in the report
+    exit_code: exitCode,
     candidate: { ref: args.candidate, commit: candidateCommit },
     base: { ref: args.base, commit: baseCommit },
     decision,
+    children: reportChildren,
     artifacts: [
       { path: "plan.json", kind: "plan" },
       { path: "evolution-report.md", kind: "report" },
@@ -294,7 +362,8 @@ export function main(): RunManifest {
 
   console.log(`evolution rehearsal ${args.evaluate ? "evaluate " : "dry-run "}report written to ${runDir}`);
   console.log(`  plan.json + evolution-report.md + manifest.json${decision ? ` (decision: ${decision})` : ""}`);
-  return manifest;
+
+  if (exitCode !== 0) process.exit(exitCode);
 }
 
 // Run as a CLI entry only when invoked directly (not when imported by tests).

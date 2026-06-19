@@ -15,10 +15,16 @@ import { join, resolve } from "node:path";
 /** A child-command runner. Injectable for tests (returns stdout + exit code). */
 export type CommandRunner = (argv: string[]) => { stdout: string; stderr: string; status: number | null };
 
-/** Default runner: spawnSync + argv, NO shell. */
+/** Default runner: spawnSync + argv, NO shell, with cwd/timeout/maxBuffer. */
 export const defaultRunner: CommandRunner = (argv) => {
   const [cmd, ...rest] = argv;
-  const r = spawnSync(cmd, rest, { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] });
+  const r = spawnSync(cmd, rest, {
+    encoding: "utf8",
+    stdio: ["pipe", "pipe", "pipe"],
+    cwd: process.cwd(),
+    timeout: 600_000,
+    maxBuffer: 10 * 1024 * 1024,
+  });
   return { stdout: r.stdout ?? "", stderr: r.stderr ?? "", status: r.status };
 };
 
@@ -37,19 +43,27 @@ export interface EvalInputs {
   runDir: string;
 }
 
+export interface ChildRunInfo {
+  command: string;
+  argv: string[];
+  exit_code: number | null;
+  started_at: string;
+  finished_at: string;
+  /** Structured category e.g. "timeout", "spawn_failure", or null on success. */
+  error_category: string | null;
+  artifacts_produced: number;
+}
+
 export interface EvalEvidence {
   replay: {
     ran: boolean;
     exitCode: number | null;
-    /** Parsed score.json summary, if replay ran and produced one. */
     summary?: { verdict?: string };
-    /** True if any fixture had a hardFail. */
     anyHardFail?: boolean;
   };
   audit: {
     ran: boolean;
     exitCode: number | null;
-    /** Red-line booleans derived from report.json, if audit ran. */
     redLines?: {
       hashChainFaulty: boolean;
       unknownDispatches: boolean;
@@ -57,6 +71,7 @@ export interface EvalEvidence {
       undeliveredIngress: boolean;
     };
   };
+  children: ChildRunInfo[];
   artifacts: { path: string; kind: string }[];
 }
 
@@ -68,9 +83,11 @@ export type Decision = "pass" | "blocked";
  * commits/merges/pushes — this function only reads + writes files in runDir.
  */
 export function runEvaluation(inputs: EvalInputs, runner: CommandRunner = defaultRunner): { evidence: EvalEvidence; decision: Decision } {
+  const children: ChildRunInfo[] = [];
   const evidence: EvalEvidence = {
     replay: { ran: false, exitCode: null },
     audit: { ran: false, exitCode: null },
+    children,
     artifacts: [],
   };
 
@@ -81,13 +98,25 @@ export function runEvaluation(inputs: EvalInputs, runner: CommandRunner = defaul
       "node", "--experimental-strip-types",
       join(inputs.repoRoot, "tools", "replay-eval", "cli.ts"),
       "--fixtures-dir", inputs.fixturesDir,
-      "--candidate", inputs.candidateCommit, // pin to the resolved commit (no ref drift)
+      "--candidate", inputs.candidateCommit,
       "--baseline", inputs.baseCommit,
       "--out-dir", replayOut,
     ];
-    const r = runner(argv);
+    const startedAt = new Date().toISOString();
+    let r: { stdout: string; stderr: string; status: number | null };
+    let errorCategory: string | null = null;
+    try {
+      r = runner(argv);
+    } catch (e) {
+      const m = (e as Error).message ?? "";
+      errorCategory = m.includes("timeout") ? "timeout" : "spawn_failure";
+      r = { stdout: "", stderr: "", status: null };
+    }
+    const finishedAt = new Date().toISOString();
     evidence.replay = { ran: true, exitCode: r.status };
     const scorePath = join(replayOut, "score.json");
+    const reportPath = join(replayOut, "report.md");
+    let artifactsProduced = 0;
     if (r.status === 0 && existsSync(scorePath)) {
       try {
         const score = JSON.parse(readFileSync(scorePath, "utf8"));
@@ -96,9 +125,24 @@ export function runEvaluation(inputs: EvalInputs, runner: CommandRunner = defaul
       } catch {
         // malformed score.json — leave summary undefined; decision stays conservative (blocked).
       }
-      evidence.artifacts.push({ path: "replay/score.json", kind: "replay-score" });
-      evidence.artifacts.push({ path: "replay/report.md", kind: "replay-report" });
+      if (existsSync(scorePath)) {
+        evidence.artifacts.push({ path: "replay/score.json", kind: "replay-score" });
+        artifactsProduced++;
+      }
+      if (existsSync(reportPath)) {
+        evidence.artifacts.push({ path: "replay/report.md", kind: "replay-report" });
+        artifactsProduced++;
+      }
     }
+    children.push({
+      command: "replay-eval",
+      argv,
+      exit_code: r.status,
+      started_at: startedAt,
+      finished_at: finishedAt,
+      error_category: errorCategory,
+      artifacts_produced: artifactsProduced,
+    });
   }
 
   // 2. audit-report (if a copied snapshot is provided).
@@ -110,12 +154,24 @@ export function runEvaluation(inputs: EvalInputs, runner: CommandRunner = defaul
       "--db", inputs.auditDb,
       "--out-dir", auditOut,
     ];
-    const r = runner(argv);
+    const startedAt = new Date().toISOString();
+    let r: { stdout: string; stderr: string; status: number | null };
+    let errorCategory: string | null = null;
+    try {
+      r = runner(argv);
+    } catch (e) {
+      const m = (e as Error).message ?? "";
+      errorCategory = m.includes("timeout") ? "timeout" : "spawn_failure";
+      r = { stdout: "", stderr: "", status: null };
+    }
+    const finishedAt = new Date().toISOString();
     evidence.audit = { ran: true, exitCode: r.status };
-    const reportPath = join(auditOut, "report.json");
-    if (r.status === 0 && existsSync(reportPath)) {
+    const reportJsonPath = join(auditOut, "report.json");
+    const reportMdPath = join(auditOut, "report.md");
+    let artifactsProduced = 0;
+    if (r.status === 0 && existsSync(reportJsonPath)) {
       try {
-        const rep = JSON.parse(readFileSync(reportPath, "utf8"));
+        const rep = JSON.parse(readFileSync(reportJsonPath, "utf8"));
         evidence.audit.redLines = {
           hashChainFaulty: rep.hash_chain?.integrity !== "ok",
           unknownDispatches: (rep.unknown_dispatches?.count ?? 0) > 0,
@@ -125,9 +181,24 @@ export function runEvaluation(inputs: EvalInputs, runner: CommandRunner = defaul
       } catch {
         // malformed — leave redLines undefined; conservative blocked.
       }
-      evidence.artifacts.push({ path: "audit/report.json", kind: "audit-report" });
-      evidence.artifacts.push({ path: "audit/report.md", kind: "audit-report-md" });
+      if (existsSync(reportJsonPath)) {
+        evidence.artifacts.push({ path: "audit/report.json", kind: "audit-report" });
+        artifactsProduced++;
+      }
+      if (existsSync(reportMdPath)) {
+        evidence.artifacts.push({ path: "audit/report.md", kind: "audit-report-md" });
+        artifactsProduced++;
+      }
     }
+    children.push({
+      command: "audit-report",
+      argv,
+      exit_code: r.status,
+      started_at: startedAt,
+      finished_at: finishedAt,
+      error_category: errorCategory,
+      artifacts_produced: artifactsProduced,
+    });
   }
 
   const decision = decide(evidence);
