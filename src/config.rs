@@ -58,7 +58,14 @@ impl KernelConfig {
         if db_path.is_none() {
             let _ = copy_legacy_db_if_needed(&legacy_db_path, &default_db_path);
         }
-        let _ = ensure_data_files(&data_dir);
+        match ensure_data_files(&data_dir) {
+            Ok(report) if report.migration_needed > 0 => eprintln!(
+                "bootstrap_prompt_migration_needed customized_files_preserved={}",
+                report.migration_needed
+            ),
+            Ok(_) => {}
+            Err(_) => eprintln!("bootstrap_prompt_setup_failed"),
+        }
         Self {
             db_path: db_path.map(PathBuf::from).unwrap_or(default_db_path),
             data_dir,

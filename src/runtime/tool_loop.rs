@@ -121,6 +121,12 @@ impl<L: LlmClient> super::Runtime<L> {
         let next = match self.llm.complete(LlmInput {
             blocks: blocks.to_vec(),
             user_text: user_text.to_string(),
+            granted_operations: run
+                .principal
+                .grants
+                .iter()
+                .map(|g| g.operation.clone())
+                .collect(),
         }) {
             Ok(next) => next,
             Err(_) => {
@@ -194,3 +200,7 @@ mod tool_loop_tests;
 #[cfg(test)]
 #[path = "blank_reply_tests.rs"]
 mod blank_reply_tests;
+
+#[cfg(test)]
+#[path = "grant_schema_tests.rs"]
+mod grant_schema_tests;

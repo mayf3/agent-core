@@ -134,9 +134,16 @@ where
                 "kinds": blocks.iter().map(|block| format!("{:?}", block.kind)).collect::<Vec<_>>(),
             }),
         )?;
+        let granted_operations: Vec<String> = run
+            .principal
+            .grants
+            .iter()
+            .map(|g| g.operation.clone())
+            .collect();
         let first = self.llm.complete(LlmInput {
             blocks: blocks.clone(),
             user_text: text.clone(),
+            granted_operations: granted_operations.clone(),
         })?;
         journal.append_event(
             JournalEventKind::LlmCompleted,
