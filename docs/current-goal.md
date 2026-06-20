@@ -155,11 +155,30 @@ On `main` at `8bd2356`. PR #155 is merged and closes the tool-recall loop state 
 
 Phase 0/1 ordinary Feishu delivery is dogfood-ready on `main`. Phase 2's tool
 loop mechanism is merged, but real Feishu `time.now` remains **pending dogfood
-acceptance**: the old generated bootstrap Prompt discouraged all tool use, and
-Provider schemas were not derived from the current Agent grants. The current
-candidate fixes those two discovery boundaries plus exact legacy-template
-migration. It must not be recorded as accepted until the user explicitly grants
-`time.now` externally and verifies the real Feishu Journal chain.
+acceptance**: the old generated bootstrap Prompt ("Keep Phase 0 chat-only" /
+"answers user messages without tools") discouraged all tool use, and Provider
+schemas were hardcoded to expose every ReadOnly catalog operation regardless of
+the Agent's grants. The current candidate PR fixes those two discovery
+boundaries plus exact legacy-template migration:
+
+- **Bootstrap Prompt**: `system/root.md`, `system/runtime.md`, and
+  `agents/main/AGENT.md` no longer say "chat-only" / "without tools"; they tell
+  the model to prefer an authorized read-only tool over guessing for real-time /
+  system / session facts, and never to assume tools that were not provided.
+- **Non-destructive migration**: `ensure_data_files` upgrades a file ONLY when
+  its bytes exactly match a known Phase-0 legacy default (verified by digest); a
+  user-customized file is never overwritten; missing files get the new default;
+  idempotent on repeat start. See `docs/bootstrap-prompt-migration.md`.
+- **Provider schema from grants**: `tools` is now derived from
+  `granted_operations ∩ ReadOnly catalog` — an un-granted tool is never sent to
+  the provider. The Gateway remains the final boundary; a malicious provider
+  fabricating an un-granted `time.now` call is rejected with
+  `ToolCallRejected(policy_denied)`. See `examples/grant-time-now.md`.
+
+This candidate must NOT be recorded as accepted until the user explicitly grants
+`time.now` externally (`AGENT_CORE_EXTRA_ALLOWED_OPERATIONS=time.now`) and
+verifies the real Feishu Journal chain (ToolCallIssued →
+InvocationProposed(time.now) → InvocationApproved → ReceiptReceived Succeeded).
 
 External harness state (productization sprint complete, PRs #135/#136/#137):
 
