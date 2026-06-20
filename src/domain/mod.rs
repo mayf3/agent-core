@@ -4,12 +4,12 @@ use serde_json::Value;
 use std::path::PathBuf;
 use uuid::Uuid;
 
-pub mod operation;
-pub mod retry;
 pub mod status;
-pub use operation::*;
-pub use retry::*;
+pub mod retry;
+pub mod operation;
 pub use status::*;
+pub use retry::*;
+pub use operation::*;
 
 macro_rules! id_type {
     ($name:ident, $prefix:literal) => {
@@ -385,10 +385,8 @@ pub enum JournalEventKind {
     RunStarted,
     ContextBuilt,
     LlmCompleted,
-    /// Model emitted a tool call (before validation). Always written when
-    /// `LlmOutput.tool_call` is `Some(ToolCall)`, regardless of whether the
-    /// tool call is later accepted or rejected. The payload contains the
-    /// operation name and the (already-hashed) internal tool-call id.
+    /// Model emitted a valid or malformed tool call, before validation. The
+    /// payload contains only bounded operation metadata and an internal id.
     ToolCallIssued,
     /// Model-emitted tool call was rejected during validation (unknown/write
     /// operation, malformed arguments, etc.). Written INSTEAD of

@@ -104,10 +104,7 @@ fn run_decision(approved: bool) -> anyhow::Result<(Value, Arc<JournalStore>)> {
 fn approve_endpoint_resumes_paused_run_to_waiting_dispatch() -> anyhow::Result<()> {
     let (body, journal) = run_decision(true)?;
     assert_eq!(body.get("ok").and_then(|v| v.as_bool()), Some(true));
-    assert_eq!(
-        body.get("decision").and_then(|v| v.as_str()),
-        Some("approved")
-    );
+    assert_eq!(body.get("decision").and_then(|v| v.as_str()), Some("approved"));
     // The run advanced out of AwaitingApproval to WaitingDispatch. Find it by
     // scanning events for the run's RunStarted/ApprovalRequested correlation.
     let resumed = journal
@@ -122,10 +119,7 @@ fn approve_endpoint_resumes_paused_run_to_waiting_dispatch() -> anyhow::Result<(
 fn deny_endpoint_fails_paused_run() -> anyhow::Result<()> {
     let (body, journal) = run_decision(false)?;
     assert_eq!(body.get("ok").and_then(|v| v.as_bool()), Some(true));
-    assert_eq!(
-        body.get("decision").and_then(|v| v.as_str()),
-        Some("denied")
-    );
+    assert_eq!(body.get("decision").and_then(|v| v.as_str()), Some("denied"));
     let denied = journal
         .events()?
         .iter()

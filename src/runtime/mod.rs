@@ -9,9 +9,12 @@ use chrono::Utc;
 use serde_json::json;
 
 pub mod outbox_dispatcher;
+mod tool_execution;
 mod tool_loop;
+mod tool_rejection;
 
-pub use tool_loop::validate_model_arguments;
+pub use crate::gateway::ToolRejection;
+pub use tool_rejection::validate_model_arguments;
 
 pub struct Runtime<L> {
     config: KernelConfig,
@@ -150,7 +153,13 @@ where
         let llm =
             self.run_tool_recall_loop(journal, gateway, &run, &session, &mut blocks, &text, first)?;
 
-        let intent = self.reply_intent(&run, &session, &llm.content, message_id, chat_id);
+        // Never enqueue a blank reply (empty first-round content with no tool
+        // call, or empty second-round content). The fallback is a fixed,
+        // minimal, generic message — no product styling. The Journal still
+        // records the true (possibly empty) model content for audit; only the
+        // reply intent text is guarded.
+        let reply_text = ensure_nonblank_reply(&llm.content);
+        let intent = self.reply_intent(&run, &session, &reply_text, message_id, chat_id);
         let correlation_id = intent.invocation_id.0.clone();
         journal.append_event(
             JournalEventKind::InvocationProposed,
@@ -177,7 +186,7 @@ where
         Ok(RuntimeOutcome {
             run_id: run.id,
             session_id: session.id,
-            output: llm.content,
+            output: reply_text,
         })
     }
 
@@ -302,5 +311,17 @@ where
                 idempotency_key: Some(format!("stdout-reply:{}", run.id.0)),
             }
         }
+    }
+}
+
+/// Return a non-blank reply string. If the model produced only whitespace
+/// (empty first-round content with no tool call, or empty second-round
+/// content), substitute a fixed, minimal, generic message so the Outbox never
+/// receives a blank string. This is the single place reply text is synthesized.
+fn ensure_nonblank_reply(content: &str) -> String {
+    if content.trim().is_empty() {
+        "No reply was generated for this turn.".to_string()
+    } else {
+        content.to_string()
     }
 }

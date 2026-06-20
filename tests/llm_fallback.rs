@@ -2,9 +2,12 @@ use agent_core_kernel::llm::{LlmClient, LlmInput, OpenAiCompatibleLlm};
 use anyhow::Result;
 use serde_json::{json, Value};
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpListener;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 use std::thread;
-
 #[test]
 fn fallback_endpoint_is_used_after_primary_http_error() -> Result<()> {
     let primary = serve_once(400, json!({ "error": { "message": "bad model" } }))?;
@@ -40,7 +43,6 @@ fn fallback_endpoint_is_used_after_primary_http_error() -> Result<()> {
     );
     Ok(())
 }
-
 fn serve_once(status: u16, body: Value) -> Result<String> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let addr = listener.local_addr()?;
@@ -56,15 +58,12 @@ fn serve_once(status: u16, body: Value) -> Result<String> {
     });
     Ok(format!("http://{addr}/v1"))
 }
-
 mod common;
-
 use agent_core_kernel::domain::*;
 use agent_core_kernel::gateway::Gateway;
 use agent_core_kernel::journal::JournalStore;
 use agent_core_kernel::llm::{LlmOutput, ToolCall, ToolCallResult};
 use agent_core_kernel::runtime::Runtime;
-use std::sync::{Arc, Mutex};
 
 struct RecallThenAnswerLlm {
     round: Arc<Mutex<usize>>,
@@ -214,7 +213,6 @@ fn recall_loop_is_bounded_by_max_tool_rounds() -> Result<()> {
             }
         })
         .collect();
-    // 2 tool proposals (session.recall_recent) + 1 reply proposal (stdout.send_text)
     let tool_proposals = tool_ops
         .iter()
         .filter(|op| **op != "stdout.send_text")
@@ -253,7 +251,8 @@ impl LlmClient for ProposeUnknownToolLlm {
         *round += 1;
         if current >= 1 {
             *self.saw_error_block.lock().unwrap() = input.blocks.iter().any(|b| {
-                matches!(b.kind, ContextBlockKind::ToolResult) && b.content.contains("error")
+                matches!(b.kind, ContextBlockKind::ToolResult)
+                    && (b.content.contains("rejected") || b.content.contains("error"))
             });
             return Ok(LlmOutput {
                 provider: "test".into(),
@@ -351,9 +350,9 @@ fn recall_loop_is_noop_when_no_tool_call() -> Result<()> {
     Ok(())
 }
 
-// ---- Stub HTTP Server: real OpenAI-compatible provider ----
 struct StubServer {
     port: u16,
+    shutdown: Arc<AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -361,35 +360,46 @@ impl StubServer {
     fn start() -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown_thread = Arc::clone(&shutdown);
         let handle = std::thread::spawn(move || {
             let mut round = 0usize;
-            for stream in listener.incoming() {
-                let mut stream = stream.unwrap();
-                // Read and discard the request (just need the connection).
+            loop {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                if shutdown_thread.load(Ordering::Relaxed) {
+                    break;
+                }
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(2000)));
                 let mut buf = [0u8; 8192];
                 let _ = stream.read(&mut buf);
-                let body_str = {
-                    let r = round;
-                    round += 1;
-                    if r == 0 {
+                let body_str = match round {
+                    0 | 1 => {
+                        round += 1;
                         r#"{"choices":[{"message":{"content":"","tool_calls":[{"id":"call_stub_1","type":"function","function":{"name":"time.now","arguments":"{}"}}]}}],"model":"stub"}"#
-                    } else {
+                    }
+                    _ => {
+                        round += 1;
                         r#"{"choices":[{"message":{"content":"The current time was retrieved successfully."}}],"model":"stub"}"#
                     }
                 };
                 let resp = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body_str.len(), body_str
+                    body_str.len(),
+                    body_str
                 );
                 let _ = stream.write_all(resp.as_bytes());
                 let _ = stream.flush();
-                if round >= 2 {
+                if round >= 3 {
                     break;
                 }
             }
         });
         Self {
             port,
+            shutdown,
             handle: Some(handle),
         }
     }
@@ -401,6 +411,13 @@ impl StubServer {
 
 impl Drop for StubServer {
     fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+        if let Ok(socket) = std::net::TcpStream::connect_timeout(
+            &std::net::SocketAddr::from(([127, 0, 0, 1], self.port)),
+            std::time::Duration::from_millis(500),
+        ) {
+            drop(socket);
+        }
         if let Some(h) = self.handle.take() {
             let _ = h.join();
         }
@@ -410,8 +427,6 @@ impl Drop for StubServer {
 #[test]
 fn stub_http_provider_completes_tool_loop() -> Result<()> {
     let server = StubServer::start();
-    std::thread::sleep(std::time::Duration::from_millis(200));
-
     let mut config = common::test_config();
     config.openai_base_url = format!("{}/v1", server.base_url());
     config.openai_api_key = "stub-key".to_string();
@@ -448,34 +463,37 @@ fn stub_http_provider_completes_tool_loop() -> Result<()> {
         .filter(|e| e.kind == JournalEventKind::LlmCompleted)
         .count();
     assert!(
-        llm_rounds >= 2,
-        "at least 2 LLM rounds expected, got {}",
+        llm_rounds == 3,
+        "exactly 3 LLM rounds expected, got {}",
         llm_rounds
     );
 
-    // Codex #3: raw provider tool_call.id ("call_stub_1") must NOT appear in
-    // any Journal event payload; idempotency_key must be run-scoped.
     let journal_json = serde_json::to_string(&events)?;
     assert!(
         !journal_json.contains("call_stub_1"),
         "raw provider ID leaked"
     );
-    let proposed = events.iter().find(|e| {
-        e.kind == JournalEventKind::InvocationProposed
-            && e.payload.get("source").and_then(|s| s.as_str()) == Some("model_tool_call")
-    });
-    if let Some(p) = proposed {
-        let key = p
-            .payload
-            .get("idempotency_key")
-            .and_then(|k| k.as_str())
-            .unwrap_or("");
-        assert!(
-            key.starts_with("tool:") && key.len() > 10,
-            "key not run-scoped: {}",
-            key
-        );
-    }
+    let keys: Vec<_> = events
+        .iter()
+        .filter(|e| {
+            e.kind == JournalEventKind::InvocationProposed
+                && e.payload.get("source").and_then(|s| s.as_str()) == Some("model_tool_call")
+        })
+        .map(|e| {
+            e.payload
+                .get("idempotency_key")
+                .and_then(|k| k.as_str())
+                .unwrap()
+        })
+        .collect();
+    let provider_id = agent_core_kernel::llm::tool_call_id_hash("call_stub_1");
+    assert_eq!(
+        keys,
+        vec![
+            format!("tool:{}:0:0:{provider_id}", outcome.run_id.0),
+            format!("tool:{}:1:1:{provider_id}", outcome.run_id.0),
+        ]
+    );
 
     Ok(())
 }

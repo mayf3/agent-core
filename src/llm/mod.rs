@@ -295,16 +295,7 @@ fn success_output(model: &str, context_blocks: usize, value: Value) -> LlmOutput
             "context_blocks": context_blocks,
             "status": "ok",
             "usage": sanitize_usage(value.get("usage")),
-            "tool_call": match &tool_call {
-                ToolCallResult::Valid(tc) => json!({
-                    "operation": tc.operation,
-                    "id": tc.id,
-                }),
-                ToolCallResult::Malformed(reason) => json!({
-                    "malformed": reason,
-                }),
-                ToolCallResult::Absent => Value::Null,
-            },
+            "tool_call": audit_tool_call(&tool_call),
         }),
         tool_call,
     }
@@ -325,14 +316,18 @@ fn parse_tool_call(value: &Value) -> ToolCallResult {
         Some(f) => f,
         None => return ToolCallResult::Malformed("missing function block".to_string()),
     };
-    let raw_id = tool_call_json
-        .get("id")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown");
+    // A missing or empty tool_call.id is malformed — we never synthesize a
+    // sentinel like "unknown" (that would make all missing-id calls collide in
+    // the idempotency key and internal audit id). The raw id is hashed exactly
+    // once here at the DTO boundary; downstream code treats it as opaque.
+    let raw_id = match tool_call_json.get("id").and_then(Value::as_str) {
+        Some(s) if !s.trim().is_empty() => s,
+        _ => return ToolCallResult::Malformed("missing tool_call id".to_string()),
+    };
     let id = tool_call_id_hash(raw_id);
     let operation = match function.get("name").and_then(Value::as_str) {
-        Some(n) => n.to_string(),
-        None => {
+        Some(n) if !n.trim().is_empty() => n.to_string(),
+        _ => {
             return ToolCallResult::Malformed("missing function name".to_string());
         }
     };
@@ -359,6 +354,24 @@ fn parse_tool_call(value: &Value) -> ToolCallResult {
         operation,
         arguments: arguments_val,
     })
+}
+
+/// Provider output is untrusted. Keep only bounded catalog metadata in the
+/// Journal; the runtime writes the position-derived malformed id and the
+/// digest-bearing unknown-operation audit value when it processes the call.
+fn audit_tool_call(tool_call: &ToolCallResult) -> Value {
+    match tool_call {
+        ToolCallResult::Valid(call) => json!({
+            "operation": crate::domain::operation::lookup(&call.operation)
+                .map(|spec| spec.name)
+                .unwrap_or("unknown_operation"),
+            "id": call.id,
+        }),
+        ToolCallResult::Malformed(_) => json!({
+            "malformed": "malformed_tool_call",
+        }),
+        ToolCallResult::Absent => Value::Null,
+    }
 }
 
 fn type_name(v: &Value) -> &'static str {
@@ -481,3 +494,6 @@ fn is_zai_endpoint(base_url: &str) -> bool {
     let lower = base_url.to_ascii_lowercase();
     lower.contains("z.ai") || lower.contains("bigmodel.cn")
 }
+
+#[cfg(test)]
+mod tests;
