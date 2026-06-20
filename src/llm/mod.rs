@@ -1,6 +1,7 @@
 use crate::domain::ContextBlock;
 use anyhow::Result;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::time::Duration;
 
 pub trait LlmClient {
@@ -17,11 +18,39 @@ pub struct LlmOutput {
     pub model: String,
     pub content: String,
     pub journal_payload: serde_json::Value,
-    /// Optional structured tool call emitted by the model (Phase 2 tool-call
-    /// execution MVP). When present, the Runtime validates + executes it
-    /// inline for `ReadOnly` operations (see `src/gateway/tool_call.rs`).
-    /// `None` preserves the text-only flow (byte-identical to pre-MVP).
-    pub tool_call: Option<ToolCall>,
+    /// Parsed tool call from the provider response. Three-way state:
+    /// - `Absent` — no tool call in the response (text-only flow).
+    /// - `Valid(tc)` — a parseable tool call to execute.
+    /// - `Malformed(reason)` — the provider sent tool_calls but arguments
+    ///   were unparseable; never executes, produces a stable ToolResult.
+    pub tool_call: ToolCallResult,
+}
+
+/// The result of parsing a provider tool-call response.
+#[derive(Debug, Clone)]
+pub enum ToolCallResult {
+    /// No tool call in the provider response (text-only).
+    Absent,
+    /// A valid, parseable tool call.
+    Valid(ToolCall),
+    /// Provider sent tool_calls but arguments were malformed. The model
+    /// receives a ToolResult with the sanitized error and can recover.
+    Malformed(String),
+}
+
+impl ToolCallResult {
+    pub fn is_absent(&self) -> bool {
+        matches!(self, ToolCallResult::Absent)
+    }
+}
+
+/// Deterministic bounded hash of a provider tool-call ID. The provider value
+/// is untrusted/unbounded; we never write it raw into Journal, idempotency keys,
+/// errors, or model-visible text.
+pub fn tool_call_id_hash(provider_id: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(provider_id.as_bytes());
+    hex::encode(hasher.finalize())
 }
 
 /// A structured tool call the model wishes to execute (Phase 2 tool-call MVP).
@@ -29,8 +58,9 @@ pub struct LlmOutput {
 /// rejected before any adapter runs.
 #[derive(Debug, Clone)]
 pub struct ToolCall {
-    /// Stable id the model assigns (e.g. OpenAI tool_call id); used as the
-    /// idempotency-key seed.
+    /// Deterministic bounded digest of the provider-assigned id. Never the raw
+    /// provider value — the raw value is untrusted and never written to Journal,
+    /// idempotency keys, errors, or model-visible text.
     pub id: String,
     /// Catalogued operation name (e.g. `time.now`).
     pub operation: String,
@@ -52,7 +82,7 @@ impl LlmClient for LocalEchoLlm {
             provider: "local".to_string(),
             model: "local-echo".to_string(),
             content: format!("收到：{}", input.user_text),
-            tool_call: None,
+            tool_call: ToolCallResult::Absent,
             journal_payload: json!({
                 "provider": "local",
                 "model": "local-echo",
@@ -148,6 +178,8 @@ impl OpenAiCompatibleLlm {
                 },
             ],
             "temperature": 0.2,
+            "tools": read_only_tool_schemas(),
+            "tool_choice": "auto",
         });
         let agent = ureq::Agent::config_builder()
             .timeout_global(Some(self.timeout))
@@ -214,7 +246,7 @@ fn config_required_output(model: &str, context_blocks: usize) -> LlmOutput {
             "status": "needs_config",
             "error_category": "model_config_required",
         }),
-        tool_call: None,
+        tool_call: ToolCallResult::Absent,
     }
 }
 
@@ -230,7 +262,7 @@ fn request_failed_output(model: &str, context_blocks: usize, category: &str) -> 
             "status": "error",
             "error_category": category,
         }),
-        tool_call: None,
+        tool_call: ToolCallResult::Absent,
     }
 }
 
@@ -240,8 +272,19 @@ fn success_output(model: &str, context_blocks: usize, value: Value) -> LlmOutput
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|text| !text.is_empty())
-        .unwrap_or("模型没有返回文本内容。")
+        .unwrap_or("")
         .to_string();
+    // Parse tool_calls[0] from the OpenAI-compatible response.
+    let tool_call = parse_tool_call(&value);
+    // When the provider returns a malformed tool call with no text content,
+    // ensure a non-empty user-safe fallback so the reply is never silently empty.
+    let content = match &tool_call {
+        ToolCallResult::Malformed(_) if content.is_empty() => {
+            "The tool call could not be parsed. Please try again.".to_string()
+        }
+        ToolCallResult::Valid(_) if content.is_empty() => "正在调用工具查询信息…".to_string(),
+        _ => content,
+    };
     LlmOutput {
         provider: "openai-compatible".to_string(),
         model: model.to_string(),
@@ -252,9 +295,145 @@ fn success_output(model: &str, context_blocks: usize, value: Value) -> LlmOutput
             "context_blocks": context_blocks,
             "status": "ok",
             "usage": sanitize_usage(value.get("usage")),
+            "tool_call": audit_tool_call(&tool_call),
         }),
-        tool_call: None,
+        tool_call,
     }
+}
+
+/// Parse `choices[0].message.tool_calls[0]` from an OpenAI-compatible response.
+/// Returns `ToolCallResult` — three-way state distinguishing absent, valid,
+/// and malformed tool calls. Never returns raw provider IDs or arguments.
+///
+/// Malformed `function.arguments` (invalid JSON, non-object JSON) is rejected
+/// as `Malformed(reason)` — the model receives a ToolResult and can recover.
+fn parse_tool_call(value: &Value) -> ToolCallResult {
+    let tool_call_json = match value.pointer("/choices/0/message/tool_calls/0") {
+        Some(v) if !v.is_null() => v,
+        _ => return ToolCallResult::Absent,
+    };
+    let function = match tool_call_json.get("function") {
+        Some(f) => f,
+        None => return ToolCallResult::Malformed("missing function block".to_string()),
+    };
+    // A missing or empty tool_call.id is malformed — we never synthesize a
+    // sentinel like "unknown" (that would make all missing-id calls collide in
+    // the idempotency key and internal audit id). The raw id is hashed exactly
+    // once here at the DTO boundary; downstream code treats it as opaque.
+    let raw_id = match tool_call_json.get("id").and_then(Value::as_str) {
+        Some(s) if !s.trim().is_empty() => s,
+        _ => return ToolCallResult::Malformed("missing tool_call id".to_string()),
+    };
+    let id = tool_call_id_hash(raw_id);
+    let operation = match function.get("name").and_then(Value::as_str) {
+        Some(n) if !n.trim().is_empty() => n.to_string(),
+        _ => {
+            return ToolCallResult::Malformed("missing function name".to_string());
+        }
+    };
+    let arguments_str = function.get("arguments").and_then(Value::as_str);
+    let arguments_val = match arguments_str {
+        Some(s) => match serde_json::from_str::<Value>(s) {
+            Ok(v) if v.is_object() => v,
+            Ok(v) => {
+                return ToolCallResult::Malformed(format!(
+                    "arguments must be a JSON object, got {}",
+                    type_name(&v)
+                ));
+            }
+            Err(e) => {
+                return ToolCallResult::Malformed(format!("arguments JSON parse error: {}", e));
+            }
+        },
+        None => {
+            return ToolCallResult::Malformed("missing arguments".to_string());
+        }
+    };
+    ToolCallResult::Valid(ToolCall {
+        id,
+        operation,
+        arguments: arguments_val,
+    })
+}
+
+/// Provider output is untrusted. Keep only bounded catalog metadata in the
+/// Journal; the runtime writes the position-derived malformed id and the
+/// digest-bearing unknown-operation audit value when it processes the call.
+fn audit_tool_call(tool_call: &ToolCallResult) -> Value {
+    match tool_call {
+        ToolCallResult::Valid(call) => json!({
+            "operation": crate::domain::operation::lookup(&call.operation)
+                .map(|spec| spec.name)
+                .unwrap_or("unknown_operation"),
+            "id": call.id,
+        }),
+        ToolCallResult::Malformed(_) => json!({
+            "malformed": "malformed_tool_call",
+        }),
+        ToolCallResult::Absent => Value::Null,
+    }
+}
+
+fn type_name(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+/// Build the OpenAI-compatible `tools` array for the request — only ReadOnly
+/// operations are exposed to the model, with strict parameter schemas. Every
+/// schema has `additionalProperties: false` so the model cannot inject extra
+/// fields that bypass validation.
+fn read_only_tool_schemas() -> Value {
+    json!([
+        {
+            "type": "function",
+            "function": {
+                "name": "time.now",
+                "description": "Return the current kernel wall-clock time (ISO-8601 + epoch ms).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                    "additionalProperties": false
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "session.recall_recent",
+                "description": "Recall recent messages from the current session (read-only, current session only).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "limit": { "type": "integer", "minimum": 1, "maximum": 20, "description": "Max messages to recall (default 5)." },
+                        "query": { "type": "string", "description": "Optional case-insensitive substring filter." }
+                    },
+                    "required": [],
+                    "additionalProperties": false
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "system.status",
+                "description": "Return system health and projection summary (aggregate counts only, no secrets).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                    "additionalProperties": false
+                }
+            }
+        }
+    ])
 }
 
 fn mark_fallback(mut output: LlmOutput, primary_model: &str, primary_error: &str) -> LlmOutput {
@@ -315,3 +494,6 @@ fn is_zai_endpoint(base_url: &str) -> bool {
     let lower = base_url.to_ascii_lowercase();
     lower.contains("z.ai") || lower.contains("bigmodel.cn")
 }
+
+#[cfg(test)]
+mod tests;

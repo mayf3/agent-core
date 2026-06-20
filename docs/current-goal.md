@@ -94,10 +94,10 @@ If a harness prototype is incubated here temporarily, it must:
 
 ## Current Snapshot
 
-Functional baseline reviewed:
+Functional base for the current candidate:
 
 ```text
-0b1338d Merge pull request #121 from mayf3/fix/tool-call-single-execution
+ec66fc7 main (base of PR #155)
 ```
 
 Doc-only refreshes may follow this baseline without changing the functional
@@ -119,7 +119,7 @@ state described below.
   boolean into details instead of the ExpectationResult object; rewritten as if/else +
   3 regression tests (PR #132).
 
-Open PRs at review time: none.
+Open PR at review time: #155 (`feat/tool-loop-clean`), not merged.
 
 High-signal state:
 
@@ -139,18 +139,20 @@ High-signal state:
 
 ## Current State
 
-On `main` after PR #146. No open PRs at the time of this update.
+On `main` at `ec66fc7`. Open PR #155 (`feat/tool-loop-clean`) — **not merged**, still a candidate pending acceptance. PR #155 closes the tool-recall loop state machine:
 
-Phase 3 (Connector Extraction Readiness) is complete: connector-local execute
-idempotency persists across restart (PR #139), and the extraction checklist +
-connector README landed (PR #140). The **External Self-Evolution Rehearsal
-harness** now has a **real evaluation-only loop**: a hardened, no-shell CLI
-that pins candidate/base commits, composes `tools/replay-eval` (+ optional
-`tools/audit-report` against a copied snapshot), writes an evidence package,
-and derives a `pass`/`blocked` decision from the red-lines (PRs #142–#146).
-Merge is always manual.
+- **Closed 5-path state machine**: every model tool call follows exactly one terminal path — (1) provider-malformed → `ToolCallIssued` + `ToolCallRejected` with a safe internal id; (2) validation-rejected → `ToolCallIssued` + `ToolCallRejected`; (3) gateway-denied → `InvocationProposed` + `ToolCallRejected` (no `InvocationApproved`, no Receipt); (4) capability-succeeded → `InvocationProposed` + `InvocationApproved` + `ReceiptReceived Succeeded`; (5) capability-failed → `InvocationProposed` + `InvocationApproved` + exactly one `ReceiptReceived Failed` + sanitized ToolResult. An approved invocation always produces exactly one terminal Receipt; the Run never lingers on `Running`.
+- **Tool rejection path**: rejected tool calls write `ToolCallIssued` + `ToolCallRejected` journal facts (NOT `ReceiptReceived { status: "Failed" }`). No `InvocationProposed`, `InvocationApproved`, or `ReceiptReceived` are written for validation rejections. Capability is never executed.
+- **Typed rejection categories**: `ToolRejection` enum (`unknown_operation`, `operation_not_allowed`, `malformed_arguments`, `invalid_arguments`, `policy_denied`, `malformed_tool_call`, `internal_tool_error`) drives the Journal `error_category` and the safe ToolResult text directly — no fragile `contains()` string matching. No raw error internals, SQL, paths, or secrets are surfaced.
+- **Provider ID hashing**: `tool_call_id_hash` is applied once at the Provider DTO boundary (`parse_tool_call`). A missing/empty provider id is malformed (no `"unknown"` sentinel). Idempotency keys are scoped by trusted call position — `tool:{run_id}:{turn_index}:{tool_index}:{provider_id_digest}` — so provider id reuse across turns/calls cannot collide.
+- **Bounded operation field**: catalogued operations record their canonical name in Journal; unknown/overlong/unicode/control-char/token-like operations collapse to `unknown_operation_<8hex>` — never the raw string.
+- **Blank-reply guard**: a first- or second-round empty model reply is replaced with a fixed minimal generic message before the Outbox, so no blank reply is ever enqueued.
+- **SQLite error propagation**: `session.recall_recent` capability failures (e.g. a recall-query error) produce a deterministic `ReceiptReceived { status: "Failed" }` with a fixed sanitized error category — never an empty success, never an unhandled `Err`, and never a Run left `Running`. The fault is injected via a test-only flag at the narrowest capability boundary (`recent_user_messages_for_capability`), so the Journal stays writable and the real Failed Receipt is written through the production Runtime chain.
+- **New Journal kinds**: `ToolCallIssued` / `ToolCallRejected` survive a real SQLite close+reopen with an intact hash chain (dedicated persistence test).
+- **Deterministic provider stub**: the stub HTTP server uses a bounded blocking-accept + shutdown-connect lifecycle (no sleep-based sync, no unbounded `join`); the tool-loop test is stable across repeated runs.
+- **Real provider test**: `stub_http_provider_completes_tool_loop` covers the full OpenAI-compatible protocol and repeats one provider ID across two tool rounds, proving distinct run/turn/index-scoped idempotency keys. Parser tests cover malformed arguments and missing or wrongly typed fields; Runtime tests separately prove the malformed issued/rejected path.
 
-Phase 0/1/2 are dogfood-ready: durable Feishu/CLI chat kernel, Journal/hash-chain/projection recovery, conservative duplicate-reply handling, health + recovery surfaces, operation catalog + policy pipeline + read-only adapter proof, durable approval state + approval endpoints, `ToolCatalog` visible to the model, and one model-emitted read-only tool (`time.now`).
+Phase 0/1 are dogfood-ready on `main`. Phase 2 is a **candidate pending acceptance** in open PR #155 — not merged. The PR exposes three read-only tools (`time.now`, `session.recall_recent`, `system.status`) with strict schemas, real provider support, provider ID hashing, sanitized error boundaries, a closed tool-call state machine, and correct `ToolCallIssued`/`ToolCallRejected` journal semantics.
 
 External harness state (productization sprint complete, PRs #135/#136/#137):
 
@@ -180,7 +182,8 @@ node --test --experimental-strip-types tools/replay-eval/test/*.test.ts
 node --test --experimental-strip-types tools/audit-report/test/*.test.ts
 ```
 
-Result: replay-eval 50/50, audit-report 7/7, structure + secret-scan + diff --check clean.
+Result: replay-eval 65/65, evolution-harness 49/49, audit-report 7/7,
+connector 45/45, structure + secret-scan + diff --check clean.
 
 ## Completed Recently
 
@@ -193,6 +196,8 @@ Result: replay-eval 50/50, audit-report 7/7, structure + secret-scan + diff --ch
 - PR #130: replay-eval synthetic fixture pack.
 - PR #131: audit-report `projection_drift` + `undelivered_ingress` Rust-semantics alignment.
 - PR #132/#134: replay-eval hard-fail details structured-object fix + regression coverage.
+- PR #155 (open, not merged): bounded read-only tool-recall loop with real provider support, strict schemas,
+  argument validation, sanitized error boundaries, provider ID hashing, and exact bounded-loop tests.
 
 ## Issues To Address Next
 
@@ -213,7 +218,7 @@ Result: replay-eval 50/50, audit-report 7/7, structure + secret-scan + diff --ch
    - Extraction target should be a separate repo/package; do not move runtime,
      gateway, journal, or policy into TypeScript.
 
-3. **First safe practical tool / broader tool loop.**
+3. **First safe practical tool / broader tool loop.** Candidate in PR #155.
    - `time.now` proves the minimum read-only path.
    - More tools require strict schemas, session scoping, audit facts, and
      approval for write/external effects.

@@ -9,7 +9,7 @@ use uuid::Uuid;
 mod policy;
 pub use policy::{evaluate_policy, PolicyVerdict};
 mod tool_call;
-pub use tool_call::validate_tool_call;
+pub use tool_call::{validate_tool_call, ToolRejection};
 
 #[derive(Clone)]
 pub struct Gateway {

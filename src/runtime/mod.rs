@@ -1,4 +1,3 @@
-use crate::adapters::InvocationAdapter;
 use crate::config::KernelConfig;
 use crate::context::ContextAssembler;
 use crate::domain::*;
@@ -10,6 +9,12 @@ use chrono::Utc;
 use serde_json::json;
 
 pub mod outbox_dispatcher;
+mod tool_execution;
+mod tool_loop;
+mod tool_rejection;
+
+pub use crate::gateway::ToolRejection;
+pub use tool_rejection::validate_model_arguments;
 
 pub struct Runtime<L> {
     config: KernelConfig,
@@ -77,174 +82,6 @@ where
         journal.update_run_status(&run.id, "WaitingDispatch")?;
         Ok(())
     }
-    /// Phase 2 tool-call MVP: if the model emitted a `ReadOnly` tool call,
-    /// validate it, execute inline, and journal the receipt — WITHOUT queueing
-    /// into `outbox_dispatches`. Audit facts: InvocationProposed +
-    /// InvocationApproved + ReceiptReceived. Returns the receipt output text,
-    /// or None if no tool call was emitted / rejected.
-    fn handle_inline_tool_call(
-        &self,
-        journal: &JournalStore,
-        gateway: &Gateway,
-        run: &Run,
-        session: &Session,
-        tool_call: &crate::llm::ToolCall,
-    ) -> Result<Option<String>> {
-        let mut intent = match crate::gateway::validate_tool_call(tool_call, &run.id) {
-            Ok(intent) => intent,
-            Err(e) => {
-                // Rejection is surfaced as a ToolResult-style note, not a crash.
-                return Ok(Some(format!("tool call rejected: {}", e)));
-            }
-        };
-        if let Some(arguments) = intent.arguments.as_object_mut() {
-            // The model may ask for a tool, but it must not choose the target
-            // session. The Runtime pins tool-call intents to the current run's
-            // session before the policy pipeline runs.
-            arguments.insert("session_id".to_string(), json!(session.id.0));
-        }
-        let correlation_id = intent.invocation_id.0.clone();
-        journal.append_event(
-            JournalEventKind::InvocationProposed,
-            Some(&run.id),
-            Some(&session.id),
-            Some(&correlation_id),
-            json!({
-                "operation": intent.operation,
-                "idempotency_key": intent.idempotency_key,
-                "source": "model_tool_call",
-            }),
-        )?;
-        let approved = gateway.approve_invocation(intent, &run, &session)?;
-        journal.append_event(
-            JournalEventKind::InvocationApproved,
-            Some(&run.id),
-            Some(&session.id),
-            Some(&correlation_id),
-            json!({
-                "decision_id": approved.decision_id,
-                "operation": approved.intent().operation,
-            }),
-        )?;
-        // Route to the correct inline executor by operation name.
-        let (receipt_status, receipt_output, result_text) =
-            match approved.intent().operation.as_str() {
-                crate::domain::operation::TIME_NOW => {
-                    let receipt = crate::adapters::TimeAdapter.execute(&approved)?;
-                    let text = receipt
-                        .output
-                        .get("iso")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("ok")
-                        .to_string();
-                    (receipt.status, receipt.output, text)
-                }
-                crate::domain::operation::SESSION_RECALL_RECENT => {
-                    let (status, output, text) =
-                        Self::execute_session_recall(journal, &session.id, &approved);
-                    (status, output, text)
-                }
-                crate::domain::operation::SYSTEM_STATUS => {
-                    let output = crate::capabilities::execute(journal);
-                    (
-                        crate::domain::ReceiptStatus::Succeeded,
-                        output.clone(),
-                        output.get("summary").and_then(|v: &serde_json::Value| v.as_str()).unwrap_or("ok").to_string(),
-                    )
-                }
-                other => {
-                    // A read-only operation not yet wired for inline execution.
-                    (
-                        crate::domain::ReceiptStatus::Failed,
-                        json!({ "error": format!("inline execution not implemented for {other}") }),
-                        format!("tool not implemented: {other}"),
-                    )
-                }
-            };
-        journal.append_event(
-            JournalEventKind::ReceiptReceived,
-            Some(&run.id),
-            Some(&session.id),
-            Some(&correlation_id),
-            json!({
-                "invocation_id": approved.intent().invocation_id,
-                "status": format!("{:?}", receipt_status),
-                "output": receipt_output,
-            }),
-        )?;
-        Ok(Some(result_text))
-    }
-
-    /// Execute `session.recall_recent`: read recent user messages from the
-    /// **current session only** and return a normalized, sanitized result.
-    /// Only returns event_id + role + text (truncated to 500 chars per msg).
-    /// No raw payload, no cross-session, no filesystem, no network.
-    fn execute_session_recall(
-        journal: &JournalStore,
-        session_id: &SessionId,
-        approved: &ApprovedInvocation,
-    ) -> (crate::domain::ReceiptStatus, serde_json::Value, String) {
-        const MAX_RECALL_LIMIT: usize = 20;
-        const MAX_RECALL_CHARS: usize = 500;
-
-        let args = &approved.intent().arguments;
-        let limit = args
-            .get("limit")
-            .and_then(|v| v.as_u64())
-            .map(|n| n.clamp(1, MAX_RECALL_LIMIT as u64) as usize)
-            .unwrap_or(5);
-        let query = args
-            .get("query")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_lowercase());
-
-        let messages = match journal.recent_user_messages(session_id, limit) {
-            Ok(msgs) => msgs,
-            Err(_) => {
-                return (
-                    crate::domain::ReceiptStatus::Failed,
-                    json!({ "error": "failed to read session history" }),
-                    "session recall failed".to_string(),
-                );
-            }
-        };
-
-        let mut results: Vec<serde_json::Value> = Vec::new();
-        for (event_id, text) in &messages {
-            // Optional case-insensitive substring filter.
-            if let Some(ref q) = query {
-                if !text.to_lowercase().contains(q) {
-                    continue;
-                }
-            }
-            // Truncate per-message text to the safety limit.
-            let truncated: String = text.chars().take(MAX_RECALL_CHARS).collect();
-            results.push(json!({
-                "event_id": event_id,
-                "role": "user",
-                "text": truncated,
-            }));
-        }
-
-        let output = json!({
-            "session_id": session_id.0,
-            "count": results.len(),
-            "messages": results,
-        });
-
-        // A compact text summary for the run outcome / ToolResult context.
-        let text = if results.is_empty() {
-            "no matching messages found".to_string()
-        } else {
-            results
-                .iter()
-                .filter_map(|m| m.get("text").and_then(|t| t.as_str()))
-                .collect::<Vec<_>>()
-                .join(" | ")
-        };
-
-        (crate::domain::ReceiptStatus::Succeeded, output, text)
-    }
 
     pub fn deliver(
         &self,
@@ -285,7 +122,7 @@ where
             chat_id,
         } = event.payload.clone();
 
-        let blocks =
+        let mut blocks =
             ContextAssembler::from_config(&self.config).build(journal, &session, &event, &text)?;
         journal.append_event(
             JournalEventKind::ContextBuilt,
@@ -297,27 +134,32 @@ where
                 "kinds": blocks.iter().map(|block| format!("{:?}", block.kind)).collect::<Vec<_>>(),
             }),
         )?;
-        let llm = self.llm.complete(LlmInput {
-            blocks,
-            user_text: text,
+        let first = self.llm.complete(LlmInput {
+            blocks: blocks.clone(),
+            user_text: text.clone(),
         })?;
         journal.append_event(
             JournalEventKind::LlmCompleted,
             Some(&run.id),
             Some(&session.id),
             None,
-            llm.journal_payload,
+            first.journal_payload.clone(),
         )?;
 
-        // Phase 2 tool-call MVP: if the model emitted a ReadOnly tool call,
-        // execute it inline (TimeAdapter) and surface the result. This does
-        // not replace the reply path below — a model may emit both a text
-        // reply and a tool call.
-        if let Some(tc) = llm.tool_call.as_ref() {
-            let _ = self.handle_inline_tool_call(journal, gateway, &run, &session, tc)?;
-        }
+        // Session Recall Loop (Task 1): when the first LLM round emits a
+        // read-only tool call, execute it, append a ToolResult block, and
+        // re-invoke the LLM. Bounded by MAX_TOOL_ROUNDS; a no-op when the model
+        // emits no tool call (backwards compatible).
+        let llm =
+            self.run_tool_recall_loop(journal, gateway, &run, &session, &mut blocks, &text, first)?;
 
-        let intent = self.reply_intent(&run, &session, &llm.content, message_id, chat_id);
+        // Never enqueue a blank reply (empty first-round content with no tool
+        // call, or empty second-round content). The fallback is a fixed,
+        // minimal, generic message — no product styling. The Journal still
+        // records the true (possibly empty) model content for audit; only the
+        // reply intent text is guarded.
+        let reply_text = ensure_nonblank_reply(&llm.content);
+        let intent = self.reply_intent(&run, &session, &reply_text, message_id, chat_id);
         let correlation_id = intent.invocation_id.0.clone();
         journal.append_event(
             JournalEventKind::InvocationProposed,
@@ -344,7 +186,7 @@ where
         Ok(RuntimeOutcome {
             run_id: run.id,
             session_id: session.id,
-            output: llm.content,
+            output: reply_text,
         })
     }
 
@@ -354,6 +196,9 @@ where
         gateway: &Gateway,
         event: ValidatedEvent,
     ) -> Result<RuntimeOutcome> {
+        // `deliver_echo` never calls the LLM, so the tool-recall loop does not
+        // apply here — there is no model output to feed a tool result back to.
+        // The loop lives only in the model-driven path (`deliver`).
         let session = journal.get_or_create_session(&event.session_target)?;
         journal.append_event(
             JournalEventKind::SessionReady,
@@ -466,5 +311,17 @@ where
                 idempotency_key: Some(format!("stdout-reply:{}", run.id.0)),
             }
         }
+    }
+}
+
+/// Return a non-blank reply string. If the model produced only whitespace
+/// (empty first-round content with no tool call, or empty second-round
+/// content), substitute a fixed, minimal, generic message so the Outbox never
+/// receives a blank string. This is the single place reply text is synthesized.
+fn ensure_nonblank_reply(content: &str) -> String {
+    if content.trim().is_empty() {
+        "No reply was generated for this turn.".to_string()
+    } else {
+        content.to_string()
     }
 }
