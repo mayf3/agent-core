@@ -1,9 +1,73 @@
-# Decision: Tool-Call Execution Loop — smallest safe design
+# Decision: Tool-Call Execution Loop — bounded read-only recall
 
 ## Status
 
-Design document. No `src/` change. **Requires maintainer sign-off before
-implementation begins** — see §4.6.
+**Open candidate (PR #155, branch `feat/tool-loop-clean`) — not merged,
+pending acceptance.** A bounded read-only tool-recall loop that is NOT a
+general workflow engine. Key properties:
+
+- At most 2 read-only tool calls execute per Run (`MAX_TOOL_ROUNDS = 2`).
+- The model may propose `time.now`, `session.recall_recent`, or `system.status`.
+- Only `ReadOnly` operations execute via this path; `Write`/unknown are rejected.
+- **Tool rejections are journaled as `ToolCallRejected`** (a dedicated fact) —
+  NOT as `ReceiptReceived { status: "Failed" }`, and NOT as `LlmCompleted`.
+  This preserves the audit distinction between "LLM finished generating",
+  "tool call attempted + rejected before execution", and "tool call executed
+  and returned a receipt". No `InvocationProposed`/`InvocationApproved`/
+  `ReceiptReceived` is written for a rejected invocation; the capability is
+  never executed.
+- **Closed 5-path state machine**: provider-malformed, validation-rejected,
+  gateway-denied, capability-succeeded, capability-failed. An approved
+  invocation always produces exactly one terminal Receipt (`Succeeded` on
+  success, `Failed` on capability error); a capability failure is captured as
+  a Failed Receipt + sanitized ToolResult (not propagated via `?`), so the Run
+  never lingers on `Running`.
+- **Typed rejection categories**: a `ToolRejection` enum
+  (`unknown_operation`, `operation_not_allowed`, `malformed_arguments`,
+  `invalid_arguments`, `policy_denied`, `malformed_tool_call`,
+  `internal_tool_error`) drives the Journal `error_category` and the safe
+  ToolResult text directly — no `contains()` string matching.
+- Tool-call idempotency keys are **scoped by trusted call position**:
+  `tool:{run_id}:{turn_index}:{tool_index}:{provider_id_digest}` to prevent
+  collision when a provider reuses the same `tool_call.id` across turns or
+  calls. A missing/empty provider id is rejected as malformed (no sentinel).
+- The OpenAI-compatible provider sends ReadOnly tool schemas in the request and
+  parses `choices[0].message.tool_calls[0]` from the response. Malformed
+  arguments are rejected before any adapter runs.
+- Proven with a local Stub HTTP Server integration test (not just FakeLLM).
+  The stub uses a bounded blocking-accept + shutdown-connect lifecycle (no
+  sleep-based sync, no unbounded `join`); the test is stable across repeated
+  runs.
+- All schemas are strict (`additionalProperties: false`).
+- Provider tool-call IDs are hashed (SHA-256) exactly once at the Provider DTO
+  boundary (`parse_tool_call`) — the raw provider value is never written to
+  Journal, idempotency keys, errors, or model-visible text.
+- Malformed arguments (invalid JSON, non-object, missing fields) produce a
+  stable `ToolCallResult::Malformed` that never executes, writes
+  `ToolCallIssued` + `ToolCallRejected` with a safe internal id (derived from
+  trusted call position), and returns a non-empty user-safe fallback.
+- Untrusted operation names are bounded/sanitized: catalogued operations record
+  their canonical name; anything else collapses to `unknown_operation_<8hex>`.
+- Infrastructure failures (Journal/SQLite/Gateway integrity) that cannot be fed
+  back to the model terminate the Run with the accurate `run_id` (a `RunFailed`
+  fact with the run_id + `fail_run`); the Journal is never left writable-only.
+  Expected business rejections (unknown operation, forbidden Write, invalid
+  arguments, capability errors) become a sanitized ToolResult so the model can
+  recover.
+- The Journal records only bounded/sanitized metadata (operation + id hash).
+  Raw arguments, raw provider IDs, and SDK errors are never journaled.
+- The new kinds `ToolCallIssued` / `ToolCallRejected` survive a real SQLite
+  close+reopen with an intact hash chain (dedicated persistence test).
+
+### LlmCompleted count in a tool-loop run
+
+The Journal records one `LlmCompleted` fact per completed model call. A text-only
+run has one. One tool call followed by text has two. If the model uses the full
+`MAX_TOOL_ROUNDS = 2` budget, the run has three: the initial tool call, a second
+tool call after the first ToolResult, and the final response after the second
+ToolResult. No additional model call occurs after the loop returns.
+
+See the PR body for the full invariant list.
 
 ## 1. Problem
 
@@ -242,11 +306,15 @@ that (the run pauses, approval resolves, dispatches continue).
 
 ### 4.4 Rejection paths
 
-| Condition | Behaviour |
+| Condition | Behaviour (typed `ToolRejection`) |
 |---|---|
-| `tool_call.operation` not in `CATALOG` | Return error to context: "Operation X is not in the catalog." Do not execute. Log as `ToolCallRejected` fact. |
-| `tool_call.operation` is `Write` (e.g. `feishu.send_message`) | Return error: "Write operations cannot be initiated via tool call in this phase." Do not execute. |
-| `tool_call.arguments` fails schema validation | Return error: "Invalid arguments for operation X." Do not execute. |
+| `tool_call.operation` not in `CATALOG` | `UnknownOperation` → `ToolCallIssued` + `ToolCallRejected` (`unknown_operation`). Do not execute. |
+| `tool_call.operation` is `Write` (e.g. `feishu.send_message`) | `OperationNotAllowed` → `ToolCallRejected` (`operation_not_allowed`). Do not execute. |
+| `tool_call.arguments` not a JSON object / unparseable | `MalformedArguments` → `ToolCallRejected` (`malformed_arguments`). Do not execute. |
+| `tool_call.arguments` fails schema validation (range/type/extra) | `InvalidArguments` → `ToolCallRejected` (`invalid_arguments`). Do not execute. |
+| Gateway policy denies the proposed invocation (grant/catalog/scope) | `PolicyDenied` → `InvocationProposed` + `ToolCallRejected` (`policy_denied`). No `InvocationApproved`/Receipt. |
+| Provider tool call structurally malformed (missing id/function) | `MalformedToolCall` → `ToolCallIssued` + `ToolCallRejected` with a safe internal id (`malformed_tool_call`). Do not execute. |
+| Approved capability returns `Err` | `ReceiptReceived { status: "Failed" }` + sanitized ToolResult (`execution_failed`-style category). Model may recover. |
 | Model returns both `content` and `tool_call` | Execute the tool call; append result to context alongside content. If both present, content is treated as the model's verbal response, tool_call as the action. |
 | Model returns multiple tool calls | MVP: execute only the first. Log a warning that parallel calls are not yet supported. |
 

@@ -224,7 +224,7 @@ impl agent_core_kernel::llm::LlmClient for FixedLlm {
             model: "fixed".to_string(),
             content: "reply".to_string(),
             journal_payload: serde_json::json!({}),
-            tool_call: None,
+            tool_call: agent_core_kernel::llm::ToolCallResult::Absent,
         })
     }
 }
@@ -349,37 +349,50 @@ fn validate_tool_call_accepts_time_now_and_rejects_others() {
     let ok = validate_tool_call(
         &ToolCall { id: "c1".into(), operation: "time.now".into(), arguments: json!({}) },
         &RunId::new(),
+        0,
+        0,
     );
     assert!(ok.is_ok(), "time.now should be accepted");
     let unknown = validate_tool_call(
         &ToolCall { id: "c1".into(), operation: "shell.exec".into(), arguments: json!({}) },
         &RunId::new(),
+        0,
+        0,
     );
     assert!(unknown.is_err(), "unknown op rejected");
     let write_op = validate_tool_call(
         &ToolCall { id: "c1".into(), operation: "feishu.send_message".into(), arguments: json!({}) },
         &RunId::new(),
+        0,
+        0,
     );
     assert!(write_op.is_err(), "Write op rejected via tool-call path");
 }
 
-struct ToolCallLlm;
+struct ToolCallLlm(std::sync::Mutex<usize>);
 
 impl agent_core_kernel::llm::LlmClient for ToolCallLlm {
     fn complete(
         &self,
         _input: agent_core_kernel::llm::LlmInput,
     ) -> Result<agent_core_kernel::llm::LlmOutput> {
+        let mut calls = self.0.lock().unwrap();
+        let round = *calls;
+        *calls += 1;
         Ok(agent_core_kernel::llm::LlmOutput {
             provider: "local".to_string(),
             model: "tool-call-test".to_string(),
-            content: "tool call complete".to_string(),
-            journal_payload: json!({ "status": "ok", "tool_call": "time.now" }),
-            tool_call: Some(agent_core_kernel::llm::ToolCall {
-                id: "call_time_once".to_string(),
-                operation: "time.now".to_string(),
-                arguments: json!({}),
-            }),
+            content: if round == 0 { "calling" } else { "time retrieved" }.to_string(),
+            journal_payload: json!({ "round": round }),
+            tool_call: if round == 0 {
+                agent_core_kernel::llm::ToolCallResult::Valid(agent_core_kernel::llm::ToolCall {
+                    id: agent_core_kernel::llm::tool_call_id_hash("call_time_once"),
+                    operation: "time.now".to_string(),
+                    arguments: json!({}),
+                })
+            } else {
+                agent_core_kernel::llm::ToolCallResult::Absent
+            },
         })
     }
 }
@@ -390,7 +403,7 @@ fn time_now_tool_call_executes_once_inline() -> Result<()> {
     config.extra_allowed_operations = vec!["time.now".to_string()];
     let journal = JournalStore::in_memory()?;
     let gateway = Gateway::new(config.clone());
-    let runtime = Runtime::new(config, ToolCallLlm);
+    let runtime = Runtime::new(config, ToolCallLlm(std::sync::Mutex::new(0)));
     let envelope = gateway.cli_ingress("what time is it?".to_string())?;
     let event = gateway.validate_ingress(&journal, envelope)?;
     let outcome = runtime.deliver(&journal, &gateway, event)?;

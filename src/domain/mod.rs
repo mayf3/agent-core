@@ -385,6 +385,15 @@ pub enum JournalEventKind {
     RunStarted,
     ContextBuilt,
     LlmCompleted,
+    /// Model emitted a valid or malformed tool call, before validation. The
+    /// payload contains only bounded operation metadata and an internal id.
+    ToolCallIssued,
+    /// Model-emitted tool call was rejected during validation (unknown/write
+    /// operation, malformed arguments, etc.). Written INSTEAD of
+    /// InvocationProposed when the tool call does not pass validation.
+    /// No ReceiptReceived corresponds to a ToolCallRejected — the invocation
+    /// was never approved or executed.
+    ToolCallRejected,
     InvocationProposed,
     InvocationApproved,
     WorkerJobQueued,

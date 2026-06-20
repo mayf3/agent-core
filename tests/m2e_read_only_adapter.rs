@@ -6,7 +6,7 @@ use agent_core_kernel::adapters::InvocationAdapter;
 use agent_core_kernel::domain::*;
 use agent_core_kernel::gateway::Gateway;
 use agent_core_kernel::journal::JournalStore;
-use agent_core_kernel::llm::{LlmClient, LlmInput, LlmOutput, ToolCall};
+use agent_core_kernel::llm::{LlmClient, LlmInput, LlmOutput, ToolCall, ToolCallResult};
 use agent_core_kernel::runtime::Runtime;
 use anyhow::Result;
 use serde_json::json;
@@ -93,8 +93,8 @@ impl LlmClient for RecallLlm {
             model: "recall-test".into(),
             content: "Recalling...".into(),
             journal_payload: json!({}),
-            tool_call: Some(ToolCall {
-                id: "call_1".into(),
+            tool_call: ToolCallResult::Valid(ToolCall {
+                id: agent_core_kernel::llm::tool_call_id_hash("call_1"),
                 operation: "session.recall_recent".into(),
                 arguments: json!({ "limit": 10 }),
             }),
@@ -173,6 +173,8 @@ fn validate_accepts_session_recall() {
     assert!(validate_tool_call(
         &ToolCall { id: "c1".into(), operation: "session.recall_recent".into(), arguments: json!({ "limit": 5 }) },
         &RunId::new(),
+        0,
+        0,
     ).is_ok());
 }
 
@@ -182,8 +184,10 @@ fn validate_rejects_write_via_tool_call() {
     let err = validate_tool_call(
         &ToolCall { id: "c1".into(), operation: "feishu.send_message".into(), arguments: json!({}) },
         &RunId::new(),
+        0,
+        0,
     ).unwrap_err();
-    assert!(err.to_string().contains("write_operation_not_allowed"));
+    assert_eq!(err, agent_core_kernel::runtime::ToolRejection::OperationNotAllowed);
 }
 
 // --- system.status (Catalog operation via tool-call path) ---
@@ -200,7 +204,7 @@ fn execute_system_status_returns_aggregate_journal_counts() -> Result<()> {
     // Direct test of the execute_system_status function: a fresh in-memory
     // journal returns status=ok with zero counts.
     let journal = JournalStore::in_memory()?;
-    let output = agent_core_kernel::capabilities::execute(&journal);
+    let output = agent_core_kernel::capabilities::execute(&journal)?;
     assert_eq!(output["status"], "ok");
     assert_eq!(output["hash_chain_ok"].as_bool(), Some(true));
     assert!(output["outbox"]["pending"].is_number());
@@ -215,6 +219,8 @@ fn system_status_tool_call_is_validated_as_read_only() {
     assert!(validate_tool_call(
         &ToolCall { id: "c1".into(), operation: "system.status".into(), arguments: json!({}) },
         &RunId::new(),
+        0,
+        0,
     ).is_ok());
 }
 
@@ -225,7 +231,7 @@ fn system_status_grant_check_passes_with_baseline_profile() -> Result<()> {
     use agent_core_kernel::gateway::validate_tool_call;
     use agent_core_kernel::domain::RunId;
     let tool_call = ToolCall { id: "c2".into(), operation: "system.status".into(), arguments: json!({}) };
-    assert!(validate_tool_call(&tool_call, &RunId::new()).is_ok(),
+    assert!(validate_tool_call(&tool_call, &RunId::new(), 0, 0).is_ok(),
         "system.status should be accepted as a read-only tool call");
     Ok(())
 }
@@ -241,8 +247,8 @@ impl LlmClient for StatusLlm {
             model: "status-test".into(),
             content: "system status tool called".into(),
             journal_payload: json!({"status": "ok", "tool_call": "system.status"}),
-            tool_call: Some(ToolCall {
-                id: "call_status_1".into(),
+            tool_call: ToolCallResult::Valid(ToolCall {
+                id: agent_core_kernel::llm::tool_call_id_hash("call_status_1"),
                 operation: "system.status".into(),
                 arguments: json!({}),
             }),

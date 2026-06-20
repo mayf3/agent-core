@@ -120,6 +120,20 @@ impl JournalStore {
         Ok(())
     }
 
+    /// Test-only deterministic fault injection for the `session.recall_recent`
+    /// capability. When `fail` is true, only the capability-bound recall query
+    /// returns a deterministic `Err`, while every other Journal operation (event append,
+    /// run status update, `fail_run`, hash-chain verification) keeps working.
+    /// This lets the capability-failure test exercise the real Runtime
+    /// production chain — a real Failed Receipt is written to a still-writable
+    /// Journal — instead of dropping a table (which also breaks receipt
+    /// writing) or faking the error with `unwrap_or`. Compiled out of
+    /// production builds.
+    pub fn set_recall_failure_for_test(&self, fail: bool) {
+        self.recall_failure_for_test
+            .store(fail, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// Simulate an operator acknowledging a terminal-unknown row (see
     /// `docs/decisions/ack-clear-terminal-unknown.md`, option 1). Mirrors the
     /// external ack SQL documented in the operating guide
