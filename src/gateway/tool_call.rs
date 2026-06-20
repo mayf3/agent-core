@@ -39,8 +39,9 @@ pub fn validate_tool_call(call: &ToolCall, run_id: &RunId) -> Result<InvocationI
     // collisions when a provider reuses the same tool_call.id across
     // different runs. Format: tool:{run_id}:{hashed_provider_id}.
     // The raw provider ID is never stored directly — only its hash.
-    let hashed_provider_id = crate::llm::tool_call_id_hash(&call.id);
-    let idempotency_key = format!("tool:{}:{}", run_id.0, hashed_provider_id);
+    // call.id is ALREADY the hashed value (see parse_tool_call in llm/mod.rs).
+    // DO NOT hash it again.
+    let idempotency_key = format!("tool:{}:{}", run_id.0, call.id);
     Ok(InvocationIntent {
         invocation_id: InvocationId::new(),
         run_id: run_id.clone(),
@@ -69,11 +70,8 @@ mod tests {
         let intent = validate_tool_call(&call("time.now"), &run_id).unwrap();
         assert_eq!(intent.operation, "time.now");
         // Key must be run-scoped: tool:{run_id}:{hashed_provider_id}
-        let expected_key = format!(
-            "tool:{}:{}",
-            run_id.0,
-            crate::llm::tool_call_id_hash("call_1")
-        );
+        // call.id ("call_1") is already hashed by parse_tool_call.
+        let expected_key = format!("tool:{}:{}", run_id.0, "call_1");
         assert_eq!(
             intent.idempotency_key.as_deref(),
             Some(expected_key.as_str())
@@ -111,9 +109,12 @@ mod tests {
     #[test]
     fn raw_provider_id_not_in_idempotency_key() {
         // The raw provider ID (before hashing) must never appear in the key.
+        // In the real flow, parse_tool_call hashes the raw ID before putting
+        // it in ToolCall.id — so this test also hashes the raw ID first.
         let raw_id = "provider_id_raw_12345";
+        let hashed = crate::llm::tool_call_id_hash(raw_id);
         let c = ToolCall {
-            id: raw_id.to_string(),
+            id: hashed.clone(),
             operation: "time.now".to_string(),
             arguments: json!({}),
         };
@@ -124,6 +125,11 @@ mod tests {
             "raw provider ID must not leak into key"
         );
         assert!(key.starts_with("tool:"), "key should start with tool:");
+        // The key should contain the hashed ID (not the raw one).
+        assert!(
+            key.contains(&hashed),
+            "key should contain the hashed provider ID"
+        );
     }
 
     #[test]
