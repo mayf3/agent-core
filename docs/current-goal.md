@@ -139,18 +139,15 @@ High-signal state:
 
 ## Current State
 
-On `main` at `ec66fc7` (after PR #153). Open PR #154 (feat/session-recall-loop) — not merged. PR #154 fixes two Codex-review correctness bugs: (1) tool rejections now use `ReceiptReceived { status: "Failed" }` instead of `LlmCompleted { status: "rejected" }`; (2) tool-call idempotency keys are run-scoped (`tool:{run_id}:{hashed_provider_id}`) to prevent cross-Run collision. Includes a Stub HTTP Server integration test proving the real OpenAI-compatible provider completes a full tool-call loop.
+On `main` at `ec66fc7`. Open PR #155 (`feat/tool-loop-clean`) — not merged. PR #155 corrects the tool-recall loop semantics:
 
-Phase 3 (Connector Extraction Readiness) is complete: connector-local execute
-idempotency persists across restart (PR #139), and the extraction checklist +
-connector README landed (PR #140). The **External Self-Evolution Rehearsal
-harness** now has a **real evaluation-only loop**: a hardened, no-shell CLI
-that pins candidate/base commits, composes `tools/replay-eval` (+ optional
-`tools/audit-report` against a copied snapshot), writes an evidence package,
-and derives a `pass`/`blocked` decision from the red-lines (PRs #142–#146).
-Merge is always manual.
+- **Tool rejection path**: rejected tool calls now write `ToolCallIssued` + `ToolCallRejected` journal facts (not `ReceiptReceived { status: "Failed" }`). No `InvocationProposed`, `InvocationApproved`, or `ReceiptReceived` are written for rejected invocations. Capability is never executed.
+- **Rejection categories**: `sanitize_rejection` outputs only fixed category strings (`unknown_operation`, `operation_not_allowed`, `invalid_arguments`, `internal_tool_error`) — no raw error internals, SQL, paths, or secrets.
+- **Provider ID hashing**: `tool_call_id_hash` is applied once at the Provider DTO boundary (`parse_tool_call`). No double-hashing. Idempotency keys are run-scoped (`tool:{run_id}:{hashed_id}`) to prevent cross-Run collisions.
+- **SQLite error propagation**: `session.recall_recent` propagates `?` errors from `recent_user_messages()` as `Err` — never silently returns an empty Vec. Test proves this via table-dropping fault injection.
+- **Real provider test**: `stub_http_provider_completes_tool_loop` covers the full OpenAI-compatible protocol (assistant `tool_calls` array, provider `tool_call.id`, `function.name`, `function.arguments` as JSON string, second-round ToolResult, final text reply). Tests for malformed arguments, missing fields, text+tool_calls coexistence.
 
-Phase 0/1/2 are dogfood-ready: durable Feishu/CLI chat kernel, Journal/hash-chain/projection recovery, conservative duplicate-reply handling, health + recovery surfaces, operation catalog + policy pipeline + read-only adapter proof, durable approval state + approval endpoints, `ToolCatalog` visible to the model, and a bounded read-only tool-recall loop (open PR #154) exposing three tools (`time.now`, `session.recall_recent`, `system.status`) with strict schemas, real provider support, provider ID hashing, and sanitized error boundaries.
+Phase 0/1/2 are dogfood-ready: durable Feishu/CLI chat kernel, Journal/hash-chain/projection recovery, conservative duplicate-reply handling, health + recovery surfaces, operation catalog + policy pipeline + read-only adapter proof, durable approval state + approval endpoints, `ToolCatalog` visible to the model, and a bounded read-only tool-recall loop (open PR #155) exposing three tools (`time.now`, `session.recall_recent`, `system.status`) with strict schemas, real provider support, provider ID hashing, sanitized error boundaries, and correct `ToolCallIssued`/`ToolCallRejected` journal semantics.
 
 External harness state (productization sprint complete, PRs #135/#136/#137):
 

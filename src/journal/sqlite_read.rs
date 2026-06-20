@@ -47,6 +47,8 @@ pub(crate) fn parse_kind(value: &str) -> JournalEventKind {
         "RunStarted" => JournalEventKind::RunStarted,
         "ContextBuilt" => JournalEventKind::ContextBuilt,
         "LlmCompleted" => JournalEventKind::LlmCompleted,
+        "ToolCallIssued" => JournalEventKind::ToolCallIssued,
+        "ToolCallRejected" => JournalEventKind::ToolCallRejected,
         "InvocationProposed" => JournalEventKind::InvocationProposed,
         "InvocationApproved" => JournalEventKind::InvocationApproved,
         "WorkerJobQueued" => JournalEventKind::WorkerJobQueued,

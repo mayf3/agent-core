@@ -385,6 +385,17 @@ pub enum JournalEventKind {
     RunStarted,
     ContextBuilt,
     LlmCompleted,
+    /// Model emitted a tool call (before validation). Always written when
+    /// `LlmOutput.tool_call` is `Some(ToolCall)`, regardless of whether the
+    /// tool call is later accepted or rejected. The payload contains the
+    /// operation name and the (already-hashed) internal tool-call id.
+    ToolCallIssued,
+    /// Model-emitted tool call was rejected during validation (unknown/write
+    /// operation, malformed arguments, etc.). Written INSTEAD of
+    /// InvocationProposed when the tool call does not pass validation.
+    /// No ReceiptReceived corresponds to a ToolCallRejected — the invocation
+    /// was never approved or executed.
+    ToolCallRejected,
     InvocationProposed,
     InvocationApproved,
     WorkerJobQueued,

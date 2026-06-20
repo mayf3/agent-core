@@ -416,6 +416,7 @@ fn stub_http_provider_completes_tool_loop() -> Result<()> {
     config.openai_base_url = format!("{}/v1", server.base_url());
     config.openai_api_key = "stub-key".to_string();
     config.model = "stub".to_string();
+    config.extra_allowed_operations = vec!["time.now".to_string(), "system.status".to_string()];
 
     let journal = JournalStore::in_memory()?;
     let gateway = Gateway::new(config.clone());

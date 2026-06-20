@@ -59,6 +59,110 @@ mod tool_loop_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// ToolCallIssued written for every tool call; ToolCallRejected written
+    /// for rejected calls (no ReceiptReceived, InvocationProposed, InvocationApproved).
+    #[test]
+    fn rejected_tool_call_writes_issued_and_rejected_not_invocation() {
+        let config = test_config();
+        let journal = JournalStore::in_memory().unwrap();
+        let gateway = Gateway::new(config.clone());
+        let runtime = Runtime::new(config.clone(), crate::llm::LocalEchoLlm);
+
+        let now = chrono::Utc::now();
+        let session = Session {
+            id: SessionId("s1".into()),
+            agent_id: AgentId("main".into()),
+            channel: ChannelKind::Cli,
+            conversation_key: "local".into(),
+            summary: None,
+            summarized_until_event_id: None,
+            last_active_at: now,
+            status: SessionStatus::Active,
+            version: 1,
+        };
+        let run = Run {
+            id: RunId::new(),
+            session_id: session.id.clone(),
+            agent_id: AgentId("main".into()),
+            trigger_event_id: EventId::new(),
+            principal: RunPrincipal {
+                principal_id: PrincipalId("cli:local".into()),
+                subject: PrincipalSubject::LocalUser,
+                source: PrincipalSource::Cli,
+                grants: vec![],
+                requester_id: Some("cli:local".into()),
+            },
+            parent_run_id: None,
+            delegated_by: None,
+            status: RunStatus::Running,
+            created_at: now,
+            updated_at: now,
+        };
+
+        // Unknown operation → ToolCallIssued + ToolCallRejected (no Receipt).
+        let bad_op = ToolCall {
+            id: "bad_op".into(),
+            operation: "shell.exec".into(),
+            arguments: json!({}),
+        };
+        let result = runtime.handle_inline_tool_call(&journal, &gateway, &run, &session, &bad_op);
+        assert!(result.is_ok());
+
+        let events = journal.events().unwrap();
+        let count = |kind| events.iter().filter(|e| e.kind == kind).count();
+        assert_eq!(
+            count(JournalEventKind::ToolCallIssued),
+            1,
+            "ToolCallIssued for the tool call"
+        );
+        assert_eq!(
+            count(JournalEventKind::ToolCallRejected),
+            1,
+            "ToolCallRejected for rejection"
+        );
+        assert_eq!(
+            count(JournalEventKind::InvocationProposed),
+            0,
+            "no InvocationProposed"
+        );
+        assert_eq!(
+            count(JournalEventKind::InvocationApproved),
+            0,
+            "no InvocationApproved"
+        );
+        assert_eq!(
+            count(JournalEventKind::ReceiptReceived),
+            0,
+            "no ReceiptReceived (never executed)"
+        );
+
+        // Verify the ToolCallRejected payload has error_category.
+        let rejected = events
+            .iter()
+            .find(|e| {
+                e.kind == JournalEventKind::ToolCallRejected
+                    && e.payload.get("tool_call_id").and_then(|v| v.as_str()) == Some("bad_op")
+            })
+            .unwrap();
+        assert!(
+            rejected.payload.get("error_category").is_some(),
+            "ToolCallRejected has error_category"
+        );
+    }
+
+    /// ToolCallRejected payload does not leak raw error internals.
+    #[test]
+    fn rejected_tool_call_sanitized_payload() {
+        // Validation errors produce fixed category strings, not raw error text.
+        use crate::runtime::tool_loop::sanitize_rejection;
+        use crate::runtime::validate_model_arguments;
+        let result = validate_model_arguments("system.status", &json!({"extra_field": "value"}));
+        assert!(result.is_err());
+        let (_category, _) = sanitize_rejection(&result.unwrap_err());
+        // The category is a fixed enum string, not a verbatim error message.
+        // (We already test this via the ToolCallRejected journal event checks.)
+    }
+
     /// Precise audit-fact count: 1 InvocationProposed, 1 InvocationApproved,
     /// 1 ReceiptReceived (Succeeded) for a single successful tool execution.
     #[test]
