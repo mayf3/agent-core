@@ -11,6 +11,11 @@ pub trait LlmClient {
 pub struct LlmInput {
     pub blocks: Vec<ContextBlock>,
     pub user_text: String,
+    /// Operations granted to the run principal (from its ExecutionProfile). The
+    /// provider `tools` schema is derived from this ∩ the ReadOnly catalog, so
+    /// only authorized read-only tools are exposed to the model. The Gateway
+    /// remains the final authorization boundary; this is a prompt hint only.
+    pub granted_operations: Vec<String>,
 }
 
 pub struct LlmOutput {
@@ -178,7 +183,7 @@ impl OpenAiCompatibleLlm {
                 },
             ],
             "temperature": 0.2,
-            "tools": read_only_tool_schemas(),
+            "tools": crate::domain::operation::provider_tools_for_grants(&input.granted_operations),
             "tool_choice": "auto",
         });
         let agent = ureq::Agent::config_builder()
@@ -383,57 +388,6 @@ fn type_name(v: &Value) -> &'static str {
         Value::Array(_) => "array",
         Value::Object(_) => "object",
     }
-}
-
-/// Build the OpenAI-compatible `tools` array for the request — only ReadOnly
-/// operations are exposed to the model, with strict parameter schemas. Every
-/// schema has `additionalProperties: false` so the model cannot inject extra
-/// fields that bypass validation.
-fn read_only_tool_schemas() -> Value {
-    json!([
-        {
-            "type": "function",
-            "function": {
-                "name": "time.now",
-                "description": "Return the current kernel wall-clock time (ISO-8601 + epoch ms).",
-                "parameters": {
-                    "type": "object",
-                    "properties": {},
-                    "required": [],
-                    "additionalProperties": false
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "session.recall_recent",
-                "description": "Recall recent messages from the current session (read-only, current session only).",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "limit": { "type": "integer", "minimum": 1, "maximum": 20, "description": "Max messages to recall (default 5)." },
-                        "query": { "type": "string", "description": "Optional case-insensitive substring filter." }
-                    },
-                    "required": [],
-                    "additionalProperties": false
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "system.status",
-                "description": "Return system health and projection summary (aggregate counts only, no secrets).",
-                "parameters": {
-                    "type": "object",
-                    "properties": {},
-                    "required": [],
-                    "additionalProperties": false
-                }
-            }
-        }
-    ])
 }
 
 fn mark_fallback(mut output: LlmOutput, primary_model: &str, primary_error: &str) -> LlmOutput {
