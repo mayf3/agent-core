@@ -11,6 +11,15 @@ use std::sync::Mutex;
 
 pub struct JournalStore {
     pub(crate) conn: Mutex<Connection>,
+    /// Test-only fault flag: when true, `recent_user_messages` returns a
+    /// deterministic `Err`, while every other Journal operation (event append,
+    /// run status update, fail_run, hash-chain verification) keeps working.
+    /// This lets the capability-failure test exercise the real Runtime
+    /// production chain (a real Failed Receipt is written to a writable
+    /// Journal) instead of dropping a table or faking the error. Compiled out
+    /// of production builds (`cargo build` never enables `test-helpers`).
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub(crate) recall_failure_for_test: std::sync::atomic::AtomicBool,
 }
 
 /// The schema `PRAGMA user_version` this kernel writes and understands.
@@ -24,19 +33,30 @@ impl JournalStore {
             std::fs::create_dir_all(parent)?;
         }
         let conn = Connection::open(path)?;
-        let store = Self {
-            conn: Mutex::new(conn),
-        };
+        let store = Self::with_conn(conn);
         store.migrate()?;
         Ok(store)
     }
 
     pub fn in_memory() -> Result<Self> {
-        let store = Self {
-            conn: Mutex::new(Connection::open_in_memory()?),
-        };
+        let store = Self::with_conn(Connection::open_in_memory()?);
         store.migrate()?;
         Ok(store)
+    }
+
+    #[cfg(any(test, feature = "test-helpers"))]
+    fn with_conn(conn: Connection) -> Self {
+        Self {
+            conn: Mutex::new(conn),
+            recall_failure_for_test: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    #[cfg(not(any(test, feature = "test-helpers")))]
+    fn with_conn(conn: Connection) -> Self {
+        Self {
+            conn: Mutex::new(conn),
+        }
     }
 
     /// The applied schema version (`PRAGMA user_version`). Useful for
@@ -276,6 +296,39 @@ impl JournalStore {
         if limit == 0 {
             return Ok(vec![]);
         }
+        self.recent_user_messages_inner(session_id, limit)
+    }
+
+    /// Capability-boundary recall: identical to [`recent_user_messages`] but
+    /// honors the test-only deterministic fault flag. Used only by the
+    /// `session.recall_recent` capability (`execute_session_recall`), NOT by
+    /// the context assembler's RecentMessages block — so a fault can be
+    /// injected precisely at the capability boundary while context building
+    /// and every other Journal operation keep working.
+    #[doc(hidden)]
+    pub(crate) fn recent_user_messages_for_capability(
+        &self,
+        session_id: &SessionId,
+        limit: usize,
+    ) -> Result<Vec<(String, String)>> {
+        if limit == 0 {
+            return Ok(vec![]);
+        }
+        #[cfg(any(test, feature = "test-helpers"))]
+        if self
+            .recall_failure_for_test
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return Err(anyhow!("recall_query_failed"));
+        }
+        self.recent_user_messages_inner(session_id, limit)
+    }
+
+    fn recent_user_messages_inner(
+        &self,
+        session_id: &SessionId,
+        limit: usize,
+    ) -> Result<Vec<(String, String)>> {
         let events = self.events()?;
         let mut ingress_text_by_event = HashMap::new();
         for event in &events {

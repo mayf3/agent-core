@@ -1,12 +1,26 @@
-use crate::adapters::InvocationAdapter;
 use crate::domain::*;
 use crate::gateway::Gateway;
 use crate::journal::JournalStore;
 use crate::llm::{LlmClient, LlmInput, LlmOutput, ToolCallResult};
+use crate::runtime::tool_rejection::sanitize_operation_for_audit;
 use anyhow::Result;
 use serde_json::json;
 
 pub(crate) const MAX_TOOL_ROUNDS: usize = 2;
+
+/// Outcome of an inline tool-call attempt. The text is the model-visible
+/// ToolResult content; `Fatal` indicates the tool loop must abort (an
+/// infrastructure failure that cannot be fed back to the model).
+pub(crate) enum ToolCallOutcome {
+    /// A ToolResult was produced (success, business rejection, or execution
+    /// failure) and the loop may continue with another LLM round. The text
+    /// distinguishes the three outcomes the model can act on: `rejected`,
+    /// `execution_failed`, and `succeeded` (the tool's own output).
+    ToolResult { text: String },
+    /// An infrastructure failure that cannot be recovered: the Run must be
+    /// terminated with the accurate run_id.
+    Fatal { category: &'static str },
+}
 
 impl<L: LlmClient> super::Runtime<L> {
     pub(crate) fn run_tool_recall_loop(
@@ -19,68 +33,66 @@ impl<L: LlmClient> super::Runtime<L> {
         user_text: &str,
         mut llm: LlmOutput,
     ) -> Result<LlmOutput> {
-        for _round in 0..MAX_TOOL_ROUNDS {
+        // Monotonic tool counter across the whole loop: distinct tool calls
+        // (malformed or valid) get distinct indices, so idempotency keys and
+        // internal ids never collide even if the provider reuses a tool_call.id.
+        let mut tool_index: usize = 0;
+        for turn_index in 0..MAX_TOOL_ROUNDS {
             match llm.tool_call.clone() {
                 ToolCallResult::Absent => return Ok(llm),
-                ToolCallResult::Malformed(reason) => {
-                    blocks.push(ContextBlock {
-                        kind: ContextBlockKind::ToolResult,
-                        content: format!("tool call malformed: {reason}"),
-                        compressibility: Compressibility::Summarizable,
-                        source_ref: None,
-                    });
-                    let next = self.llm.complete(LlmInput {
-                        blocks: blocks.clone(),
-                        user_text: user_text.to_string(),
-                    })?;
-                    journal.append_event(
-                        JournalEventKind::LlmCompleted,
-                        Some(&run.id),
-                        Some(&session.id),
-                        None,
-                        next.journal_payload.clone(),
-                    )?;
-                    llm = next;
-                    if llm.tool_call.is_absent() {
-                        return Ok(llm);
+                ToolCallResult::Malformed(_reason) => {
+                    let this_tool = tool_index;
+                    tool_index += 1;
+                    let outcome = self
+                        .handle_malformed_tool_call(journal, run, session, turn_index, this_tool)?;
+                    match outcome {
+                        ToolCallOutcome::Fatal { category } => {
+                            return self.terminate_run_failure(journal, run, session, category);
+                        }
+                        ToolCallOutcome::ToolResult { text } => {
+                            blocks.push(ContextBlock {
+                                kind: ContextBlockKind::ToolResult,
+                                content: text,
+                                compressibility: Compressibility::Summarizable,
+                                source_ref: Some("tool:malformed".to_string()),
+                            });
+                            let next = self.complete_after_tool_result(
+                                journal, run, session, blocks, user_text,
+                            )?;
+                            llm = next;
+                            if llm.tool_call.is_absent() {
+                                return Ok(llm);
+                            }
+                            continue;
+                        }
                     }
-                    // If still present (valid or malformed), loop again.
-                    continue;
                 }
                 ToolCallResult::Valid(tool_call) => {
-                    let (result_text, result_json) = match self
-                        .handle_inline_tool_call(journal, gateway, run, session, &tool_call)
-                    {
-                        Ok(Some(tuple)) => tuple,
-                        Ok(None) => (
-                            "tool call produced no result".to_string(),
-                            json!({ "error": "tool call produced no result" }),
-                        ),
-                        Err(e) => return Err(e),
-                    };
-                    blocks.push(ContextBlock {
-                        kind: ContextBlockKind::ToolResult,
-                        content: format!(
-                            "tool: {}\nresult: {}\noutput: {}",
-                            tool_call.operation, result_text, result_json,
-                        ),
-                        compressibility: Compressibility::Summarizable,
-                        source_ref: Some(format!("tool:{}", tool_call.operation)),
-                    });
-                    let next = self.llm.complete(LlmInput {
-                        blocks: blocks.clone(),
-                        user_text: user_text.to_string(),
-                    })?;
-                    journal.append_event(
-                        JournalEventKind::LlmCompleted,
-                        Some(&run.id),
-                        Some(&session.id),
-                        None,
-                        next.journal_payload.clone(),
+                    let this_tool = tool_index;
+                    tool_index += 1;
+                    let outcome = self.handle_inline_tool_call(
+                        journal, gateway, run, session, &tool_call, turn_index, this_tool,
                     )?;
-                    llm = next;
-                    if llm.tool_call.is_absent() {
-                        return Ok(llm);
+                    match outcome {
+                        ToolCallOutcome::Fatal { category } => {
+                            return self.terminate_run_failure(journal, run, session, category);
+                        }
+                        ToolCallOutcome::ToolResult { text } => {
+                            let op_for_ref = sanitize_operation_for_audit(&tool_call.operation);
+                            blocks.push(ContextBlock {
+                                kind: ContextBlockKind::ToolResult,
+                                content: format!("tool: {op_for_ref}\nresult: {text}"),
+                                compressibility: Compressibility::Summarizable,
+                                source_ref: Some(format!("tool:{op_for_ref}")),
+                            });
+                            let next = self.complete_after_tool_result(
+                                journal, run, session, blocks, user_text,
+                            )?;
+                            llm = next;
+                            if llm.tool_call.is_absent() {
+                                return Ok(llm);
+                            }
+                        }
                     }
                 }
             }
@@ -88,7 +100,7 @@ impl<L: LlmClient> super::Runtime<L> {
         if !llm.tool_call.is_absent() {
             llm.content = format!(
                 "{}\n\n[Reached tool-call limit ({MAX_TOOL_ROUNDS}). Using the best answer from the last round.]",
-                if llm.content.is_empty() {
+                if llm.content.trim().is_empty() {
                     "I gathered information but couldn't finish within the tool-call limit."
                 } else {
                     &llm.content
@@ -98,158 +110,72 @@ impl<L: LlmClient> super::Runtime<L> {
         Ok(llm)
     }
 
-    pub(crate) fn handle_inline_tool_call(
+    fn complete_after_tool_result(
         &self,
         journal: &JournalStore,
-        gateway: &Gateway,
         run: &Run,
         session: &Session,
-        tool_call: &crate::llm::ToolCall,
-    ) -> Result<Option<(String, serde_json::Value)>> {
-        // Always write ToolCallIssued when processing a tool call — whether
-        // the call is later accepted or rejected. This gives a complete
-        // audit trail at the point of encounter.
-        journal.append_event(
-            JournalEventKind::ToolCallIssued,
-            Some(&run.id),
-            Some(&session.id),
-            None,
-            json!({
-                "operation": tool_call.operation,
-                "tool_call_id": tool_call.id,
-            }),
-        )?;
-        let mut intent = match crate::gateway::validate_tool_call(tool_call, &run.id) {
-            Ok(intent) => intent,
-            Err(e) => {
-                // Tool call rejected before InvocationProposed. Write a
-                // ToolCallRejected fact (NOT ReceiptReceived — the invocation
-                // was never approved or executed).
-                let (category, _) = sanitize_rejection(&e);
-                journal.append_event(
-                    JournalEventKind::ToolCallRejected,
-                    Some(&run.id),
-                    Some(&session.id),
-                    None,
-                    json!({
-                        "operation": tool_call.operation,
-                        "tool_call_id": tool_call.id,
-                        "error_category": category,
-                    }),
-                )?;
-                return Ok(Some((
-                    format!("tool call rejected: {}", category),
-                    json!({ "error": category }),
-                )));
+        blocks: &[ContextBlock],
+        user_text: &str,
+    ) -> Result<LlmOutput> {
+        let next = match self.llm.complete(LlmInput {
+            blocks: blocks.to_vec(),
+            user_text: user_text.to_string(),
+        }) {
+            Ok(next) => next,
+            Err(_) => {
+                return self.terminate_run_failure(
+                    journal,
+                    run,
+                    session,
+                    "tool_followup_llm_failed",
+                )
             }
         };
-        if let Err(e) = validate_model_arguments(&intent.operation, &intent.arguments) {
-            let (category, _) = sanitize_rejection(&e);
-            journal.append_event(
-                JournalEventKind::ToolCallRejected,
+        if journal
+            .append_event(
+                JournalEventKind::LlmCompleted,
                 Some(&run.id),
                 Some(&session.id),
                 None,
-                json!({
-                    "operation": intent.operation,
-                    "tool_call_id": tool_call.id,
-                    "error_category": category,
-                }),
-            )?;
-            return Ok(Some((
-                format!("tool call rejected: {}", category),
-                json!({ "error": category }),
-            )));
+                next.journal_payload.clone(),
+            )
+            .is_err()
+        {
+            return self.terminate_run_failure(
+                journal,
+                run,
+                session,
+                "tool_followup_journal_failed",
+            );
         }
-        if let Some(arguments) = intent.arguments.as_object_mut() {
-            arguments.insert("session_id".to_string(), json!(session.id.0));
-        }
-        let correlation_id = intent.invocation_id.0.clone();
-        journal.append_event(
-            JournalEventKind::InvocationProposed,
-            Some(&run.id),
-            Some(&session.id),
-            Some(&correlation_id),
-            json!({
-                "operation": intent.operation,
-                "idempotency_key": intent.idempotency_key,
-                "source": "model_tool_call",
-            }),
-        )?;
-        let approved = match gateway.approve_invocation(intent, &run, &session) {
-            Ok(a) => a,
-            Err(_e) => {
-                // Gateway denial: write ToolCallRejected (not ReceiptReceived —
-                // the capability was never executed).
-                journal.append_event(
-                    JournalEventKind::ToolCallRejected,
-                    Some(&run.id),
-                    Some(&session.id),
-                    Some(&correlation_id),
-                    json!({
-                        "operation": "tool_call",
-                        "invocation_id": correlation_id,
-                        "error_category": "policy_denied",
-                    }),
-                )?;
-                return Ok(Some((
-                    "tool call rejected: not permitted".to_string(),
-                    json!({ "error": "tool call rejected: not permitted" }),
-                )));
-            }
-        };
-        journal.append_event(
-            JournalEventKind::InvocationApproved,
-            Some(&run.id),
-            Some(&session.id),
-            Some(&correlation_id),
-            json!({
-                "decision_id": approved.decision_id,
-                "operation": approved.intent().operation,
-            }),
-        )?;
-        let (receipt_status, receipt_output, result_text) =
-            match approved.intent().operation.as_str() {
-                crate::domain::operation::TIME_NOW => {
-                    let receipt = crate::adapters::TimeAdapter.execute(&approved)?;
-                    let text = receipt
-                        .output
-                        .get("iso")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("ok")
-                        .to_string();
-                    (receipt.status, receipt.output, text)
-                }
-                crate::domain::operation::SESSION_RECALL_RECENT => {
-                    Self::execute_session_recall(journal, &session.id, &approved)?
-                }
-                crate::domain::operation::SYSTEM_STATUS => {
-                    let output = crate::capabilities::execute(journal)?;
-                    let text = output
-                        .get("summary")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("ok")
-                        .to_string();
-                    (crate::domain::ReceiptStatus::Succeeded, output, text)
-                }
-                other => (
-                    crate::domain::ReceiptStatus::Failed,
-                    json!({ "error": format!("inline execution not implemented for {other}") }),
-                    format!("tool not implemented: {other}"),
-                ),
-            };
-        journal.append_event(
-            JournalEventKind::ReceiptReceived,
-            Some(&run.id),
-            Some(&session.id),
-            Some(&correlation_id),
-            json!({
-                "invocation_id": approved.intent().invocation_id,
-                "status": format!("{:?}", receipt_status),
-                "output": receipt_output.clone(),
-            }),
-        )?;
-        Ok(Some((result_text, receipt_output)))
+        Ok(next)
+    }
+
+    /// Terminate a Run with the accurate run_id after an infrastructure failure
+    /// that cannot be fed back to the model. Writes a `RunFailed` fact (with
+    /// the run_id — never `None`) and sets `runs.status` to `Failed`. Returns
+    /// the propagated infrastructure error so `deliver()` surfaces it.
+    fn terminate_run_failure(
+        &self,
+        journal: &JournalStore,
+        run: &Run,
+        session: &Session,
+        category: &'static str,
+    ) -> Result<LlmOutput> {
+        let run_status_recorded = journal.fail_run(&run.id).is_ok();
+        let failure_fact_recorded = journal
+            .append_event(
+                JournalEventKind::RunFailed,
+                Some(&run.id),
+                Some(&session.id),
+                None,
+                json!({ "run_id": run.id.0, "error_category": category }),
+            )
+            .is_ok();
+        Err(anyhow::anyhow!(
+            "tool loop infrastructure failure: {category}; run_status_recorded={run_status_recorded}; failure_fact_recorded={failure_fact_recorded}"
+        ))
     }
 
     pub(crate) fn execute_session_recall(
@@ -257,156 +183,14 @@ impl<L: LlmClient> super::Runtime<L> {
         session_id: &SessionId,
         approved: &ApprovedInvocation,
     ) -> Result<(crate::domain::ReceiptStatus, serde_json::Value, String)> {
-        const MAX_RECALL_LIMIT: usize = 20;
-        const MAX_RECALL_CHARS: usize = 500;
-
-        let args = &approved.intent().arguments;
-        let limit = args
-            .get("limit")
-            .and_then(|v| v.as_u64())
-            .map(|n| n.clamp(1, MAX_RECALL_LIMIT as u64) as usize)
-            .unwrap_or(5);
-        let query = args
-            .get("query")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_lowercase());
-
-        let messages = journal.recent_user_messages(session_id, limit)?;
-
-        let mut results: Vec<serde_json::Value> = Vec::new();
-        for (event_id, text) in &messages {
-            if let Some(ref q) = query {
-                if !text.to_lowercase().contains(q) {
-                    continue;
-                }
-            }
-            let truncated: String = text.chars().take(MAX_RECALL_CHARS).collect();
-            results.push(json!({
-                "event_id": event_id,
-                "role": "user",
-                "text": truncated,
-            }));
-        }
-
-        let output = json!({
-            "session_id": session_id.0,
-            "count": results.len(),
-            "messages": results,
-        });
-
-        let text = if results.is_empty() {
-            "no matching messages found".to_string()
-        } else {
-            results
-                .iter()
-                .filter_map(|m| m.get("text").and_then(|t| t.as_str()))
-                .collect::<Vec<_>>()
-                .join(" | ")
-        };
-
-        Ok((crate::domain::ReceiptStatus::Succeeded, output, text))
-    }
-}
-
-pub fn validate_model_arguments(
-    operation: &str,
-    arguments: &serde_json::Value,
-) -> anyhow::Result<()> {
-    let Some(map) = arguments.as_object() else {
-        anyhow::bail!("arguments must be a JSON object");
-    };
-    match operation {
-        crate::domain::operation::TIME_NOW | crate::domain::operation::SYSTEM_STATUS => {
-            if !map.is_empty() {
-                anyhow::bail!("operation takes no arguments");
-            }
-        }
-        crate::domain::operation::SESSION_RECALL_RECENT => {
-            for (key, value) in map {
-                match key.as_str() {
-                    "limit" => {
-                        let n = value
-                            .as_u64()
-                            .ok_or_else(|| anyhow::anyhow!("limit must be a positive integer"))?;
-                        if n < 1 || n > 20 {
-                            anyhow::bail!("limit must be between 1 and 20");
-                        }
-                    }
-                    "query" => {
-                        if !value.is_string() {
-                            anyhow::bail!("query must be a string");
-                        }
-                    }
-                    _ => anyhow::bail!("unexpected argument: {key}"),
-                }
-            }
-        }
-        _ => anyhow::bail!("unknown operation"),
-    }
-    Ok(())
-}
-
-/// Sanitize a rejection error into a (category, safe_message) pair.
-///
-/// The category is a fixed enum-like string; the message is a fixed
-/// security-safe string (never exposes raw anyhow internals, SQL, paths,
-/// tokens, keys, or credentials). The caller formats the final user-facing
-/// rejection text from the category, never from the raw error.
-pub(crate) fn sanitize_rejection(e: &anyhow::Error) -> (&'static str, &'static str) {
-    let msg = e.to_string();
-    if msg.contains("unknown_operation") {
-        (
-            "unknown_operation",
-            "Tool call rejected: unknown operation.",
-        )
-    } else if msg.contains("write_operation_not_allowed") {
-        (
-            "operation_not_allowed",
-            "Tool call rejected: operation is not allowed.",
-        )
-    } else if msg.contains("invalid_arguments") || msg.contains("must be a JSON object") {
-        (
-            "invalid_arguments",
-            "Tool call rejected: malformed arguments.",
-        )
-    } else if msg.contains("no arguments") {
-        (
-            "invalid_arguments",
-            "Tool call rejected: this operation takes no arguments.",
-        )
-    } else if msg.contains("must be between") {
-        (
-            "invalid_arguments",
-            "Tool call rejected: argument out of range.",
-        )
-    } else if msg.contains("unexpected argument") {
-        (
-            "invalid_arguments",
-            "Tool call rejected: unexpected argument.",
-        )
-    } else if msg.contains("must be a positive integer") {
-        (
-            "invalid_arguments",
-            "Tool call rejected: argument must be a positive integer.",
-        )
-    } else if msg.contains("must be a string") {
-        (
-            "invalid_arguments",
-            "Tool call rejected: argument must be a string.",
-        )
-    } else if msg.contains("not permitted") || msg.contains("capability_not_enabled") {
-        (
-            "operation_not_allowed",
-            "Tool call rejected: operation is not allowed.",
-        )
-    } else {
-        (
-            "internal_tool_error",
-            "Tool call rejected: internal tool error.",
-        )
+        crate::runtime::tool_rejection::execute_session_recall(journal, session_id, approved)
     }
 }
 
 #[cfg(test)]
 #[path = "tool_loop_tests.rs"]
 mod tool_loop_tests;
+
+#[cfg(test)]
+#[path = "blank_reply_tests.rs"]
+mod blank_reply_tests;

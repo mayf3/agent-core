@@ -119,12 +119,7 @@ fn string_arg(value: &Value, key: &str) -> Result<String, AdapterError> {
         .ok_or_else(|| AdapterError::InvalidArgument(format!("missing string argument: {key}")))
 }
 
-fn post_json(
-    url: &str,
-    token: &str,
-    body: &Value,
-    timeout: Duration,
-) -> Result<Value, AdapterError> {
+fn post_json(url: &str, token: &str, body: &Value, timeout: Duration) -> Result<Value, AdapterError> {
     let endpoint = Endpoint::parse(url).map_err(|e| AdapterError::Transport(e.to_string()))?;
     // Bind the connect phase to the same timeout budget as read/write. The
     // dispatcher thread joins on the in-flight adapter call during shutdown,
@@ -136,8 +131,7 @@ fn post_json(
     stream
         .set_write_timeout(Some(timeout))
         .map_err(|e| AdapterError::Transport(e.to_string()))?;
-    let payload =
-        serde_json::to_string(body).map_err(|e| AdapterError::Transport(e.to_string()))?;
+    let payload = serde_json::to_string(body).map_err(|e| AdapterError::Transport(e.to_string()))?;
     let auth = if token.is_empty() {
         String::new()
     } else {
@@ -304,7 +298,9 @@ mod tests {
 
     #[test]
     fn invalid_argument_classifies_as_invalid_approved_invocation() {
-        let error = anyhow::Error::new(AdapterError::InvalidArgument("missing text".to_string()));
+        let error = anyhow::Error::new(AdapterError::InvalidArgument(
+            "missing text".to_string(),
+        ));
         assert_eq!(
             DispatchErrorCategory::from_error(&error),
             DispatchErrorCategory::InvalidApprovedInvocation

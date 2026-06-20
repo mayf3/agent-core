@@ -1,303 +1,466 @@
-#[cfg(test)]
-mod tool_loop_tests {
+use crate::config::KernelConfig;
+use crate::domain::*;
+use crate::gateway::Gateway;
+use crate::journal::JournalStore;
+use crate::llm::{ToolCall, ToolCallResult};
+use crate::runtime::tool_rejection::sanitize_operation_for_audit;
+use crate::runtime::{Runtime, ToolRejection};
+use serde_json::json;
+use std::path::PathBuf;
 
-    use crate::adapters::InvocationAdapter;
-    use crate::config::KernelConfig;
-    use crate::domain::*;
-    use crate::gateway::Gateway;
-    use crate::journal::JournalStore;
-    use crate::llm::ToolCall;
-    use crate::runtime::Runtime;
-    use anyhow::Result;
-    use serde_json::json;
-
-    /// SQLite error injection: drop `journal_events` so queries fail. Verify
-    /// failure is NOT swallowed → ReceiptReceived Failed, sanitized error.
-    #[test]
-    fn session_recall_sql_error_returns_failed_not_empty_success() {
-        let dir = std::env::temp_dir().join(format!("tool-loop-sql-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).ok();
-        let db_path = dir.join("test.db");
-
-        let journal = JournalStore::open(&db_path).unwrap();
-        // Corrupt: drop the journal_events table so queries fail.
-        {
-            let conn = journal.conn.lock().unwrap();
-            conn.execute_batch("DROP TABLE IF EXISTS journal_events;")
-                .unwrap();
-        }
-
-        let approved = fake_approved("session.recall_recent", json!({}));
-        let (status, output, text) = Runtime::<crate::llm::LocalEchoLlm>::execute_session_recall(
-            &journal,
-            &SessionId("s1".into()),
-            &approved,
-        )
-        .unwrap_or((
-            crate::domain::ReceiptStatus::Failed,
-            json!({"error": "test"}),
-            "test failed".into(),
-        ));
-
-        // Must NOT be Succeeded — DB failure propagates as Failed.
-        assert_eq!(status, crate::domain::ReceiptStatus::Failed);
-        // Output must contain a sanitized error, not an empty messages array.
-        assert!(output.get("error").is_some(), "error field present");
-        assert!(
-            output.get("messages").is_none(),
-            "must not return messages on DB failure"
-        );
-        assert!(text.contains("failed"), "text indicates failure");
-        // Must not leak SQL internals.
-        let json_str = serde_json::to_string(&output).unwrap();
-        assert!(
-            !json_str.contains("journal_events") && !json_str.contains("sqlite"),
-            "no SQL internals leaked"
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
+pub(super) fn test_config() -> KernelConfig {
+    KernelConfig {
+        db_path: PathBuf::from(":memory:"),
+        data_dir: PathBuf::from("."),
+        agent_id: AgentId("main".into()),
+        root_dir: PathBuf::from("."),
+        kernel_port: 4130,
+        connector_execute_url: String::new(),
+        ipc_token: "test".into(),
+        feishu_allowed_open_ids: vec![],
+        feishu_allowed_chat_ids: vec![],
+        feishu_require_group_mention: true,
+        openai_base_url: String::new(),
+        openai_api_key: String::new(),
+        model: String::new(),
+        fallback_openai_base_url: String::new(),
+        fallback_openai_api_key: String::new(),
+        fallback_model: String::new(),
+        model_timeout_ms: 100,
+        context_recent_messages: 6,
+        context_max_block_chars: 4000,
+        outbox_dispatcher_enabled: false,
+        outbox_dispatcher_poll_interval_ms: 10,
+        extra_allowed_operations: vec![],
+        require_write_approval: false,
+        write_approval_ttl_secs: 0,
     }
+}
 
-    /// ToolCallIssued written for every tool call; ToolCallRejected written
-    /// for rejected calls (no ReceiptReceived, InvocationProposed, InvocationApproved).
-    #[test]
-    fn rejected_tool_call_writes_issued_and_rejected_not_invocation() {
-        let config = test_config();
-        let journal = JournalStore::in_memory().unwrap();
-        let gateway = Gateway::new(config.clone());
-        let runtime = Runtime::new(config.clone(), crate::llm::LocalEchoLlm);
-
-        let now = chrono::Utc::now();
-        let session = Session {
-            id: SessionId("s1".into()),
-            agent_id: AgentId("main".into()),
-            channel: ChannelKind::Cli,
-            conversation_key: "local".into(),
-            summary: None,
-            summarized_until_event_id: None,
-            last_active_at: now,
-            status: SessionStatus::Active,
-            version: 1,
-        };
-        let run = Run {
-            id: RunId::new(),
-            session_id: session.id.clone(),
-            agent_id: AgentId("main".into()),
-            trigger_event_id: EventId::new(),
-            principal: RunPrincipal {
-                principal_id: PrincipalId("cli:local".into()),
-                subject: PrincipalSubject::LocalUser,
-                source: PrincipalSource::Cli,
-                grants: vec![],
-                requester_id: Some("cli:local".into()),
-            },
-            parent_run_id: None,
-            delegated_by: None,
-            status: RunStatus::Running,
-            created_at: now,
-            updated_at: now,
-        };
-
-        // Unknown operation → ToolCallIssued + ToolCallRejected (no Receipt).
-        let bad_op = ToolCall {
-            id: "bad_op".into(),
-            operation: "shell.exec".into(),
-            arguments: json!({}),
-        };
-        let result = runtime.handle_inline_tool_call(&journal, &gateway, &run, &session, &bad_op);
-        assert!(result.is_ok());
-
-        let events = journal.events().unwrap();
-        let count = |kind| events.iter().filter(|e| e.kind == kind).count();
-        assert_eq!(
-            count(JournalEventKind::ToolCallIssued),
-            1,
-            "ToolCallIssued for the tool call"
-        );
-        assert_eq!(
-            count(JournalEventKind::ToolCallRejected),
-            1,
-            "ToolCallRejected for rejection"
-        );
-        assert_eq!(
-            count(JournalEventKind::InvocationProposed),
-            0,
-            "no InvocationProposed"
-        );
-        assert_eq!(
-            count(JournalEventKind::InvocationApproved),
-            0,
-            "no InvocationApproved"
-        );
-        assert_eq!(
-            count(JournalEventKind::ReceiptReceived),
-            0,
-            "no ReceiptReceived (never executed)"
-        );
-
-        // Verify the ToolCallRejected payload has error_category.
-        let rejected = events
-            .iter()
-            .find(|e| {
-                e.kind == JournalEventKind::ToolCallRejected
-                    && e.payload.get("tool_call_id").and_then(|v| v.as_str()) == Some("bad_op")
-            })
-            .unwrap();
-        assert!(
-            rejected.payload.get("error_category").is_some(),
-            "ToolCallRejected has error_category"
-        );
-    }
-
-    /// ToolCallRejected payload does not leak raw error internals.
-    #[test]
-    fn rejected_tool_call_sanitized_payload() {
-        // Validation errors produce fixed category strings, not raw error text.
-        use crate::runtime::tool_loop::sanitize_rejection;
-        use crate::runtime::validate_model_arguments;
-        let result = validate_model_arguments("system.status", &json!({"extra_field": "value"}));
-        assert!(result.is_err());
-        let (_category, _) = sanitize_rejection(&result.unwrap_err());
-        // The category is a fixed enum string, not a verbatim error message.
-        // (We already test this via the ToolCallRejected journal event checks.)
-    }
-
-    /// Precise audit-fact count: 1 InvocationProposed, 1 InvocationApproved,
-    /// 1 ReceiptReceived (Succeeded) for a single successful tool execution.
-    #[test]
-    fn precise_audit_fact_counts_on_successful_tool_call() {
-        // Use the FakeLLM approach: first call returns a tool_call for
-        // time.now, second returns text. We call handle_inline_tool_call
-        // directly and count the Journal events it writes.
-        let config = test_config();
-        let journal = JournalStore::in_memory().unwrap();
-        let gateway = Gateway::new(config.clone());
-        let runtime = Runtime::new(config, crate::llm::LocalEchoLlm);
-
-        let now = chrono::Utc::now();
-        let session = Session {
-            id: SessionId("s1".into()),
-            agent_id: AgentId("main".into()),
-            channel: ChannelKind::Cli,
-            conversation_key: "local".into(),
-            summary: None,
-            summarized_until_event_id: None,
-            last_active_at: now,
-            status: crate::domain::SessionStatus::Active,
-            version: 1,
-        };
-        let run = Run {
-            id: RunId::new(),
-            session_id: session.id.clone(),
-            agent_id: AgentId("main".into()),
-            trigger_event_id: EventId::new(),
-            principal: RunPrincipal {
-                principal_id: PrincipalId("cli:local".into()),
-                subject: PrincipalSubject::LocalUser,
-                source: PrincipalSource::Cli,
-                grants: vec![CapabilityGrant {
+/// One-call fixture: (journal, gateway, runtime, session, run) with a
+/// principal granted `time.now` + `session.recall_recent`.
+fn fixture() -> (
+    JournalStore,
+    Gateway,
+    Runtime<crate::llm::LocalEchoLlm>,
+    Session,
+    Run,
+) {
+    let config = test_config();
+    let journal = JournalStore::in_memory().unwrap();
+    let gateway = Gateway::new(config.clone());
+    let runtime = Runtime::new(config, crate::llm::LocalEchoLlm);
+    let now = chrono::Utc::now();
+    let session = Session {
+        id: SessionId("s1".into()),
+        agent_id: AgentId("main".into()),
+        channel: ChannelKind::Cli,
+        conversation_key: "local".into(),
+        summary: None,
+        summarized_until_event_id: None,
+        last_active_at: now,
+        status: SessionStatus::Active,
+        version: 1,
+    };
+    let run = Run {
+        id: RunId::new(),
+        session_id: session.id.clone(),
+        agent_id: AgentId("main".into()),
+        trigger_event_id: EventId::new(),
+        principal: RunPrincipal {
+            principal_id: PrincipalId("cli:local".into()),
+            subject: PrincipalSubject::LocalUser,
+            source: PrincipalSource::Cli,
+            grants: vec![
+                CapabilityGrant {
                     operation: "time.now".into(),
                     scope: "current_session".into(),
-                }],
-                requester_id: Some("cli:local".into()),
-            },
-            parent_run_id: None,
-            delegated_by: None,
-            status: RunStatus::Running,
-            created_at: now,
-            updated_at: now,
-        };
+                },
+                CapabilityGrant {
+                    operation: "session.recall_recent".into(),
+                    scope: "current_session".into(),
+                },
+            ],
+            requester_id: Some("cli:local".into()),
+        },
+        parent_run_id: None,
+        delegated_by: None,
+        status: RunStatus::Running,
+        created_at: now,
+        updated_at: now,
+    };
+    (journal, gateway, runtime, session, run)
+}
 
-        let tool_call = ToolCall {
-            id: "tc1".into(),
-            operation: "time.now".into(),
-            arguments: json!({}),
-        };
+fn count(events: &[JournalEvent], kind: JournalEventKind) -> usize {
+    events.iter().filter(|e| e.kind == kind).count()
+}
 
-        // Execute the tool call — this writes InvocationProposed +
-        // InvocationApproved + ReceiptReceived.
-        let result =
-            runtime.handle_inline_tool_call(&journal, &gateway, &run, &session, &tool_call);
-        assert!(result.is_ok());
+// ===== §1/§9: rejected tool call → Issued+Rejected, no Receipt =====
+#[test]
+fn rejected_tool_call_writes_issued_and_rejected_not_invocation() {
+    let (journal, gateway, runtime, session, run) = fixture();
+    let bad_op = ToolCall {
+        id: "bad_op".into(),
+        operation: "shell.exec".into(),
+        arguments: json!({}),
+    };
+    assert!(runtime
+        .handle_inline_tool_call(&journal, &gateway, &run, &session, &bad_op, 0, 0)
+        .is_ok());
+    let events = journal.events().unwrap();
+    assert_eq!(count(&events, JournalEventKind::ToolCallIssued), 1);
+    assert_eq!(count(&events, JournalEventKind::ToolCallRejected), 1);
+    assert_eq!(count(&events, JournalEventKind::InvocationProposed), 0);
+    assert_eq!(count(&events, JournalEventKind::InvocationApproved), 0);
+    assert_eq!(count(&events, JournalEventKind::ReceiptReceived), 0);
+    let rejected = events
+        .iter()
+        .find(|e| e.kind == JournalEventKind::ToolCallRejected)
+        .unwrap();
+    assert_eq!(
+        rejected
+            .payload
+            .get("error_category")
+            .and_then(|v| v.as_str()),
+        Some("unknown_operation")
+    );
+    let audited = rejected
+        .payload
+        .get("operation")
+        .and_then(|v| v.as_str())
+        .unwrap();
+    assert!(
+        audited.starts_with("unknown_operation_"),
+        "sanitized: {audited}"
+    );
+    assert!(!audited.contains("shell.exec"), "raw op leaked: {audited}");
+}
 
-        let events = journal.events().unwrap();
-        let proposed = events
-            .iter()
-            .filter(|e| e.kind == JournalEventKind::InvocationProposed)
-            .count();
-        let approved = events
-            .iter()
-            .filter(|e| e.kind == JournalEventKind::InvocationApproved)
-            .count();
-        let receipts = events
+// ===== §2: successful tool call → Proposed+Approved+Succeeded Receipt =====
+#[test]
+fn successful_tool_call_writes_proposed_approved_succeeded_receipt() {
+    let (journal, gateway, runtime, session, run) = fixture();
+    let tc = ToolCall {
+        id: "tc1".into(),
+        operation: "time.now".into(),
+        arguments: json!({}),
+    };
+    assert!(runtime
+        .handle_inline_tool_call(&journal, &gateway, &run, &session, &tc, 0, 0)
+        .is_ok());
+    let events = journal.events().unwrap();
+    assert_eq!(count(&events, JournalEventKind::ToolCallIssued), 1);
+    assert_eq!(count(&events, JournalEventKind::InvocationProposed), 1);
+    assert_eq!(count(&events, JournalEventKind::InvocationApproved), 1);
+    assert_eq!(count(&events, JournalEventKind::ReceiptReceived), 1);
+    let receipt = events
+        .iter()
+        .find(|e| e.kind == JournalEventKind::ReceiptReceived)
+        .unwrap();
+    assert_eq!(
+        receipt.payload.get("status").and_then(|s| s.as_str()),
+        Some("Succeeded")
+    );
+}
+
+// ===== §2/§3: capability failure → exactly one Failed Receipt (real chain) =====
+#[test]
+fn capability_failure_writes_failed_receipt_not_running() {
+    let (journal, gateway, runtime, session, run) = fixture();
+    journal.insert_run(&run).unwrap();
+    journal.set_recall_failure_for_test(true);
+    let tc = ToolCall {
+        id: "recall_fail".into(),
+        operation: "session.recall_recent".into(),
+        arguments: json!({}),
+    };
+    assert!(
+        runtime
+            .handle_inline_tool_call(&journal, &gateway, &run, &session, &tc, 0, 0)
+            .is_ok(),
+        "capability failure is a ToolResult, not Err"
+    );
+    let events = journal.events().unwrap();
+    assert_eq!(count(&events, JournalEventKind::ToolCallIssued), 1);
+    assert_eq!(count(&events, JournalEventKind::InvocationProposed), 1);
+    assert_eq!(count(&events, JournalEventKind::InvocationApproved), 1);
+    assert_eq!(count(&events, JournalEventKind::ReceiptReceived), 1);
+    let receipt = events
+        .iter()
+        .find(|e| e.kind == JournalEventKind::ReceiptReceived)
+        .unwrap();
+    assert_eq!(
+        receipt.payload.get("status").and_then(|s| s.as_str()),
+        Some("Failed")
+    );
+    let output = receipt.payload.get("output").unwrap();
+    assert!(
+        output.get("messages").is_none(),
+        "failed receipt != empty success"
+    );
+    assert!(
+        output.get("error_category").is_some(),
+        "error category present"
+    );
+    assert_eq!(
+        events
             .iter()
             .filter(|e| e.kind == JournalEventKind::ReceiptReceived)
-            .count();
-
-        // Exactly 1 of each for the single tool execution.
-        assert_eq!(
-            proposed, 1,
-            "exactly 1 InvocationProposed, got {}",
-            proposed
-        );
-        assert_eq!(
-            approved, 1,
-            "exactly 1 InvocationApproved, got {}",
-            approved
-        );
-        assert_eq!(receipts, 1, "exactly 1 ReceiptReceived, got {}", receipts);
-        // The receipt must be Succeeded.
-        let receipt = events
+            .filter(|e| e.payload.get("status").and_then(|s| s.as_str()) == Some("Failed"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
             .iter()
-            .find(|e| e.kind == JournalEventKind::ReceiptReceived)
-            .unwrap();
-        assert_eq!(
-            receipt.payload.get("status").and_then(|s| s.as_str()),
-            Some("Succeeded")
+            .filter(|e| e.kind == JournalEventKind::ReceiptReceived)
+            .filter(|e| e.payload.get("status").and_then(|s| s.as_str()) == Some("Succeeded"))
+            .count(),
+        0
+    );
+    let j = serde_json::to_string(&events).unwrap();
+    assert!(
+        !j.contains("sqlite")
+            && !j.contains("journal_events")
+            && !j.contains("recall_query_failed")
+    );
+}
+
+/// Empty recall → Succeeded + `messages: []` (differs from a DB error).
+#[test]
+fn empty_recall_returns_succeeded_empty_messages() {
+    let (journal, gateway, runtime, session, run) = fixture();
+    let tc = ToolCall {
+        id: "recall_empty".into(),
+        operation: "session.recall_recent".into(),
+        arguments: json!({}),
+    };
+    assert!(runtime
+        .handle_inline_tool_call(&journal, &gateway, &run, &session, &tc, 0, 0)
+        .is_ok());
+    let events = journal.events().unwrap();
+    let receipt = events
+        .iter()
+        .find(|e| e.kind == JournalEventKind::ReceiptReceived)
+        .unwrap();
+    assert_eq!(
+        receipt.payload.get("status").and_then(|s| s.as_str()),
+        Some("Succeeded")
+    );
+    let messages = receipt
+        .payload
+        .get("output")
+        .unwrap()
+        .get("messages")
+        .unwrap()
+        .as_array()
+        .unwrap();
+    assert!(messages.is_empty());
+}
+
+// ===== §1.3: provider malformed → Issued+Rejected, safe internal id =====
+#[test]
+fn malformed_tool_call_writes_issued_rejected_with_safe_internal_id() {
+    let (journal, _gateway, runtime, session, run) = fixture();
+    let outcome = runtime
+        .handle_malformed_tool_call(&journal, &run, &session, 0, 0)
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        crate::runtime::tool_loop::ToolCallOutcome::ToolResult { .. }
+    ));
+    let events = journal.events().unwrap();
+    assert_eq!(count(&events, JournalEventKind::ToolCallIssued), 1);
+    assert_eq!(count(&events, JournalEventKind::ToolCallRejected), 1);
+    assert_eq!(count(&events, JournalEventKind::InvocationProposed), 0);
+    assert_eq!(count(&events, JournalEventKind::InvocationApproved), 0);
+    assert_eq!(count(&events, JournalEventKind::ReceiptReceived), 0);
+    let issued = events
+        .iter()
+        .find(|e| e.kind == JournalEventKind::ToolCallIssued)
+        .unwrap();
+    let tcid = issued
+        .payload
+        .get("tool_call_id")
+        .and_then(|v| v.as_str())
+        .unwrap();
+    assert!(tcid.starts_with("tc:"), "position-derived id: {tcid}");
+    assert_eq!(
+        issued.payload.get("operation").and_then(|v| v.as_str()),
+        Some("malformed_tool_call")
+    );
+    let j = serde_json::to_string(&events).unwrap();
+    assert!(!j.contains("missing function") && !j.contains("arguments JSON parse error"));
+}
+
+// ===== §5: untrusted operation never leaks raw into Journal =====
+#[test]
+fn untrusted_operation_never_leaks_raw_into_journal() {
+    let cases = [
+        ("overlong", "x".repeat(10_000)),
+        ("unicode", "操作🔥工具".to_string()),
+        ("control", "op\nwith\r\tcontrol".to_string()),
+        ("path", "../../../etc/passwd".to_string()),
+        (
+            "token",
+            "credential_marker_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890".to_string(),
+        ),
+        ("auth", "header_marker_supersecret".to_string()),
+    ];
+    for (label, raw_op) in cases {
+        let (journal, gateway, runtime, session, run) = fixture();
+        let tc = ToolCall {
+            id: "leak".into(),
+            operation: raw_op.clone(),
+            arguments: json!({}),
+        };
+        let _ = runtime.handle_inline_tool_call(&journal, &gateway, &run, &session, &tc, 0, 0);
+        let j = serde_json::to_string(&journal.events().unwrap()).unwrap();
+        assert!(!j.contains(&raw_op), "[{}] raw leaked", label);
+        assert!(
+            !j.contains("credential_marker")
+                && !j.contains("header_marker")
+                && !j.contains("passwd"),
+            "[{}] sensitive leaked",
+            label
         );
     }
+}
 
-    fn fake_approved(operation: &str, args: serde_json::Value) -> ApprovedInvocation {
-        ApprovedInvocation::new(
-            InvocationIntent {
-                invocation_id: InvocationId::new(),
-                run_id: RunId::new(),
-                operation: operation.to_string(),
-                arguments: args,
-                idempotency_key: Some("test".into()),
-            },
-            "decision_test".into(),
-        )
-    }
+#[test]
+fn sanitize_operation_keeps_catalog_and_collapses_unknown() {
+    assert_eq!(sanitize_operation_for_audit("time.now"), "time.now");
+    let s = sanitize_operation_for_audit("shell.exec");
+    assert!(s.starts_with("unknown_operation_"));
+    assert_eq!(
+        sanitize_operation_for_audit("shell.exec"),
+        sanitize_operation_for_audit("shell.exec")
+    );
+}
 
-    fn test_config() -> KernelConfig {
-        use std::path::PathBuf;
-        KernelConfig {
-            db_path: PathBuf::from(":memory:"),
-            data_dir: PathBuf::from("."),
-            agent_id: AgentId("main".into()),
-            root_dir: PathBuf::from("."),
-            kernel_port: 4130,
-            connector_execute_url: String::new(),
-            ipc_token: "test".into(),
-            feishu_allowed_open_ids: vec![],
-            feishu_allowed_chat_ids: vec![],
-            feishu_require_group_mention: true,
-            openai_base_url: String::new(),
-            openai_api_key: String::new(),
-            model: String::new(),
-            fallback_openai_base_url: String::new(),
-            fallback_openai_api_key: String::new(),
-            fallback_model: String::new(),
-            model_timeout_ms: 100,
-            context_recent_messages: 6,
-            context_max_block_chars: 4000,
-            outbox_dispatcher_enabled: false,
-            outbox_dispatcher_poll_interval_ms: 10,
-            extra_allowed_operations: vec![],
-            require_write_approval: false,
-            write_approval_ttl_secs: 0,
-        }
+// ===== §6: idempotency key composition (turn + tool_index) =====
+#[test]
+fn idempotency_key_is_run_turn_index_scoped() {
+    use crate::gateway::validate_tool_call;
+    use crate::llm::tool_call_id_hash;
+    let raw_id = "call_abc123";
+    let hashed = tool_call_id_hash(raw_id);
+    let mk = |op: &str| ToolCall {
+        id: hashed.clone(),
+        operation: op.to_string(),
+        arguments: json!({}),
+    };
+    let run = RunId::new();
+    let k1 = validate_tool_call(&mk("time.now"), &run, 0, 0).unwrap();
+    let k2 = validate_tool_call(&mk("time.now"), &run, 0, 0).unwrap();
+    assert_eq!(k1.idempotency_key, k2.idempotency_key, "stable");
+    assert_ne!(
+        validate_tool_call(&mk("time.now"), &run, 0, 0)
+            .unwrap()
+            .idempotency_key,
+        validate_tool_call(&mk("time.now"), &run, 1, 0)
+            .unwrap()
+            .idempotency_key,
+        "turn"
+    );
+    assert_ne!(
+        validate_tool_call(&mk("time.now"), &run, 0, 0)
+            .unwrap()
+            .idempotency_key,
+        validate_tool_call(&mk("time.now"), &run, 0, 1)
+            .unwrap()
+            .idempotency_key,
+        "index"
+    );
+    assert_ne!(
+        validate_tool_call(&mk("time.now"), &run, 0, 0)
+            .unwrap()
+            .idempotency_key,
+        validate_tool_call(&mk("time.now"), &RunId::new(), 0, 0)
+            .unwrap()
+            .idempotency_key,
+        "run"
+    );
+    assert!(
+        !k1.idempotency_key.clone().unwrap().contains(raw_id),
+        "raw id leaked"
+    );
+}
+
+// ===== §9: typed rejection categories =====
+#[test]
+fn validate_model_arguments_returns_typed_rejections() {
+    use crate::runtime::validate_model_arguments;
+    assert_eq!(
+        validate_model_arguments("system.status", &json!({"x": 1})),
+        Err(ToolRejection::InvalidArguments)
+    );
+    assert_eq!(
+        validate_model_arguments("session.recall_recent", &json!({"limit": 0})),
+        Err(ToolRejection::InvalidArguments)
+    );
+    assert_eq!(
+        validate_model_arguments("time.now", &json!("nope")),
+        Err(ToolRejection::MalformedArguments)
+    );
+    assert_eq!(
+        validate_model_arguments("shell.exec", &json!({})),
+        Err(ToolRejection::UnknownOperation)
+    );
+    assert!(validate_model_arguments("time.now", &json!({})).is_ok());
+}
+
+#[test]
+fn typed_rejection_categories_and_messages_are_safe() {
+    for r in [
+        ToolRejection::UnknownOperation,
+        ToolRejection::OperationNotAllowed,
+        ToolRejection::MalformedArguments,
+        ToolRejection::InvalidArguments,
+        ToolRejection::PolicyDenied,
+        ToolRejection::MalformedToolCall,
+        ToolRejection::InternalToolError,
+    ] {
+        let (cat, msg) = (r.category(), r.safe_message());
+        assert!(!cat.is_empty() && cat.len() <= 32);
+        assert!(!msg.is_empty() && msg.len() <= 80);
+        assert!(cat
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c == '_' || c.is_ascii_digit()));
     }
+}
+
+#[test]
+fn policy_denial_writes_rejected_with_correlation() {
+    let (journal, gateway, runtime, session, mut run) = fixture();
+    run.principal.grants.clear();
+    let tc = ToolCall {
+        id: "no_grant".into(),
+        operation: "time.now".into(),
+        arguments: json!({}),
+    };
+    let _ = runtime.handle_inline_tool_call(&journal, &gateway, &run, &session, &tc, 0, 0);
+    let events = journal.events().unwrap();
+    assert_eq!(count(&events, JournalEventKind::InvocationProposed), 1);
+    assert_eq!(count(&events, JournalEventKind::ToolCallRejected), 1);
+    assert_eq!(count(&events, JournalEventKind::InvocationApproved), 0);
+    assert_eq!(count(&events, JournalEventKind::ReceiptReceived), 0);
+    let rejected = events
+        .iter()
+        .find(|e| e.kind == JournalEventKind::ToolCallRejected)
+        .unwrap();
+    assert_eq!(
+        rejected
+            .payload
+            .get("error_category")
+            .and_then(|v| v.as_str()),
+        Some("policy_denied")
+    );
+    assert!(rejected.correlation_id.is_some());
+}
+
+#[test]
+fn tool_call_result_absent_is_absent() {
+    assert!(ToolCallResult::Absent.is_absent());
 }
