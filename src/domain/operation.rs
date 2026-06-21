@@ -15,10 +15,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::{CapabilityGrant, ChannelKind};
 
-/// The risk classification of an operation. Today every operation is
-/// `Write` in effect (it produces a side effect: a reply). M2d will gate
-/// `Write` operations behind durable approval state; `ReadOnly` operations
-/// (none exist yet — M2e will add the first) will execute inline.
+/// The risk classification of an operation. `Write` operations use the
+/// approval/dispatch boundary; catalogued `ReadOnly` operations may execute
+/// inline after the Gateway approves the current run's explicit grant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Risk {
     /// Produces no external side effect (e.g. read a file, get the time).
@@ -94,6 +93,115 @@ pub fn lookup(name: &str) -> Option<&'static OperationSpec> {
 /// previous inline `intent.operation != "stdout.send_text" && ...` check.
 pub fn is_allowed(name: &str) -> bool {
     lookup(name).is_some()
+}
+
+/// The minimal OpenAI-compatible tool definition for a catalogued `ReadOnly`
+/// operation exposed to the model. Returns `None` for `Write` operations or
+/// unknown names — Write operations are NEVER sent to the provider as tools.
+///
+/// This is the single closed mapping from a catalog operation to its provider
+/// schema; there is no second hand-maintained tool list in `llm/mod.rs`. Each
+/// schema is strict (`additionalProperties: false`). The Gateway remains the
+/// final authorization boundary — schema exposure is only a prompt hint.
+pub fn provider_tool_definition(name: &str) -> Option<serde_json::Value> {
+    use serde_json::json;
+    let spec = lookup(name)?;
+    if spec.risk != Risk::ReadOnly {
+        return None;
+    }
+    let (description, parameters) = match spec.name {
+        TIME_NOW => (
+            "Return the current kernel wall-clock time (ISO-8601 + epoch ms).",
+            json!({
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false
+            }),
+        ),
+        SESSION_RECALL_RECENT => (
+            "Recall recent messages from the current session (read-only, current session only).",
+            json!({
+                "type": "object",
+                "properties": {
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 20, "description": "Max messages to recall (default 5)." },
+                    "query": { "type": "string", "description": "Optional case-insensitive substring filter." }
+                },
+                "required": [],
+                "additionalProperties": false
+            }),
+        ),
+        SYSTEM_STATUS => (
+            "Return system health and projection summary (aggregate counts only, no secrets).",
+            json!({
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false
+            }),
+        ),
+        _ => return None,
+    };
+    Some(json!({
+        "type": "function",
+        "function": {
+            "name": spec.name,
+            "description": description,
+            "parameters": parameters,
+        }
+    }))
+}
+
+/// Build the OpenAI-compatible `tools` array for the provider request from the
+/// agent's granted operations: a tool is exposed ONLY when it is both granted
+/// to the run principal AND a catalogued `ReadOnly` operation. Write operations
+/// and unknown names are never included. Order is the catalog order (stable).
+pub fn provider_tools_for_grants(granted_operations: &[String]) -> Vec<serde_json::Value> {
+    CATALOG
+        .iter()
+        .filter(|spec| {
+            spec.risk == Risk::ReadOnly && granted_operations.iter().any(|g| g == spec.name)
+        })
+        .filter_map(|spec| provider_tool_definition(spec.name))
+        .collect()
+}
+
+/// Build the ToolCatalog text for the model from the **current Run's grants**:
+/// a tool is listed only when it is BOTH granted to the run principal AND a
+/// catalogued `ReadOnly` operation. Write operations and unknown names are
+/// never listed. Order is the catalog order (stable, deduplicated).
+///
+/// This stays consistent with `provider_tools_for_grants` — the operation set
+/// shown to the model in the ToolCatalog block equals the set in the provider
+/// `tools` schema. The Gateway remains the independent final authorization
+/// boundary; surfacing is only a prompt hint.
+pub fn catalog_for_context_grants(granted_operations: &[String]) -> String {
+    let names: Vec<&str> = CATALOG
+        .iter()
+        .filter(|spec| {
+            spec.risk == Risk::ReadOnly && granted_operations.iter().any(|g| g == spec.name)
+        })
+        .map(|spec| spec.name)
+        .collect();
+    if names.is_empty() {
+        return "No tools are available for this request.".to_string();
+    }
+    let rows = names
+        .into_iter()
+        .map(|name| {
+            let desc = match name {
+                TIME_NOW => "read the current kernel wall-clock time (no side effect).",
+                SESSION_RECALL_RECENT => {
+                    "recall recent messages from the current session (read-only, current session only)."
+                }
+                SYSTEM_STATUS => "read system health and projection summary (aggregate counts only).",
+                _ => "catalogued read-only operation.",
+            };
+            format!("{name} - {desc}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("Available tools (authorized for this request, read-only):\n{rows}")
 }
 
 /// The capability grants a run principal receives for a given channel.
@@ -281,10 +389,18 @@ mod tests {
         // extra_allowed_operations in the default config (see config.rs).
         let profile = ExecutionProfile::for_channel(ChannelKind::Cli);
         assert_eq!(profile.grants.len(), 2);
-        let ops: Vec<&str> = profile.grants.iter().map(|g| g.operation.as_str()).collect();
+        let ops: Vec<&str> = profile
+            .grants
+            .iter()
+            .map(|g| g.operation.as_str())
+            .collect();
         assert!(ops.contains(&STDOUT_SEND_TEXT));
         assert!(ops.contains(&SESSION_RECALL_RECENT));
-        assert!(!ops.contains(&SYSTEM_STATUS), "system.status is NOT a channel-level grant");
+        assert!(!ops.contains(&TIME_NOW));
+        assert!(
+            !ops.contains(&SYSTEM_STATUS),
+            "system.status is NOT a channel-level grant"
+        );
         for grant in &profile.grants {
             assert_eq!(grant.scope, "current_session");
         }
@@ -294,10 +410,18 @@ mod tests {
     fn execution_profile_for_feishu_grants_feishu_send_message_and_recall() {
         let profile = ExecutionProfile::for_channel(ChannelKind::Feishu);
         assert_eq!(profile.grants.len(), 2);
-        let ops: Vec<&str> = profile.grants.iter().map(|g| g.operation.as_str()).collect();
+        let ops: Vec<&str> = profile
+            .grants
+            .iter()
+            .map(|g| g.operation.as_str())
+            .collect();
         assert!(ops.contains(&FEISHU_SEND_MESSAGE));
         assert!(ops.contains(&SESSION_RECALL_RECENT));
-        assert!(!ops.contains(&SYSTEM_STATUS), "system.status is NOT a channel-level grant");
+        assert!(!ops.contains(&TIME_NOW));
+        assert!(
+            !ops.contains(&SYSTEM_STATUS),
+            "system.status is NOT a channel-level grant"
+        );
         for grant in &profile.grants {
             assert_eq!(grant.scope, "current_session");
         }

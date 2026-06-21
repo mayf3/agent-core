@@ -322,6 +322,7 @@ fn openai_compatible_llm_missing_config_returns_friendly_output() -> Result<()> 
     let output = llm.complete(LlmInput {
         blocks: vec![],
         user_text: "hello".to_string(),
+        granted_operations: vec![],
     })?;
     assert_eq!(output.provider, "openai-compatible");
     assert_eq!(
@@ -345,6 +346,7 @@ fn zai_model_prefix_is_normalized_for_zai_endpoint() -> Result<()> {
     let output = llm.complete(LlmInput {
         blocks: vec![],
         user_text: "hello".to_string(),
+        granted_operations: vec![],
     })?;
     assert_eq!(output.model, "glm-5.1");
     assert_eq!(
@@ -367,6 +369,7 @@ fn provider_model_prefix_is_preserved_for_generic_endpoint() -> Result<()> {
     let output = llm.complete(LlmInput {
         blocks: vec![],
         user_text: "hello".to_string(),
+        granted_operations: vec![],
     })?;
     assert_eq!(output.model, "zai/glm-5.1");
     Ok(())
