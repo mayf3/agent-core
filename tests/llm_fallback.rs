@@ -24,6 +24,7 @@ fn fallback_endpoint_is_used_after_primary_http_error() -> Result<()> {
     let output = llm.complete(LlmInput {
         blocks: vec![],
         user_text: "hello".into(),
+        granted_operations: vec![],
     })?;
     assert_eq!(output.model, "deepseek-v4-flash");
     assert_eq!(output.content, "fallback ok");
@@ -64,7 +65,6 @@ use agent_core_kernel::gateway::Gateway;
 use agent_core_kernel::journal::JournalStore;
 use agent_core_kernel::llm::{LlmOutput, ToolCall, ToolCallResult};
 use agent_core_kernel::runtime::Runtime;
-
 struct RecallThenAnswerLlm {
     round: Arc<Mutex<usize>>,
     saw_tool_result_block: Arc<Mutex<bool>>,

@@ -42,11 +42,18 @@ fn context_assembler_loads_files_catalog_recent_and_truncates() -> Result<()> {
     )?;
 
     let event = validated_event("event_current", "current text");
+    let grants: Vec<String> = event
+        .principal
+        .grants
+        .iter()
+        .map(|g| g.operation.clone())
+        .collect();
     let blocks = ContextAssembler::from_config(&config).build(
         &journal,
         &session,
         &event,
         "current text that is intentionally longer than the tiny budget",
+        &grants,
     )?;
 
     let root_block = block(&blocks, ContextBlockKind::RootSystem);
@@ -167,10 +174,10 @@ fn test_config(root_dir: PathBuf) -> KernelConfig {
         model_timeout_ms: 100,
         context_recent_messages: 6,
         context_max_block_chars: 4_000,
-            outbox_dispatcher_enabled: false,
-            outbox_dispatcher_poll_interval_ms: 100,
-            extra_allowed_operations: vec![],
-            require_write_approval: false,
-            write_approval_ttl_secs: 0,
+        outbox_dispatcher_enabled: false,
+        outbox_dispatcher_poll_interval_ms: 100,
+        extra_allowed_operations: vec![],
+        require_write_approval: false,
+        write_approval_ttl_secs: 0,
     }
 }

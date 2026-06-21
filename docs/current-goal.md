@@ -97,7 +97,7 @@ If a harness prototype is incubated here temporarily, it must:
 Functional base for the current candidate:
 
 ```text
-ec66fc7 main (base of PR #155)
+8bd2356 main (PR #155 merged)
 ```
 
 Doc-only refreshes may follow this baseline without changing the functional
@@ -119,7 +119,8 @@ state described below.
   boolean into details instead of the ExpectationResult object; rewritten as if/else +
   3 regression tests (PR #132).
 
-Open PR at review time: #155 (`feat/tool-loop-clean`), not merged.
+Open PR at task start: none. PR #155 is merged. The current candidate addresses
+the remaining real-dogfood tool-discovery gap; it is not yet accepted.
 
 High-signal state:
 
@@ -139,7 +140,7 @@ High-signal state:
 
 ## Current State
 
-On `main` at `ec66fc7`. Open PR #155 (`feat/tool-loop-clean`) — **not merged**, still a candidate pending acceptance. PR #155 closes the tool-recall loop state machine:
+On `main` at `8bd2356`. PR #155 is merged and closes the tool-recall loop state machine:
 
 - **Closed 5-path state machine**: every model tool call follows exactly one terminal path — (1) provider-malformed → `ToolCallIssued` + `ToolCallRejected` with a safe internal id; (2) validation-rejected → `ToolCallIssued` + `ToolCallRejected`; (3) gateway-denied → `InvocationProposed` + `ToolCallRejected` (no `InvocationApproved`, no Receipt); (4) capability-succeeded → `InvocationProposed` + `InvocationApproved` + `ReceiptReceived Succeeded`; (5) capability-failed → `InvocationProposed` + `InvocationApproved` + exactly one `ReceiptReceived Failed` + sanitized ToolResult. An approved invocation always produces exactly one terminal Receipt; the Run never lingers on `Running`.
 - **Tool rejection path**: rejected tool calls write `ToolCallIssued` + `ToolCallRejected` journal facts (NOT `ReceiptReceived { status: "Failed" }`). No `InvocationProposed`, `InvocationApproved`, or `ReceiptReceived` are written for validation rejections. Capability is never executed.
@@ -152,7 +153,46 @@ On `main` at `ec66fc7`. Open PR #155 (`feat/tool-loop-clean`) — **not merged**
 - **Deterministic provider stub**: the stub HTTP server uses a bounded blocking-accept + shutdown-connect lifecycle (no sleep-based sync, no unbounded `join`); the tool-loop test is stable across repeated runs.
 - **Real provider test**: `stub_http_provider_completes_tool_loop` covers the full OpenAI-compatible protocol and repeats one provider ID across two tool rounds, proving distinct run/turn/index-scoped idempotency keys. Parser tests cover malformed arguments and missing or wrongly typed fields; Runtime tests separately prove the malformed issued/rejected path.
 
-Phase 0/1 are dogfood-ready on `main`. Phase 2 is a **candidate pending acceptance** in open PR #155 — not merged. The PR exposes three read-only tools (`time.now`, `session.recall_recent`, `system.status`) with strict schemas, real provider support, provider ID hashing, sanitized error boundaries, a closed tool-call state machine, and correct `ToolCallIssued`/`ToolCallRejected` journal semantics.
+Phase 0/1 ordinary Feishu delivery is dogfood-ready on `main`. Phase 2's tool
+loop mechanism is merged, but real Feishu `time.now` remains **pending dogfood
+acceptance**: the old generated bootstrap Prompt ("Keep Phase 0 chat-only" /
+"answers user messages without tools") discouraged all tool use, and Provider
+schemas were hardcoded to expose every ReadOnly catalog operation regardless of
+the Agent's grants. The current candidate PR fixes those two discovery
+boundaries plus exact legacy-template migration:
+
+- **Bootstrap Prompt**: `system/root.md`, `system/runtime.md`, and
+  `agents/main/AGENT.md` no longer say "chat-only" / "without tools"; they tell
+  the model to prefer an authorized read-only tool over guessing for real-time /
+  system / session facts, and never to assume tools that were not provided.
+- **Non-destructive migration**: `ensure_data_files` upgrades a file ONLY when
+  its bytes exactly match a known Phase-0 legacy default (exact string
+  comparison — not a fuzzy/digest match); a user-customized file is never
+  overwritten; missing files get the new default; idempotent on repeat start.
+  All writes (create + upgrade) are atomic (temp-file + flush + fsync + rename
+  in the same directory), so a crash or write failure never truncates a
+  template. See `docs/bootstrap-prompt-migration.md`.
+- **Provider schema from grants**: `tools` is now derived from
+  `granted_operations ∩ ReadOnly catalog` — an un-granted tool is never sent to
+  the provider. **The system ToolCatalog block is derived from the same grants**,
+  so the operation set the model sees in the prompt equals the set in the
+  provider `tools` schema (consistent across round 1 and round 2). The Gateway
+  remains the final boundary; a malicious provider fabricating an un-granted
+  `time.now` call is rejected with `ToolCallRejected(policy_denied)`. See
+  `examples/grant-time-now.md`.
+
+> Note: `AGENT_CORE_EXTRA_ALLOWED_OPERATIONS` is only the **current single-agent
+> compatibility config entry**, not the final architecture. The long-term target
+> is `~/.agent-core/agents/{agent_id}/agent.toml`, which will carry each agent's
+> grants, skills, and attributes. The repo templates and `examples/` are NOT a
+> production source of truth.
+
+This candidate must NOT be recorded as accepted until the user explicitly grants
+`time.now` externally (`AGENT_CORE_EXTRA_ALLOWED_OPERATIONS=time.now`) and
+verifies the real Feishu Journal chain (ToolCallIssued →
+InvocationProposed(time.now) → InvocationApproved → ReceiptReceived Succeeded).
+The local StubProvider tests prove the mechanism; they are NOT real dogfood
+success.
 
 External harness state (productization sprint complete, PRs #135/#136/#137):
 
@@ -196,7 +236,7 @@ connector 45/45, structure + secret-scan + diff --check clean.
 - PR #130: replay-eval synthetic fixture pack.
 - PR #131: audit-report `projection_drift` + `undelivered_ingress` Rust-semantics alignment.
 - PR #132/#134: replay-eval hard-fail details structured-object fix + regression coverage.
-- PR #155 (open, not merged): bounded read-only tool-recall loop with real provider support, strict schemas,
+- PR #155 (merged): bounded read-only tool-recall loop with real provider support, strict schemas,
   argument validation, sanitized error boundaries, provider ID hashing, and exact bounded-loop tests.
 
 ## Issues To Address Next
@@ -218,8 +258,12 @@ connector 45/45, structure + secret-scan + diff --check clean.
    - Extraction target should be a separate repo/package; do not move runtime,
      gateway, journal, or policy into TypeScript.
 
-3. **First safe practical tool / broader tool loop.** Candidate in PR #155.
-   - `time.now` proves the minimum read-only path.
+3. **First safe practical tool / broader tool loop.** Mechanism merged in PR #155;
+   real Feishu dogfood acceptance remains pending.
+   - Current candidate removes contradictory bootstrap text, migrates only exact
+     generated defaults, and derives Provider tools from explicit Agent grants.
+   - The operator must explicitly grant `time.now` through external config
+     before the final Feishu test; it is not a channel baseline grant.
    - More tools require strict schemas, session scoping, audit facts, and
      approval for write/external effects.
    - Do not add arbitrary HTTP, shell, browser, deployment, or memory tools by
