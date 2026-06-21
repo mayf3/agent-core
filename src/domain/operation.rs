@@ -166,6 +166,44 @@ pub fn provider_tools_for_grants(granted_operations: &[String]) -> Vec<serde_jso
         .collect()
 }
 
+/// Build the ToolCatalog text for the model from the **current Run's grants**:
+/// a tool is listed only when it is BOTH granted to the run principal AND a
+/// catalogued `ReadOnly` operation. Write operations and unknown names are
+/// never listed. Order is the catalog order (stable, deduplicated).
+///
+/// This stays consistent with `provider_tools_for_grants` — the operation set
+/// shown to the model in the ToolCatalog block equals the set in the provider
+/// `tools` schema. The Gateway remains the independent final authorization
+/// boundary; surfacing is only a prompt hint.
+pub fn catalog_for_context_grants(granted_operations: &[String]) -> String {
+    let names: Vec<&str> = CATALOG
+        .iter()
+        .filter(|spec| {
+            spec.risk == Risk::ReadOnly && granted_operations.iter().any(|g| g == spec.name)
+        })
+        .map(|spec| spec.name)
+        .collect();
+    if names.is_empty() {
+        return "No tools are available for this request.".to_string();
+    }
+    let rows = names
+        .into_iter()
+        .map(|name| {
+            let desc = match name {
+                TIME_NOW => "read the current kernel wall-clock time (no side effect).",
+                SESSION_RECALL_RECENT => {
+                    "recall recent messages from the current session (read-only, current session only)."
+                }
+                SYSTEM_STATUS => "read system health and projection summary (aggregate counts only).",
+                _ => "catalogued read-only operation.",
+            };
+            format!("{name} - {desc}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("Available tools (authorized for this request, read-only):\n{rows}")
+}
+
 /// The capability grants a run principal receives for a given channel.
 ///
 /// Phase 2 M2b (`docs/decisions/phase2-invocation-gateway-scoping.md`):

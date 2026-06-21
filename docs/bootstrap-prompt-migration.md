@@ -23,10 +23,16 @@ For each bootstrap file (`system/root.md`, `system/runtime.md`,
 | Content is already the new default | No-op (idempotent) |
 | Content differs from any known default (user-customized) | **Left untouched** |
 
-Matching is exact, path-specific, and byte-for-byte, not fuzzy. A Root template
-placed in the Agent template path is not considered that path's legacy default.
-Editing a single character of a legacy default makes it "user-customized" and
-it will NOT be upgraded.
+Matching is exact, path-specific, and byte-for-byte, not fuzzy and not a digest.
+A Root template placed in the Agent template path is not considered that path's
+legacy default. Editing a single character of a legacy default makes it
+"user-customized" and it will NOT be upgraded.
+
+All template writes (new-file creation and legacy upgrade) are atomic: a temp
+file is written in the same directory, flushed, fsynced, then renamed onto the
+target. A crash or write failure never truncates a template; on failure the
+original is untouched and the temp file is cleaned up. New files use safe
+default permissions (0600 on unix).
 
 ## Recognizing the old Phase-0 Prompt
 

@@ -34,6 +34,12 @@ AGENT_CORE_EXTRA_ALLOWED_OPERATIONS=time.now,system.status
 > Note: `system.status` is added to the dogfood profile automatically by the
 > Kernel default config. The `time.now` grant is not defaulted; you must grant
 > it explicitly through this external setting.
+>
+> `AGENT_CORE_EXTRA_ALLOWED_OPERATIONS` is the **current single-agent
+> compatibility config entry**, not the final architecture. The long-term target
+> is `~/.agent-core/agents/{agent_id}/agent.toml`, which will carry each agent's
+> grants, skills, and attributes. These repo docs/examples are NOT a production
+> source of truth.
 
 After this PR is merged, update the external service configuration and restart
 the Kernel yourself. The provider request will then include the `time.now`
