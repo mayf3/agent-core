@@ -122,8 +122,19 @@ where
             chat_id,
         } = event.payload.clone();
 
-        let mut blocks =
-            ContextAssembler::from_config(&self.config).build(journal, &session, &event, &text)?;
+        let granted_operations: Vec<String> = run
+            .principal
+            .grants
+            .iter()
+            .map(|g| g.operation.clone())
+            .collect();
+        let mut blocks = ContextAssembler::from_config(&self.config).build(
+            journal,
+            &session,
+            &event,
+            &text,
+            &granted_operations,
+        )?;
         journal.append_event(
             JournalEventKind::ContextBuilt,
             Some(&run.id),
@@ -134,12 +145,6 @@ where
                 "kinds": blocks.iter().map(|block| format!("{:?}", block.kind)).collect::<Vec<_>>(),
             }),
         )?;
-        let granted_operations: Vec<String> = run
-            .principal
-            .grants
-            .iter()
-            .map(|g| g.operation.clone())
-            .collect();
         let first = self.llm.complete(LlmInput {
             blocks: blocks.clone(),
             user_text: text.clone(),

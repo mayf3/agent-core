@@ -26,29 +26,45 @@ impl ContextAssembler {
         session: &Session,
         event: &ValidatedEvent,
         user_text: &str,
+        granted_operations: &[String],
     ) -> Result<Vec<ContextBlock>> {
         let recent = self.recent_block(journal, session, &event.event_id.0)?;
         let mut blocks = vec![
             self.file_block(
                 ContextBlockKind::RootSystem,
                 "system/root.md",
-                "You are the main Agent Core assistant.",
+                // Generic, safe fallback — NOT "Phase 0 chat-only". When the
+                // external prompt file is absent/unreadable, the model is still
+                // told it may use explicitly-provided, Gateway-authorized tools
+                // and should prefer an authorized read-only tool over guessing.
+                "You are the main Agent Core assistant. You may use tools that \
+                 are explicitly provided in the current request and authorized \
+                 by the Gateway. For real-time, system, or session facts, do \
+                 not guess; prefer an authorized read-only tool. Never assume a \
+                 tool that was not provided or not authorized.",
                 Compressibility::Never,
             ),
             self.file_block(
                 ContextBlockKind::RuntimeContract,
                 "system/runtime.md",
-                "Use the kernel boundary. External actions require approved invocations.",
+                "External actions must be expressed as invocation intents and \
+                 approved by Gateway. For real-time, system, or current-session \
+                 facts, do not guess; use an authorized read-only tool if one is \
+                 provided. Never assume a tool that was not provided.",
                 Compressibility::Never,
             ),
             self.file_block(
                 ContextBlockKind::AgentProfile,
                 "agents/main/AGENT.md",
-                "Main agent. Phase 0 chat-only profile.",
+                "Main agent. You assist the user by answering messages and, when \
+                 useful, calling the tools explicitly provided in the current \
+                 request. Prefer an authorized read-only tool over guessing for \
+                 real-time, system, or session facts. Do not assume tools that \
+                 were not provided or not authorized.",
                 Compressibility::Never,
             ),
             self.skill_catalog_block(),
-            self.tool_catalog_block(),
+            self.tool_catalog_block(granted_operations),
             self.file_block(
                 ContextBlockKind::ActiveSkill,
                 "skills/chat/SKILL.md",
@@ -97,14 +113,12 @@ impl ContextAssembler {
             self.max_block_chars,
         )
     }
-    fn tool_catalog_block(&self) -> ContextBlock {
-        // Phase 2 tool-surfacing: surface the operation catalog so the model
-        // knows which operations exist and their risk class. Generated from
-        // the single source of truth (src/domain/operation.rs).
-        let content = format!(
-            "Available operations (propose via the kernel; read-only ones run              inline, write ones need approval when enabled):\n{}",
-            crate::domain::operation::catalog_for_context()
-        );
+    fn tool_catalog_block(&self, granted_operations: &[String]) -> ContextBlock {
+        // ToolCatalog is derived from the current Run's grants ∩ the ReadOnly
+        // catalog — exactly the same operation set as the provider `tools`
+        // schema. An un-granted or Write operation is never shown. The Gateway
+        // remains the independent final authorization boundary.
+        let content = crate::domain::operation::catalog_for_context_grants(granted_operations);
         block(
             ContextBlockKind::ToolCatalog,
             &content,

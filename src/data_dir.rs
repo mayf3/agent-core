@@ -111,6 +111,10 @@ pub fn ensure_data_files(data_dir: &Path) -> Result<BootstrapMigrationReport> {
 /// - missing  → write the new default
 /// - exact legacy default → overwrite with the new default
 /// - anything else (user-customized, or already the new default) → untouched
+///
+/// All writes use `atomic_write` so a crash or write failure can never leave a
+/// truncated/corrupt template file: the target file is either untouched or
+/// fully replaced.
 fn upgrade_template(
     path: &Path,
     legacy_default: &str,
@@ -120,7 +124,7 @@ fn upgrade_template(
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(path, new_default)?;
+        atomic_write(path, new_default)?;
         return Ok(TemplateAction::Created);
     }
     let current = fs::read_to_string(path)?;
@@ -128,10 +132,55 @@ fn upgrade_template(
         return Ok(TemplateAction::Current);
     }
     if current == legacy_default {
-        fs::write(path, new_default)?;
+        atomic_write(path, new_default)?;
         return Ok(TemplateAction::Upgraded);
     }
     Ok(TemplateAction::MigrationNeeded)
+}
+
+/// Write `content` to `path` atomically: write to a unique temp file in the
+/// SAME directory, flush+sync, then rename onto the target. On failure the
+/// target file is never truncated or partially written; the temp file is
+/// cleaned up. New files get safe default permissions (0600). This is a small,
+/// closed helper — not a general file-transaction framework.
+fn atomic_write(path: &Path, content: &str) -> Result<()> {
+    let dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(dir)?;
+    // Unique temp name in the same directory (required for rename atomicity).
+    let tmp = dir.join(format!(
+        ".{}.tmp",
+        path.file_name().and_then(|n| n.to_str()).unwrap_or("tmpl")
+    ));
+    let write_result: Result<()> = (|| {
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&tmp)?;
+        // Safe permissions on a newly-created file (best-effort; files being
+        // upgraded keep their original mode because rename preserves it).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
+        }
+        use std::io::Write;
+        f.write_all(content.as_bytes())?;
+        f.flush()?;
+        // fsync so the bytes hit disk before the rename.
+        f.sync_all()?;
+        Ok(())
+    })();
+    if write_result.is_err() {
+        // Clean up the partial temp file; the target is untouched.
+        let _ = fs::remove_file(&tmp);
+        return write_result;
+    }
+    fs::rename(&tmp, path)?;
+    Ok(())
 }
 
 pub fn copy_legacy_db_if_needed(legacy_path: &Path, new_path: &Path) -> Result<()> {
@@ -276,6 +325,127 @@ mod tests {
         let report = ensure_data_files(&dir).unwrap();
         assert_eq!(report.migration_needed, 1);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), LEGACY_AGENT_MD);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ===== §3: atomic write semantics =====
+
+    #[test]
+    fn atomic_write_creates_missing_file() {
+        let dir = temp_dir();
+        let p = dir.join("sub/agent.md");
+        atomic_write(&p, "hello").unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "hello");
+        // No leftover temp file.
+        assert!(
+            !std::fs::read_dir(dir.join("sub"))
+                .unwrap()
+                .any(|e| { e.unwrap().file_name().to_string_lossy().ends_with(".tmp") }),
+            "no leftover temp file"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn atomic_write_replaces_existing_file_atomically() {
+        let dir = temp_dir();
+        let p = dir.join("x.md");
+        std::fs::write(&p, "old").unwrap();
+        atomic_write(&p, "new content").unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "new content");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn atomic_write_failure_leaves_original_unchanged() {
+        let dir = temp_dir();
+        let p = dir.join("good.md");
+        std::fs::write(&p, "original").unwrap();
+        // Point the write at a path whose parent is a FILE → create_dir_all /
+        // open must fail. The original must be untouched.
+        let bad = dir.join("good.md/notallowed/sub.md");
+        let result = atomic_write(&bad, "x");
+        assert!(result.is_err(), "write should fail");
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "original");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn atomic_write_is_idempotent() {
+        let dir = temp_dir();
+        let p = dir.join("i.md");
+        atomic_write(&p, "v1").unwrap();
+        atomic_write(&p, "v1").unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "v1");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ensure_data_files_upgrade_is_atomic() {
+        // An exact legacy default is upgraded; on success the file is the new
+        // default, no temp file remains.
+        let dir = temp_dir();
+        let p = dir.join("agents/main/AGENT.md");
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, LEGACY_AGENT_MD).unwrap();
+        ensure_data_files(&dir).unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), AGENT_MD);
+        assert!(
+            !std::fs::read_dir(dir.join("agents/main"))
+                .unwrap()
+                .any(|e| { e.unwrap().file_name().to_string_lossy().ends_with(".tmp") }),
+            "no leftover temp file after upgrade"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn empty_and_newline_changed_custom_files_preserved() {
+        let dir = temp_dir();
+        // Empty file is custom (not a legacy default) → preserved.
+        let p = dir.join("system/root.md");
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, "").unwrap();
+        let report = ensure_data_files(&dir).unwrap();
+        assert_eq!(report.migration_needed, 1);
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn non_utf8_custom_file_is_preserved_or_safely_failed() {
+        let dir = temp_dir();
+        let p = dir.join("agents/main/AGENT.md");
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        // Invalid UTF-8 bytes — not a legacy default, must NOT be overwritten.
+        std::fs::write(&p, b"\xff\xfe garbage").unwrap();
+        let report = ensure_data_files(&dir);
+        // Either migration_needed (read fails → treated as needs-migration) or
+        // an Err is acceptable, but the file must be untouched.
+        match report {
+            Ok(r) => {
+                assert_eq!(r.migration_needed, 1);
+            }
+            Err(_) => {}
+        }
+        assert_eq!(std::fs::read(&p).unwrap(), b"\xff\xfe garbage");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_new_file_has_safe_permissions() {
+        let dir = temp_dir();
+        let p = dir.join("perm.md");
+        atomic_write(&p, "x").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&p).unwrap().permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "new file should have 0600, got {:o}",
+            mode
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -204,3 +204,7 @@ mod blank_reply_tests;
 #[cfg(test)]
 #[path = "grant_schema_tests.rs"]
 mod grant_schema_tests;
+
+#[cfg(test)]
+#[path = "grants_context_tests.rs"]
+mod grants_context_tests;

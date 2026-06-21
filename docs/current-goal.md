@@ -166,19 +166,33 @@ boundaries plus exact legacy-template migration:
   the model to prefer an authorized read-only tool over guessing for real-time /
   system / session facts, and never to assume tools that were not provided.
 - **Non-destructive migration**: `ensure_data_files` upgrades a file ONLY when
-  its bytes exactly match a known Phase-0 legacy default (verified by digest); a
-  user-customized file is never overwritten; missing files get the new default;
-  idempotent on repeat start. See `docs/bootstrap-prompt-migration.md`.
+  its bytes exactly match a known Phase-0 legacy default (exact string
+  comparison — not a fuzzy/digest match); a user-customized file is never
+  overwritten; missing files get the new default; idempotent on repeat start.
+  All writes (create + upgrade) are atomic (temp-file + flush + fsync + rename
+  in the same directory), so a crash or write failure never truncates a
+  template. See `docs/bootstrap-prompt-migration.md`.
 - **Provider schema from grants**: `tools` is now derived from
   `granted_operations ∩ ReadOnly catalog` — an un-granted tool is never sent to
-  the provider. The Gateway remains the final boundary; a malicious provider
-  fabricating an un-granted `time.now` call is rejected with
-  `ToolCallRejected(policy_denied)`. See `examples/grant-time-now.md`.
+  the provider. **The system ToolCatalog block is derived from the same grants**,
+  so the operation set the model sees in the prompt equals the set in the
+  provider `tools` schema (consistent across round 1 and round 2). The Gateway
+  remains the final boundary; a malicious provider fabricating an un-granted
+  `time.now` call is rejected with `ToolCallRejected(policy_denied)`. See
+  `examples/grant-time-now.md`.
+
+> Note: `AGENT_CORE_EXTRA_ALLOWED_OPERATIONS` is only the **current single-agent
+> compatibility config entry**, not the final architecture. The long-term target
+> is `~/.agent-core/agents/{agent_id}/agent.toml`, which will carry each agent's
+> grants, skills, and attributes. The repo templates and `examples/` are NOT a
+> production source of truth.
 
 This candidate must NOT be recorded as accepted until the user explicitly grants
 `time.now` externally (`AGENT_CORE_EXTRA_ALLOWED_OPERATIONS=time.now`) and
 verifies the real Feishu Journal chain (ToolCallIssued →
 InvocationProposed(time.now) → InvocationApproved → ReceiptReceived Succeeded).
+The local StubProvider tests prove the mechanism; they are NOT real dogfood
+success.
 
 External harness state (productization sprint complete, PRs #135/#136/#137):
 

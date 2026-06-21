@@ -14,7 +14,7 @@ use std::sync::{
     Arc, Mutex,
 };
 
-// ===== §5/§7: schema is derived from granted operations ∩ ReadOnly catalog =====
+// §5/§7: schema is derived from granted operations ∩ ReadOnly catalog
 
 #[test]
 fn provider_tools_expose_only_granted_readonly_operations() {
@@ -78,10 +78,8 @@ fn provider_tool_definition_rejects_write_and_unknown() {
 }
 
 // ===== §7: real HTTP request-capture — tools reflect grants =====
-//
-// A local stub server captures the raw outgoing request body (no key, no
-// real network) so we can assert the provider sees exactly the authorized
-// tools. Nothing sensitive is printed.
+// A local stub server captures the raw outgoing request body (no key, no real
+// network). Nothing sensitive is printed.
 
 struct CaptureServer {
     port: u16,
@@ -216,6 +214,15 @@ fn request_includes_time_now_when_granted() -> Result<()> {
             .and_then(Value::as_str),
         Some("object")
     );
+    // §5: every exposed tool schema must be strict.
+    for tool in tools {
+        assert_eq!(
+            tool.pointer("/function/parameters/additionalProperties")
+                .and_then(Value::as_bool),
+            Some(false),
+            "strict schema required"
+        );
+    }
     let names: Vec<&str> = tools
         .iter()
         .filter_map(|tool| tool.pointer("/function/name").and_then(Value::as_str))
@@ -290,7 +297,7 @@ fn misconfigured_write_grant_not_in_tools() -> Result<()> {
     Ok(())
 }
 
-// ===== §8: Gateway is the security boundary (un-granted tool call rejected) =====
+// ===== §8: Gateway is the security boundary =====
 
 fn config() -> KernelConfig {
     use std::path::PathBuf;
@@ -357,28 +364,20 @@ fn ungranted_provider_time_now_is_rejected_by_gateway() {
     runtime.deliver(&journal, &gateway, event).unwrap();
     let events = journal.events().unwrap();
     let count = |k: JournalEventKind| events.iter().filter(|e| e.kind == k).count();
+    // count an event kind whose operation == time.now
+    let count_op = |k: JournalEventKind| {
+        events
+            .iter()
+            .filter(|e| {
+                e.kind == k
+                    && e.payload.get("operation").and_then(Value::as_str) == Some("time.now")
+            })
+            .count()
+    };
     assert_eq!(count(JournalEventKind::ToolCallIssued), 1);
-    assert_eq!(
-        events
-            .iter()
-            .filter(|event| {
-                event.kind == JournalEventKind::InvocationProposed
-                    && event.payload.get("operation").and_then(Value::as_str) == Some("time.now")
-            })
-            .count(),
-        1
-    );
+    assert_eq!(count_op(JournalEventKind::InvocationProposed), 1);
     assert_eq!(count(JournalEventKind::ToolCallRejected), 1);
-    assert_eq!(
-        events
-            .iter()
-            .filter(|event| {
-                event.kind == JournalEventKind::InvocationApproved
-                    && event.payload.get("operation").and_then(Value::as_str) == Some("time.now")
-            })
-            .count(),
-        0
-    );
+    assert_eq!(count_op(JournalEventKind::InvocationApproved), 0);
     assert_eq!(count(JournalEventKind::ReceiptReceived), 0);
     let rej = events
         .iter()
@@ -396,6 +395,13 @@ fn ungranted_provider_time_now_is_rejected_by_gateway() {
         .filter_map(|tool| tool.pointer("/function/name").and_then(Value::as_str))
         .collect();
     assert_eq!(names, vec!["session.recall_recent"]);
+    // §5: time.now is not in provider tools (asserted via names above) and not
+    // in the system ToolCatalog block.
+    let sys_msg = requests[0]["messages"][0]["content"].as_str().unwrap_or("");
+    assert!(
+        !sys_msg.contains("time.now"),
+        "un-granted time.now not in ToolCatalog"
+    );
 }
 
 // ===== §9: full time.now tool loop (granted) =====
@@ -473,4 +479,22 @@ fn granted_time_now_completes_real_http_tool_loop() {
         .unwrap();
     assert!(followup_context.contains("tool: time.now"));
     assert!(followup_context.contains("status: succeeded"));
+    // §5: round-2 tools set == round-1; ToolCatalog consistent across rounds.
+    let names2: Vec<&str> = requests[1]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|t| t.pointer("/function/name").and_then(Value::as_str))
+        .collect();
+    assert_eq!(names2, names, "round-2 tools set must equal round-1");
+    let cat1 = requests[0]["messages"][0]["content"].as_str().unwrap_or("");
+    let cat2 = requests[1]["messages"][0]["content"].as_str().unwrap_or("");
+    assert_eq!(
+        cat1.contains("time.now"),
+        cat2.contains("time.now"),
+        "ToolCatalog consistent across rounds"
+    );
+    // Run is not left Running.
+    let status = journal.run_status(&outcome.run_id).unwrap();
+    assert_ne!(status.as_deref(), Some("Running"), "Run not stuck Running");
 }
