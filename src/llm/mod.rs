@@ -170,6 +170,18 @@ impl OpenAiCompatibleLlm {
         endpoint: &ModelEndpoint,
         input: &LlmInput,
     ) -> std::result::Result<Value, String> {
+        let mut tools =
+            crate::domain::operation::provider_tools_for_grants(&input.granted_operations);
+        // DeepSeek rejects dots in function names (^[a-zA-Z0-9_-]+$).
+        // Encode as _D_ (collision-free: _ → __ so _D_ can't appear naturally).
+        // The response parser (parse_tool_call) reverses the mapping.
+        if is_deepseek_endpoint(&endpoint.base_url) {
+            for tool in &mut tools {
+                if let Some(name) = tool.pointer("/function/name").and_then(Value::as_str) {
+                    tool["function"]["name"] = json!(encode_deepseek_fn_name(name));
+                }
+            }
+        }
         let body = json!({
             "model": endpoint.model,
             "messages": [
@@ -183,7 +195,7 @@ impl OpenAiCompatibleLlm {
                 },
             ],
             "temperature": 0.2,
-            "tools": crate::domain::operation::provider_tools_for_grants(&input.granted_operations),
+            "tools": tools,
             "tool_choice": "auto",
         });
         let agent = ureq::Agent::config_builder()
@@ -330,12 +342,13 @@ fn parse_tool_call(value: &Value) -> ToolCallResult {
         _ => return ToolCallResult::Malformed("missing tool_call id".to_string()),
     };
     let id = tool_call_id_hash(raw_id);
-    let operation = match function.get("name").and_then(Value::as_str) {
+    let raw_operation = match function.get("name").and_then(Value::as_str) {
         Some(n) if !n.trim().is_empty() => n.to_string(),
         _ => {
             return ToolCallResult::Malformed("missing function name".to_string());
         }
     };
+    let operation = decode_deepseek_fn_name(&raw_operation);
     let arguments_str = function.get("arguments").and_then(Value::as_str);
     let arguments_val = match arguments_str {
         Some(s) => match serde_json::from_str::<Value>(s) {
@@ -447,6 +460,40 @@ fn normalize_model_name(base_url: &str, model: &str) -> String {
 fn is_zai_endpoint(base_url: &str) -> bool {
     let lower = base_url.to_ascii_lowercase();
     lower.contains("z.ai") || lower.contains("bigmodel.cn")
+}
+
+fn is_deepseek_endpoint(base_url: &str) -> bool {
+    base_url.to_ascii_lowercase().contains("deepseek")
+}
+
+/// Encode a canonical fn name for DeepSeek (no dots allowed: ^[a-zA-Z0-9_-]+$).
+/// Scheme (collision-free): `.` → `_D_`, `_` → `__`. Decode reverses.
+fn encode_deepseek_fn_name(name: &str) -> String {
+    name.replace('_', "__").replace('.', "_D_")
+}
+
+/// Reverse `encode_deepseek_fn_name`. Tries raw name first; if not in catalog
+/// applies `_D_`/`__` decode and looks up again. Falls back to raw name.
+fn decode_deepseek_fn_name(name: &str) -> String {
+    if crate::domain::operation::lookup(name).is_some() {
+        return name.to_string();
+    }
+    let mut r = String::with_capacity(name.len());
+    let b = name.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if i + 3 <= b.len() && b[i] == b'_' && b[i + 1] == b'D' && b[i + 2] == b'_' {
+            r.push('.');
+            i += 3;
+        } else if i + 1 < b.len() && b[i] == b'_' && b[i + 1] == b'_' {
+            r.push('_');
+            i += 2;
+        } else {
+            r.push(b[i] as char);
+            i += 1;
+        }
+    }
+    if crate::domain::operation::lookup(&r).is_some() { r } else { name.to_string() }
 }
 
 #[cfg(test)]
