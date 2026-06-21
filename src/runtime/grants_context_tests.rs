@@ -11,22 +11,12 @@ mod grants_context_tests {
 
     // ===== §4: env → profile → principal → ToolCatalog / Provider tools =====
     //
-    // The only correct config key is AGENT_CORE_EXTRA_ALLOWED_OPERATIONS. We
-    // test the pure parse+filter path (no real env mutation, to avoid
-    // cross-test races). The shared helper `parse_extra_operations` mirrors the
-    // kernel's env_list semantics (trim, drop-empty), then with_extra dedups
-    // and drops unknown names; Write ops pass the grant check but are hidden by
-    // catalog_for_context_grants / provider_tools_for_grants.
-
-    /// Mirror of the kernel env parser (config.rs env_list): split on comma,
-    /// trim, drop empties.
-    fn parse_extra_operations(raw: &str) -> Vec<String> {
-        raw.split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-            .collect()
-    }
+    // The only correct config key is AGENT_CORE_EXTRA_ALLOWED_OPERATIONS.
+    // Tests reuse the production `parse_env_list_value` (not a mirror), so
+    // the same split/trim/filter logic that `KernelConfig::from_cli` calls
+    // is exercised without mutating global environment variables. Downstream
+    // with_extra dedups and drops unknown names; Write ops pass the grant
+    // check but are hidden by catalog_for_context_grants / provider_tools_for_grants.
 
     fn tool_set_from_grants(grants: &[String]) -> Vec<String> {
         provider_tools_for_grants(grants)
@@ -51,7 +41,7 @@ mod grants_context_tests {
     #[test]
     fn single_time_now_grant_aligns_catalog_and_provider_tools() {
         let grants: Vec<String> = ExecutionProfile::for_channel(ChannelKind::Cli)
-            .with_extra(&parse_extra_operations("time.now"))
+            .with_extra(&crate::config::parse_env_list_value("time.now"))
             .grants
             .into_iter()
             .map(|g| g.operation)
@@ -69,7 +59,7 @@ mod grants_context_tests {
     #[test]
     fn multiple_readonly_grants_whitespace_and_duplicates() {
         let grants: Vec<String> = ExecutionProfile::for_channel(ChannelKind::Cli)
-            .with_extra(&parse_extra_operations(
+            .with_extra(&crate::config::parse_env_list_value(
                 "  time.now ,  system.status ,, time.now  ",
             ))
             .grants
@@ -95,7 +85,7 @@ mod grants_context_tests {
     #[test]
     fn unknown_operations_do_not_enter_profile_or_tools() {
         let grants: Vec<String> = ExecutionProfile::for_channel(ChannelKind::Cli)
-            .with_extra(&parse_extra_operations("shell.exec, time.now, bogus_op"))
+            .with_extra(&crate::config::parse_env_list_value("shell.exec, time.now, bogus_op"))
             .grants
             .into_iter()
             .map(|g| g.operation)
@@ -111,7 +101,7 @@ mod grants_context_tests {
         // Even if a Write op is in the env, it is granted (lookup passes) but
         // hidden from BOTH Provider tools and the ToolCatalog (ReadOnly-only).
         let grants: Vec<String> = ExecutionProfile::for_channel(ChannelKind::Cli)
-            .with_extra(&parse_extra_operations("feishu.send_message, time.now"))
+            .with_extra(&crate::config::parse_env_list_value("feishu.send_message, time.now"))
             .grants
             .into_iter()
             .map(|g| g.operation)
