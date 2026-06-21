@@ -2,6 +2,7 @@ use crate::domain::ContextBlock;
 use anyhow::Result;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::time::Duration;
 
 pub trait LlmClient {
@@ -73,6 +74,12 @@ pub struct ToolCall {
     pub arguments: serde_json::Value,
 }
 
+/// Per-request mapping from a provider-safe function name back to the
+/// canonical catalog operation name. Built during request construction and
+/// consumed during response parsing so only names *this request* actually
+/// exposed can be recovered. Unknown/forged names are safely rejected.
+pub(crate) type ToolNameMap = HashMap<String, String>;
+
 impl<T: LlmClient + ?Sized> LlmClient for Box<T> {
     fn complete(&self, input: LlmInput) -> Result<LlmOutput> {
         (**self).complete(input)
@@ -134,10 +141,11 @@ impl LlmClient for OpenAiCompatibleLlm {
             };
         }
         match self.request_endpoint(&self.primary, &input) {
-            Ok(value) => Ok(success_output(
+            Ok((value, map)) => Ok(success_output(
                 &self.primary.model,
                 input.blocks.len(),
                 value,
+                &map,
             )),
             Err(error) => {
                 if let Some(output) = self.try_fallback(&input, error.as_str()) {
@@ -157,7 +165,7 @@ impl OpenAiCompatibleLlm {
     fn try_fallback(&self, input: &LlmInput, primary_error: &str) -> Option<LlmOutput> {
         let fallback = self.fallback.as_ref()?;
         let output = match self.request_endpoint(fallback, input) {
-            Ok(value) => success_output(&fallback.model, input.blocks.len(), value),
+            Ok((value, map)) => success_output(&fallback.model, input.blocks.len(), value, &map),
             Err(error) => {
                 request_failed_output(&fallback.model, input.blocks.len(), error.as_str())
             }
@@ -169,16 +177,20 @@ impl OpenAiCompatibleLlm {
         &self,
         endpoint: &ModelEndpoint,
         input: &LlmInput,
-    ) -> std::result::Result<Value, String> {
+    ) -> std::result::Result<(Value, ToolNameMap), String> {
         let mut tools =
             crate::domain::operation::provider_tools_for_grants(&input.granted_operations);
+        let mut tool_name_map = ToolNameMap::new();
         // DeepSeek rejects dots in function names (^[a-zA-Z0-9_-]+$).
-        // Encode as _D_ (collision-free: _ → __ so _D_ can't appear naturally).
-        // The response parser (parse_tool_call) reverses the mapping.
+        // Build a per-request explicit mapping table: assign each tool a
+        // compact provider-safe index name (fn_0, fn_1, …) so only names
+        // exposed by *this* request can be recovered during response parsing.
         if is_deepseek_endpoint(&endpoint.base_url) {
-            for tool in &mut tools {
+            for (idx, tool) in tools.iter_mut().enumerate() {
                 if let Some(name) = tool.pointer("/function/name").and_then(Value::as_str) {
-                    tool["function"]["name"] = json!(encode_deepseek_fn_name(name));
+                    let safe = format!("fn_{}", idx);
+                    tool_name_map.insert(safe.clone(), name.to_string());
+                    tool["function"]["name"] = json!(safe);
                 }
             }
         }
@@ -207,7 +219,7 @@ impl OpenAiCompatibleLlm {
             .header("authorization", &format!("Bearer {}", endpoint.api_key))
             .header("content-type", "application/json")
             .send_json(body);
-        match response {
+        let response_value = match response {
             Ok(mut response) => response
                 .body_mut()
                 .read_json::<Value>()
@@ -215,7 +227,8 @@ impl OpenAiCompatibleLlm {
             Err(ureq::Error::StatusCode(code)) => Err(format!("model_http_{code}")),
             Err(ureq::Error::Timeout(_)) => Err("model_timeout".to_string()),
             Err(_) => Err("model_request_failed".to_string()),
-        }
+        };
+        response_value.map(|v| (v, tool_name_map))
     }
 }
 
@@ -283,7 +296,7 @@ fn request_failed_output(model: &str, context_blocks: usize, category: &str) -> 
     }
 }
 
-fn success_output(model: &str, context_blocks: usize, value: Value) -> LlmOutput {
+fn success_output(model: &str, context_blocks: usize, value: Value, map: &ToolNameMap) -> LlmOutput {
     let content = value
         .pointer("/choices/0/message/content")
         .and_then(Value::as_str)
@@ -292,7 +305,7 @@ fn success_output(model: &str, context_blocks: usize, value: Value) -> LlmOutput
         .unwrap_or("")
         .to_string();
     // Parse tool_calls[0] from the OpenAI-compatible response.
-    let tool_call = parse_tool_call(&value);
+    let tool_call = parse_tool_call(&value, map);
     // When the provider returns a malformed tool call with no text content,
     // ensure a non-empty user-safe fallback so the reply is never silently empty.
     let content = match &tool_call {
@@ -322,9 +335,14 @@ fn success_output(model: &str, context_blocks: usize, value: Value) -> LlmOutput
 /// Returns `ToolCallResult` — three-way state distinguishing absent, valid,
 /// and malformed tool calls. Never returns raw provider IDs or arguments.
 ///
+/// When `map` is non-empty (deepseek endpoint), the provider-safe name
+/// (e.g. `fn_0`) is looked up in the map to recover the canonical operation
+/// name (e.g. `time.now`). Unknown names that are not in the map are treated
+/// as malformed — they cannot be forged into arbitrary internal operations.
+///
 /// Malformed `function.arguments` (invalid JSON, non-object JSON) is rejected
 /// as `Malformed(reason)` — the model receives a ToolResult and can recover.
-fn parse_tool_call(value: &Value) -> ToolCallResult {
+fn parse_tool_call(value: &Value, map: &ToolNameMap) -> ToolCallResult {
     let tool_call_json = match value.pointer("/choices/0/message/tool_calls/0") {
         Some(v) if !v.is_null() => v,
         _ => return ToolCallResult::Absent,
@@ -348,7 +366,16 @@ fn parse_tool_call(value: &Value) -> ToolCallResult {
             return ToolCallResult::Malformed("missing function name".to_string());
         }
     };
-    let operation = decode_deepseek_fn_name(&raw_operation);
+    // Resolve provider-safe name → canonical catalog name via the per-request
+    // mapping table. Only names actually sent in *this* request can be
+    // recovered; forged/unknown names are rejected as malformed.
+    let operation = match map.get(&raw_operation) {
+        Some(canonical) => canonical.clone(),
+        None if map.is_empty() => raw_operation,
+        None => {
+            return ToolCallResult::Malformed("unknown function name".to_string());
+        }
+    };
     let arguments_str = function.get("arguments").and_then(Value::as_str);
     let arguments_val = match arguments_str {
         Some(s) => match serde_json::from_str::<Value>(s) {
@@ -464,36 +491,6 @@ fn is_zai_endpoint(base_url: &str) -> bool {
 
 fn is_deepseek_endpoint(base_url: &str) -> bool {
     base_url.to_ascii_lowercase().contains("deepseek")
-}
-
-/// Encode a canonical fn name for DeepSeek (no dots allowed: ^[a-zA-Z0-9_-]+$).
-/// Scheme (collision-free): `.` → `_D_`, `_` → `__`. Decode reverses.
-fn encode_deepseek_fn_name(name: &str) -> String {
-    name.replace('_', "__").replace('.', "_D_")
-}
-
-/// Reverse `encode_deepseek_fn_name`. Tries raw name first; if not in catalog
-/// applies `_D_`/`__` decode and looks up again. Falls back to raw name.
-fn decode_deepseek_fn_name(name: &str) -> String {
-    if crate::domain::operation::lookup(name).is_some() {
-        return name.to_string();
-    }
-    let mut r = String::with_capacity(name.len());
-    let b = name.as_bytes();
-    let mut i = 0;
-    while i < b.len() {
-        if i + 3 <= b.len() && b[i] == b'_' && b[i + 1] == b'D' && b[i + 2] == b'_' {
-            r.push('.');
-            i += 3;
-        } else if i + 1 < b.len() && b[i] == b'_' && b[i + 1] == b'_' {
-            r.push('_');
-            i += 2;
-        } else {
-            r.push(b[i] as char);
-            i += 1;
-        }
-    }
-    if crate::domain::operation::lookup(&r).is_some() { r } else { name.to_string() }
 }
 
 #[cfg(test)]
