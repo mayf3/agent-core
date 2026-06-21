@@ -359,18 +359,17 @@ fn ungranted_provider_time_now_is_rejected_by_gateway() {
     let runtime = Runtime::new(cfg, llm);
     let envelope = gateway.cli_ingress("current time".to_string()).unwrap();
     let event = gateway.validate_ingress(&journal, envelope).unwrap();
-    runtime.deliver(&journal, &gateway, event).unwrap();
+    let outcome = runtime.deliver(&journal, &gateway, event).unwrap();
+    assert_ne!(
+        journal.run_status(&outcome.run_id).unwrap().as_deref(),
+        Some("Running"),
+        "Run not stuck Running after un-granted tool call"
+    );
     let events = journal.events().unwrap();
     let count = |k: JournalEventKind| events.iter().filter(|e| e.kind == k).count();
     // count an event kind whose operation == time.now
     let count_op = |k: JournalEventKind| {
-        events
-            .iter()
-            .filter(|e| {
-                e.kind == k
-                    && e.payload.get("operation").and_then(Value::as_str) == Some("time.now")
-            })
-            .count()
+        events.iter().filter(|e| e.kind == k && e.payload.get("operation").and_then(Value::as_str) == Some("time.now")).count()
     };
     assert_eq!(count(JournalEventKind::ToolCallIssued), 1);
     assert_eq!(count_op(JournalEventKind::InvocationProposed), 1);

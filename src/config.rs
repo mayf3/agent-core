@@ -139,13 +139,20 @@ fn env_string(key: &str, fallback: &str) -> String {
         .to_string()
 }
 
-fn env_list(key: &str) -> Vec<String> {
-    env_string(key, "")
+/// Parse a comma-separated env-var value into non-empty, trimmed strings.
+/// Both production (`env_list`) and tests share this pure function so there
+/// is exactly one split/trim/filter code path.
+pub(crate) fn parse_env_list_value(value: &str) -> Vec<String> {
+    value
         .split(',')
         .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .filter(|s| !s.is_empty())
         .map(str::to_string)
         .collect()
+}
+
+fn env_list(key: &str) -> Vec<String> {
+    parse_env_list_value(&env_string(key, ""))
 }
 
 fn env_bool(key: &str, fallback: bool) -> bool {

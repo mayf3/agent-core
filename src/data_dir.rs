@@ -1,6 +1,7 @@
 use anyhow::Result;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 // --- Current bootstrap templates (Phase 2+) ---
 //
@@ -138,30 +139,35 @@ fn upgrade_template(
     Ok(TemplateAction::MigrationNeeded)
 }
 
-/// Write `content` to `path` atomically: write to a unique temp file in the
-/// SAME directory, flush+sync, then rename onto the target. On failure the
-/// target file is never truncated or partially written; the temp file is
-/// cleaned up. New files get safe default permissions (0600). This is a small,
-/// closed helper — not a general file-transaction framework.
+// Global counter so each atomic_write gets a unique temp-file name even on the
+// same target path. Combined with pid this prevents collision between threads
+// or processes that may concurrently write the same template file.
+static WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// Write `content` to `path` atomically: create a uniquely-named temp file
+/// (dir/.{name}.tmp.{pid}.{counter}) in the same directory with `create_new`,
+/// flush+sync, rename, then best-effort parent-directory sync. The target is
+/// never truncated or partially written. New files get 0o600 on unix.
 fn atomic_write(path: &Path, content: &str) -> Result<()> {
     let dir = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(dir)?;
-    // Unique temp name in the same directory (required for rename atomicity).
-    let tmp = dir.join(format!(
-        ".{}.tmp",
-        path.file_name().and_then(|n| n.to_str()).unwrap_or("tmpl")
-    ));
-    let write_result: Result<()> = (|| {
+    let pid = std::process::id();
+    let seq = WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let base = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("tmpl");
+    let tmp_name = format!(".{base}.tmp.{pid}.{seq}");
+    let tmp = dir.join(&tmp_name);
+    let result: Result<()> = (|| {
         let mut f = fs::OpenOptions::new()
             .write(true)
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .open(&tmp)?;
-        // Safe permissions on a newly-created file (best-effort; files being
-        // upgraded keep their original mode because rename preserves it).
+        // Secure permissions on a newly-created file (best-effort).
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -174,12 +180,19 @@ fn atomic_write(path: &Path, content: &str) -> Result<()> {
         f.sync_all()?;
         Ok(())
     })();
-    if write_result.is_err() {
-        // Clean up the partial temp file; the target is untouched.
+    if result.is_err() {
+        // Clean up only OUR temp file (unique name ensures no collision).
         let _ = fs::remove_file(&tmp);
-        return write_result;
+        return result;
     }
     fs::rename(&tmp, path)?;
+    // Best-effort parent directory sync so the rename metadata is durable.
+    #[cfg(unix)]
+    {
+        if let Ok(dir_f) = fs::File::open(dir) {
+            let _ = dir_f.sync_all();
+        }
+    }
     Ok(())
 }
 
@@ -201,7 +214,6 @@ fn home_dir() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     fn temp_dir() -> PathBuf {
         static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -336,11 +348,11 @@ mod tests {
         let p = dir.join("sub/agent.md");
         atomic_write(&p, "hello").unwrap();
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "hello");
-        // No leftover temp file.
+        // No leftover temp file (temp pattern: .{base}.tmp.{pid}.{seq}).
         assert!(
             !std::fs::read_dir(dir.join("sub"))
                 .unwrap()
-                .any(|e| { e.unwrap().file_name().to_string_lossy().ends_with(".tmp") }),
+                .any(|e| { e.unwrap().file_name().to_string_lossy().contains(".tmp.") }),
             "no leftover temp file"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -393,7 +405,7 @@ mod tests {
         assert!(
             !std::fs::read_dir(dir.join("agents/main"))
                 .unwrap()
-                .any(|e| { e.unwrap().file_name().to_string_lossy().ends_with(".tmp") }),
+                .any(|e| { e.unwrap().file_name().to_string_lossy().contains(".tmp.") }),
             "no leftover temp file after upgrade"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -446,6 +458,32 @@ mod tests {
             "new file should have 0600, got {:o}",
             mode
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn atomic_write_concurrent_and_stale_tmp() {
+        let dir = temp_dir();
+        let p = dir.join("concurrent.md");
+        let p1 = p.clone();
+        let p2 = p.clone();
+        let t1 = std::thread::spawn(move || {
+            for _ in 0..10 { atomic_write(&p1, "from-a").ok(); }
+        });
+        let t2 = std::thread::spawn(move || {
+            for _ in 0..10 { atomic_write(&p2, "from-b").ok(); }
+        });
+        t1.join().unwrap(); t2.join().unwrap();
+        let content = std::fs::read_to_string(&p).unwrap();
+        assert!(content == "from-a" || content == "from-b");
+        assert!(!std::fs::read_dir(&dir).unwrap().any(|e|
+            e.unwrap().file_name().to_string_lossy().contains(".tmp.")));
+        // Stale .tmp file must not collide with new temp file.
+        std::fs::write(&dir.join(".stale.tmp"), "stale").unwrap();
+        let fresh = dir.join("fresh.md");
+        atomic_write(&fresh, "fresh").unwrap();
+        assert_eq!(std::fs::read_to_string(&dir.join(".stale.tmp")).unwrap(), "stale");
+        assert_eq!(std::fs::read_to_string(&fresh).unwrap(), "fresh");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
