@@ -297,8 +297,6 @@ fn misconfigured_write_grant_not_in_tools() -> Result<()> {
     Ok(())
 }
 
-// ===== §8: Gateway is the security boundary =====
-
 fn config() -> KernelConfig {
     use std::path::PathBuf;
     KernelConfig {
