@@ -326,7 +326,6 @@ pub(crate) fn _cfg() -> KernelConfig {
         primary_tool_name_indexed: false,
     }
 }
-
 #[test]
 fn ungranted_provider_time_now_is_rejected_by_gateway() {
     let mut cfg = _cfg();

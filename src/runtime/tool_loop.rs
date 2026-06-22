@@ -214,3 +214,7 @@ pub(crate) mod grant_schema_tests;
 #[cfg(test)]
 #[path = "grants_context_tests.rs"]
 pub(crate) mod grants_context_tests;
+
+#[cfg(test)]
+#[path = "tool_name_mode_tests.rs"]
+pub(crate) mod tool_name_mode_tests;

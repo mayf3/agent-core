@@ -6,12 +6,7 @@ mod grants_context_tests {
         catalog_for_context_grants, provider_tools_for_grants, ExecutionProfile,
     };
     use crate::domain::*;
-    use crate::gateway::Gateway;
     use crate::journal::JournalStore;
-    use crate::llm::{LlmClient, LlmInput, OpenAiCompatibleLlm};
-    use crate::runtime::Runtime;
-    use anyhow::Result;
-    use serde_json::{json, Value};
     use std::path::PathBuf;
     // ===== §4: env → profile → principal → ToolCatalog / Provider tools =====
     //
@@ -155,34 +150,11 @@ mod grants_context_tests {
         }
     }
     fn test_config() -> KernelConfig {
-        KernelConfig {
-            db_path: PathBuf::from(":memory:"),
-            data_dir: PathBuf::from("."),
-            agent_id: AgentId("main".into()),
-            root_dir: PathBuf::from("/nonexistent-agent-core-root-xyz"),
-            kernel_port: 4130,
-            connector_execute_url: String::new(),
-            ipc_token: "test".into(),
-            feishu_allowed_open_ids: vec![],
-            feishu_allowed_chat_ids: vec![],
-            feishu_require_group_mention: true,
-            openai_base_url: String::new(),
-            openai_api_key: String::new(),
-            model: String::new(),
-            fallback_openai_base_url: String::new(),
-            fallback_openai_api_key: String::new(),
-            fallback_model: String::new(),
-            model_timeout_ms: 100,
-            context_recent_messages: 6,
-            context_max_block_chars: 4000,
-            outbox_dispatcher_enabled: false,
-            outbox_dispatcher_poll_interval_ms: 10,
-            extra_allowed_operations: vec![],
-            require_write_approval: false,
-            write_approval_ttl_secs: 0,
-            fallback_tool_name_indexed: false,
-            primary_tool_name_indexed: false,
-        }
+        // Reuse _cfg() but point root_dir at a nonexistent path so the Context
+        // assembler uses safe fallback text (exercises the no-chat-only path).
+        let mut c = super::super::grant_schema_tests::_cfg();
+        c.root_dir = PathBuf::from("/nonexistent-agent-core-root-xyz");
+        c
     }
     fn build_blocks(grants: &[String]) -> Vec<ContextBlock> {
         let cfg = test_config();
@@ -276,186 +248,5 @@ mod grants_context_tests {
             !all.contains("No such file") && !all.contains("os error"),
             "fallback leaked an I/O error"
         );
-    }
-    // ===== IndexedMapping + 429→fallback tests =====
-    use crate::domain::JournalEventKind;
-    use std::io::{Read, Write};
-    use std::net::TcpListener;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Arc, Mutex};
-    use std::thread;
-    struct _C {
-        port: u16,
-        c: Arc<Mutex<Vec<Value>>>,
-        sd: Arc<AtomicBool>,
-    }
-    impl _C {
-        fn new(r: Vec<Value>) -> Self {
-            let l = TcpListener::bind("127.0.0.1:0").unwrap();
-            let p = l.local_addr().unwrap().port();
-            let cl = Arc::new(Mutex::new(Vec::new()));
-            let c2 = Arc::clone(&cl);
-            let sd = Arc::new(AtomicBool::new(false));
-            let s2 = Arc::clone(&sd);
-            thread::spawn(move || {
-                for resp in r {
-                    if let Ok((mut s, _)) = l.accept() {
-                        if s2.load(Ordering::Relaxed) {
-                            break;
-                        }
-                        let mut b = [0u8; 4096];
-                        let n = s.read(&mut b).unwrap_or(0);
-                        if n == 0 {
-                            continue;
-                        }
-                        let h = String::from_utf8_lossy(&b[..n]);
-                        let cl = h
-                            .lines()
-                            .find_map(|l| {
-                                let (k, v) = l.split_once(':')?;
-                                k.eq_ignore_ascii_case("content-length")
-                                    .then(|| v.trim().parse::<usize>().ok())
-                            })
-                            .flatten()
-                            .unwrap_or(0);
-                        let he = b.windows(4).position(|w| w == b"\r\n\r\n").unwrap_or(0);
-                        let bs = he + 4;
-                        if cl > 0 && bs + cl <= n {
-                            if let Ok(body) = serde_json::from_slice(&b[bs..bs + cl]) {
-                                c2.lock().unwrap().push(body)
-                            }
-                        }
-                        let rb = resp.to_string();
-                        let _=s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length:{}\r\nConnection:close\r\n\r\n{}",rb.len(),rb).as_bytes());
-                    }
-                }
-            });
-            Self { port: p, c: cl, sd }
-        }
-        fn u(&self) -> String {
-            format!("http://127.0.0.1:{}/v1", self.port)
-        }
-        fn r(&self) -> Vec<Value> {
-            self.c.lock().unwrap().clone()
-        }
-    }
-    #[test] #[test]
-    fn indexed_mapping_rejects_forged_fn_99() -> Result<()> {
-        let s = _C::new(vec![
-            json!({"model":"s","choices":[{"message":{"content":"","tool_calls":[{"id":"f","type":"function","function":{"name":"fn_99","arguments":"{}"}}]}}]}),
-            json!({"model":"s","choices":[{"message":{"content":"no"}}]}),
-        ]);
-        let mut c = super::super::grant_schema_tests::_cfg();
-        c.extra_allowed_operations = vec!["time.now".to_string()];
-        let llm =
-            OpenAiCompatibleLlm::new(s.u(), "t".into(), "p".into(), 5000).with_indexed_primary();
-        let j = JournalStore::in_memory()?;
-        let g = Gateway::new(c.clone());
-        let r = Runtime::new(c, llm);
-        let _ = r.deliver(
-            &j,
-            &g,
-            g.validate_ingress(&j, g.cli_ingress("t".to_string())?)?,
-        )?;
-        let ev = j.events()?;
-        let tnp = |k: JournalEventKind| {
-            ev.iter()
-                .filter(|e| {
-                    e.kind == k
-                        && e.payload.get("operation").and_then(Value::as_str) == Some("time.now")
-                })
-                .count()
-        };
-        assert_eq!(tnp(JournalEventKind::InvocationApproved), 0);
-        assert_eq!(tnp(JournalEventKind::ReceiptReceived), 0);
-        Ok(())
-    }
-    // Real primary 429 → fallback with explicit config.
-    struct _L(u16);
-    impl _L {
-        fn s() -> Self {
-            let l = TcpListener::bind("127.0.0.1:0").unwrap();
-            let p = l.local_addr().unwrap().port();
-            thread::spawn(move || {
-                if let Ok((mut s, _)) = l.accept() {
-                    let mut b = [0u8; 1024];
-                    let _ = s.read(&mut b);
-                    let _=s.write_all(b"HTTP/1.1 429 Too Many Requests\r\nContent-Length:2\r\nConnection:close\r\n\r\n{}");
-                }
-            });
-            Self(p)
-        }
-        fn u(&self) -> String {
-            format!("http://127.0.0.1:{}/v1", self.0)
-        }
-    }
-    #[test]
-    fn primary_429_triggers_indexed_fallback_via_config() -> Result<()> {
-        let p = _L::s();
-        let fb = _C::new(vec![
-            json!({"model":"s","choices":[{"message":{"content":"","tool_calls":[{"id":"fb1","type":"function","function":{"name":"fn_0","arguments":"{}"}}]}}]}),
-            json!({"model":"s","choices":[{"message":{"content":"done"}}]}),
-        ]);
-        let mut c = super::super::grant_schema_tests::_cfg();
-        c.extra_allowed_operations = vec!["time.now".to_string()];
-        c.fallback_tool_name_indexed = true;
-        c.fallback_openai_base_url = fb.u();
-        c.fallback_openai_api_key = "test".into();
-        c.fallback_model = "fs".into();
-        let llm = OpenAiCompatibleLlm::new(p.u(), "t".into(), "p".into(), 5000)
-            .with_indexed_fallback(fb.u(), "test".into(), "fs".into());
-        let j = JournalStore::in_memory()?;
-        let g = Gateway::new(c.clone());
-        let r = Runtime::new(c, llm);
-        let o = r.deliver(
-            &j,
-            &g,
-            g.validate_ingress(&j, g.cli_ingress("time?".to_string())?)?,
-        )?;
-        assert!(!o.output.trim().is_empty());
-        let reqs = fb.r();
-        assert!(!reqs.is_empty(), "fallback invoked");
-        let ns: Vec<&str> = reqs[0]["tools"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|t| t.pointer("/function/name").and_then(Value::as_str))
-            .collect();
-        assert!(ns.contains(&"fn_0"));
-        assert!(!ns.iter().any(|n| n.contains("time.now")));
-        let ev = j.events()?;
-        let tnp = |k: JournalEventKind| {
-            ev.iter()
-                .filter(|e| {
-                    e.kind == k
-                        && e.payload.get("operation").and_then(Value::as_str) == Some("time.now")
-                })
-                .count()
-        };
-        assert_eq!(tnp(JournalEventKind::ToolCallIssued), 1);
-        assert_eq!(tnp(JournalEventKind::InvocationProposed), 1);
-        assert_eq!(tnp(JournalEventKind::InvocationApproved), 1);
-        assert_eq!(
-            ev.iter()
-                .filter(|e| e.kind == JournalEventKind::ReceiptReceived)
-                .count(),
-            1
-        );
-        if reqs.len() > 1 {
-            let n2: Vec<&str> = reqs[1]["tools"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .filter_map(|t| t.pointer("/function/name").and_then(Value::as_str))
-                .collect();
-            assert_eq!(n2, ns);
-        }
-        assert_ne!(j.run_status(&o.run_id)?.as_deref(), Some("Running"));
-        let jt = serde_json::to_string(&ev).unwrap_or_default();
-        assert!(
-            !jt.contains("fn_0") && !jt.contains("fn_1"),
-            "fn_N must not appear in journal"
-        );
-        Ok(())
     }
 } // end mod grants_context_tests
