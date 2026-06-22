@@ -13,9 +13,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
 };
-
 // §5/§7: schema is derived from granted operations ∩ ReadOnly catalog
-
 #[test]
 fn provider_tools_expose_only_granted_readonly_operations() {
     let tools = provider_tools_for_grants(&["time.now".to_string()]);
@@ -296,8 +294,7 @@ fn misconfigured_write_grant_not_in_tools() -> Result<()> {
     );
     Ok(())
 }
-
-fn config() -> KernelConfig {
+pub(crate) fn _cfg() -> KernelConfig {
     use std::path::PathBuf;
     KernelConfig {
         db_path: PathBuf::from(":memory:"),
@@ -330,7 +327,7 @@ fn config() -> KernelConfig {
 
 #[test]
 fn ungranted_provider_time_now_is_rejected_by_gateway() {
-    let mut cfg = config();
+    let mut cfg = _cfg();
     let server = CaptureServer::start(vec![
         json!({
             "model": "local-stub",
@@ -369,7 +366,13 @@ fn ungranted_provider_time_now_is_rejected_by_gateway() {
     let count = |k: JournalEventKind| events.iter().filter(|e| e.kind == k).count();
     // count an event kind whose operation == time.now
     let count_op = |k: JournalEventKind| {
-        events.iter().filter(|e| e.kind == k && e.payload.get("operation").and_then(Value::as_str) == Some("time.now")).count()
+        events
+            .iter()
+            .filter(|e| {
+                e.kind == k
+                    && e.payload.get("operation").and_then(Value::as_str) == Some("time.now")
+            })
+            .count()
     };
     assert_eq!(count(JournalEventKind::ToolCallIssued), 1);
     assert_eq!(count_op(JournalEventKind::InvocationProposed), 1);
@@ -405,7 +408,7 @@ fn ungranted_provider_time_now_is_rejected_by_gateway() {
 
 #[test]
 fn granted_time_now_completes_real_http_tool_loop() {
-    let mut cfg = config();
+    let mut cfg = _cfg();
     cfg.extra_allowed_operations = vec!["time.now".to_string()];
     let server = CaptureServer::start(vec![
         json!({
