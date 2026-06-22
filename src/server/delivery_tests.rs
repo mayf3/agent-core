@@ -57,8 +57,14 @@ fn run_dispatcher_sends_pending_outbox() -> Result<()> {
         journal.outbox_dispatch_status(&invocation_id)?.as_ref(),
         Some(&OutboxDispatchStatus::Succeeded)
     );
-    assert!(journal.events()?.iter().any(|e| e.kind == JournalEventKind::ReceiptReceived));
-    assert!(journal.events()?.iter().any(|e| e.kind == JournalEventKind::DispatchStarted));
+    assert!(journal
+        .events()?
+        .iter()
+        .any(|e| e.kind == JournalEventKind::ReceiptReceived));
+    assert!(journal
+        .events()?
+        .iter()
+        .any(|e| e.kind == JournalEventKind::DispatchStarted));
     assert!(journal.verify_hash_chain()?);
     Ok(())
 }
@@ -264,9 +270,7 @@ fn disabled_dispatcher_loop_returns_without_draining_outbox() -> Result<()> {
         .map_err(|_| anyhow::anyhow!("dispatcher thread panicked"))?;
 
     assert_eq!(
-        journal
-            .outbox_dispatch_status(&invocation_id)?
-            .as_ref(),
+        journal.outbox_dispatch_status(&invocation_id)?.as_ref(),
         Some(&OutboxDispatchStatus::Pending),
         "disabled dispatcher must not consume pending outbox"
     );
@@ -345,9 +349,7 @@ fn run_dispatcher_drains_multiple_pending_rows() -> Result<()> {
             "invocation {invocation_id:?} must have been dispatched"
         );
         assert_eq!(
-            journal
-                .outbox_dispatch_status(invocation_id)?
-                .as_ref(),
+            journal.outbox_dispatch_status(invocation_id)?.as_ref(),
             Some(&OutboxDispatchStatus::Succeeded),
             "invocation {invocation_id:?} must be succeeded"
         );
@@ -356,8 +358,7 @@ fn run_dispatcher_drains_multiple_pending_rows() -> Result<()> {
             .iter()
             .filter(|event| {
                 event.kind == JournalEventKind::DispatchStarted
-                    && event.correlation_id.as_deref()
-                        == Some(invocation_id.0.as_str())
+                    && event.correlation_id.as_deref() == Some(invocation_id.0.as_str())
             })
             .count();
         assert_eq!(dispatch_started, 1);
@@ -366,8 +367,7 @@ fn run_dispatcher_drains_multiple_pending_rows() -> Result<()> {
             .iter()
             .filter(|event| {
                 event.kind == JournalEventKind::ReceiptReceived
-                    && event.correlation_id.as_deref()
-                        == Some(invocation_id.0.as_str())
+                    && event.correlation_id.as_deref() == Some(invocation_id.0.as_str())
             })
             .count();
         assert_eq!(receipt, 1);
@@ -441,7 +441,8 @@ fn approval_expiry_loop_is_noop_when_ttl_zero() -> Result<()> {
     let mut config = disabled_test_config();
     config.require_write_approval = true;
     config.write_approval_ttl_secs = 0;
-    let handle = super::start_approval_expiry_loop(config, Arc::clone(&journal), Arc::clone(&running));
+    let handle =
+        super::start_approval_expiry_loop(config, Arc::clone(&journal), Arc::clone(&running));
     handle.join().unwrap();
     assert_eq!(
         journal.run_status(&RunId(run_id))?.as_deref(),

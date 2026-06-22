@@ -109,17 +109,34 @@ fn deliver_event(
     gateway: &Gateway,
     validated: ValidatedEvent,
 ) -> Result<()> {
-    let llm = OpenAiCompatibleLlm::new(
+    let mut llm = OpenAiCompatibleLlm::new(
         config.openai_base_url.clone(),
         config.openai_api_key.clone(),
         config.model.clone(),
         config.model_timeout_ms,
-    )
-    .with_fallback(
-        config.fallback_openai_base_url.clone(),
-        config.fallback_openai_api_key.clone(),
-        config.fallback_model.clone(),
     );
+    // The fallback endpoint determines its own tool-name mode.
+    // DeepSeek-like URLs get IndexedMapping; others get Passthrough.
+    // This check lives in the config/delivery layer where we know
+    // which provider the URL points to — the LLM layer (llm/mod.rs)
+    // never inspects URLs to decide encoding.
+    if config
+        .fallback_openai_base_url
+        .to_ascii_lowercase()
+        .contains("deepseek")
+    {
+        llm = llm.with_indexed_fallback(
+            config.fallback_openai_base_url.clone(),
+            config.fallback_openai_api_key.clone(),
+            config.fallback_model.clone(),
+        );
+    } else {
+        llm = llm.with_fallback(
+            config.fallback_openai_base_url.clone(),
+            config.fallback_openai_api_key.clone(),
+            config.fallback_model.clone(),
+        );
+    }
     let llm = Box::new(llm);
     let runtime = Runtime::new(config.clone(), llm);
     runtime.deliver(journal, gateway, validated)?;

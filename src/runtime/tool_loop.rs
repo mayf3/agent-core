@@ -8,6 +8,12 @@ use serde_json::json;
 
 pub(crate) const MAX_TOOL_ROUNDS: usize = 2;
 
+/// Single tool-call MVP: only `tool_calls[0]` is parsed and executed per round.
+/// Subsequent entries in the `tool_calls` array (multi-tool / parallel calls)
+/// are silently ignored — they are neither executed nor reported as rejected.
+/// This simplifies idempotency, ordering, and the ToolResult structure.
+/// Extending to multiple tool calls per round is a future concern.
+
 /// Outcome of an inline tool-call attempt. The text is the model-visible
 /// ToolResult content; `Fatal` indicates the tool loop must abort (an
 /// infrastructure failure that cannot be fed back to the model).
@@ -203,8 +209,8 @@ mod blank_reply_tests;
 
 #[cfg(test)]
 #[path = "grant_schema_tests.rs"]
-mod grant_schema_tests;
+pub(crate) mod grant_schema_tests;
 
 #[cfg(test)]
 #[path = "grants_context_tests.rs"]
-mod grants_context_tests;
+pub(crate) mod grants_context_tests;
