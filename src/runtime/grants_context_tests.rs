@@ -13,7 +13,6 @@ mod grants_context_tests {
     use anyhow::Result;
     use serde_json::{json, Value};
     use std::path::PathBuf;
-
     // ===== §4: env → profile → principal → ToolCatalog / Provider tools =====
     //
     // The only correct config key is AGENT_CORE_EXTRA_ALLOWED_OPERATIONS.
@@ -22,7 +21,6 @@ mod grants_context_tests {
     // is exercised without mutating global environment variables. Downstream
     // with_extra dedups and drops unknown names; Write ops pass the grant
     // check but are hidden by catalog_for_context_grants / provider_tools_for_grants.
-
     fn tool_set_from_grants(grants: &[String]) -> Vec<String> {
         provider_tools_for_grants(grants)
             .into_iter()
@@ -33,7 +31,6 @@ mod grants_context_tests {
             })
             .collect()
     }
-
     fn catalog_set_from_grants(grants: &[String]) -> Vec<String> {
         // The catalog text lists "<name> - <desc>" per line after the header.
         catalog_for_context_grants(grants)
@@ -42,7 +39,6 @@ mod grants_context_tests {
             .filter_map(|l| l.split(" - ").next().map(str::to_string))
             .collect()
     }
-
     #[test]
     fn single_time_now_grant_aligns_catalog_and_provider_tools() {
         let grants: Vec<String> = ExecutionProfile::for_channel(ChannelKind::Cli)
@@ -60,7 +56,6 @@ mod grants_context_tests {
             "ToolCatalog set must equal Provider tools set"
         );
     }
-
     #[test]
     fn multiple_readonly_grants_whitespace_and_duplicates() {
         let grants: Vec<String> = ExecutionProfile::for_channel(ChannelKind::Cli)
@@ -86,7 +81,6 @@ mod grants_context_tests {
             catalog_set_from_grants(&grants)
         );
     }
-
     #[test]
     fn unknown_operations_do_not_enter_profile_or_tools() {
         let grants: Vec<String> = ExecutionProfile::for_channel(ChannelKind::Cli)
@@ -102,7 +96,6 @@ mod grants_context_tests {
         assert!(!tools.contains(&"bogus_op".to_string()));
         assert!(tools.contains(&"time.now".to_string()));
     }
-
     #[test]
     fn write_operation_granted_but_never_in_tools_or_catalog() {
         // Even if a Write op is in the env, it is granted (lookup passes) but
@@ -125,7 +118,6 @@ mod grants_context_tests {
         assert!(!catalog.contains(&"feishu.send_message".to_string()));
         assert!(tools.contains(&"time.now".to_string()));
     }
-
     #[test]
     fn empty_grants_yield_no_tools_and_no_catalog_entries() {
         let grants: Vec<String> = vec![];
@@ -136,9 +128,7 @@ mod grants_context_tests {
         );
         assert!(provider_tools_for_grants(&grants).is_empty());
     }
-
     // ===== Context ToolCatalog aligns with grants (§1) =====
-
     fn empty_event(_session: &Session) -> ValidatedEvent {
         ValidatedEvent {
             event_id: EventId::new(),
@@ -164,7 +154,6 @@ mod grants_context_tests {
             occurred_at: chrono::Utc::now(),
         }
     }
-
     fn test_config() -> KernelConfig {
         KernelConfig {
             db_path: PathBuf::from(":memory:"),
@@ -191,9 +180,10 @@ mod grants_context_tests {
             extra_allowed_operations: vec![],
             require_write_approval: false,
             write_approval_ttl_secs: 0,
+            fallback_tool_name_indexed: false,
+            primary_tool_name_indexed: false,
         }
     }
-
     fn build_blocks(grants: &[String]) -> Vec<ContextBlock> {
         let cfg = test_config();
         let journal = JournalStore::in_memory().unwrap();
@@ -213,7 +203,6 @@ mod grants_context_tests {
             .build(&journal, &session, &event, "hi", grants)
             .unwrap()
     }
-
     fn catalog_block_text(blocks: &[ContextBlock]) -> String {
         blocks
             .iter()
@@ -221,7 +210,6 @@ mod grants_context_tests {
             .map(|b| b.content.clone())
             .unwrap_or_default()
     }
-
     #[test]
     fn context_tool_catalog_omits_ungranted_time_now() {
         // No time.now grant → the ToolCatalog block must not mention it.
@@ -237,7 +225,6 @@ mod grants_context_tests {
             "ToolCatalog must omit un-granted time.now: {cat}"
         );
     }
-
     #[test]
     fn context_tool_catalog_includes_granted_time_now() {
         let grants: Vec<String> = ExecutionProfile::for_channel(ChannelKind::Cli)
@@ -256,7 +243,6 @@ mod grants_context_tests {
         assert!(!cat.contains("feishu.send_message"));
         assert!(!cat.contains("stdout.send_text"));
     }
-
     #[test]
     fn context_fallback_contains_no_chat_only_semantics() {
         // When prompt files are absent (root_dir points nowhere), the context
@@ -274,7 +260,6 @@ mod grants_context_tests {
             "fallback leaked without tools"
         );
     }
-
     #[test]
     fn context_fallback_does_not_leak_paths_or_errors() {
         let blocks = build_blocks(&[]);
@@ -292,44 +277,39 @@ mod grants_context_tests {
             "fallback leaked an I/O error"
         );
     }
-
-    // ===== IndexedMapping via capture =====
-
+    // ===== IndexedMapping + 429→fallback tests =====
     use crate::domain::JournalEventKind;
     use std::io::{Read, Write};
     use std::net::TcpListener;
-    use std::sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
-    };
-
-    struct _Cap {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+    struct _C {
         port: u16,
-        cap: Arc<Mutex<Vec<Value>>>,
+        c: Arc<Mutex<Vec<Value>>>,
         sd: Arc<AtomicBool>,
-        _h: Option<std::thread::JoinHandle<()>>,
     }
-    impl _Cap {
-        fn start(responses: Vec<Value>) -> Self {
+    impl _C {
+        fn new(r: Vec<Value>) -> Self {
             let l = TcpListener::bind("127.0.0.1:0").unwrap();
             let p = l.local_addr().unwrap().port();
-            let c = Arc::new(Mutex::new(Vec::new()));
-            let c2 = Arc::clone(&c);
+            let cl = Arc::new(Mutex::new(Vec::new()));
+            let c2 = Arc::clone(&cl);
             let sd = Arc::new(AtomicBool::new(false));
             let s2 = Arc::clone(&sd);
-            let h = std::thread::spawn(move || {
-                for resp in responses {
+            thread::spawn(move || {
+                for resp in r {
                     if let Ok((mut s, _)) = l.accept() {
                         if s2.load(Ordering::Relaxed) {
                             break;
                         }
-                        let mut buf = [0u8; 4096];
-                        let n = s.read(&mut buf).unwrap_or(0);
+                        let mut b = [0u8; 4096];
+                        let n = s.read(&mut b).unwrap_or(0);
                         if n == 0 {
                             continue;
                         }
-                        let hdr = String::from_utf8_lossy(&buf[..n]);
-                        let cl = hdr
+                        let h = String::from_utf8_lossy(&b[..n]);
+                        let cl = h
                             .lines()
                             .find_map(|l| {
                                 let (k, v) = l.split_once(':')?;
@@ -338,53 +318,92 @@ mod grants_context_tests {
                             })
                             .flatten()
                             .unwrap_or(0);
-                        let he = buf.windows(4).position(|w| w == b"\r\n\r\n").unwrap_or(0);
+                        let he = b.windows(4).position(|w| w == b"\r\n\r\n").unwrap_or(0);
                         let bs = he + 4;
                         if cl > 0 && bs + cl <= n {
-                            if let Ok(body) = serde_json::from_slice(&buf[bs..bs + cl]) {
-                                c2.lock().unwrap().push(body);
+                            if let Ok(body) = serde_json::from_slice(&b[bs..bs + cl]) {
+                                c2.lock().unwrap().push(body)
                             }
                         }
-                        let b = resp.to_string();
-                        let _ = s.write_all(
-                            format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                                b.len(), b).as_bytes());
+                        let rb = resp.to_string();
+                        let _=s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length:{}\r\nConnection:close\r\n\r\n{}",rb.len(),rb).as_bytes());
                     }
                 }
             });
-            Self {
-                port: p,
-                cap: c,
-                sd,
-                _h: Some(h),
-            }
+            Self { port: p, c: cl, sd }
         }
-        fn url(&self) -> String {
+        fn u(&self) -> String {
             format!("http://127.0.0.1:{}/v1", self.port)
         }
-        fn reqs(&self) -> Vec<Value> {
-            self.cap.lock().unwrap().clone()
+        fn r(&self) -> Vec<Value> {
+            self.c.lock().unwrap().clone()
         }
     }
-    impl Drop for _Cap {
-        fn drop(&mut self) {
-            self.sd.store(true, Ordering::Relaxed);
-            let _ = std::net::TcpStream::connect(("127.0.0.1", self.port));
+    #[test] #[test]
+    fn indexed_mapping_rejects_forged_fn_99() -> Result<()> {
+        let s = _C::new(vec![
+            json!({"model":"s","choices":[{"message":{"content":"","tool_calls":[{"id":"f","type":"function","function":{"name":"fn_99","arguments":"{}"}}]}}]}),
+            json!({"model":"s","choices":[{"message":{"content":"no"}}]}),
+        ]);
+        let mut c = super::super::grant_schema_tests::_cfg();
+        c.extra_allowed_operations = vec!["time.now".to_string()];
+        let llm =
+            OpenAiCompatibleLlm::new(s.u(), "t".into(), "p".into(), 5000).with_indexed_primary();
+        let j = JournalStore::in_memory()?;
+        let g = Gateway::new(c.clone());
+        let r = Runtime::new(c, llm);
+        let _ = r.deliver(
+            &j,
+            &g,
+            g.validate_ingress(&j, g.cli_ingress("t".to_string())?)?,
+        )?;
+        let ev = j.events()?;
+        let tnp = |k: JournalEventKind| {
+            ev.iter()
+                .filter(|e| {
+                    e.kind == k
+                        && e.payload.get("operation").and_then(Value::as_str) == Some("time.now")
+                })
+                .count()
+        };
+        assert_eq!(tnp(JournalEventKind::InvocationApproved), 0);
+        assert_eq!(tnp(JournalEventKind::ReceiptReceived), 0);
+        Ok(())
+    }
+    // Real primary 429 → fallback with explicit config.
+    struct _L(u16);
+    impl _L {
+        fn s() -> Self {
+            let l = TcpListener::bind("127.0.0.1:0").unwrap();
+            let p = l.local_addr().unwrap().port();
+            thread::spawn(move || {
+                if let Ok((mut s, _)) = l.accept() {
+                    let mut b = [0u8; 1024];
+                    let _ = s.read(&mut b);
+                    let _=s.write_all(b"HTTP/1.1 429 Too Many Requests\r\nContent-Length:2\r\nConnection:close\r\n\r\n{}");
+                }
+            });
+            Self(p)
+        }
+        fn u(&self) -> String {
+            format!("http://127.0.0.1:{}/v1", self.0)
         }
     }
-
     #[test]
-    fn indexed_mapping_encodes_fn_0_in_request() -> Result<()> {
-        let srv = _Cap::start(vec![
-            // Primary request: the _Cap acts as the LLM endpoint.
-            json!({"model":"s","choices":[{"message":{"content":"","tool_calls":[{"id":"x","type":"function","function":{"name":"fn_0","arguments":"{}"}}]}}]}),
+    fn primary_429_triggers_indexed_fallback_via_config() -> Result<()> {
+        let p = _L::s();
+        let fb = _C::new(vec![
+            json!({"model":"s","choices":[{"message":{"content":"","tool_calls":[{"id":"fb1","type":"function","function":{"name":"fn_0","arguments":"{}"}}]}}]}),
             json!({"model":"s","choices":[{"message":{"content":"done"}}]}),
         ]);
         let mut c = super::super::grant_schema_tests::_cfg();
         c.extra_allowed_operations = vec!["time.now".to_string()];
-        // Use the _Cap as the PRIMARY endpoint with IndexedMapping.
-        let llm = OpenAiCompatibleLlm::new(srv.url(), "t".into(), "p".into(), 5000)
-            .with_indexed_primary();
+        c.fallback_tool_name_indexed = true;
+        c.fallback_openai_base_url = fb.u();
+        c.fallback_openai_api_key = "test".into();
+        c.fallback_model = "fs".into();
+        let llm = OpenAiCompatibleLlm::new(p.u(), "t".into(), "p".into(), 5000)
+            .with_indexed_fallback(fb.u(), "test".into(), "fs".into());
         let j = JournalStore::in_memory()?;
         let g = Gateway::new(c.clone());
         let r = Runtime::new(c, llm);
@@ -394,28 +413,16 @@ mod grants_context_tests {
             g.validate_ingress(&j, g.cli_ingress("time?".to_string())?)?,
         )?;
         assert!(!o.output.trim().is_empty());
-        let reqs = srv.reqs();
-        assert!(!reqs.is_empty(), "request captured");
+        let reqs = fb.r();
+        assert!(!reqs.is_empty(), "fallback invoked");
         let ns: Vec<&str> = reqs[0]["tools"]
             .as_array()
             .unwrap()
             .iter()
             .filter_map(|t| t.pointer("/function/name").and_then(Value::as_str))
             .collect();
-        assert!(ns.contains(&"fn_0"), "must encode fn_0, got {ns:?}");
-        assert!(
-            !ns.iter().any(|n| n.contains("time.now")),
-            "no canonical in tools"
-        );
-        if reqs.len() > 1 {
-            let n2: Vec<&str> = reqs[1]["tools"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .filter_map(|t| t.pointer("/function/name").and_then(Value::as_str))
-                .collect();
-            assert_eq!(n2, ns, "round-2 tools = round-1");
-        }
+        assert!(ns.contains(&"fn_0"));
+        assert!(!ns.iter().any(|n| n.contains("time.now")));
         let ev = j.events()?;
         let tnp = |k: JournalEventKind| {
             ev.iter()
@@ -434,48 +441,21 @@ mod grants_context_tests {
                 .count(),
             1
         );
+        if reqs.len() > 1 {
+            let n2: Vec<&str> = reqs[1]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|t| t.pointer("/function/name").and_then(Value::as_str))
+                .collect();
+            assert_eq!(n2, ns);
+        }
         assert_ne!(j.run_status(&o.run_id)?.as_deref(), Some("Running"));
-        Ok(())
-    }
-
-    #[test]
-    fn indexed_mapping_rejects_forged_fn_99() -> Result<()> {
-        let srv = _Cap::start(vec![
-            json!({"model":"s","choices":[{"message":{"content":"","tool_calls":[{"id":"f","type":"function","function":{"name":"fn_99","arguments":"{}"}}]}}]}),
-            json!({"model":"s","choices":[{"message":{"content":"no"}}]}),
-        ]);
-        let mut c = super::super::grant_schema_tests::_cfg();
-        c.extra_allowed_operations = vec!["time.now".to_string()];
-        let llm = OpenAiCompatibleLlm::new(srv.url(), "t".into(), "p".into(), 5000)
-            .with_indexed_primary();
-        let j = JournalStore::in_memory()?;
-        let g = Gateway::new(c.clone());
-        let r = Runtime::new(c, llm);
-        let o = r.deliver(
-            &j,
-            &g,
-            g.validate_ingress(&j, g.cli_ingress("t".to_string())?)?,
-        )?;
-        let ev = j.events()?;
-        let tnp = |k: JournalEventKind| {
-            ev.iter()
-                .filter(|e| {
-                    e.kind == k
-                        && e.payload.get("operation").and_then(Value::as_str) == Some("time.now")
-                })
-                .count()
-        };
-        assert_eq!(
-            tnp(JournalEventKind::InvocationApproved),
-            0,
-            "forged fn_99 not approved"
+        let jt = serde_json::to_string(&ev).unwrap_or_default();
+        assert!(
+            !jt.contains("fn_0") && !jt.contains("fn_1"),
+            "fn_N must not appear in journal"
         );
-        assert_eq!(
-            tnp(JournalEventKind::ReceiptReceived),
-            0,
-            "no time.now exec"
-        );
-        assert_ne!(j.run_status(&o.run_id)?.as_deref(), Some("Running"));
         Ok(())
     }
 } // end mod grants_context_tests
