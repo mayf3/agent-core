@@ -36,9 +36,7 @@ fn count_kind(journal: &JournalStore, run_id: &RunId, kind: JournalEventKind) ->
         .count()
 }
 
-fn run_deliver_cli(
-    required: bool,
-) -> Result<(JournalStore, Gateway, Runtime<LocalEchoLlm>, RunId)> {
+fn run_deliver_cli(required: bool) -> Result<(JournalStore, Gateway, Runtime<LocalEchoLlm>, RunId)> {
     let config = config_with_approval(required);
     let journal = JournalStore::in_memory()?;
     let gateway = Gateway::new(config.clone());
@@ -58,15 +56,9 @@ fn opt_out_write_inline_approves_and_queues() -> Result<()> {
         journal.run_status(&run_id)?.as_deref(),
         Some("WaitingDispatch")
     );
-    assert_eq!(
-        count_kind(&journal, &run_id, JournalEventKind::ApprovalRequested),
-        0
-    );
+    assert_eq!(count_kind(&journal, &run_id, JournalEventKind::ApprovalRequested), 0);
     assert!(count_kind(&journal, &run_id, JournalEventKind::OutboxQueued) >= 1);
-    assert_eq!(
-        count_kind(&journal, &run_id, JournalEventKind::DispatchStarted),
-        0
-    );
+    assert_eq!(count_kind(&journal, &run_id, JournalEventKind::DispatchStarted), 0);
     Ok(())
 }
 
@@ -79,31 +71,19 @@ fn opt_in_write_pauses_in_awaiting_approval() -> Result<()> {
         journal.run_status(&run_id)?.as_deref(),
         Some("AwaitingApproval")
     );
-    assert_eq!(
-        count_kind(&journal, &run_id, JournalEventKind::ApprovalRequested),
-        1
-    );
-    assert_eq!(
-        count_kind(&journal, &run_id, JournalEventKind::OutboxQueued),
-        0
-    );
-    assert_eq!(
-        count_kind(&journal, &run_id, JournalEventKind::DispatchStarted),
-        0
-    );
+    assert_eq!(count_kind(&journal, &run_id, JournalEventKind::ApprovalRequested), 1);
+    assert_eq!(count_kind(&journal, &run_id, JournalEventKind::OutboxQueued), 0);
+    assert_eq!(count_kind(&journal, &run_id, JournalEventKind::DispatchStarted), 0);
     // The snapshot is retrievable.
     let snapshot = journal.approval_request_for_run(&run_id)?;
     assert!(snapshot.is_some());
     assert_eq!(
-        snapshot
-            .as_ref()
-            .unwrap()
-            .get("operation")
-            .and_then(|v| v.as_str()),
+        snapshot.as_ref().unwrap().get("operation").and_then(|v| v.as_str()),
         Some("stdout.send_text")
     );
     Ok(())
 }
+
 #[test]
 fn approve_run_resumes_into_waiting_dispatch() -> Result<()> {
     // A paused run, once approved, queues and advances to WaitingDispatch.
@@ -113,28 +93,21 @@ fn approve_run_resumes_into_waiting_dispatch() -> Result<()> {
         journal.run_status(&run_id)?.as_deref(),
         Some("WaitingDispatch")
     );
-    assert_eq!(
-        count_kind(&journal, &run_id, JournalEventKind::ApprovalGranted),
-        1
-    );
+    assert_eq!(count_kind(&journal, &run_id, JournalEventKind::ApprovalGranted), 1);
     assert!(count_kind(&journal, &run_id, JournalEventKind::OutboxQueued) >= 1);
     Ok(())
 }
+
 #[test]
 fn deny_run_fails_the_run() -> Result<()> {
     let (journal, gateway, _runtime, run_id) = run_deliver_cli(true)?;
     gateway.deny_run(&journal, &run_id)?;
     assert_eq!(journal.run_status(&run_id)?.as_deref(), Some("Failed"));
-    assert_eq!(
-        count_kind(&journal, &run_id, JournalEventKind::ApprovalDenied),
-        1
-    );
-    assert_eq!(
-        count_kind(&journal, &run_id, JournalEventKind::OutboxQueued),
-        0
-    );
+    assert_eq!(count_kind(&journal, &run_id, JournalEventKind::ApprovalDenied), 1);
+    assert_eq!(count_kind(&journal, &run_id, JournalEventKind::OutboxQueued), 0);
     Ok(())
 }
+
 #[test]
 fn resume_is_idempotent_on_non_awaiting_run() -> Result<()> {
     // approve_run/deny_run on a run that is not AwaitingApproval is a no-op Ok.
@@ -145,16 +118,11 @@ fn resume_is_idempotent_on_non_awaiting_run() -> Result<()> {
         journal.run_status(&run_id)?.as_deref(),
         Some("WaitingDispatch")
     );
-    assert_eq!(
-        count_kind(&journal, &run_id, JournalEventKind::ApprovalGranted),
-        0
-    );
-    assert_eq!(
-        count_kind(&journal, &run_id, JournalEventKind::ApprovalDenied),
-        0
-    );
+    assert_eq!(count_kind(&journal, &run_id, JournalEventKind::ApprovalGranted), 0);
+    assert_eq!(count_kind(&journal, &run_id, JournalEventKind::ApprovalDenied), 0);
     Ok(())
 }
+
 #[test]
 fn approve_then_deny_does_not_double_transition() -> Result<()> {
     // After approve resumes the run, a subsequent deny is a no-op (run is no
@@ -166,12 +134,10 @@ fn approve_then_deny_does_not_double_transition() -> Result<()> {
         journal.run_status(&run_id)?.as_deref(),
         Some("WaitingDispatch")
     );
-    assert_eq!(
-        count_kind(&journal, &run_id, JournalEventKind::ApprovalDenied),
-        0
-    );
+    assert_eq!(count_kind(&journal, &run_id, JournalEventKind::ApprovalDenied), 0);
     Ok(())
 }
+
 #[test]
 fn approval_state_is_durable_across_reopen() -> Result<()> {
     // Build a paused run in a file-backed DB, reopen it in a fresh JournalStore,
@@ -181,6 +147,7 @@ fn approval_state_is_durable_across_reopen() -> Result<()> {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).ok();
     let db_path = dir.join("kernel.sqlite");
+
     let mut config = common::test_config();
     config.db_path = db_path.clone();
     config.require_write_approval = true;
@@ -193,6 +160,7 @@ fn approval_state_is_durable_across_reopen() -> Result<()> {
         let outcome = runtime.deliver(&journal, &gateway, event)?;
         outcome.run_id
     };
+
     // Reopen — simulates a restart. The run must still be paused.
     let journal2 = JournalStore::open(&db_path)?;
     assert_eq!(
@@ -203,6 +171,7 @@ fn approval_state_is_durable_across_reopen() -> Result<()> {
     // proving it did not degrade to the Unknown sentinel (hash-chain guard).
     let snapshot = journal2.approval_request_for_run(&run_id)?;
     assert!(snapshot.is_some());
+
     // And it can still be resumed after the reopen.
     let gateway2 = Gateway::new(common::test_config());
     gateway2.approve_run(&journal2, &run_id)?;
@@ -210,9 +179,11 @@ fn approval_state_is_durable_across_reopen() -> Result<()> {
         journal2.run_status(&run_id)?.as_deref(),
         Some("WaitingDispatch")
     );
+
     let _ = std::fs::remove_dir_all(&dir);
     Ok(())
 }
+
 #[test]
 fn parse_kind_round_trips_approval_kinds() -> Result<()> {
     // Append an ApprovalRequested event directly, reopen, and confirm it reads
@@ -222,6 +193,7 @@ fn parse_kind_round_trips_approval_kinds() -> Result<()> {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).ok();
     let db_path = dir.join("k.sqlite");
+
     {
         let journal = JournalStore::open(&db_path)?;
         journal.append_event(
@@ -237,16 +209,16 @@ fn parse_kind_round_trips_approval_kinds() -> Result<()> {
     let kinds: Vec<_> = journal2.events()?.iter().map(|e| e.kind.clone()).collect();
     assert_eq!(kinds, vec![JournalEventKind::ApprovalRequested]);
     assert!(journal2.verify_hash_chain()?);
+
     let _ = std::fs::remove_dir_all(&dir);
     Ok(())
 }
+
 // ---- Phase 2 M2d follow-up: approval expiry ----
+
 struct FixedLlm;
 impl agent_core_kernel::llm::LlmClient for FixedLlm {
-    fn complete(
-        &self,
-        _input: agent_core_kernel::llm::LlmInput,
-    ) -> Result<agent_core_kernel::llm::LlmOutput> {
+    fn complete(&self, _input: agent_core_kernel::llm::LlmInput) -> Result<agent_core_kernel::llm::LlmOutput> {
         Ok(agent_core_kernel::llm::LlmOutput {
             provider: "local".to_string(),
             model: "fixed".to_string(),
@@ -256,12 +228,14 @@ impl agent_core_kernel::llm::LlmClient for FixedLlm {
         })
     }
 }
+
 fn config_with_ttl(ttl: u64) -> KernelConfig {
     let mut c = common::test_config();
     c.require_write_approval = true;
     c.write_approval_ttl_secs = ttl;
     c
 }
+
 /// Build a paused run; returns its id and the journal.
 fn paused_run(ttl: u64) -> Result<(RunId, JournalStore)> {
     let config = config_with_ttl(ttl);
@@ -277,6 +251,7 @@ fn paused_run(ttl: u64) -> Result<(RunId, JournalStore)> {
     );
     Ok((outcome.run_id, journal))
 }
+
 #[test]
 fn ttl_zero_is_a_noop() -> Result<()> {
     // Default: a paused run stays AwaitingApproval; nothing is expired.
@@ -287,12 +262,10 @@ fn ttl_zero_is_a_noop() -> Result<()> {
         journal.run_status(&run_id)?.as_deref(),
         Some("AwaitingApproval")
     );
-    assert_eq!(
-        count_kind(&journal, &run_id, JournalEventKind::ApprovalExpired),
-        0
-    );
+    assert_eq!(count_kind(&journal, &run_id, JournalEventKind::ApprovalExpired), 0);
     Ok(())
 }
+
 #[test]
 fn expire_advances_stale_run_to_failed() -> Result<()> {
     // A tiny TTL means the just-paused run is already "stale" relative to it.
@@ -302,17 +275,12 @@ fn expire_advances_stale_run_to_failed() -> Result<()> {
     let expired = journal.expire_stale_approvals(1)?;
     assert_eq!(expired, 1);
     assert_eq!(journal.run_status(&run_id)?.as_deref(), Some("Failed"));
-    assert_eq!(
-        count_kind(&journal, &run_id, JournalEventKind::ApprovalExpired),
-        1
-    );
+    assert_eq!(count_kind(&journal, &run_id, JournalEventKind::ApprovalExpired), 1);
     // No dispatch happened (never queued).
-    assert_eq!(
-        count_kind(&journal, &run_id, JournalEventKind::OutboxQueued),
-        0
-    );
+    assert_eq!(count_kind(&journal, &run_id, JournalEventKind::OutboxQueued), 0);
     Ok(())
 }
+
 #[test]
 fn expire_does_not_touch_resume_or_deny_terminal_runs() -> Result<()> {
     // A run that was already resumed (WaitingDispatch) must not be expired even
@@ -327,12 +295,10 @@ fn expire_does_not_touch_resume_or_deny_terminal_runs() -> Result<()> {
     std::thread::sleep(std::time::Duration::from_millis(1100));
     let expired = journal.expire_stale_approvals(1)?;
     assert_eq!(expired, 0, "a resumed run must not be expired");
-    assert_eq!(
-        count_kind(&journal, &run_id, JournalEventKind::ApprovalExpired),
-        0
-    );
+    assert_eq!(count_kind(&journal, &run_id, JournalEventKind::ApprovalExpired), 0);
     Ok(())
 }
+
 #[test]
 fn expire_is_idempotent() -> Result<()> {
     let (run_id, journal) = paused_run(1)?;
@@ -340,17 +306,16 @@ fn expire_is_idempotent() -> Result<()> {
     assert_eq!(journal.expire_stale_approvals(1)?, 1);
     // Second pass finds nothing (run is now Failed, no longer AwaitingApproval).
     assert_eq!(journal.expire_stale_approvals(1)?, 0);
-    assert_eq!(
-        count_kind(&journal, &run_id, JournalEventKind::ApprovalExpired),
-        1
-    );
+    assert_eq!(count_kind(&journal, &run_id, JournalEventKind::ApprovalExpired), 1);
     Ok(())
 }
+
 #[test]
 fn parse_kind_round_trips_approval_expired() -> Result<()> {
     // Append ApprovalExpired directly, reopen, confirm it reads back correctly
     // (not Unknown) — guards the hash-chain invariant.
-    let dir = std::env::temp_dir().join(format!("m2d-expiry-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("m2d-expiry-{}",
+        std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).ok();
     let db_path = dir.join("e.sqlite");
@@ -372,48 +337,40 @@ fn parse_kind_round_trips_approval_expired() -> Result<()> {
     let _ = std::fs::remove_dir_all(&dir);
     Ok(())
 }
+
 // ---- Phase 2 tool-call MVP: inline time.now execution ----
+
 #[test]
 fn validate_tool_call_accepts_time_now_and_rejects_others() {
-    use agent_core_kernel::domain::RunId;
     use agent_core_kernel::gateway::validate_tool_call;
+    use agent_core_kernel::domain::RunId;
     use agent_core_kernel::llm::ToolCall;
     use serde_json::json;
     let ok = validate_tool_call(
-        &ToolCall {
-            id: "c1".into(),
-            operation: "time.now".into(),
-            arguments: json!({}),
-        },
+        &ToolCall { id: "c1".into(), operation: "time.now".into(), arguments: json!({}) },
         &RunId::new(),
         0,
         0,
     );
     assert!(ok.is_ok(), "time.now should be accepted");
     let unknown = validate_tool_call(
-        &ToolCall {
-            id: "c1".into(),
-            operation: "shell.exec".into(),
-            arguments: json!({}),
-        },
+        &ToolCall { id: "c1".into(), operation: "shell.exec".into(), arguments: json!({}) },
         &RunId::new(),
         0,
         0,
     );
     assert!(unknown.is_err(), "unknown op rejected");
     let write_op = validate_tool_call(
-        &ToolCall {
-            id: "c1".into(),
-            operation: "feishu.send_message".into(),
-            arguments: json!({}),
-        },
+        &ToolCall { id: "c1".into(), operation: "feishu.send_message".into(), arguments: json!({}) },
         &RunId::new(),
         0,
         0,
     );
     assert!(write_op.is_err(), "Write op rejected via tool-call path");
 }
+
 struct ToolCallLlm(std::sync::Mutex<usize>);
+
 impl agent_core_kernel::llm::LlmClient for ToolCallLlm {
     fn complete(
         &self,
@@ -425,12 +382,7 @@ impl agent_core_kernel::llm::LlmClient for ToolCallLlm {
         Ok(agent_core_kernel::llm::LlmOutput {
             provider: "local".to_string(),
             model: "tool-call-test".to_string(),
-            content: if round == 0 {
-                "calling"
-            } else {
-                "time retrieved"
-            }
-            .to_string(),
+            content: if round == 0 { "calling" } else { "time retrieved" }.to_string(),
             journal_payload: json!({ "round": round }),
             tool_call: if round == 0 {
                 agent_core_kernel::llm::ToolCallResult::Valid(agent_core_kernel::llm::ToolCall {
@@ -444,6 +396,7 @@ impl agent_core_kernel::llm::LlmClient for ToolCallLlm {
         })
     }
 }
+
 #[test]
 fn time_now_tool_call_executes_once_inline() -> Result<()> {
     let mut config = common::test_config();
@@ -455,6 +408,7 @@ fn time_now_tool_call_executes_once_inline() -> Result<()> {
     let event = gateway.validate_ingress(&journal, envelope)?;
     let outcome = runtime.deliver(&journal, &gateway, event)?;
     let events = journal.events()?;
+
     let time_now_proposed = events
         .iter()
         .filter(|event| {
@@ -479,6 +433,7 @@ fn time_now_tool_call_executes_once_inline() -> Result<()> {
                     == Some("time.now")
         })
         .count();
+
     assert_eq!(time_now_proposed, 1, "time.now must be proposed once");
     assert_eq!(time_now_approved, 1, "time.now must be approved once");
     assert_eq!(

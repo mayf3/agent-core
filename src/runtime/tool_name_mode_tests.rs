@@ -130,22 +130,59 @@ mod tool_name_mode_tests {
         let j = JournalStore::in_memory()?;
         let g = Gateway::new(c.clone());
         let r = Runtime::new(c, llm);
-        let _ = r.deliver(
+        let o = r.deliver(
             &j,
             &g,
             g.validate_ingress(&j, g.cli_ingress("t".to_string())?)?,
         )?;
         let ev = j.events()?;
-        let tnp = |k: JournalEventKind| {
+        let total = |k: JournalEventKind| ev.iter().filter(|e| e.kind == k).count();
+        let total_op = |k: JournalEventKind, op: &str| {
             ev.iter()
                 .filter(|e| {
-                    e.kind == k
-                        && e.payload.get("operation").and_then(Value::as_str) == Some("time.now")
+                    e.kind == k && e.payload.get("operation").and_then(Value::as_str) == Some(op)
                 })
                 .count()
         };
-        assert_eq!(tnp(JournalEventKind::InvocationApproved), 0);
-        assert_eq!(tnp(JournalEventKind::ReceiptReceived), 0);
+        // The forged fn_99 is Malformed → ToolCallIssued + ToolCallRejected.
+        assert_eq!(total(JournalEventKind::ToolCallIssued), 1, "Issued=1");
+        assert_eq!(total(JournalEventKind::ToolCallRejected), 1, "Rejected=1");
+        // No time.now Proposed/Approved/Receipt — capability never executes.
+        // (stdout.send_text reply Proposed may appear; that is expected and
+        // unrelated to the tool call.)
+        assert_eq!(
+            total_op(JournalEventKind::InvocationProposed, "time.now"),
+            0
+        );
+        assert_eq!(
+            total_op(JournalEventKind::InvocationApproved, "time.now"),
+            0
+        );
+        assert_eq!(total_op(JournalEventKind::ReceiptReceived, "time.now"), 0);
+        // No Approved/Receipt under the time.now tool path (capability never
+        // executes). The stdout.send_text reply may itself be Proposed/Approved
+        // by Gateway — that is the normal reply path, not the forged tool.
+        assert_eq!(
+            total_op(JournalEventKind::InvocationApproved, "time.now"),
+            0,
+            "no time.now Approved"
+        );
+        assert_eq!(
+            total_op(JournalEventKind::ReceiptReceived, "time.now"),
+            0,
+            "no time.now Receipt"
+        );
+        // Journal must not contain the raw forged wire name.
+        let jt = serde_json::to_string(&ev).unwrap_or_default();
+        assert!(
+            !jt.contains("fn_99"),
+            "forged name must not appear in journal"
+        );
+        // Exactly one OutboxQueued (the recovery reply), no duplicates/blanks.
+        assert_eq!(total(JournalEventKind::OutboxQueued), 1, "OutboxQueued=1");
+        // Run is terminal, not Running.
+        let st = j.run_status(&o.run_id)?;
+        assert_ne!(st.as_deref(), Some("Running"), "Run not stuck Running");
         Ok(())
     }
 
@@ -265,11 +302,51 @@ mod tool_name_mode_tests {
         assert_eq!(tnp(JournalEventKind::ToolCallIssued), 1);
         assert_eq!(tnp(JournalEventKind::InvocationProposed), 1);
         assert_eq!(tnp(JournalEventKind::InvocationApproved), 1);
+        // Receipt correlation: shares the invocation_id (correlation_id) with
+        // Proposed/Approved — not just a count check.
+        let approved = ev
+            .iter()
+            .find(|e| {
+                e.kind == JournalEventKind::InvocationApproved
+                    && e.payload.get("operation").and_then(Value::as_str) == Some("time.now")
+            })
+            .expect("approved time.now");
+        let corr = approved.correlation_id.as_ref().expect("correlation_id");
         assert_eq!(
-            ev.iter()
-                .filter(|e| e.kind == JournalEventKind::ReceiptReceived)
-                .count(),
-            1
+            approved.run_id.as_ref(),
+            Some(&o.run_id),
+            "Approved run_id matches"
+        );
+        let receipt = ev
+            .iter()
+            .find(|e| e.kind == JournalEventKind::ReceiptReceived)
+            .expect("receipt");
+        assert_eq!(
+            receipt.correlation_id.as_ref(),
+            Some(corr),
+            "Receipt shares invocation correlation_id"
+        );
+        assert_eq!(receipt.run_id.as_ref(), Some(&o.run_id));
+        assert_eq!(
+            receipt.payload.get("status").and_then(Value::as_str),
+            Some("Succeeded")
+        );
+        // Round-2 system/context (messages[0].content) contains the textual
+        // ToolResult block (the project uses ContextBlock::ToolResult, NOT
+        // OpenAI role=tool messages).
+        let round2_ctx = reqs[1]["messages"][0]["content"].as_str().unwrap_or("");
+        assert!(
+            round2_ctx.contains("time.now"),
+            "round-2 context contains ToolResult for time.now"
+        );
+        assert!(
+            round2_ctx.contains("succeeded"),
+            "round-2 context shows status: succeeded"
+        );
+        assert_eq!(
+            tnp(JournalEventKind::InvocationApproved),
+            1,
+            "no 2nd capability exec"
         );
         assert_eq!(
             ev.iter()
@@ -288,5 +365,118 @@ mod tool_name_mode_tests {
             "fn_N must not appear in journal"
         );
         Ok(())
+    }
+
+    // ===== §3: production config wiring (build_llm_from_config) — 4 combos =====
+    //
+    // Exercises KernelConfig → build_llm_from_config → ModelEndpoint wiring,
+    // the SAME path delivery.rs uses. No HTTP needed: the indexed flags are
+    // inspected directly. Primary and fallback are independent.
+
+    fn wired_cfg() -> crate::config::KernelConfig {
+        let mut c = cfg();
+        c.openai_base_url = "http://primary/v1".into();
+        c.openai_api_key = "k".into();
+        c.model = "m".into();
+        c.fallback_openai_base_url = "http://fallback/v1".into();
+        c.fallback_openai_api_key = "fk".into();
+        c.fallback_model = "fm".into();
+        c
+    }
+    use crate::llm::ToolNameMode;
+    fn primary_indexed(llm: &crate::llm::OpenAiCompatibleLlm) -> bool {
+        matches!(llm.primary.tool_name_mode, ToolNameMode::IndexedMapping(_))
+    }
+    fn fallback_indexed(llm: &crate::llm::OpenAiCompatibleLlm) -> bool {
+        llm.fallback
+            .as_ref()
+            .map(|e| matches!(e.tool_name_mode, ToolNameMode::IndexedMapping(_)))
+            .unwrap_or(false)
+    }
+
+    #[test]
+    fn config_both_passthrough_default() {
+        let mut c = wired_cfg();
+        c.primary_tool_name_indexed = false;
+        c.fallback_tool_name_indexed = false;
+        let llm = crate::server::build_llm_from_config(&c);
+        assert!(!primary_indexed(&llm), "primary passthrough");
+        assert!(!fallback_indexed(&llm), "fallback passthrough");
+    }
+
+    #[test]
+    fn config_primary_indexed_only() {
+        let mut c = wired_cfg();
+        c.primary_tool_name_indexed = true;
+        c.fallback_tool_name_indexed = false;
+        let llm = crate::server::build_llm_from_config(&c);
+        assert!(primary_indexed(&llm), "primary indexed");
+        assert!(!fallback_indexed(&llm), "fallback still passthrough");
+    }
+
+    #[test]
+    fn config_fallback_indexed_only() {
+        let mut c = wired_cfg();
+        c.primary_tool_name_indexed = false;
+        c.fallback_tool_name_indexed = true;
+        let llm = crate::server::build_llm_from_config(&c);
+        assert!(!primary_indexed(&llm), "primary still passthrough");
+        assert!(fallback_indexed(&llm), "fallback indexed");
+    }
+
+    #[test]
+    fn config_both_indexed_independent() {
+        let mut c = wired_cfg();
+        c.primary_tool_name_indexed = true;
+        c.fallback_tool_name_indexed = true;
+        let llm = crate::server::build_llm_from_config(&c);
+        assert!(primary_indexed(&llm));
+        assert!(fallback_indexed(&llm));
+    }
+
+    #[test]
+    fn config_fallback_indexed_without_endpoint_does_not_create_one() {
+        // If fallback_tool_name_indexed=true but no fallback URL is configured,
+        // build_llm_from_config must NOT create a fallback endpoint.
+        let mut c = cfg();
+        c.fallback_openai_base_url = String::new();
+        c.fallback_tool_name_indexed = true;
+        let llm = crate::server::build_llm_from_config(&c);
+        assert!(
+            !fallback_indexed(&llm),
+            "no endpoint created from empty URL"
+        );
+    }
+
+    // ===== §4: freeze env_bool parsing (pure function) =====
+
+    #[test]
+    fn env_bool_accepts_common_truthy_values() {
+        use crate::config::parse_env_bool_value;
+        for v in ["true", "TRUE", "True", "1", "yes", "YES", "on", "on "] {
+            assert!(parse_env_bool_value(v, false), "truthy: {v:?}");
+        }
+        for v in ["false", "FALSE", "0", "no", "off", "OFF"] {
+            assert!(!parse_env_bool_value(v, true), "falsy: {v:?}");
+        }
+    }
+
+    #[test]
+    fn env_bool_unparsable_falls_back_safely() {
+        use crate::config::parse_env_bool_value;
+        // Invalid values fall back to the provided default — they do NOT silently
+        // enable indexed mapping (which could mask a deployment misconfiguration).
+        for v in ["", "maybe", "2", "y", "n", "yes/no"] {
+            assert_eq!(
+                parse_env_bool_value(v, false),
+                false,
+                "invalid → false default: {v:?}"
+            );
+            assert_eq!(
+                parse_env_bool_value(v, true),
+                true,
+                "invalid → true default: {v:?}"
+            );
+        }
     }
 }
