@@ -168,9 +168,24 @@ fn env_list(key: &str) -> Vec<String> {
     parse_env_list_value(&env_string(key, ""))
 }
 
+/// Parse a boolean env-var value. Pure (no env access) so production and tests
+/// share one code path. Accepted true values (case-insensitive, trimmed):
+/// `true`, `1`, `yes`, `on`. Accepted false values: `false`, `0`, `no`, `off`.
+/// Any other non-empty value is treated as a misconfiguration and falls back
+/// to `fallback` (false) — a deployment that sets an invalid value does NOT
+/// silently enable indexed mapping. `env_bool` logs nothing and never prints
+/// the raw env value.
+pub(crate) fn parse_env_bool_value(value: &str, fallback: bool) -> bool {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => true,
+        "false" | "0" | "no" | "off" => false,
+        _ => fallback,
+    }
+}
+
 fn env_bool(key: &str, fallback: bool) -> bool {
     std::env::var(key)
-        .map(|value| value == "true")
+        .map(|value| parse_env_bool_value(&value, fallback))
         .unwrap_or(fallback)
 }
 

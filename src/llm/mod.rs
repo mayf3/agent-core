@@ -107,8 +107,8 @@ impl LlmClient for LocalEchoLlm {
     }
 }
 pub struct OpenAiCompatibleLlm {
-    primary: ModelEndpoint,
-    fallback: Option<ModelEndpoint>,
+    pub(crate) primary: ModelEndpoint,
+    pub(crate) fallback: Option<ModelEndpoint>,
     timeout: Duration,
 }
 impl OpenAiCompatibleLlm {
@@ -245,11 +245,11 @@ impl OpenAiCompatibleLlm {
         response_value.map(|v| (v, tool_name_mode))
     }
 }
-struct ModelEndpoint {
+pub(crate) struct ModelEndpoint {
     base_url: String,
     api_key: String,
     model: String,
-    tool_name_mode: ToolNameMode,
+    pub(crate) tool_name_mode: ToolNameMode,
 }
 impl ModelEndpoint {
     fn new(base_url: String, api_key: String, model: String) -> Self {
@@ -360,10 +360,8 @@ fn parse_tool_call(value: &Value, mode: &ToolNameMode) -> ToolCallResult {
         Some(f) => f,
         None => return ToolCallResult::Malformed("missing function block".to_string()),
     };
-    // A missing or empty tool_call.id is malformed — we never synthesize a
-    // sentinel like "unknown" (that would make all missing-id calls collide in
-    // the idempotency key and internal audit id). The raw id is hashed exactly
-    // once here at the DTO boundary; downstream code treats it as opaque.
+    // A missing/empty id is malformed (never synthesize "unknown"). The raw id
+    // is hashed once here at the DTO boundary; downstream treats it as opaque.
     let raw_id = match tool_call_json.get("id").and_then(Value::as_str) {
         Some(s) if !s.trim().is_empty() => s,
         _ => return ToolCallResult::Malformed("missing tool_call id".to_string()),
@@ -371,20 +369,15 @@ fn parse_tool_call(value: &Value, mode: &ToolNameMode) -> ToolCallResult {
     let id = tool_call_id_hash(raw_id);
     let raw_operation = match function.get("name").and_then(Value::as_str) {
         Some(n) if !n.trim().is_empty() => n.to_string(),
-        _ => {
-            return ToolCallResult::Malformed("missing function name".to_string());
-        }
+        _ => return ToolCallResult::Malformed("missing function name".to_string()),
     };
-    // Resolve provider-safe name → canonical catalog name.
-    // IndexedMapping: look up in the per-request map; unknowns are Malformed.
-    // Passthrough: use the provider name as-is.
+    // Resolve provider-safe name → canonical. IndexedMapping: per-request map,
+    // unknowns are Malformed. Passthrough: use provider name as-is.
     let operation = match mode {
         ToolNameMode::Passthrough => raw_operation,
         ToolNameMode::IndexedMapping(map) => match map.get(&raw_operation) {
             Some(canonical) => canonical.clone(),
-            None => {
-                return ToolCallResult::Malformed("unknown function name".to_string());
-            }
+            None => return ToolCallResult::Malformed("unknown function name".to_string()),
         },
     };
     let arguments_str = function.get("arguments").and_then(Value::as_str);
@@ -411,10 +404,8 @@ fn parse_tool_call(value: &Value, mode: &ToolNameMode) -> ToolCallResult {
         arguments: arguments_val,
     })
 }
-/// Provider output is untrusted. Keep only bounded catalog metadata in the
-/// Journal; the runtime writes the position-derived malformed id and the
-/// digest-bearing unknown-operation audit value when it processes the call.
-
+/// Provider output is untrusted; keep only bounded catalog metadata in the
+/// Journal (the runtime adds the position-derived malformed id / digest).
 fn audit_tool_call(tool_call: &ToolCallResult) -> Value {
     match tool_call {
         ToolCallResult::Valid(call) => json!({
