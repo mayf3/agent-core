@@ -115,22 +115,19 @@ fn deliver_event(
         config.model.clone(),
         config.model_timeout_ms,
     );
-    // The fallback endpoint determines its own tool-name mode.
-    // DeepSeek-like URLs get IndexedMapping; others get Passthrough.
-    // This check lives in the config/delivery layer where we know
-    // which provider the URL points to — the LLM layer (llm/mod.rs)
-    // never inspects URLs to decide encoding.
-    if config
-        .fallback_openai_base_url
-        .to_ascii_lowercase()
-        .contains("deepseek")
-    {
+    // ToolNameMode is configured explicitly — never inferred from URL,
+    // host, model name, or path substrings. Primary and fallback each have
+    // their own independent setting via AGENT_CORE_*_TOOL_NAME_INDEXED.
+    if config.primary_tool_name_indexed {
+        llm = llm.with_indexed_primary();
+    }
+    if config.fallback_tool_name_indexed {
         llm = llm.with_indexed_fallback(
             config.fallback_openai_base_url.clone(),
             config.fallback_openai_api_key.clone(),
             config.fallback_model.clone(),
         );
-    } else {
+    } else if !config.fallback_openai_base_url.is_empty() {
         llm = llm.with_fallback(
             config.fallback_openai_base_url.clone(),
             config.fallback_openai_api_key.clone(),

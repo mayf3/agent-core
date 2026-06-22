@@ -259,6 +259,8 @@ fn test_config() -> KernelConfig {
         extra_allowed_operations: vec![],
         require_write_approval: false,
         write_approval_ttl_secs: 0,
+        fallback_tool_name_indexed: false,
+        primary_tool_name_indexed: false,
     }
 }
 

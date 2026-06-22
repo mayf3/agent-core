@@ -243,6 +243,8 @@ fn disabled_dispatcher_loop_returns_without_draining_outbox() -> Result<()> {
         extra_allowed_operations: vec![],
         require_write_approval: false,
         write_approval_ttl_secs: 0,
+        fallback_tool_name_indexed: false,
+        primary_tool_name_indexed: false,
     };
 
     let journal = Arc::new(JournalStore::in_memory()?);
@@ -407,6 +409,8 @@ fn disabled_test_config() -> KernelConfig {
         extra_allowed_operations: vec![],
         require_write_approval: false,
         write_approval_ttl_secs: 0,
+        fallback_tool_name_indexed: false,
+        primary_tool_name_indexed: false,
     }
 }
 

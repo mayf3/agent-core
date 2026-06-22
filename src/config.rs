@@ -41,6 +41,14 @@ pub struct KernelConfig {
     /// paused run waits indefinitely, the pre-expiry behavior). Only
     /// consulted when `require_write_approval` is true.
     pub write_approval_ttl_secs: u64,
+    /// When true, the fallback LLM endpoint uses IndexedMapping for tool
+    /// names (e.g. DeepSeek that rejects dots in function names).
+    /// Configured via AGENT_CORE_FALLBACK_TOOL_NAME_INDEXED (default: false).
+    pub fallback_tool_name_indexed: bool,
+    /// When true, the primary LLM endpoint uses IndexedMapping for tool
+    /// names.
+    /// Configured via AGENT_CORE_PRIMARY_TOOL_NAME_INDEXED (default: false).
+    pub primary_tool_name_indexed: bool,
 }
 
 impl KernelConfig {
@@ -94,7 +102,10 @@ impl KernelConfig {
             context_recent_messages: env_usize("AGENT_CORE_CONTEXT_RECENT_MESSAGES", 6),
             context_max_block_chars: env_usize("AGENT_CORE_CONTEXT_MAX_BLOCK_CHARS", 4_000),
             outbox_dispatcher_enabled: env_bool("AGENT_CORE_OUTBOX_DISPATCHER_ENABLED", true),
-            outbox_dispatcher_poll_interval_ms: env_u64("AGENT_CORE_OUTBOX_DISPATCHER_POLL_MS", 500),
+            outbox_dispatcher_poll_interval_ms: env_u64(
+                "AGENT_CORE_OUTBOX_DISPATCHER_POLL_MS",
+                500,
+            ),
             // system.status is part of the dogfood agent's profile (not a
             // channel grant, see ExecutionProfile::for_channel). It is granted
             // here in the default config so the dogfood agent can query system
@@ -109,6 +120,8 @@ impl KernelConfig {
             },
             require_write_approval: env_bool("AGENT_CORE_REQUIRE_WRITE_APPROVAL", false),
             write_approval_ttl_secs: env_u64("AGENT_CORE_WRITE_APPROVAL_TTL_SECS", 0),
+            fallback_tool_name_indexed: env_bool("AGENT_CORE_FALLBACK_TOOL_NAME_INDEXED", false),
+            primary_tool_name_indexed: env_bool("AGENT_CORE_PRIMARY_TOOL_NAME_INDEXED", false),
         }
     }
 }

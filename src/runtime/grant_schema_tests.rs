@@ -322,6 +322,8 @@ pub(crate) fn _cfg() -> KernelConfig {
         extra_allowed_operations: vec![],
         require_write_approval: false,
         write_approval_ttl_secs: 0,
+        fallback_tool_name_indexed: false,
+        primary_tool_name_indexed: false,
     }
 }
 
@@ -403,9 +405,7 @@ fn ungranted_provider_time_now_is_rejected_by_gateway() {
         "un-granted time.now not in ToolCatalog"
     );
 }
-
 // ===== §9: full time.now tool loop (granted) =====
-
 #[test]
 fn granted_time_now_completes_real_http_tool_loop() {
     let mut cfg = _cfg();
