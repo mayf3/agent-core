@@ -2,12 +2,12 @@ use crate::domain::ContextBlock;
 use anyhow::Result;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::time::Duration;
 
 pub trait LlmClient {
     fn complete(&self, input: LlmInput) -> Result<LlmOutput>;
 }
-
 pub struct LlmInput {
     pub blocks: Vec<ContextBlock>,
     pub user_text: String,
@@ -17,7 +17,6 @@ pub struct LlmInput {
     /// remains the final authorization boundary; this is a prompt hint only.
     pub granted_operations: Vec<String>,
 }
-
 pub struct LlmOutput {
     pub provider: String,
     pub model: String,
@@ -30,9 +29,9 @@ pub struct LlmOutput {
     ///   were unparseable; never executes, produces a stable ToolResult.
     pub tool_call: ToolCallResult,
 }
-
 /// The result of parsing a provider tool-call response.
 #[derive(Debug, Clone)]
+
 pub enum ToolCallResult {
     /// No tool call in the provider response (text-only).
     Absent,
@@ -42,26 +41,25 @@ pub enum ToolCallResult {
     /// receives a ToolResult with the sanitized error and can recover.
     Malformed(String),
 }
-
 impl ToolCallResult {
     pub fn is_absent(&self) -> bool {
         matches!(self, ToolCallResult::Absent)
     }
 }
-
 /// Deterministic bounded hash of a provider tool-call ID. The provider value
 /// is untrusted/unbounded; we never write it raw into Journal, idempotency keys,
 /// errors, or model-visible text.
+
 pub fn tool_call_id_hash(provider_id: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(provider_id.as_bytes());
     hex::encode(hasher.finalize())
 }
-
 /// A structured tool call the model wishes to execute (Phase 2 tool-call MVP).
 /// `operation` must be a catalogued `ReadOnly` operation or the call is
 /// rejected before any adapter runs.
 #[derive(Debug, Clone)]
+
 pub struct ToolCall {
     /// Deterministic bounded digest of the provider-assigned id. Never the raw
     /// provider value — the raw value is untrusted and never written to Journal,
@@ -72,13 +70,24 @@ pub struct ToolCall {
     /// JSON arguments for the operation.
     pub arguments: serde_json::Value,
 }
+/// How an LLM endpoint encodes tool names. Explicitly set on the
+/// `ModelEndpoint` — never inferred from URL substrings.
+#[derive(Debug, Clone)]
 
+pub(crate) enum ToolNameMode {
+    /// Canonical names as-is (GLM/OpenAI).
+    Passthrough,
+    /// Per-request `fn_N` indices with reverse map (DeepSeek).
+    IndexedMapping(ToolNameMap),
+}
+/// Encoded → canonical name map for one request.
+
+pub(crate) type ToolNameMap = HashMap<String, String>;
 impl<T: LlmClient + ?Sized> LlmClient for Box<T> {
     fn complete(&self, input: LlmInput) -> Result<LlmOutput> {
         (**self).complete(input)
     }
 }
-
 pub struct LocalEchoLlm;
 
 impl LlmClient for LocalEchoLlm {
@@ -97,13 +106,11 @@ impl LlmClient for LocalEchoLlm {
         })
     }
 }
-
 pub struct OpenAiCompatibleLlm {
-    primary: ModelEndpoint,
-    fallback: Option<ModelEndpoint>,
+    pub(crate) primary: ModelEndpoint,
+    pub(crate) fallback: Option<ModelEndpoint>,
     timeout: Duration,
 }
-
 impl OpenAiCompatibleLlm {
     pub fn new(base_url: String, api_key: String, model: String, timeout_ms: u64) -> Self {
         Self {
@@ -112,7 +119,6 @@ impl OpenAiCompatibleLlm {
             timeout: Duration::from_millis(timeout_ms),
         }
     }
-
     pub fn with_fallback(mut self, base_url: String, api_key: String, model: String) -> Self {
         let endpoint = ModelEndpoint::new(base_url, api_key, model);
         if endpoint.is_configured() {
@@ -120,8 +126,24 @@ impl OpenAiCompatibleLlm {
         }
         self
     }
+    /// Like `with_fallback` but marks the fallback endpoint as `IndexedMapping`.
+    pub fn with_indexed_fallback(
+        mut self,
+        base_url: String,
+        api_key: String,
+        model: String,
+    ) -> Self {
+        let endpoint = ModelEndpoint::new(base_url, api_key, model).with_indexed_tool_name();
+        if endpoint.is_configured() {
+            self.fallback = Some(endpoint);
+        }
+        self
+    }
+    pub fn with_indexed_primary(mut self) -> Self {
+        self.primary = self.primary.with_indexed_tool_name();
+        self
+    }
 }
-
 impl LlmClient for OpenAiCompatibleLlm {
     fn complete(&self, input: LlmInput) -> Result<LlmOutput> {
         if !self.primary.is_configured() {
@@ -134,10 +156,11 @@ impl LlmClient for OpenAiCompatibleLlm {
             };
         }
         match self.request_endpoint(&self.primary, &input) {
-            Ok(value) => Ok(success_output(
+            Ok((value, mode)) => Ok(success_output(
                 &self.primary.model,
                 input.blocks.len(),
                 value,
+                &mode,
             )),
             Err(error) => {
                 if let Some(output) = self.try_fallback(&input, error.as_str()) {
@@ -152,24 +175,39 @@ impl LlmClient for OpenAiCompatibleLlm {
         }
     }
 }
-
 impl OpenAiCompatibleLlm {
     fn try_fallback(&self, input: &LlmInput, primary_error: &str) -> Option<LlmOutput> {
         let fallback = self.fallback.as_ref()?;
         let output = match self.request_endpoint(fallback, input) {
-            Ok(value) => success_output(&fallback.model, input.blocks.len(), value),
+            Ok((value, mode)) => success_output(&fallback.model, input.blocks.len(), value, &mode),
             Err(error) => {
                 request_failed_output(&fallback.model, input.blocks.len(), error.as_str())
             }
         };
         Some(mark_fallback(output, &self.primary.model, primary_error))
     }
-
     fn request_endpoint(
         &self,
         endpoint: &ModelEndpoint,
         input: &LlmInput,
-    ) -> std::result::Result<Value, String> {
+    ) -> std::result::Result<(Value, ToolNameMode), String> {
+        let mut tools =
+            crate::domain::operation::provider_tools_for_grants(&input.granted_operations);
+        // Build per-request mapping if endpoint uses IndexedMapping.
+        let tool_name_mode = match &endpoint.tool_name_mode {
+            ToolNameMode::Passthrough => ToolNameMode::Passthrough,
+            ToolNameMode::IndexedMapping(_) => {
+                let mut map = ToolNameMap::new();
+                for (idx, tool) in tools.iter_mut().enumerate() {
+                    if let Some(name) = tool.pointer("/function/name").and_then(Value::as_str) {
+                        let safe = format!("fn_{}", idx);
+                        map.insert(safe.clone(), name.to_string());
+                        tool["function"]["name"] = json!(safe);
+                    }
+                }
+                ToolNameMode::IndexedMapping(map)
+            }
+        };
         let body = json!({
             "model": endpoint.model,
             "messages": [
@@ -183,7 +221,7 @@ impl OpenAiCompatibleLlm {
                 },
             ],
             "temperature": 0.2,
-            "tools": crate::domain::operation::provider_tools_for_grants(&input.granted_operations),
+            "tools": tools,
             "tool_choice": "auto",
         });
         let agent = ureq::Agent::config_builder()
@@ -195,7 +233,7 @@ impl OpenAiCompatibleLlm {
             .header("authorization", &format!("Bearer {}", endpoint.api_key))
             .header("content-type", "application/json")
             .send_json(body);
-        match response {
+        let response_value = match response {
             Ok(mut response) => response
                 .body_mut()
                 .read_json::<Value>()
@@ -203,16 +241,16 @@ impl OpenAiCompatibleLlm {
             Err(ureq::Error::StatusCode(code)) => Err(format!("model_http_{code}")),
             Err(ureq::Error::Timeout(_)) => Err("model_timeout".to_string()),
             Err(_) => Err("model_request_failed".to_string()),
-        }
+        };
+        response_value.map(|v| (v, tool_name_mode))
     }
 }
-
-struct ModelEndpoint {
+pub(crate) struct ModelEndpoint {
     base_url: String,
     api_key: String,
     model: String,
+    pub(crate) tool_name_mode: ToolNameMode,
 }
-
 impl ModelEndpoint {
     fn new(base_url: String, api_key: String, model: String) -> Self {
         let normalized_model = normalize_model_name(&base_url, &model);
@@ -220,15 +258,18 @@ impl ModelEndpoint {
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key,
             model: normalized_model,
+            tool_name_mode: ToolNameMode::Passthrough,
         }
     }
-
+    fn with_indexed_tool_name(mut self) -> Self {
+        self.tool_name_mode = ToolNameMode::IndexedMapping(ToolNameMap::new());
+        self
+    }
     fn is_configured(&self) -> bool {
         !self.base_url.trim().is_empty()
             && !self.api_key.trim().is_empty()
             && !self.model.trim().is_empty()
     }
-
     fn chat_completions_url(&self) -> String {
         if self.base_url.ends_with("/chat/completions") {
             self.base_url.clone()
@@ -237,7 +278,6 @@ impl ModelEndpoint {
         }
     }
 }
-
 fn config_required_output(model: &str, context_blocks: usize) -> LlmOutput {
     LlmOutput {
         provider: "openai-compatible".to_string(),
@@ -254,7 +294,6 @@ fn config_required_output(model: &str, context_blocks: usize) -> LlmOutput {
         tool_call: ToolCallResult::Absent,
     }
 }
-
 fn request_failed_output(model: &str, context_blocks: usize, category: &str) -> LlmOutput {
     LlmOutput {
         provider: "openai-compatible".to_string(),
@@ -270,8 +309,12 @@ fn request_failed_output(model: &str, context_blocks: usize, category: &str) -> 
         tool_call: ToolCallResult::Absent,
     }
 }
-
-fn success_output(model: &str, context_blocks: usize, value: Value) -> LlmOutput {
+fn success_output(
+    model: &str,
+    context_blocks: usize,
+    value: Value,
+    mode: &ToolNameMode,
+) -> LlmOutput {
     let content = value
         .pointer("/choices/0/message/content")
         .and_then(Value::as_str)
@@ -280,9 +323,8 @@ fn success_output(model: &str, context_blocks: usize, value: Value) -> LlmOutput
         .unwrap_or("")
         .to_string();
     // Parse tool_calls[0] from the OpenAI-compatible response.
-    let tool_call = parse_tool_call(&value);
-    // When the provider returns a malformed tool call with no text content,
-    // ensure a non-empty user-safe fallback so the reply is never silently empty.
+    let tool_call = parse_tool_call(&value, mode);
+    // User-safe fallback for malformed tool calls with empty content.
     let content = match &tool_call {
         ToolCallResult::Malformed(_) if content.is_empty() => {
             "The tool call could not be parsed. Please try again.".to_string()
@@ -305,14 +347,11 @@ fn success_output(model: &str, context_blocks: usize, value: Value) -> LlmOutput
         tool_call,
     }
 }
+/// Parse `choices[0].message.tool_calls[0]` (single tool-call MVP).
+/// `IndexedMapping(map)`: look up provider name; unknowns → Malformed.
+/// `Passthrough`: use provider name as-is (GLM/OpenAI).
 
-/// Parse `choices[0].message.tool_calls[0]` from an OpenAI-compatible response.
-/// Returns `ToolCallResult` — three-way state distinguishing absent, valid,
-/// and malformed tool calls. Never returns raw provider IDs or arguments.
-///
-/// Malformed `function.arguments` (invalid JSON, non-object JSON) is rejected
-/// as `Malformed(reason)` — the model receives a ToolResult and can recover.
-fn parse_tool_call(value: &Value) -> ToolCallResult {
+fn parse_tool_call(value: &Value, mode: &ToolNameMode) -> ToolCallResult {
     let tool_call_json = match value.pointer("/choices/0/message/tool_calls/0") {
         Some(v) if !v.is_null() => v,
         _ => return ToolCallResult::Absent,
@@ -321,20 +360,25 @@ fn parse_tool_call(value: &Value) -> ToolCallResult {
         Some(f) => f,
         None => return ToolCallResult::Malformed("missing function block".to_string()),
     };
-    // A missing or empty tool_call.id is malformed — we never synthesize a
-    // sentinel like "unknown" (that would make all missing-id calls collide in
-    // the idempotency key and internal audit id). The raw id is hashed exactly
-    // once here at the DTO boundary; downstream code treats it as opaque.
+    // A missing/empty id is malformed (never synthesize "unknown"). The raw id
+    // is hashed once here at the DTO boundary; downstream treats it as opaque.
     let raw_id = match tool_call_json.get("id").and_then(Value::as_str) {
         Some(s) if !s.trim().is_empty() => s,
         _ => return ToolCallResult::Malformed("missing tool_call id".to_string()),
     };
     let id = tool_call_id_hash(raw_id);
-    let operation = match function.get("name").and_then(Value::as_str) {
+    let raw_operation = match function.get("name").and_then(Value::as_str) {
         Some(n) if !n.trim().is_empty() => n.to_string(),
-        _ => {
-            return ToolCallResult::Malformed("missing function name".to_string());
-        }
+        _ => return ToolCallResult::Malformed("missing function name".to_string()),
+    };
+    // Resolve provider-safe name → canonical. IndexedMapping: per-request map,
+    // unknowns are Malformed. Passthrough: use provider name as-is.
+    let operation = match mode {
+        ToolNameMode::Passthrough => raw_operation,
+        ToolNameMode::IndexedMapping(map) => match map.get(&raw_operation) {
+            Some(canonical) => canonical.clone(),
+            None => return ToolCallResult::Malformed("unknown function name".to_string()),
+        },
     };
     let arguments_str = function.get("arguments").and_then(Value::as_str);
     let arguments_val = match arguments_str {
@@ -360,10 +404,8 @@ fn parse_tool_call(value: &Value) -> ToolCallResult {
         arguments: arguments_val,
     })
 }
-
-/// Provider output is untrusted. Keep only bounded catalog metadata in the
-/// Journal; the runtime writes the position-derived malformed id and the
-/// digest-bearing unknown-operation audit value when it processes the call.
+/// Provider output is untrusted; keep only bounded catalog metadata in the
+/// Journal (the runtime adds the position-derived malformed id / digest).
 fn audit_tool_call(tool_call: &ToolCallResult) -> Value {
     match tool_call {
         ToolCallResult::Valid(call) => json!({
@@ -378,7 +420,6 @@ fn audit_tool_call(tool_call: &ToolCallResult) -> Value {
         ToolCallResult::Absent => Value::Null,
     }
 }
-
 fn type_name(v: &Value) -> &'static str {
     match v {
         Value::Null => "null",
@@ -389,7 +430,6 @@ fn type_name(v: &Value) -> &'static str {
         Value::Object(_) => "object",
     }
 }
-
 fn mark_fallback(mut output: LlmOutput, primary_model: &str, primary_error: &str) -> LlmOutput {
     if let Some(payload) = output.journal_payload.as_object_mut() {
         payload.insert(
@@ -403,7 +443,6 @@ fn mark_fallback(mut output: LlmOutput, primary_model: &str, primary_error: &str
     }
     output
 }
-
 fn serialize_system_context(blocks: &[ContextBlock]) -> String {
     blocks
         .iter()
@@ -412,7 +451,6 @@ fn serialize_system_context(blocks: &[ContextBlock]) -> String {
         .collect::<Vec<_>>()
         .join("\n\n")
 }
-
 fn sanitize_usage(value: Option<&Value>) -> Value {
     let Some(value) = value else {
         return Value::Null;
@@ -423,7 +461,6 @@ fn sanitize_usage(value: Option<&Value>) -> Value {
         "total_tokens": value.get("total_tokens").and_then(Value::as_i64),
     })
 }
-
 fn empty_to_null(value: &str) -> Value {
     if value.is_empty() {
         Value::Null
@@ -431,7 +468,6 @@ fn empty_to_null(value: &str) -> Value {
         json!(value)
     }
 }
-
 fn normalize_model_name(base_url: &str, model: &str) -> String {
     let trimmed = model.trim();
     if is_zai_endpoint(base_url) {
@@ -443,7 +479,6 @@ fn normalize_model_name(base_url: &str, model: &str) -> String {
     }
     trimmed.to_string()
 }
-
 fn is_zai_endpoint(base_url: &str) -> bool {
     let lower = base_url.to_ascii_lowercase();
     lower.contains("z.ai") || lower.contains("bigmodel.cn")

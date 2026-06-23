@@ -13,6 +13,39 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
+
+/// Build an `OpenAiCompatibleLlm` from a `KernelConfig`. This is the SINGLE
+/// production wiring path shared by `deliver` and tests — so the
+/// `primary_tool_name_indexed` / `fallback_tool_name_indexed` config flags are
+/// applied identically everywhere. The mode is explicit config, never inferred
+/// from URL/host/model substrings. Primary and fallback are independent.
+pub(crate) fn build_llm_from_config(config: &KernelConfig) -> OpenAiCompatibleLlm {
+    let mut llm = OpenAiCompatibleLlm::new(
+        config.openai_base_url.clone(),
+        config.openai_api_key.clone(),
+        config.model.clone(),
+        config.model_timeout_ms,
+    );
+    if config.primary_tool_name_indexed {
+        llm = llm.with_indexed_primary();
+    }
+    if config.fallback_tool_name_indexed {
+        if !config.fallback_openai_base_url.is_empty() {
+            llm = llm.with_indexed_fallback(
+                config.fallback_openai_base_url.clone(),
+                config.fallback_openai_api_key.clone(),
+                config.fallback_model.clone(),
+            );
+        }
+    } else if !config.fallback_openai_base_url.is_empty() {
+        llm = llm.with_fallback(
+            config.fallback_openai_base_url.clone(),
+            config.fallback_openai_api_key.clone(),
+            config.fallback_model.clone(),
+        );
+    }
+    llm
+}
 use std::thread;
 use std::time::Duration;
 
@@ -109,18 +142,7 @@ fn deliver_event(
     gateway: &Gateway,
     validated: ValidatedEvent,
 ) -> Result<()> {
-    let llm = OpenAiCompatibleLlm::new(
-        config.openai_base_url.clone(),
-        config.openai_api_key.clone(),
-        config.model.clone(),
-        config.model_timeout_ms,
-    )
-    .with_fallback(
-        config.fallback_openai_base_url.clone(),
-        config.fallback_openai_api_key.clone(),
-        config.fallback_model.clone(),
-    );
-    let llm = Box::new(llm);
+    let llm: Box<dyn crate::llm::LlmClient> = Box::new(build_llm_from_config(&config));
     let runtime = Runtime::new(config.clone(), llm);
     runtime.deliver(journal, gateway, validated)?;
     Ok(())
