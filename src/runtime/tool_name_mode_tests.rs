@@ -147,6 +147,18 @@ mod tool_name_mode_tests {
         // The forged fn_99 is Malformed → ToolCallIssued + ToolCallRejected.
         assert_eq!(total(JournalEventKind::ToolCallIssued), 1, "Issued=1");
         assert_eq!(total(JournalEventKind::ToolCallRejected), 1, "Rejected=1");
+        let rejected = ev
+            .iter()
+            .find(|e| e.kind == JournalEventKind::ToolCallRejected)
+            .unwrap();
+        assert_eq!(
+            rejected
+                .payload
+                .get("error_category")
+                .and_then(Value::as_str),
+            Some("malformed_tool_call"),
+            "rejection category must be malformed_tool_call"
+        );
         // No time.now Proposed/Approved/Receipt — capability never executes.
         // (stdout.send_text reply Proposed may appear; that is expected and
         // unrelated to the tool call.)
@@ -256,12 +268,15 @@ mod tool_name_mode_tests {
         ]);
         let mut c = cfg();
         c.extra_allowed_operations = vec!["time.now".to_string()];
+        c.openai_api_key = "t".into();
+        c.model = "p".into();
         c.fallback_tool_name_indexed = true;
         c.fallback_openai_base_url = fb.url();
         c.fallback_openai_api_key = "test".into();
         c.fallback_model = "fs".into();
-        let llm = OpenAiCompatibleLlm::new(p.url(), "t".into(), "p".into(), 5000)
-            .with_indexed_fallback(fb.url(), "test".into(), "fs".into());
+        // Primary URL is always the 429 stub (build_llm_from_config reads config).
+        c.openai_base_url = p.url();
+        let llm = crate::server::build_llm_from_config(&c);
         let j = JournalStore::in_memory()?;
         let g = Gateway::new(c.clone());
         let r = Runtime::new(c, llm);
@@ -454,29 +469,24 @@ mod tool_name_mode_tests {
     fn env_bool_accepts_common_truthy_values() {
         use crate::config::parse_env_bool_value;
         for v in ["true", "TRUE", "True", "1", "yes", "YES", "on", "on "] {
-            assert!(parse_env_bool_value(v, false), "truthy: {v:?}");
+            assert_eq!(parse_env_bool_value(v), Ok(true), "truthy: {v:?}");
         }
         for v in ["false", "FALSE", "0", "no", "off", "OFF"] {
-            assert!(!parse_env_bool_value(v, true), "falsy: {v:?}");
+            assert_eq!(parse_env_bool_value(v), Ok(false), "falsy: {v:?}");
         }
     }
 
     #[test]
-    fn env_bool_unparsable_falls_back_safely() {
+    fn env_bool_unparsable_returns_error() {
         use crate::config::parse_env_bool_value;
-        // Invalid values fall back to the provided default — they do NOT silently
-        // enable indexed mapping (which could mask a deployment misconfiguration).
-        for v in ["", "maybe", "2", "y", "n", "yes/no"] {
-            assert_eq!(
-                parse_env_bool_value(v, false),
-                false,
-                "invalid → false default: {v:?}"
-            );
-            assert_eq!(
-                parse_env_bool_value(v, true),
-                true,
-                "invalid → true default: {v:?}"
-            );
+        for v in ["", "maybe", "2", "y", "n", "yes/no", "tru"] {
+            let r = parse_env_bool_value(v);
+            assert!(r.is_err(), "invalid value must produce Err: {v:?}");
+            let err = r.unwrap_err();
+            assert_eq!(err, "invalid_boolean_config");
+            if v.len() > 2 {
+                assert!(!err.contains(v), "error must not contain raw value: {v:?}");
+            }
         }
     }
 }

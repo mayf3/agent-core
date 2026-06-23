@@ -175,18 +175,27 @@ fn env_list(key: &str) -> Vec<String> {
 /// to `fallback` (false) — a deployment that sets an invalid value does NOT
 /// silently enable indexed mapping. `env_bool` logs nothing and never prints
 /// the raw env value.
-pub(crate) fn parse_env_bool_value(value: &str, fallback: bool) -> bool {
+pub(crate) fn parse_env_bool_value(value: &str) -> Result<bool, String> {
     match value.trim().to_ascii_lowercase().as_str() {
-        "true" | "1" | "yes" | "on" => true,
-        "false" | "0" | "no" | "off" => false,
-        _ => fallback,
+        "true" | "1" | "yes" | "on" => Ok(true),
+        "false" | "0" | "no" | "off" => Ok(false),
+        _ => Err("invalid_boolean_config".to_string()),
     }
 }
 
 fn env_bool(key: &str, fallback: bool) -> bool {
-    std::env::var(key)
-        .map(|value| parse_env_bool_value(&value, fallback))
-        .unwrap_or(fallback)
+    let raw = match std::env::var(key) {
+        Ok(v) => v,
+        Err(_) => return fallback,
+    };
+    match parse_env_bool_value(&raw) {
+        Ok(v) => v,
+        Err(_) => {
+            // Invalid value — abort startup so the operator knows.
+            eprintln!("invalid_boolean_config: {key}");
+            std::process::exit(1);
+        }
+    }
 }
 
 fn env_u16(key: &str, fallback: u16) -> u16 {
