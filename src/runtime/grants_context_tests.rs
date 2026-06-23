@@ -8,7 +8,6 @@ mod grants_context_tests {
     use crate::domain::*;
     use crate::journal::JournalStore;
     use std::path::PathBuf;
-
     // ===== §4: env → profile → principal → ToolCatalog / Provider tools =====
     //
     // The only correct config key is AGENT_CORE_EXTRA_ALLOWED_OPERATIONS.
@@ -17,7 +16,6 @@ mod grants_context_tests {
     // is exercised without mutating global environment variables. Downstream
     // with_extra dedups and drops unknown names; Write ops pass the grant
     // check but are hidden by catalog_for_context_grants / provider_tools_for_grants.
-
     fn tool_set_from_grants(grants: &[String]) -> Vec<String> {
         provider_tools_for_grants(grants)
             .into_iter()
@@ -28,7 +26,6 @@ mod grants_context_tests {
             })
             .collect()
     }
-
     fn catalog_set_from_grants(grants: &[String]) -> Vec<String> {
         // The catalog text lists "<name> - <desc>" per line after the header.
         catalog_for_context_grants(grants)
@@ -37,7 +34,6 @@ mod grants_context_tests {
             .filter_map(|l| l.split(" - ").next().map(str::to_string))
             .collect()
     }
-
     #[test]
     fn single_time_now_grant_aligns_catalog_and_provider_tools() {
         let grants: Vec<String> = ExecutionProfile::for_channel(ChannelKind::Cli)
@@ -55,7 +51,6 @@ mod grants_context_tests {
             "ToolCatalog set must equal Provider tools set"
         );
     }
-
     #[test]
     fn multiple_readonly_grants_whitespace_and_duplicates() {
         let grants: Vec<String> = ExecutionProfile::for_channel(ChannelKind::Cli)
@@ -81,11 +76,12 @@ mod grants_context_tests {
             catalog_set_from_grants(&grants)
         );
     }
-
     #[test]
     fn unknown_operations_do_not_enter_profile_or_tools() {
         let grants: Vec<String> = ExecutionProfile::for_channel(ChannelKind::Cli)
-            .with_extra(&crate::config::parse_env_list_value("shell.exec, time.now, bogus_op"))
+            .with_extra(&crate::config::parse_env_list_value(
+                "shell.exec, time.now, bogus_op",
+            ))
             .grants
             .into_iter()
             .map(|g| g.operation)
@@ -95,13 +91,14 @@ mod grants_context_tests {
         assert!(!tools.contains(&"bogus_op".to_string()));
         assert!(tools.contains(&"time.now".to_string()));
     }
-
     #[test]
     fn write_operation_granted_but_never_in_tools_or_catalog() {
         // Even if a Write op is in the env, it is granted (lookup passes) but
         // hidden from BOTH Provider tools and the ToolCatalog (ReadOnly-only).
         let grants: Vec<String> = ExecutionProfile::for_channel(ChannelKind::Cli)
-            .with_extra(&crate::config::parse_env_list_value("feishu.send_message, time.now"))
+            .with_extra(&crate::config::parse_env_list_value(
+                "feishu.send_message, time.now",
+            ))
             .grants
             .into_iter()
             .map(|g| g.operation)
@@ -116,7 +113,6 @@ mod grants_context_tests {
         assert!(!catalog.contains(&"feishu.send_message".to_string()));
         assert!(tools.contains(&"time.now".to_string()));
     }
-
     #[test]
     fn empty_grants_yield_no_tools_and_no_catalog_entries() {
         let grants: Vec<String> = vec![];
@@ -127,9 +123,7 @@ mod grants_context_tests {
         );
         assert!(provider_tools_for_grants(&grants).is_empty());
     }
-
     // ===== Context ToolCatalog aligns with grants (§1) =====
-
     fn empty_event(_session: &Session) -> ValidatedEvent {
         ValidatedEvent {
             event_id: EventId::new(),
@@ -155,36 +149,13 @@ mod grants_context_tests {
             occurred_at: chrono::Utc::now(),
         }
     }
-
     fn test_config() -> KernelConfig {
-        KernelConfig {
-            db_path: PathBuf::from(":memory:"),
-            data_dir: PathBuf::from("."),
-            agent_id: AgentId("main".into()),
-            root_dir: PathBuf::from("/nonexistent-agent-core-root-xyz"),
-            kernel_port: 4130,
-            connector_execute_url: String::new(),
-            ipc_token: "test".into(),
-            feishu_allowed_open_ids: vec![],
-            feishu_allowed_chat_ids: vec![],
-            feishu_require_group_mention: true,
-            openai_base_url: String::new(),
-            openai_api_key: String::new(),
-            model: String::new(),
-            fallback_openai_base_url: String::new(),
-            fallback_openai_api_key: String::new(),
-            fallback_model: String::new(),
-            model_timeout_ms: 100,
-            context_recent_messages: 6,
-            context_max_block_chars: 4000,
-            outbox_dispatcher_enabled: false,
-            outbox_dispatcher_poll_interval_ms: 10,
-            extra_allowed_operations: vec![],
-            require_write_approval: false,
-            write_approval_ttl_secs: 0,
-        }
+        // Reuse _cfg() but point root_dir at a nonexistent path so the Context
+        // assembler uses safe fallback text (exercises the no-chat-only path).
+        let mut c = super::super::grant_schema_tests::_cfg();
+        c.root_dir = PathBuf::from("/nonexistent-agent-core-root-xyz");
+        c
     }
-
     fn build_blocks(grants: &[String]) -> Vec<ContextBlock> {
         let cfg = test_config();
         let journal = JournalStore::in_memory().unwrap();
@@ -204,7 +175,6 @@ mod grants_context_tests {
             .build(&journal, &session, &event, "hi", grants)
             .unwrap()
     }
-
     fn catalog_block_text(blocks: &[ContextBlock]) -> String {
         blocks
             .iter()
@@ -212,7 +182,6 @@ mod grants_context_tests {
             .map(|b| b.content.clone())
             .unwrap_or_default()
     }
-
     #[test]
     fn context_tool_catalog_omits_ungranted_time_now() {
         // No time.now grant → the ToolCatalog block must not mention it.
@@ -228,7 +197,6 @@ mod grants_context_tests {
             "ToolCatalog must omit un-granted time.now: {cat}"
         );
     }
-
     #[test]
     fn context_tool_catalog_includes_granted_time_now() {
         let grants: Vec<String> = ExecutionProfile::for_channel(ChannelKind::Cli)
@@ -247,7 +215,6 @@ mod grants_context_tests {
         assert!(!cat.contains("feishu.send_message"));
         assert!(!cat.contains("stdout.send_text"));
     }
-
     #[test]
     fn context_fallback_contains_no_chat_only_semantics() {
         // When prompt files are absent (root_dir points nowhere), the context
@@ -265,7 +232,6 @@ mod grants_context_tests {
             "fallback leaked without tools"
         );
     }
-
     #[test]
     fn context_fallback_does_not_leak_paths_or_errors() {
         let blocks = build_blocks(&[]);
@@ -283,4 +249,4 @@ mod grants_context_tests {
             "fallback leaked an I/O error"
         );
     }
-}
+} // end mod grants_context_tests

@@ -5,8 +5,14 @@ use crate::journal::JournalStore;
 mod delivery;
 mod dispatcher_metrics;
 
+#[cfg(test)]
+pub(crate) use delivery::build_llm_from_config;
+
 use anyhow::{bail, Result};
-use delivery::{recover_undelivered_ingress, start_approval_expiry_loop, start_outbox_dispatcher_loop, start_worker_loop};
+use delivery::{
+    recover_undelivered_ingress, start_approval_expiry_loop, start_outbox_dispatcher_loop,
+    start_worker_loop,
+};
 pub use dispatcher_metrics::DispatcherMetrics;
 use serde_json::{json, Value};
 use std::io::{ErrorKind, Read, Write};
@@ -63,11 +69,8 @@ pub fn serve(config: KernelConfig) -> Result<()> {
         Arc::clone(&running),
         Arc::clone(&dispatcher_metrics),
     );
-    let approval_expiry = start_approval_expiry_loop(
-        config.clone(),
-        Arc::clone(&journal),
-        Arc::clone(&running),
-    );
+    let approval_expiry =
+        start_approval_expiry_loop(config.clone(), Arc::clone(&journal), Arc::clone(&running));
     while running.load(Ordering::SeqCst) {
         match listener.accept() {
             Ok((mut stream, _)) => {
