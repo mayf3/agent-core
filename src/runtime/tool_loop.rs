@@ -1,12 +1,16 @@
 use crate::domain::*;
 use crate::gateway::Gateway;
 use crate::journal::JournalStore;
-use crate::llm::{LlmClient, LlmInput, LlmOutput, ToolCallResult};
+use crate::llm::{EndpointChoice, LlmFollowUp, LlmClient, LlmInput, LlmOutput, ProviderToolTurn, ToolCallResult};
 use crate::runtime::tool_rejection::sanitize_operation_for_audit;
 use anyhow::Result;
 use serde_json::json;
 
 pub(crate) const MAX_TOOL_ROUNDS: usize = 2;
+
+fn relay_provider_id(tc: &crate::llm::ToolCall) -> String {
+    tc.id.chars().take(16).collect()
+}
 
 /// Single tool-call MVP: only `tool_calls[0]` is parsed and executed per round.
 /// Subsequent entries in the `tool_calls` array (multi-tool / parallel calls)
@@ -28,7 +32,7 @@ pub(crate) enum ToolCallOutcome {
     Fatal { category: &'static str },
 }
 
-impl<L: LlmClient> super::Runtime<L> {
+impl<L: LlmClient + 'static> super::Runtime<L> {
     pub(crate) fn run_tool_recall_loop(
         &self,
         journal: &JournalStore,
@@ -91,6 +95,23 @@ impl<L: LlmClient> super::Runtime<L> {
                                 compressibility: Compressibility::Summarizable,
                                 source_ref: Some(format!("tool:{op_for_ref}")),
                             });
+                            {
+                                use crate::llm::{LlmFollowUp, OpenAiCompatibleLlm, ProviderToolTurn};
+                                use std::any::Any;
+                                if let Some(llm) = (&self.llm as &dyn Any).downcast_ref::<OpenAiCompatibleLlm>() {
+                                    let turn = ProviderToolTurn {
+                                        provider_tool_call_id: relay_provider_id(&tool_call),
+                                        wire_name: tool_call.operation.clone(),
+                                        canonical_operation: tool_call.operation.clone(),
+                                        arguments_json: "{}".to_string(),
+                                        result_content: text.clone(),
+                                    };
+                                    *llm.pending_transcript.borrow_mut() = LlmFollowUp {
+                                        transcript: vec![turn],
+                                        endpoint: None,
+                                    };
+                                }
+                            }
                             let next = self.complete_after_tool_result(
                                 journal, run, session, blocks, user_text,
                             )?;
