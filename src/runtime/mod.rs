@@ -37,7 +37,7 @@ pub fn run_yield() -> Result<()> {
 
 impl<L> Runtime<L>
 where
-    L: LlmClient,
+    L: LlmClient + 'static,
 {
     pub fn new(config: KernelConfig, llm: L) -> Self {
         Self { config, llm }

@@ -4,7 +4,6 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::time::Duration;
-
 pub trait LlmClient {
     fn complete(&self, input: LlmInput) -> Result<LlmOutput>;
 }
@@ -31,7 +30,6 @@ pub struct LlmOutput {
 }
 /// The result of parsing a provider tool-call response.
 #[derive(Debug, Clone)]
-
 pub enum ToolCallResult {
     /// No tool call in the provider response (text-only).
     Absent,
@@ -47,19 +45,14 @@ impl ToolCallResult {
     }
 }
 /// Deterministic bounded hash of a provider tool-call ID. The provider value
-/// is untrusted/unbounded; we never write it raw into Journal, idempotency keys,
-/// errors, or model-visible text.
-
+/// is untrusted; never written raw into Journal, idempotency keys, errors.
 pub fn tool_call_id_hash(provider_id: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(provider_id.as_bytes());
     hex::encode(hasher.finalize())
 }
-/// A structured tool call the model wishes to execute (Phase 2 tool-call MVP).
-/// `operation` must be a catalogued `ReadOnly` operation or the call is
-/// rejected before any adapter runs.
+/// A structured tool call. `operation` must be a catalogued `ReadOnly` operation.
 #[derive(Debug, Clone)]
-
 pub struct ToolCall {
     /// Deterministic bounded digest of the provider-assigned id. Never the raw
     /// provider value — the raw value is untrusted and never written to Journal,
@@ -73,7 +66,6 @@ pub struct ToolCall {
 /// How an LLM endpoint encodes tool names. Explicitly set on the
 /// `ModelEndpoint` — never inferred from URL substrings.
 #[derive(Debug, Clone)]
-
 pub(crate) enum ToolNameMode {
     /// Canonical names as-is (GLM/OpenAI).
     Passthrough,
@@ -81,15 +73,25 @@ pub(crate) enum ToolNameMode {
     IndexedMapping(ToolNameMap),
 }
 /// Encoded → canonical name map for one request.
-
 pub(crate) type ToolNameMap = HashMap<String, String>;
+/// One provider-visible tool-turn for structured transcript.
+#[derive(Debug, Clone)]
+pub struct ProviderToolTurn {
+    pub provider_tool_call_id: String,
+    pub wire_name: String,
+    pub canonical_operation: String,
+    pub arguments_json: String,
+    pub result_content: String,
+} #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EndpointChoice {
+    Primary, Fallback,
+}
 impl<T: LlmClient + ?Sized> LlmClient for Box<T> {
     fn complete(&self, input: LlmInput) -> Result<LlmOutput> {
         (**self).complete(input)
     }
 }
 pub struct LocalEchoLlm;
-
 impl LlmClient for LocalEchoLlm {
     fn complete(&self, input: LlmInput) -> Result<LlmOutput> {
         Ok(LlmOutput {
@@ -110,6 +112,11 @@ pub struct OpenAiCompatibleLlm {
     pub(crate) primary: ModelEndpoint,
     pub(crate) fallback: Option<ModelEndpoint>,
     timeout: Duration,
+    pub(crate) pending_transcript: std::cell::RefCell<LlmFollowUp>,
+} #[derive(Debug, Clone, Default)]
+pub struct LlmFollowUp {
+    pub transcript: Vec<ProviderToolTurn>,
+    pub endpoint: Option<EndpointChoice>,
 }
 impl OpenAiCompatibleLlm {
     pub fn new(base_url: String, api_key: String, model: String, timeout_ms: u64) -> Self {
@@ -117,6 +124,7 @@ impl OpenAiCompatibleLlm {
             primary: ModelEndpoint::new(base_url, api_key, model),
             fallback: None,
             timeout: Duration::from_millis(timeout_ms),
+            pending_transcript: std::cell::RefCell::new(LlmFollowUp::default()),
         }
     }
     pub fn with_fallback(mut self, base_url: String, api_key: String, model: String) -> Self {
@@ -191,6 +199,8 @@ impl OpenAiCompatibleLlm {
         endpoint: &ModelEndpoint,
         input: &LlmInput,
     ) -> std::result::Result<(Value, ToolNameMode), String> {
+        let follow_up = self.pending_transcript.borrow();
+        let transcript = &follow_up.transcript;
         let mut tools =
             crate::domain::operation::provider_tools_for_grants(&input.granted_operations);
         // Build per-request mapping if endpoint uses IndexedMapping.
@@ -208,18 +218,17 @@ impl OpenAiCompatibleLlm {
                 ToolNameMode::IndexedMapping(map)
             }
         };
+        let mut messages: Vec<Value> = vec![
+            json!({"role": "system", "content": serialize_system_context(&input.blocks)}),
+            json!({"role": "user", "content": input.user_text}),
+        ];
+        for turn in transcript {
+            messages.push(json!({"role":"assistant","tool_calls":[{"id":turn.provider_tool_call_id,"type":"function","function":{"name":turn.wire_name,"arguments":turn.arguments_json}}]}));
+            messages.push(json!({"role":"tool","tool_call_id":turn.provider_tool_call_id,"content":turn.result_content}));
+        }
         let body = json!({
             "model": endpoint.model,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": serialize_system_context(&input.blocks),
-                },
-                {
-                    "role": "user",
-                    "content": input.user_text,
-                },
-            ],
+            "messages": messages,
             "temperature": 0.2,
             "tools": tools,
             "tool_choice": "auto",
@@ -350,7 +359,6 @@ fn success_output(
 /// Parse `choices[0].message.tool_calls[0]` (single tool-call MVP).
 /// `IndexedMapping(map)`: look up provider name; unknowns → Malformed.
 /// `Passthrough`: use provider name as-is (GLM/OpenAI).
-
 fn parse_tool_call(value: &Value, mode: &ToolNameMode) -> ToolCallResult {
     let tool_call_json = match value.pointer("/choices/0/message/tool_calls/0") {
         Some(v) if !v.is_null() => v,
@@ -483,6 +491,5 @@ fn is_zai_endpoint(base_url: &str) -> bool {
     let lower = base_url.to_ascii_lowercase();
     lower.contains("z.ai") || lower.contains("bigmodel.cn")
 }
-
 #[cfg(test)]
 mod tests;

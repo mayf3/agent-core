@@ -42,7 +42,7 @@ fn rejected_result(rejection: ToolRejection) -> ToolCallOutcome {
     }
 }
 
-impl<L: LlmClient> super::Runtime<L> {
+impl<L: LlmClient + 'static> super::Runtime<L> {
     pub(crate) fn handle_malformed_tool_call(
         &self,
         journal: &JournalStore,
