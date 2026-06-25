@@ -98,6 +98,7 @@ impl LlmClient for RecallLlm {
                 operation: "session.recall_recent".into(),
                 arguments: json!({ "limit": 10 }),
             }),
+            provider_turn: None,
         })
     }
 }
@@ -252,6 +253,7 @@ impl LlmClient for StatusLlm {
                 operation: "system.status".into(),
                 arguments: json!({}),
             }),
+            provider_turn: None,
         })
     }
 }

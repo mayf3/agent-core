@@ -210,6 +210,7 @@ mod tool_name_mode_tests {
             blocks: vec![],
             user_text: "x".into(),
             granted_operations: vec!["time.now".to_string()],
+            follow_up: None,
         })?;
         let reqs = fb.requests();
         let ns: Vec<&str> = reqs[0]["tools"]
@@ -238,6 +239,7 @@ mod tool_name_mode_tests {
             blocks: vec![],
             user_text: "x".into(),
             granted_operations: vec!["time.now".to_string()],
+            follow_up: None,
         })?;
         let reqs = fb.requests();
         assert!(!reqs.is_empty(), "request captured");
@@ -288,7 +290,9 @@ mod tool_name_mode_tests {
         assert!(!o.output.trim().is_empty());
         let reqs = fb.requests();
         assert_eq!(reqs.len(), 2, "fallback served 2 rounds");
-        assert_eq!(p.hits(), 2, "primary hit 2 times, both 429");
+        // Sticky endpoint: round 1 fallback tool call → round 2 stays on
+        // fallback (does NOT re-hit primary). Primary hit exactly once (429).
+        assert_eq!(p.hits(), 1, "primary hit 1 time (429), round 2 is sticky to fallback");
         let ns: Vec<&str> = reqs[0]["tools"]
             .as_array()
             .unwrap()
@@ -346,17 +350,32 @@ mod tool_name_mode_tests {
             receipt.payload.get("status").and_then(Value::as_str),
             Some("Succeeded")
         );
-        // Round-2 system/context (messages[0].content) contains the textual
-        // ToolResult block (the project uses ContextBlock::ToolResult, NOT
-        // OpenAI role=tool messages).
-        let round2_ctx = reqs[1]["messages"][0]["content"].as_str().unwrap_or("");
+        // Round-2 structured follow-up: the tool result is sent as a
+        // role:tool message with tool_call_id matching the assistant tool_calls.
+        let round2_messages = reqs[1]["messages"].as_array().unwrap();
+        let tool_msg = round2_messages
+            .iter()
+            .find(|m| m["role"].as_str() == Some("tool"))
+            .expect("role:tool message in round 2");
+        let tool_content = tool_msg["content"].as_str().unwrap_or("");
         assert!(
-            round2_ctx.contains("time.now"),
-            "round-2 context contains ToolResult for time.now"
+            tool_content.contains("time.now") || tool_content.contains("succeeded"),
+            "role:tool content references the tool result: {tool_content}"
         );
+        // The assistant tool_call_id and tool.tool_call_id must match.
+        let assistant_msg = round2_messages
+            .iter()
+            .find(|m| m["role"].as_str() == Some("assistant"))
+            .expect("role:assistant message in round 2");
+        let call_id = assistant_msg["tool_calls"][0]["id"].as_str().unwrap_or("");
         assert!(
-            round2_ctx.contains("succeeded"),
-            "round-2 context shows status: succeeded"
+            !call_id.is_empty(),
+            "assistant tool_calls[0].id is the raw provider id"
+        );
+        assert_eq!(
+            tool_msg["tool_call_id"].as_str(),
+            Some(call_id),
+            "tool.tool_call_id matches assistant tool_calls[0].id"
         );
         assert_eq!(
             tnp(JournalEventKind::InvocationApproved),

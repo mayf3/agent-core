@@ -31,6 +31,7 @@ impl LlmClient for WhitespaceLlm {
             content: "  \n".into(),
             journal_payload: json!({"round": call}),
             tool_call,
+            provider_turn: None,
         })
     }
 }
@@ -103,6 +104,7 @@ impl LlmClient for FailingRecallLlm {
             } else {
                 ToolCallResult::Absent
             },
+            provider_turn: None,
         })
     }
 }
@@ -160,6 +162,7 @@ impl LlmClient for FollowupFailureLlm {
                 operation: "time.now".into(),
                 arguments: json!({}),
             }),
+            provider_turn: None,
         })
     }
 }

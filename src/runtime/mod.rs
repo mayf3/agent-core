@@ -149,6 +149,7 @@ where
             blocks: blocks.clone(),
             user_text: text.clone(),
             granted_operations: granted_operations.clone(),
+            follow_up: None,
         })?;
         journal.append_event(
             JournalEventKind::LlmCompleted,

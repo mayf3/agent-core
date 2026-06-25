@@ -4,33 +4,43 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::time::Duration;
+
 pub trait LlmClient {
     fn complete(&self, input: LlmInput) -> Result<LlmOutput>;
 }
+
 pub struct LlmInput {
     pub blocks: Vec<ContextBlock>,
     pub user_text: String,
-
     pub granted_operations: Vec<String>,
+    /// Structured tool follow-up for the second round: the provider-side
+    /// tool_call transcript (raw id, wire name, args) + bounded result content.
+    /// When present, the LLM sends `role: assistant` + `role: tool` messages to
+    /// the **source endpoint** that returned the tool call (sticky). This is
+    /// Run-local state threaded through LlmInput — never shared client state.
+    pub follow_up: Option<LlmFollowUp>,
 }
+
 pub struct LlmOutput {
     pub provider: String,
     pub model: String,
     pub content: String,
-    pub journal_payload: serde_json::Value,
-
+    pub journal_payload: Value,
     pub tool_call: ToolCallResult,
+    /// When a tool call was parsed from the provider response, the raw
+    /// provider-side metadata (endpoint, raw id, wire name, args JSON) is
+    /// carried here so the Runtime can build an `LlmFollowUp` for the next
+    /// round — without leaking raw ids/wire names into the Journal `ToolCall`.
+    pub provider_turn: Option<ProviderToolTurn>,
 }
 
 #[derive(Debug, Clone)]
 pub enum ToolCallResult {
-
     Absent,
-
     Valid(ToolCall),
-
     Malformed(String),
 }
+
 impl ToolCallResult {
     pub fn is_absent(&self) -> bool {
         matches!(self, ToolCallResult::Absent)
@@ -43,50 +53,58 @@ pub fn tool_call_id_hash(provider_id: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
+/// Kernel-authoritative, provider-agnostic tool call. Only the internal hashed
+/// id, canonical operation, and parsed arguments live here. Raw provider id,
+/// wire name, and raw arguments JSON travel in `ProviderToolTurn`.
 #[derive(Debug, Clone)]
 pub struct ToolCall {
-
     pub id: String,
-
     pub operation: String,
-
-    pub arguments: serde_json::Value,
+    pub arguments: Value,
 }
 
-#[derive(Debug, Clone)]
-pub(crate) enum ToolNameMode {
-
-    Passthrough,
-
-    IndexedMapping(ToolNameMap),
+/// Which endpoint returned the tool call. Determined at the actual HTTP request
+/// site — never inferred from turn_index, model name, or URL substring.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EndpointChoice {
+    Primary,
+    Fallback,
 }
 
-pub(crate) type ToolNameMap = HashMap<String, String>;
-pub(crate) type ToolCallRawMap = std::collections::HashMap<String, ToolCallRawData>;
-
-#[derive(Debug, Clone)]
-pub(crate) struct ToolCallRawData {
-    pub provider_id: String,
-    pub wire_name: String,
-    pub arguments_json: String,
-}
-
+/// Provider-side metadata for a single tool-call round. The raw provider id is
+/// preserved verbatim (bounded) so the follow-up `role: tool` message can match
+/// the provider's own `tool_call_id`. This never enters the Journal.
 #[derive(Debug, Clone)]
 pub struct ProviderToolTurn {
+    pub endpoint: EndpointChoice,
     pub provider_tool_call_id: String,
     pub wire_name: String,
     pub canonical_operation: String,
     pub arguments_json: String,
-    pub result_content: String,
-} #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EndpointChoice {
-    Primary, Fallback,
 }
+
+/// A structured follow-up carried Run-locally through LlmInput: the provider
+/// transcript of the first round + the bounded result content.
+#[derive(Debug, Clone)]
+pub struct LlmFollowUp {
+    pub provider_turn: ProviderToolTurn,
+    pub result_content: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum ToolNameMode {
+    Passthrough,
+    IndexedMapping(ToolNameMap),
+}
+
+pub(crate) type ToolNameMap = HashMap<String, String>;
+
 impl<T: LlmClient + ?Sized> LlmClient for Box<T> {
     fn complete(&self, input: LlmInput) -> Result<LlmOutput> {
         (**self).complete(input)
     }
 }
+
 pub struct LocalEchoLlm;
 impl LlmClient for LocalEchoLlm {
     fn complete(&self, input: LlmInput) -> Result<LlmOutput> {
@@ -101,28 +119,23 @@ impl LlmClient for LocalEchoLlm {
                 "context_blocks": input.blocks.len(),
                 "status": "ok",
             }),
+            provider_turn: None,
         })
     }
 }
+
 pub struct OpenAiCompatibleLlm {
     pub(crate) primary: ModelEndpoint,
     pub(crate) fallback: Option<ModelEndpoint>,
     timeout: Duration,
-    pub(crate) pending_transcript: std::cell::RefCell<LlmFollowUp>,
-    pub(crate) pending_raw_map: std::cell::RefCell<ToolCallRawMap>,
-} #[derive(Debug, Clone, Default)]
-pub struct LlmFollowUp {
-    pub transcript: Vec<ProviderToolTurn>,
-    pub endpoint: Option<EndpointChoice>,
 }
+
 impl OpenAiCompatibleLlm {
     pub fn new(base_url: String, api_key: String, model: String, timeout_ms: u64) -> Self {
         Self {
             primary: ModelEndpoint::new(base_url, api_key, model),
             fallback: None,
             timeout: Duration::from_millis(timeout_ms),
-            pending_transcript: std::cell::RefCell::new(LlmFollowUp::default()),
-            pending_raw_map: std::cell::RefCell::new(ToolCallRawMap::new()),
         }
     }
     pub fn with_fallback(mut self, base_url: String, api_key: String, model: String) -> Self {
@@ -132,7 +145,6 @@ impl OpenAiCompatibleLlm {
         }
         self
     }
-
     pub fn with_indexed_fallback(
         mut self,
         base_url: String,
@@ -150,29 +162,31 @@ impl OpenAiCompatibleLlm {
         self
     }
 }
-std::thread_local! {
-    static LAST_RAW_TOOL_CALL: std::cell::RefCell<Option<ToolCallRawData>> = std::cell::RefCell::new(None);
-}
+
 impl LlmClient for OpenAiCompatibleLlm {
     fn complete(&self, input: LlmInput) -> Result<LlmOutput> {
-        let follow_up = self.pending_transcript.take();
-        let chosen = follow_up.endpoint;
-        if chosen == Some(EndpointChoice::Fallback) {
-            if let Some(fb) = &self.fallback {
-                return match self.request_endpoint(fb, &input, &follow_up.transcript) {
-                    Ok((v,m)) => Ok(Self::cc(success_output(&fb.model, input.blocks.len(), v, &m), &self.pending_raw_map)),
-                    Err(e) => Ok(request_failed_output(&fb.model, input.blocks.len(), e.as_str())),
-                };
-            }
-        }
-        if !self.primary.is_configured() {
-            return match self.try_fallback(&input, "model_config_required") {
-                Some(o) => Ok(o),
-                None => Ok(config_required_output(&self.primary.model, input.blocks.len())),
+        // Sticky follow-up: if a follow_up names the source endpoint, request
+        // ONLY that endpoint (do not cross providers).
+        if let Some(fu) = &input.follow_up {
+            let endpoint = match fu.provider_turn.endpoint {
+                EndpointChoice::Primary => &self.primary,
+                EndpointChoice::Fallback => match &self.fallback {
+                    Some(fb) => fb,
+                    None => &self.primary,
+                },
             };
+            return self.request_endpoint(endpoint, fu.provider_turn.endpoint, &input, fu)
+                .map_err(anyhow::Error::msg);
         }
-        match self.request_endpoint(&self.primary, &input, &follow_up.transcript) {
-            Ok((value, mode)) => Ok(Self::cc(success_output(&self.primary.model, input.blocks.len(), value, &mode), &self.pending_raw_map)),
+        // No follow-up: normal primary → fallback routing.
+        if !self.primary.is_configured() {
+            return Ok(match self.try_fallback(&input, "model_config_required") {
+                Some(o) => o,
+                None => config_required_output(&self.primary.model, input.blocks.len()),
+            });
+        }
+        match self.request_endpoint(&self.primary, EndpointChoice::Primary, &input, &empty_followup(&input)) {
+            Ok(output) => Ok(output),
             Err(error) => {
                 if let Some(output) = self.try_fallback(&input, error.as_str()) {
                     return Ok(output);
@@ -180,47 +194,39 @@ impl LlmClient for OpenAiCompatibleLlm {
                 Ok(request_failed_output(&self.primary.model, input.blocks.len(), error.as_str()))
             }
         }
-}
-}
-impl OpenAiCompatibleLlm {
-    fn cc(output: LlmOutput, map: &std::cell::RefCell<ToolCallRawMap>) -> LlmOutput {
-        LAST_RAW_TOOL_CALL.with(|cell| {
-            if let Some(raw) = cell.borrow_mut().take() {
-                let mut m = map.borrow_mut();
-                if let ToolCallResult::Valid(ref tc) = output.tool_call {
-                    m.insert(tc.id.clone(), raw);
-                }
-            }
-        });
-        output
     }
+}
+
+impl OpenAiCompatibleLlm {
     fn try_fallback(&self, input: &LlmInput, primary_error: &str) -> Option<LlmOutput> {
         let fallback = self.fallback.as_ref()?;
-        let output = match self.request_endpoint(fallback, input, &[]) {
-            Ok((value, mode)) => success_output(&fallback.model, input.blocks.len(), value, &mode),
-            Err(error) => {
-                request_failed_output(&fallback.model, input.blocks.len(), error.as_str())
-            }
-        };
+        let output =
+            match self.request_endpoint(fallback, EndpointChoice::Fallback, input, &empty_followup(input)) {
+                Ok(output) => output,
+                Err(error) => request_failed_output(&fallback.model, input.blocks.len(), error.as_str()),
+            };
         Some(mark_fallback(output, &self.primary.model, primary_error))
     }
+
+    /// The single HTTP request site. `choice` is the authoritative endpoint
+    /// identity — it is recorded into the `ProviderToolTurn` if a tool call is
+    /// parsed, so the follow-up round is sticky to this exact endpoint.
     fn request_endpoint(
         &self,
         endpoint: &ModelEndpoint,
+        choice: EndpointChoice,
         input: &LlmInput,
-        transcript: &[ProviderToolTurn],
-    ) -> std::result::Result<(Value, ToolNameMode), String> {
-        let transcript = transcript;
+        follow_up: &LlmFollowUp,
+    ) -> std::result::Result<LlmOutput, String> {
         let mut tools =
             crate::domain::operation::provider_tools_for_grants(&input.granted_operations);
-        // Build per-request mapping if endpoint uses IndexedMapping.
         let tool_name_mode = match &endpoint.tool_name_mode {
             ToolNameMode::Passthrough => ToolNameMode::Passthrough,
             ToolNameMode::IndexedMapping(_) => {
                 let mut map = ToolNameMap::new();
                 for (idx, tool) in tools.iter_mut().enumerate() {
                     if let Some(name) = tool.pointer("/function/name").and_then(Value::as_str) {
-                        let safe = format!("fn_{}", idx);
+                        let safe = format!("fn_{idx}");
                         map.insert(safe.clone(), name.to_string());
                         tool["function"]["name"] = json!(safe);
                     }
@@ -232,10 +238,24 @@ impl OpenAiCompatibleLlm {
             json!({"role": "system", "content": serialize_system_context(&input.blocks)}),
             json!({"role": "user", "content": input.user_text}),
         ];
-        for turn in transcript {
-            messages.push(json!({"role":"assistant","tool_calls":[{"id":turn.provider_tool_call_id,"type":"function","function":{"name":turn.wire_name,"arguments":turn.arguments_json}}]}));
-            messages.push(json!({"role":"tool","tool_call_id":turn.provider_tool_call_id,"content":turn.result_content}));
-        }
+        // Structured follow-up transcript: assistant tool_calls + role:tool.
+        let turn = &follow_up.provider_turn;
+        messages.push(json!({
+            "role": "assistant",
+            "tool_calls": [{
+                "id": turn.provider_tool_call_id,
+                "type": "function",
+                "function": {
+                    "name": turn.wire_name,
+                    "arguments": turn.arguments_json,
+                }
+            }]
+        }));
+        messages.push(json!({
+            "role": "tool",
+            "tool_call_id": turn.provider_tool_call_id,
+            "content": follow_up.result_content,
+        }));
         let body = json!({
             "model": endpoint.model,
             "messages": messages,
@@ -252,24 +272,44 @@ impl OpenAiCompatibleLlm {
             .header("authorization", &format!("Bearer {}", endpoint.api_key))
             .header("content-type", "application/json")
             .send_json(body);
-        let response_value = match response {
+        let value = match response {
             Ok(mut response) => response
                 .body_mut()
                 .read_json::<Value>()
-                .map_err(|_| "model_response_parse_failed".to_string()),
-            Err(ureq::Error::StatusCode(code)) => Err(format!("model_http_{code}")),
-            Err(ureq::Error::Timeout(_)) => Err("model_timeout".to_string()),
-            Err(_) => Err("model_request_failed".to_string()),
+                .map_err(|_| "model_response_parse_failed".to_string())?,
+            Err(ureq::Error::StatusCode(code)) => return Err(format!("model_http_{code}")),
+            Err(ureq::Error::Timeout(_)) => return Err("model_timeout".to_string()),
+            Err(_) => return Err("model_request_failed".to_string()),
         };
-        response_value.map(|v| (v, tool_name_mode))
+        let mode = tool_name_mode;
+        let output = success_output(&endpoint.model, input.blocks.len(), value, &mode, choice);
+        Ok(output)
     }
 }
+
+/// A no-op follow-up used when there is no prior tool call (first round). The
+/// assistant/tool messages are harmless placeholders that providers ignore when
+/// the conversation has no prior tool_calls to match.
+fn empty_followup(_input: &LlmInput) -> LlmFollowUp {
+    LlmFollowUp {
+        provider_turn: ProviderToolTurn {
+            endpoint: EndpointChoice::Primary,
+            provider_tool_call_id: String::new(),
+            wire_name: String::new(),
+            canonical_operation: String::new(),
+            arguments_json: String::new(),
+        },
+        result_content: String::new(),
+    }
+}
+
 pub(crate) struct ModelEndpoint {
     base_url: String,
     api_key: String,
     model: String,
     pub(crate) tool_name_mode: ToolNameMode,
 }
+
 impl ModelEndpoint {
     fn new(base_url: String, api_key: String, model: String) -> Self {
         let normalized_model = normalize_model_name(&base_url, &model);
@@ -297,6 +337,7 @@ impl ModelEndpoint {
         }
     }
 }
+
 fn config_required_output(model: &str, context_blocks: usize) -> LlmOutput {
     LlmOutput {
         provider: "openai-compatible".to_string(),
@@ -311,8 +352,10 @@ fn config_required_output(model: &str, context_blocks: usize) -> LlmOutput {
             "error_category": "model_config_required",
         }),
         tool_call: ToolCallResult::Absent,
+        provider_turn: None,
     }
 }
+
 fn request_failed_output(model: &str, context_blocks: usize, category: &str) -> LlmOutput {
     LlmOutput {
         provider: "openai-compatible".to_string(),
@@ -326,13 +369,16 @@ fn request_failed_output(model: &str, context_blocks: usize, category: &str) -> 
             "error_category": category,
         }),
         tool_call: ToolCallResult::Absent,
+        provider_turn: None,
     }
 }
+
 fn success_output(
     model: &str,
     context_blocks: usize,
     value: Value,
     mode: &ToolNameMode,
+    choice: EndpointChoice,
 ) -> LlmOutput {
     let content = value
         .pointer("/choices/0/message/content")
@@ -341,9 +387,9 @@ fn success_output(
         .filter(|text| !text.is_empty())
         .unwrap_or("")
         .to_string();
-    // Parse tool_calls[0] from the OpenAI-compatible response.
-    let tool_call = parse_tool_call(&value, mode);
-    // User-safe fallback for malformed tool calls with empty content.
+    let parsed = parse_tool_call(&value, mode, choice);
+    let provider_turn = parsed.provider_turn;
+    let tool_call = parsed.tool_call_result;
     let content = match &tool_call {
         ToolCallResult::Malformed(_) if content.is_empty() => {
             "The tool call could not be parsed. Please try again.".to_string()
@@ -353,7 +399,7 @@ fn success_output(
     };
     LlmOutput {
         provider: "openai-compatible".to_string(),
-        model: model.to_string(),
+        model: value.get("model").and_then(Value::as_str).unwrap_or(model).to_string(),
         content,
         journal_payload: json!({
             "provider": "openai-compatible",
@@ -364,61 +410,133 @@ fn success_output(
             "tool_call": audit_tool_call(&tool_call),
         }),
         tool_call,
+        provider_turn,
     }
 }
-fn parse_tool_call(value: &Value, mode: &ToolNameMode) -> ToolCallResult {
+
+/// Result of parsing a provider tool call: the kernel-authoritative ToolCall
+/// plus the provider-side ProviderToolTurn (raw id, wire name, args JSON).
+struct ParsedToolCall {
+    tool_call_result: ToolCallResult,
+    provider_turn: Option<ProviderToolTurn>,
+}
+
+const MAX_PROVIDER_ID_LEN: usize = 256;
+const MAX_WIRE_NAME_LEN: usize = 128;
+const MAX_ARGS_JSON_LEN: usize = 8192;
+
+fn parse_tool_call(value: &Value, mode: &ToolNameMode, choice: EndpointChoice) -> ParsedToolCall {
     let tool_call_json = match value.pointer("/choices/0/message/tool_calls/0") {
         Some(v) if !v.is_null() => v,
-        _ => return ToolCallResult::Absent,
+        _ => {
+            return ParsedToolCall {
+                tool_call_result: ToolCallResult::Absent,
+                provider_turn: None,
+            }
+        }
     };
     let function = match tool_call_json.get("function") {
         Some(f) => f,
-        None => return ToolCallResult::Malformed("missing function block".to_string()),
-    };
-    // A missing/empty id is malformed (never synthesize "unknown"). The raw id
-    // is hashed once here at the DTO boundary; downstream treats it as opaque.
-    let raw_id = match tool_call_json.get("id").and_then(Value::as_str) {
-        Some(s) if !s.trim().is_empty() => s,
-        _ => return ToolCallResult::Malformed("missing tool_call id".to_string()),
-    };
-    let id = tool_call_id_hash(raw_id);
-    let raw_operation = match function.get("name").and_then(Value::as_str) {
-        Some(n) if !n.trim().is_empty() => n.to_string(),
-        _ => return ToolCallResult::Malformed("missing function name".to_string()),
-    };
-    // Resolve provider-safe name → canonical. IndexedMapping: per-request map,
-    // unknowns are Malformed. Passthrough: use provider name as-is.
-    let operation = match mode {
-        ToolNameMode::Passthrough => raw_operation,
-        ToolNameMode::IndexedMapping(map) => match map.get(&raw_operation) {
-            Some(canonical) => canonical.clone(),
-            None => return ToolCallResult::Malformed("unknown function name".to_string()),
-        },
-    };
-    let arguments_str = function.get("arguments").and_then(Value::as_str);
-    let arguments_val = match arguments_str {
-        Some(s) => match serde_json::from_str::<Value>(s) {
-            Ok(v) if v.is_object() => v,
-            Ok(v) => {
-                return ToolCallResult::Malformed(format!(
-                    "arguments must be a JSON object, got {}",
-                    type_name(&v)
-                ));
-            }
-            Err(e) => {
-                return ToolCallResult::Malformed(format!("arguments JSON parse error: {}", e));
-            }
-        },
         None => {
-            return ToolCallResult::Malformed("missing arguments".to_string());
+            return ParsedToolCall {
+                tool_call_result: ToolCallResult::Malformed("missing function block".to_string()),
+                provider_turn: None,
+            }
         }
     };
-    ToolCallResult::Valid(ToolCall {
-        id,
-        operation,
-        arguments: arguments_val,
-    })
+    let raw_id = match tool_call_json.get("id").and_then(Value::as_str) {
+        Some(s) if !s.trim().is_empty() => s,
+        _ => {
+            return ParsedToolCall {
+                tool_call_result: ToolCallResult::Malformed("missing tool_call id".to_string()),
+                provider_turn: None,
+            }
+        }
+    };
+    if raw_id.len() > MAX_PROVIDER_ID_LEN {
+        return ParsedToolCall {
+            tool_call_result: ToolCallResult::Malformed("provider id too long".to_string()),
+            provider_turn: None,
+        };
+    }
+    let id = tool_call_id_hash(raw_id);
+    let raw_operation = match function.get("name").and_then(Value::as_str) {
+        Some(n) if !n.trim().is_empty() => n,
+        _ => {
+            return ParsedToolCall {
+                tool_call_result: ToolCallResult::Malformed("missing function name".to_string()),
+                provider_turn: None,
+            }
+        }
+    };
+    if raw_operation.len() > MAX_WIRE_NAME_LEN {
+        return ParsedToolCall {
+            tool_call_result: ToolCallResult::Malformed("wire name too long".to_string()),
+            provider_turn: None,
+        };
+    }
+    let operation = match mode {
+        ToolNameMode::Passthrough => raw_operation.to_string(),
+        ToolNameMode::IndexedMapping(map) => match map.get(raw_operation) {
+            Some(canonical) => canonical.clone(),
+            None => {
+                return ParsedToolCall {
+                    tool_call_result: ToolCallResult::Malformed("unknown function name".to_string()),
+                    provider_turn: None,
+                }
+            }
+        },
+    };
+    let arguments_str = match function.get("arguments").and_then(Value::as_str) {
+        Some(s) => s,
+        None => {
+            return ParsedToolCall {
+                tool_call_result: ToolCallResult::Malformed("missing arguments".to_string()),
+                provider_turn: None,
+            }
+        }
+    };
+    if arguments_str.len() > MAX_ARGS_JSON_LEN {
+        return ParsedToolCall {
+            tool_call_result: ToolCallResult::Malformed("arguments too long".to_string()),
+            provider_turn: None,
+        };
+    }
+    let arguments_val = match serde_json::from_str::<Value>(arguments_str) {
+        Ok(v) if v.is_object() => v,
+        Ok(v) => {
+            return ParsedToolCall {
+                tool_call_result: ToolCallResult::Malformed(format!(
+                    "arguments must be a JSON object, got {}",
+                    type_name(&v)
+                )),
+                provider_turn: None,
+            }
+        }
+        Err(e) => {
+            return ParsedToolCall {
+                tool_call_result: ToolCallResult::Malformed(format!("arguments JSON parse error: {e}")),
+                provider_turn: None,
+            }
+        }
+    };
+    let provider_turn = ProviderToolTurn {
+        endpoint: choice,
+        provider_tool_call_id: raw_id.to_string(),
+        wire_name: raw_operation.to_string(),
+        canonical_operation: operation.clone(),
+        arguments_json: arguments_str.to_string(),
+    };
+    ParsedToolCall {
+        tool_call_result: ToolCallResult::Valid(ToolCall {
+            id,
+            operation,
+            arguments: arguments_val,
+        }),
+        provider_turn: Some(provider_turn),
+    }
 }
+
 fn audit_tool_call(tool_call: &ToolCallResult) -> Value {
     match tool_call {
         ToolCallResult::Valid(call) => json!({
@@ -427,12 +545,11 @@ fn audit_tool_call(tool_call: &ToolCallResult) -> Value {
                 .unwrap_or("unknown_operation"),
             "id": call.id,
         }),
-        ToolCallResult::Malformed(_) => json!({
-            "malformed": "malformed_tool_call",
-        }),
+        ToolCallResult::Malformed(_) => json!({ "malformed": "malformed_tool_call" }),
         ToolCallResult::Absent => Value::Null,
     }
 }
+
 fn type_name(v: &Value) -> &'static str {
     match v {
         Value::Null => "null",
@@ -443,6 +560,7 @@ fn type_name(v: &Value) -> &'static str {
         Value::Object(_) => "object",
     }
 }
+
 fn mark_fallback(mut output: LlmOutput, primary_model: &str, primary_error: &str) -> LlmOutput {
     if let Some(payload) = output.journal_payload.as_object_mut() {
         payload.insert(
@@ -456,6 +574,7 @@ fn mark_fallback(mut output: LlmOutput, primary_model: &str, primary_error: &str
     }
     output
 }
+
 fn serialize_system_context(blocks: &[ContextBlock]) -> String {
     blocks
         .iter()
@@ -464,6 +583,7 @@ fn serialize_system_context(blocks: &[ContextBlock]) -> String {
         .collect::<Vec<_>>()
         .join("\n\n")
 }
+
 fn sanitize_usage(value: Option<&Value>) -> Value {
     let Some(value) = value else {
         return Value::Null;
@@ -474,6 +594,7 @@ fn sanitize_usage(value: Option<&Value>) -> Value {
         "total_tokens": value.get("total_tokens").and_then(Value::as_i64),
     })
 }
+
 fn empty_to_null(value: &str) -> Value {
     if value.is_empty() {
         Value::Null
@@ -481,6 +602,7 @@ fn empty_to_null(value: &str) -> Value {
         json!(value)
     }
 }
+
 fn normalize_model_name(base_url: &str, model: &str) -> String {
     let trimmed = model.trim();
     if is_zai_endpoint(base_url) {
@@ -492,9 +614,11 @@ fn normalize_model_name(base_url: &str, model: &str) -> String {
     }
     trimmed.to_string()
 }
+
 fn is_zai_endpoint(base_url: &str) -> bool {
     let lower = base_url.to_ascii_lowercase();
     lower.contains("z.ai") || lower.contains("bigmodel.cn")
 }
+
 #[cfg(test)]
 mod tests;

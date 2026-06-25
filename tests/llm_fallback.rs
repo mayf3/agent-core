@@ -25,6 +25,7 @@ fn fallback_endpoint_is_used_after_primary_http_error() -> Result<()> {
         blocks: vec![],
         user_text: "hello".into(),
         granted_operations: vec![],
+            follow_up: None,
     })?;
     assert_eq!(output.model, "deepseek-v4-flash");
     assert_eq!(output.content, "fallback ok");
@@ -92,6 +93,7 @@ impl LlmClient for RecallThenAnswerLlm {
                     operation: "session.recall_recent".into(),
                     arguments: json!({ "limit": 5 }),
                 }),
+            provider_turn: None,
             })
         } else {
             Ok(LlmOutput {
@@ -100,6 +102,7 @@ impl LlmClient for RecallThenAnswerLlm {
                 content: "The PR5 risk was WaitingDispatch not closing the loop.".into(),
                 journal_payload: json!({ "round": current }),
                 tool_call: ToolCallResult::Absent,
+            provider_turn: None,
             })
         }
     }
@@ -168,6 +171,7 @@ impl LlmClient for AlwaysRecallLlm {
                 operation: "session.recall_recent".into(),
                 arguments: json!({ "limit": 5 }),
             }),
+            provider_turn: None,
         })
     }
 }
@@ -260,6 +264,7 @@ impl LlmClient for ProposeUnknownToolLlm {
                 content: "sorry, that tool is unavailable".into(),
                 journal_payload: json!({ "round": current }),
                 tool_call: ToolCallResult::Absent,
+            provider_turn: None,
             });
         }
         Ok(LlmOutput {
@@ -272,6 +277,7 @@ impl LlmClient for ProposeUnknownToolLlm {
                 operation: "shell.exec".into(),
                 arguments: json!({}),
             }),
+            provider_turn: None,
         })
     }
 }
@@ -310,6 +316,7 @@ fn recall_loop_is_noop_when_no_tool_call() -> Result<()> {
                 content: "hello back".into(),
                 journal_payload: json!({}),
                 tool_call: ToolCallResult::Absent,
+            provider_turn: None,
             })
         }
     }
