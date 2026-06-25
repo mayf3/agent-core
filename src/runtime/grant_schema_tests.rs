@@ -193,6 +193,7 @@ fn request_includes_time_now_when_granted() -> Result<()> {
         blocks: vec![],
         user_text: "x".into(),
         granted_operations: vec!["time.now".to_string(), "system.status".to_string()],
+            follow_up: None,
     })?;
     let requests = server.requests();
     let body = requests.first().expect("request captured");
@@ -243,6 +244,7 @@ fn request_omits_time_now_when_not_granted() -> Result<()> {
         blocks: vec![],
         user_text: "x".into(),
         granted_operations: vec!["session.recall_recent".to_string()],
+            follow_up: None,
     })?;
     let requests = server.requests();
     let body = requests.first().expect("request captured");
@@ -276,6 +278,7 @@ fn misconfigured_write_grant_not_in_tools() -> Result<()> {
         blocks: vec![],
         user_text: "x".into(),
         granted_operations: vec!["feishu.send_message".to_string()],
+            follow_up: None,
     })?;
     let requests = server.requests();
     let body = requests.first().expect("request captured");

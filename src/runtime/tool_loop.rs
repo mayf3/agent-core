@@ -1,7 +1,9 @@
 use crate::domain::*;
 use crate::gateway::Gateway;
 use crate::journal::JournalStore;
-use crate::llm::{EndpointChoice, LlmFollowUp, LlmClient, LlmInput, LlmOutput, ProviderToolTurn, ToolCallResult};
+use crate::llm::{
+    LlmClient, LlmFollowUp, LlmInput, LlmOutput, ProviderToolTurn, ToolCallResult,
+};
 use crate::runtime::tool_rejection::sanitize_operation_for_audit;
 use anyhow::Result;
 use serde_json::json;
@@ -9,22 +11,9 @@ use serde_json::json;
 pub(crate) const MAX_TOOL_ROUNDS: usize = 2;
 
 /// Single tool-call MVP: only `tool_calls[0]` is parsed and executed per round.
-/// Subsequent entries in the `tool_calls` array (multi-tool / parallel calls)
-/// are silently ignored — they are neither executed nor reported as rejected.
-/// This simplifies idempotency, ordering, and the ToolResult structure.
-/// Extending to multiple tool calls per round is a future concern.
 
-/// Outcome of an inline tool-call attempt. The text is the model-visible
-/// ToolResult content; `Fatal` indicates the tool loop must abort (an
-/// infrastructure failure that cannot be fed back to the model).
 pub(crate) enum ToolCallOutcome {
-    /// A ToolResult was produced (success, business rejection, or execution
-    /// failure) and the loop may continue with another LLM round. The text
-    /// distinguishes the three outcomes the model can act on: `rejected`,
-    /// `execution_failed`, and `succeeded` (the tool's own output).
     ToolResult { text: String },
-    /// An infrastructure failure that cannot be recovered: the Run must be
-    /// terminated with the accurate run_id.
     Fatal { category: &'static str },
 }
 
@@ -39,18 +28,18 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
         user_text: &str,
         mut llm: LlmOutput,
     ) -> Result<LlmOutput> {
-        // Monotonic tool counter across the whole loop: distinct tool calls
-        // (malformed or valid) get distinct indices, so idempotency keys and
-        // internal ids never collide even if the provider reuses a tool_call.id.
         let mut tool_index: usize = 0;
+        // Run-local follow-up state: the provider turn from the first round,
+        // carried explicitly through LlmInput — never shared client state.
+        let mut pending_turn: Option<ProviderToolTurn> = llm.provider_turn.take();
         for turn_index in 0..MAX_TOOL_ROUNDS {
             match llm.tool_call.clone() {
                 ToolCallResult::Absent => return Ok(llm),
                 ToolCallResult::Malformed(_reason) => {
                     let this_tool = tool_index;
                     tool_index += 1;
-                    let outcome = self
-                        .handle_malformed_tool_call(journal, run, session, turn_index, this_tool)?;
+                    let outcome =
+                        self.handle_malformed_tool_call(journal, run, session, turn_index, this_tool)?;
                     match outcome {
                         ToolCallOutcome::Fatal { category } => {
                             return self.terminate_run_failure(journal, run, session, category);
@@ -58,14 +47,17 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
                         ToolCallOutcome::ToolResult { text } => {
                             blocks.push(ContextBlock {
                                 kind: ContextBlockKind::ToolResult,
-                                content: text,
+                                content: text.clone(),
                                 compressibility: Compressibility::Summarizable,
                                 source_ref: Some("tool:malformed".to_string()),
                             });
-                            let next = self.complete_after_tool_result(
-                                journal, run, session, blocks, user_text,
+                            let fu = pending_turn.take().map(|pt| LlmFollowUp {
+                                provider_turn: pt,
+                                result_content: text,
+                            });
+                            llm = self.complete_after_tool_result(
+                                journal, run, session, blocks, user_text, fu,
                             )?;
-                            llm = next;
                             if llm.tool_call.is_absent() {
                                 return Ok(llm);
                             }
@@ -77,7 +69,13 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
                     let this_tool = tool_index;
                     tool_index += 1;
                     let outcome = self.handle_inline_tool_call(
-                        journal, gateway, run, session, &tool_call, turn_index, this_tool,
+                        journal,
+                        gateway,
+                        run,
+                        session,
+                        &tool_call,
+                        turn_index,
+                        this_tool,
                     )?;
                     match outcome {
                         ToolCallOutcome::Fatal { category } => {
@@ -85,36 +83,27 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
                         }
                         ToolCallOutcome::ToolResult { text } => {
                             let op_for_ref = sanitize_operation_for_audit(&tool_call.operation);
+                            // The structured ToolResult block is the only
+                            // ToolResult in the system context (do NOT also send
+                            // it as a role:tool message — that would duplicate).
                             blocks.push(ContextBlock {
                                 kind: ContextBlockKind::ToolResult,
                                 content: format!("tool: {op_for_ref}\nresult: {text}"),
                                 compressibility: Compressibility::Summarizable,
                                 source_ref: Some(format!("tool:{op_for_ref}")),
                             });
-                            {
-                                use crate::llm::{EndpointChoice, LlmFollowUp, OpenAiCompatibleLlm, ProviderToolTurn};
-                                use std::any::Any;
-                                if let Some(llm) = (&self.llm as &dyn Any).downcast_ref::<OpenAiCompatibleLlm>() {
-                                    let raw = llm.pending_raw_map.borrow();
-                                    let pid = raw.get(&tool_call.id).map(|r| r.provider_id.clone()).unwrap_or_else(|| tool_call.id.clone());
-                                    let wn = raw.get(&tool_call.id).map(|r| r.wire_name.clone()).unwrap_or_else(|| tool_call.operation.clone());
-                                    let aj = raw.get(&tool_call.id).map(|r| r.arguments_json.clone()).unwrap_or_else(|| "{}".to_string());
-                                    drop(raw);
-                                    let turn = ProviderToolTurn {
-                                        provider_tool_call_id: pid,
-                                        wire_name: wn,
-                                        canonical_operation: tool_call.operation.clone(),
-                                        arguments_json: aj,
-                                        result_content: text.clone(),
-                                    };
-                                    let endpoint = if turn_index == 0 { Some(EndpointChoice::Primary) } else { Some(EndpointChoice::Fallback) };
-                                    *llm.pending_transcript.borrow_mut() = LlmFollowUp { transcript: vec![turn], endpoint };
-                                }
-                            }
-                            let next = self.complete_after_tool_result(
-                                journal, run, session, blocks, user_text,
+                            // Build the Run-local follow-up from the provider
+                            // turn captured in the first-round LlmOutput. The
+                            // endpoint identity comes from the actual HTTP
+                            // request site — never inferred from turn_index.
+                            let fu = pending_turn.take().map(|pt| LlmFollowUp {
+                                provider_turn: pt,
+                                result_content: text.clone(),
+                            });
+                            llm = self.complete_after_tool_result(
+                                journal, run, session, blocks, user_text, fu,
                             )?;
-                            llm = next;
+                            pending_turn = llm.provider_turn.take();
                             if llm.tool_call.is_absent() {
                                 return Ok(llm);
                             }
@@ -143,16 +132,13 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
         session: &Session,
         blocks: &[ContextBlock],
         user_text: &str,
+        follow_up: Option<LlmFollowUp>,
     ) -> Result<LlmOutput> {
         let next = match self.llm.complete(LlmInput {
             blocks: blocks.to_vec(),
             user_text: user_text.to_string(),
-            granted_operations: run
-                .principal
-                .grants
-                .iter()
-                .map(|g| g.operation.clone())
-                .collect(),
+            granted_operations: run.principal.grants.iter().map(|g| g.operation.clone()).collect(),
+            follow_up,
         }) {
             Ok(next) => next,
             Err(_) => {
@@ -184,10 +170,6 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
         Ok(next)
     }
 
-    /// Terminate a Run with the accurate run_id after an infrastructure failure
-    /// that cannot be fed back to the model. Writes a `RunFailed` fact (with
-    /// the run_id — never `None`) and sets `runs.status` to `Failed`. Returns
-    /// the propagated infrastructure error so `deliver()` surfaces it.
     fn terminate_run_failure(
         &self,
         journal: &JournalStore,
@@ -214,7 +196,7 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
         journal: &JournalStore,
         session_id: &SessionId,
         approved: &ApprovedInvocation,
-    ) -> Result<(crate::domain::ReceiptStatus, serde_json::Value, String)> {
+    ) -> Result<(ReceiptStatus, serde_json::Value, String)> {
         crate::runtime::tool_rejection::execute_session_recall(journal, session_id, approved)
     }
 }
