@@ -10,10 +10,7 @@ pub trait LlmClient {
 pub struct LlmInput {
     pub blocks: Vec<ContextBlock>,
     pub user_text: String,
-    /// Operations granted to the run principal (from its ExecutionProfile). The
-    /// provider `tools` schema is derived from this ∩ the ReadOnly catalog, so
-    /// only authorized read-only tools are exposed to the model. The Gateway
-    /// remains the final authorization boundary; this is a prompt hint only.
+
     pub granted_operations: Vec<String>,
 }
 pub struct LlmOutput {
@@ -21,22 +18,17 @@ pub struct LlmOutput {
     pub model: String,
     pub content: String,
     pub journal_payload: serde_json::Value,
-    /// Parsed tool call from the provider response. Three-way state:
-    /// - `Absent` — no tool call in the response (text-only flow).
-    /// - `Valid(tc)` — a parseable tool call to execute.
-    /// - `Malformed(reason)` — the provider sent tool_calls but arguments
-    ///   were unparseable; never executes, produces a stable ToolResult.
+
     pub tool_call: ToolCallResult,
 }
-/// The result of parsing a provider tool-call response.
+
 #[derive(Debug, Clone)]
 pub enum ToolCallResult {
-    /// No tool call in the provider response (text-only).
+
     Absent,
-    /// A valid, parseable tool call.
+
     Valid(ToolCall),
-    /// Provider sent tool_calls but arguments were malformed. The model
-    /// receives a ToolResult with the sanitized error and can recover.
+
     Malformed(String),
 }
 impl ToolCallResult {
@@ -44,37 +36,41 @@ impl ToolCallResult {
         matches!(self, ToolCallResult::Absent)
     }
 }
-/// Deterministic bounded hash of a provider tool-call ID. The provider value
-/// is untrusted; never written raw into Journal, idempotency keys, errors.
+
 pub fn tool_call_id_hash(provider_id: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(provider_id.as_bytes());
     hex::encode(hasher.finalize())
 }
-/// A structured tool call. `operation` must be a catalogued `ReadOnly` operation.
+
 #[derive(Debug, Clone)]
 pub struct ToolCall {
-    /// Deterministic bounded digest of the provider-assigned id. Never the raw
-    /// provider value — the raw value is untrusted and never written to Journal,
-    /// idempotency keys, errors, or model-visible text.
+
     pub id: String,
-    /// Catalogued operation name (e.g. `time.now`).
+
     pub operation: String,
-    /// JSON arguments for the operation.
+
     pub arguments: serde_json::Value,
 }
-/// How an LLM endpoint encodes tool names. Explicitly set on the
-/// `ModelEndpoint` — never inferred from URL substrings.
+
 #[derive(Debug, Clone)]
 pub(crate) enum ToolNameMode {
-    /// Canonical names as-is (GLM/OpenAI).
+
     Passthrough,
-    /// Per-request `fn_N` indices with reverse map (DeepSeek).
+
     IndexedMapping(ToolNameMap),
 }
-/// Encoded → canonical name map for one request.
+
 pub(crate) type ToolNameMap = HashMap<String, String>;
-/// One provider-visible tool-turn for structured transcript.
+pub(crate) type ToolCallRawMap = std::collections::HashMap<String, ToolCallRawData>;
+
+#[derive(Debug, Clone)]
+pub(crate) struct ToolCallRawData {
+    pub provider_id: String,
+    pub wire_name: String,
+    pub arguments_json: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct ProviderToolTurn {
     pub provider_tool_call_id: String,
@@ -113,6 +109,7 @@ pub struct OpenAiCompatibleLlm {
     pub(crate) fallback: Option<ModelEndpoint>,
     timeout: Duration,
     pub(crate) pending_transcript: std::cell::RefCell<LlmFollowUp>,
+    pub(crate) pending_raw_map: std::cell::RefCell<ToolCallRawMap>,
 } #[derive(Debug, Clone, Default)]
 pub struct LlmFollowUp {
     pub transcript: Vec<ProviderToolTurn>,
@@ -125,6 +122,7 @@ impl OpenAiCompatibleLlm {
             fallback: None,
             timeout: Duration::from_millis(timeout_ms),
             pending_transcript: std::cell::RefCell::new(LlmFollowUp::default()),
+            pending_raw_map: std::cell::RefCell::new(ToolCallRawMap::new()),
         }
     }
     pub fn with_fallback(mut self, base_url: String, api_key: String, model: String) -> Self {
@@ -134,7 +132,7 @@ impl OpenAiCompatibleLlm {
         }
         self
     }
-    /// Like `with_fallback` but marks the fallback endpoint as `IndexedMapping`.
+
     pub fn with_indexed_fallback(
         mut self,
         base_url: String,
@@ -152,41 +150,53 @@ impl OpenAiCompatibleLlm {
         self
     }
 }
+std::thread_local! {
+    static LAST_RAW_TOOL_CALL: std::cell::RefCell<Option<ToolCallRawData>> = std::cell::RefCell::new(None);
+}
 impl LlmClient for OpenAiCompatibleLlm {
     fn complete(&self, input: LlmInput) -> Result<LlmOutput> {
+        let follow_up = self.pending_transcript.take();
+        let chosen = follow_up.endpoint;
+        if chosen == Some(EndpointChoice::Fallback) {
+            if let Some(fb) = &self.fallback {
+                return match self.request_endpoint(fb, &input, &follow_up.transcript) {
+                    Ok((v,m)) => Ok(Self::cc(success_output(&fb.model, input.blocks.len(), v, &m), &self.pending_raw_map)),
+                    Err(e) => Ok(request_failed_output(&fb.model, input.blocks.len(), e.as_str())),
+                };
+            }
+        }
         if !self.primary.is_configured() {
             return match self.try_fallback(&input, "model_config_required") {
-                Some(output) => Ok(output),
-                None => Ok(config_required_output(
-                    &self.primary.model,
-                    input.blocks.len(),
-                )),
+                Some(o) => Ok(o),
+                None => Ok(config_required_output(&self.primary.model, input.blocks.len())),
             };
         }
-        match self.request_endpoint(&self.primary, &input) {
-            Ok((value, mode)) => Ok(success_output(
-                &self.primary.model,
-                input.blocks.len(),
-                value,
-                &mode,
-            )),
+        match self.request_endpoint(&self.primary, &input, &follow_up.transcript) {
+            Ok((value, mode)) => Ok(Self::cc(success_output(&self.primary.model, input.blocks.len(), value, &mode), &self.pending_raw_map)),
             Err(error) => {
                 if let Some(output) = self.try_fallback(&input, error.as_str()) {
                     return Ok(output);
                 }
-                Ok(request_failed_output(
-                    &self.primary.model,
-                    input.blocks.len(),
-                    error.as_str(),
-                ))
+                Ok(request_failed_output(&self.primary.model, input.blocks.len(), error.as_str()))
             }
         }
-    }
+}
 }
 impl OpenAiCompatibleLlm {
+    fn cc(output: LlmOutput, map: &std::cell::RefCell<ToolCallRawMap>) -> LlmOutput {
+        LAST_RAW_TOOL_CALL.with(|cell| {
+            if let Some(raw) = cell.borrow_mut().take() {
+                let mut m = map.borrow_mut();
+                if let ToolCallResult::Valid(ref tc) = output.tool_call {
+                    m.insert(tc.id.clone(), raw);
+                }
+            }
+        });
+        output
+    }
     fn try_fallback(&self, input: &LlmInput, primary_error: &str) -> Option<LlmOutput> {
         let fallback = self.fallback.as_ref()?;
-        let output = match self.request_endpoint(fallback, input) {
+        let output = match self.request_endpoint(fallback, input, &[]) {
             Ok((value, mode)) => success_output(&fallback.model, input.blocks.len(), value, &mode),
             Err(error) => {
                 request_failed_output(&fallback.model, input.blocks.len(), error.as_str())
@@ -198,9 +208,9 @@ impl OpenAiCompatibleLlm {
         &self,
         endpoint: &ModelEndpoint,
         input: &LlmInput,
+        transcript: &[ProviderToolTurn],
     ) -> std::result::Result<(Value, ToolNameMode), String> {
-        let follow_up = self.pending_transcript.borrow();
-        let transcript = &follow_up.transcript;
+        let transcript = transcript;
         let mut tools =
             crate::domain::operation::provider_tools_for_grants(&input.granted_operations);
         // Build per-request mapping if endpoint uses IndexedMapping.
@@ -356,9 +366,6 @@ fn success_output(
         tool_call,
     }
 }
-/// Parse `choices[0].message.tool_calls[0]` (single tool-call MVP).
-/// `IndexedMapping(map)`: look up provider name; unknowns → Malformed.
-/// `Passthrough`: use provider name as-is (GLM/OpenAI).
 fn parse_tool_call(value: &Value, mode: &ToolNameMode) -> ToolCallResult {
     let tool_call_json = match value.pointer("/choices/0/message/tool_calls/0") {
         Some(v) if !v.is_null() => v,
@@ -412,8 +419,6 @@ fn parse_tool_call(value: &Value, mode: &ToolNameMode) -> ToolCallResult {
         arguments: arguments_val,
     })
 }
-/// Provider output is untrusted; keep only bounded catalog metadata in the
-/// Journal (the runtime adds the position-derived malformed id / digest).
 fn audit_tool_call(tool_call: &ToolCallResult) -> Value {
     match tool_call {
         ToolCallResult::Valid(call) => json!({

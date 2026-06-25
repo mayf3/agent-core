@@ -8,10 +8,6 @@ use serde_json::json;
 
 pub(crate) const MAX_TOOL_ROUNDS: usize = 2;
 
-fn relay_provider_id(tc: &crate::llm::ToolCall) -> String {
-    tc.id.chars().take(16).collect()
-}
-
 /// Single tool-call MVP: only `tool_calls[0]` is parsed and executed per round.
 /// Subsequent entries in the `tool_calls` array (multi-tool / parallel calls)
 /// are silently ignored — they are neither executed nor reported as rejected.
@@ -96,20 +92,23 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
                                 source_ref: Some(format!("tool:{op_for_ref}")),
                             });
                             {
-                                use crate::llm::{LlmFollowUp, OpenAiCompatibleLlm, ProviderToolTurn};
+                                use crate::llm::{EndpointChoice, LlmFollowUp, OpenAiCompatibleLlm, ProviderToolTurn};
                                 use std::any::Any;
                                 if let Some(llm) = (&self.llm as &dyn Any).downcast_ref::<OpenAiCompatibleLlm>() {
+                                    let raw = llm.pending_raw_map.borrow();
+                                    let pid = raw.get(&tool_call.id).map(|r| r.provider_id.clone()).unwrap_or_else(|| tool_call.id.clone());
+                                    let wn = raw.get(&tool_call.id).map(|r| r.wire_name.clone()).unwrap_or_else(|| tool_call.operation.clone());
+                                    let aj = raw.get(&tool_call.id).map(|r| r.arguments_json.clone()).unwrap_or_else(|| "{}".to_string());
+                                    drop(raw);
                                     let turn = ProviderToolTurn {
-                                        provider_tool_call_id: relay_provider_id(&tool_call),
-                                        wire_name: tool_call.operation.clone(),
+                                        provider_tool_call_id: pid,
+                                        wire_name: wn,
                                         canonical_operation: tool_call.operation.clone(),
-                                        arguments_json: "{}".to_string(),
+                                        arguments_json: aj,
                                         result_content: text.clone(),
                                     };
-                                    *llm.pending_transcript.borrow_mut() = LlmFollowUp {
-                                        transcript: vec![turn],
-                                        endpoint: None,
-                                    };
+                                    let endpoint = if turn_index == 0 { Some(EndpointChoice::Primary) } else { Some(EndpointChoice::Fallback) };
+                                    *llm.pending_transcript.borrow_mut() = LlmFollowUp { transcript: vec![turn], endpoint };
                                 }
                             }
                             let next = self.complete_after_tool_result(
