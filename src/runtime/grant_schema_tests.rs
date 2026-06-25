@@ -13,7 +13,6 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
 };
-// §5/§7: schema is derived from granted operations ∩ ReadOnly catalog
 #[test]
 fn provider_tools_expose_only_granted_readonly_operations() {
     let tools = provider_tools_for_grants(&["time.now".to_string()]);
@@ -26,7 +25,6 @@ fn provider_tools_expose_only_granted_readonly_operations() {
 
 #[test]
 fn write_operations_are_never_in_provider_tools() {
-    // Even if mistakenly granted, a Write operation is filtered out.
     let tools = provider_tools_for_grants(&[
         "stdout.send_text".to_string(),
         "feishu.send_message".to_string(),
@@ -51,7 +49,6 @@ fn multiple_readonly_grants_expose_all_in_catalog_order() {
         .iter()
         .filter_map(|t| t.pointer("/function/name").and_then(Value::as_str))
         .collect();
-    // Catalog order: time.now, session.recall_recent, system.status
     assert_eq!(
         names,
         vec!["time.now", "session.recall_recent", "system.status"]
@@ -67,7 +64,6 @@ fn provider_tool_definition_rejects_write_and_unknown() {
         tn.pointer("/function/name").and_then(Value::as_str),
         Some("time.now")
     );
-    // Strict schema.
     assert_eq!(
         tn.pointer("/function/parameters/additionalProperties")
             .and_then(Value::as_bool),
@@ -193,7 +189,7 @@ fn request_includes_time_now_when_granted() -> Result<()> {
         blocks: vec![],
         user_text: "x".into(),
         granted_operations: vec!["time.now".to_string(), "system.status".to_string()],
-            follow_up: None,
+        follow_up: None,
     })?;
     let requests = server.requests();
     let body = requests.first().expect("request captured");
@@ -244,7 +240,7 @@ fn request_omits_time_now_when_not_granted() -> Result<()> {
         blocks: vec![],
         user_text: "x".into(),
         granted_operations: vec!["session.recall_recent".to_string()],
-            follow_up: None,
+        follow_up: None,
     })?;
     let requests = server.requests();
     let body = requests.first().expect("request captured");
@@ -278,7 +274,7 @@ fn misconfigured_write_grant_not_in_tools() -> Result<()> {
         blocks: vec![],
         user_text: "x".into(),
         granted_operations: vec!["feishu.send_message".to_string()],
-            follow_up: None,
+        follow_up: None,
     })?;
     let requests = server.requests();
     let body = requests.first().expect("request captured");

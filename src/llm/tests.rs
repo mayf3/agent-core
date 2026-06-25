@@ -1,6 +1,6 @@
 use super::{
-    audit_tool_call, parse_tool_call, tool_call_id_hash, EndpointChoice, ToolCallResult, ToolNameMap,
-    ToolNameMode,
+    parsing::{self, ParsedToolCall},
+    tool_call_id_hash, EndpointChoice, ToolCallResult, ToolNameMap, ToolNameMode,
 };
 use serde_json::json;
 
@@ -20,7 +20,7 @@ fn indexed() -> ToolNameMode {
 }
 
 fn parse(value: &serde_json::Value, mode: &ToolNameMode) -> ToolCallResult {
-    parse_tool_call(value, mode, EndpointChoice::Primary).tool_call_result
+    parsing::parse_tool_call(value, mode, EndpointChoice::Primary).tool_call_result
 }
 
 // === Passthrough mode (GLM/OpenAI) ===
@@ -122,7 +122,10 @@ fn malformed_shapes_rejected_in_passthrough() {
     ] {
         let p = parse(&response(case), &passthrough());
         assert!(matches!(p, ToolCallResult::Malformed(_)));
-        assert_eq!(audit_tool_call(&p), json!({"malformed": "malformed_tool_call"}));
+        assert_eq!(
+            parsing::audit_tool_call(&p),
+            json!({"malformed": "malformed_tool_call"})
+        );
     }
 }
 
@@ -141,17 +144,17 @@ fn provider_dto_hashes_id_once_and_bounds_unknown_operation_audit() {
     };
     assert_eq!(c.id, tool_call_id_hash(raw_id));
     assert_eq!(
-        audit_tool_call(&p),
+        parsing::audit_tool_call(&p),
         json!({"operation": "unknown_operation", "id": c.id})
     );
-    assert!(!audit_tool_call(&p).to_string().contains("Bearer"));
+    assert!(!parsing::audit_tool_call(&p).to_string().contains("Bearer"));
 }
 
 // === ProviderToolTurn provenance ===
 
 #[test]
 fn provider_turn_carries_raw_id_wire_name_and_endpoint() {
-    let parsed = parse_tool_call(
+    let parsed = parsing::parse_tool_call(
         &response(json!({
             "id": "call_ds_123",
             "function": {"name": "fn_0", "arguments": "{\"limit\":5}"}
@@ -170,7 +173,7 @@ fn provider_turn_carries_raw_id_wire_name_and_endpoint() {
 
 #[test]
 fn provider_turn_absent_when_no_tool_call() {
-    let parsed = parse_tool_call(
+    let parsed = parsing::parse_tool_call(
         &json!({"choices": [{"message": {"content": "hello"}}]}),
         &passthrough(),
         EndpointChoice::Primary,
@@ -182,11 +185,14 @@ fn provider_turn_absent_when_no_tool_call() {
 #[test]
 fn oversized_provider_id_is_malformed() {
     let huge_id = "x".repeat(300);
-    let parsed = parse_tool_call(
+    let parsed = parsing::parse_tool_call(
         &response(json!({"id": huge_id, "function": {"name": "time.now", "arguments": "{}"}})),
         &passthrough(),
         EndpointChoice::Primary,
     );
-    assert!(matches!(parsed.tool_call_result, ToolCallResult::Malformed(_)));
+    assert!(matches!(
+        parsed.tool_call_result,
+        ToolCallResult::Malformed(_)
+    ));
     assert!(parsed.provider_turn.is_none());
 }

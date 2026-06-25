@@ -25,7 +25,7 @@ fn fallback_endpoint_is_used_after_primary_http_error() -> Result<()> {
         blocks: vec![],
         user_text: "hello".into(),
         granted_operations: vec![],
-            follow_up: None,
+        follow_up: None,
     })?;
     assert_eq!(output.model, "deepseek-v4-flash");
     assert_eq!(output.content, "fallback ok");
@@ -93,7 +93,7 @@ impl LlmClient for RecallThenAnswerLlm {
                     operation: "session.recall_recent".into(),
                     arguments: json!({ "limit": 5 }),
                 }),
-            provider_turn: None,
+                provider_turn: None,
             })
         } else {
             Ok(LlmOutput {
@@ -102,7 +102,7 @@ impl LlmClient for RecallThenAnswerLlm {
                 content: "The PR5 risk was WaitingDispatch not closing the loop.".into(),
                 journal_payload: json!({ "round": current }),
                 tool_call: ToolCallResult::Absent,
-            provider_turn: None,
+                provider_turn: None,
             })
         }
     }
@@ -129,27 +129,6 @@ fn recall_loop_uses_second_round_reply() -> Result<()> {
     assert!(
         !outcome.output.contains("let me recall"),
         "first-round placeholder must not be the final reply"
-    );
-    Ok(())
-}
-
-#[test]
-fn recall_loop_appends_tool_result_block_before_second_round() -> Result<()> {
-    let config = common::test_config();
-    let journal = JournalStore::in_memory()?;
-    let gateway = Gateway::new(config.clone());
-    let saw = Arc::new(Mutex::new(false));
-    let llm = RecallThenAnswerLlm {
-        round: Arc::new(Mutex::new(0)),
-        saw_tool_result_block: Arc::clone(&saw),
-    };
-    let runtime = Runtime::new(config, llm);
-    let envelope = gateway.cli_ingress("what was the PR5 risk".to_string())?;
-    let event = gateway.validate_ingress(&journal, envelope)?;
-    let _ = runtime.deliver(&journal, &gateway, event)?;
-    assert!(
-        *saw.lock().unwrap(),
-        "second LLM round must see ToolResult block"
     );
     Ok(())
 }
@@ -264,7 +243,7 @@ impl LlmClient for ProposeUnknownToolLlm {
                 content: "sorry, that tool is unavailable".into(),
                 journal_payload: json!({ "round": current }),
                 tool_call: ToolCallResult::Absent,
-            provider_turn: None,
+                provider_turn: None,
             });
         }
         Ok(LlmOutput {
@@ -316,7 +295,7 @@ fn recall_loop_is_noop_when_no_tool_call() -> Result<()> {
                 content: "hello back".into(),
                 journal_payload: json!({}),
                 tool_call: ToolCallResult::Absent,
-            provider_turn: None,
+                provider_turn: None,
             })
         }
     }

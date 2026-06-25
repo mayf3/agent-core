@@ -175,7 +175,8 @@ impl LlmClient for OpenAiCompatibleLlm {
                     None => &self.primary,
                 },
             };
-            return self.request_endpoint(endpoint, fu.provider_turn.endpoint, &input, fu)
+            return self
+                .request_endpoint(endpoint, fu.provider_turn.endpoint, &input, fu)
                 .map_err(anyhow::Error::msg);
         }
         // No follow-up: normal primary → fallback routing.
@@ -185,13 +186,22 @@ impl LlmClient for OpenAiCompatibleLlm {
                 None => config_required_output(&self.primary.model, input.blocks.len()),
             });
         }
-        match self.request_endpoint(&self.primary, EndpointChoice::Primary, &input, &empty_followup(&input)) {
+        match self.request_endpoint(
+            &self.primary,
+            EndpointChoice::Primary,
+            &input,
+            &empty_followup(&input),
+        ) {
             Ok(output) => Ok(output),
             Err(error) => {
                 if let Some(output) = self.try_fallback(&input, error.as_str()) {
                     return Ok(output);
                 }
-                Ok(request_failed_output(&self.primary.model, input.blocks.len(), error.as_str()))
+                Ok(request_failed_output(
+                    &self.primary.model,
+                    input.blocks.len(),
+                    error.as_str(),
+                ))
             }
         }
     }
@@ -200,11 +210,17 @@ impl LlmClient for OpenAiCompatibleLlm {
 impl OpenAiCompatibleLlm {
     fn try_fallback(&self, input: &LlmInput, primary_error: &str) -> Option<LlmOutput> {
         let fallback = self.fallback.as_ref()?;
-        let output =
-            match self.request_endpoint(fallback, EndpointChoice::Fallback, input, &empty_followup(input)) {
-                Ok(output) => output,
-                Err(error) => request_failed_output(&fallback.model, input.blocks.len(), error.as_str()),
-            };
+        let output = match self.request_endpoint(
+            fallback,
+            EndpointChoice::Fallback,
+            input,
+            &empty_followup(input),
+        ) {
+            Ok(output) => output,
+            Err(error) => {
+                request_failed_output(&fallback.model, input.blocks.len(), error.as_str())
+            }
+        };
         Some(mark_fallback(output, &self.primary.model, primary_error))
     }
 
@@ -387,7 +403,7 @@ fn success_output(
         .filter(|text| !text.is_empty())
         .unwrap_or("")
         .to_string();
-    let parsed = parse_tool_call(&value, mode, choice);
+    let parsed = parsing::parse_tool_call(&value, mode, choice);
     let provider_turn = parsed.provider_turn;
     let tool_call = parsed.tool_call_result;
     let content = match &tool_call {
@@ -399,7 +415,11 @@ fn success_output(
     };
     LlmOutput {
         provider: "openai-compatible".to_string(),
-        model: value.get("model").and_then(Value::as_str).unwrap_or(model).to_string(),
+        model: value
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or(model)
+            .to_string(),
         content,
         journal_payload: json!({
             "provider": "openai-compatible",
@@ -407,157 +427,10 @@ fn success_output(
             "context_blocks": context_blocks,
             "status": "ok",
             "usage": sanitize_usage(value.get("usage")),
-            "tool_call": audit_tool_call(&tool_call),
+            "tool_call": parsing::audit_tool_call(&tool_call),
         }),
         tool_call,
         provider_turn,
-    }
-}
-
-/// Result of parsing a provider tool call: the kernel-authoritative ToolCall
-/// plus the provider-side ProviderToolTurn (raw id, wire name, args JSON).
-struct ParsedToolCall {
-    tool_call_result: ToolCallResult,
-    provider_turn: Option<ProviderToolTurn>,
-}
-
-const MAX_PROVIDER_ID_LEN: usize = 256;
-const MAX_WIRE_NAME_LEN: usize = 128;
-const MAX_ARGS_JSON_LEN: usize = 8192;
-
-fn parse_tool_call(value: &Value, mode: &ToolNameMode, choice: EndpointChoice) -> ParsedToolCall {
-    let tool_call_json = match value.pointer("/choices/0/message/tool_calls/0") {
-        Some(v) if !v.is_null() => v,
-        _ => {
-            return ParsedToolCall {
-                tool_call_result: ToolCallResult::Absent,
-                provider_turn: None,
-            }
-        }
-    };
-    let function = match tool_call_json.get("function") {
-        Some(f) => f,
-        None => {
-            return ParsedToolCall {
-                tool_call_result: ToolCallResult::Malformed("missing function block".to_string()),
-                provider_turn: None,
-            }
-        }
-    };
-    let raw_id = match tool_call_json.get("id").and_then(Value::as_str) {
-        Some(s) if !s.trim().is_empty() => s,
-        _ => {
-            return ParsedToolCall {
-                tool_call_result: ToolCallResult::Malformed("missing tool_call id".to_string()),
-                provider_turn: None,
-            }
-        }
-    };
-    if raw_id.len() > MAX_PROVIDER_ID_LEN {
-        return ParsedToolCall {
-            tool_call_result: ToolCallResult::Malformed("provider id too long".to_string()),
-            provider_turn: None,
-        };
-    }
-    let id = tool_call_id_hash(raw_id);
-    let raw_operation = match function.get("name").and_then(Value::as_str) {
-        Some(n) if !n.trim().is_empty() => n,
-        _ => {
-            return ParsedToolCall {
-                tool_call_result: ToolCallResult::Malformed("missing function name".to_string()),
-                provider_turn: None,
-            }
-        }
-    };
-    if raw_operation.len() > MAX_WIRE_NAME_LEN {
-        return ParsedToolCall {
-            tool_call_result: ToolCallResult::Malformed("wire name too long".to_string()),
-            provider_turn: None,
-        };
-    }
-    let operation = match mode {
-        ToolNameMode::Passthrough => raw_operation.to_string(),
-        ToolNameMode::IndexedMapping(map) => match map.get(raw_operation) {
-            Some(canonical) => canonical.clone(),
-            None => {
-                return ParsedToolCall {
-                    tool_call_result: ToolCallResult::Malformed("unknown function name".to_string()),
-                    provider_turn: None,
-                }
-            }
-        },
-    };
-    let arguments_str = match function.get("arguments").and_then(Value::as_str) {
-        Some(s) => s,
-        None => {
-            return ParsedToolCall {
-                tool_call_result: ToolCallResult::Malformed("missing arguments".to_string()),
-                provider_turn: None,
-            }
-        }
-    };
-    if arguments_str.len() > MAX_ARGS_JSON_LEN {
-        return ParsedToolCall {
-            tool_call_result: ToolCallResult::Malformed("arguments too long".to_string()),
-            provider_turn: None,
-        };
-    }
-    let arguments_val = match serde_json::from_str::<Value>(arguments_str) {
-        Ok(v) if v.is_object() => v,
-        Ok(v) => {
-            return ParsedToolCall {
-                tool_call_result: ToolCallResult::Malformed(format!(
-                    "arguments must be a JSON object, got {}",
-                    type_name(&v)
-                )),
-                provider_turn: None,
-            }
-        }
-        Err(e) => {
-            return ParsedToolCall {
-                tool_call_result: ToolCallResult::Malformed(format!("arguments JSON parse error: {e}")),
-                provider_turn: None,
-            }
-        }
-    };
-    let provider_turn = ProviderToolTurn {
-        endpoint: choice,
-        provider_tool_call_id: raw_id.to_string(),
-        wire_name: raw_operation.to_string(),
-        canonical_operation: operation.clone(),
-        arguments_json: arguments_str.to_string(),
-    };
-    ParsedToolCall {
-        tool_call_result: ToolCallResult::Valid(ToolCall {
-            id,
-            operation,
-            arguments: arguments_val,
-        }),
-        provider_turn: Some(provider_turn),
-    }
-}
-
-fn audit_tool_call(tool_call: &ToolCallResult) -> Value {
-    match tool_call {
-        ToolCallResult::Valid(call) => json!({
-            "operation": crate::domain::operation::lookup(&call.operation)
-                .map(|spec| spec.name)
-                .unwrap_or("unknown_operation"),
-            "id": call.id,
-        }),
-        ToolCallResult::Malformed(_) => json!({ "malformed": "malformed_tool_call" }),
-        ToolCallResult::Absent => Value::Null,
-    }
-}
-
-fn type_name(v: &Value) -> &'static str {
-    match v {
-        Value::Null => "null",
-        Value::Bool(_) => "boolean",
-        Value::Number(_) => "number",
-        Value::String(_) => "string",
-        Value::Array(_) => "array",
-        Value::Object(_) => "object",
     }
 }
 
@@ -620,5 +493,6 @@ fn is_zai_endpoint(base_url: &str) -> bool {
     lower.contains("z.ai") || lower.contains("bigmodel.cn")
 }
 
+mod parsing;
 #[cfg(test)]
 mod tests;
