@@ -225,6 +225,7 @@ impl agent_core_kernel::llm::LlmClient for FixedLlm {
             content: "reply".to_string(),
             journal_payload: serde_json::json!({}),
             tool_call: agent_core_kernel::llm::ToolCallResult::Absent,
+            provider_turn: None,
         })
     }
 }
@@ -393,6 +394,7 @@ impl agent_core_kernel::llm::LlmClient for ToolCallLlm {
             } else {
                 agent_core_kernel::llm::ToolCallResult::Absent
             },
+            provider_turn: None,
         })
     }
 }

@@ -37,7 +37,7 @@ pub fn run_yield() -> Result<()> {
 
 impl<L> Runtime<L>
 where
-    L: LlmClient,
+    L: LlmClient + 'static,
 {
     pub fn new(config: KernelConfig, llm: L) -> Self {
         Self { config, llm }
@@ -149,6 +149,7 @@ where
             blocks: blocks.clone(),
             user_text: text.clone(),
             granted_operations: granted_operations.clone(),
+            follow_up: None,
         })?;
         journal.append_event(
             JournalEventKind::LlmCompleted,
