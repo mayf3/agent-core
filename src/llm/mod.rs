@@ -186,12 +186,7 @@ impl LlmClient for OpenAiCompatibleLlm {
                 None => config_required_output(&self.primary.model, input.blocks.len()),
             });
         }
-        match self.request_endpoint(
-            &self.primary,
-            EndpointChoice::Primary,
-            &input,
-            None,
-        ) {
+        match self.request_endpoint(&self.primary, EndpointChoice::Primary, &input, None) {
             Ok(output) => Ok(output),
             Err(error) => {
                 if let Some(output) = self.try_fallback(&input, error.as_str()) {
@@ -210,12 +205,7 @@ impl LlmClient for OpenAiCompatibleLlm {
 impl OpenAiCompatibleLlm {
     fn try_fallback(&self, input: &LlmInput, primary_error: &str) -> Option<LlmOutput> {
         let fallback = self.fallback.as_ref()?;
-        let output = match self.request_endpoint(
-            fallback,
-            EndpointChoice::Fallback,
-            input,
-            None,
-        ) {
+        let output = match self.request_endpoint(fallback, EndpointChoice::Fallback, input, None) {
             Ok(output) => output,
             Err(error) => {
                 request_failed_output(&fallback.model, input.blocks.len(), error.as_str())

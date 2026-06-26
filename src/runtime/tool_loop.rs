@@ -1,9 +1,7 @@
 use crate::domain::*;
 use crate::gateway::Gateway;
 use crate::journal::JournalStore;
-use crate::llm::{
-    LlmClient, LlmFollowUp, LlmInput, LlmOutput, ProviderToolTurn, ToolCallResult,
-};
+use crate::llm::{LlmClient, LlmFollowUp, LlmInput, LlmOutput, ProviderToolTurn, ToolCallResult};
 use crate::runtime::tool_rejection::sanitize_operation_for_audit;
 use anyhow::Result;
 use serde_json::json;
@@ -38,8 +36,8 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
                 ToolCallResult::Malformed(_reason) => {
                     let this_tool = tool_index;
                     tool_index += 1;
-                    let outcome =
-                        self.handle_malformed_tool_call(journal, run, session, turn_index, this_tool)?;
+                    let outcome = self
+                        .handle_malformed_tool_call(journal, run, session, turn_index, this_tool)?;
                     match outcome {
                         ToolCallOutcome::Fatal { category } => {
                             return self.terminate_run_failure(journal, run, session, category);
@@ -69,13 +67,7 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
                     let this_tool = tool_index;
                     tool_index += 1;
                     let outcome = self.handle_inline_tool_call(
-                        journal,
-                        gateway,
-                        run,
-                        session,
-                        &tool_call,
-                        turn_index,
-                        this_tool,
+                        journal, gateway, run, session, &tool_call, turn_index, this_tool,
                     )?;
                     match outcome {
                         ToolCallOutcome::Fatal { category } => {
@@ -137,7 +129,12 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
         let next = match self.llm.complete(LlmInput {
             blocks: blocks.to_vec(),
             user_text: user_text.to_string(),
-            granted_operations: run.principal.grants.iter().map(|g| g.operation.clone()).collect(),
+            granted_operations: run
+                .principal
+                .grants
+                .iter()
+                .map(|g| g.operation.clone())
+                .collect(),
             follow_up,
         }) {
             Ok(next) => next,
