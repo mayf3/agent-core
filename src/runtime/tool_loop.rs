@@ -224,3 +224,7 @@ pub(crate) mod tool_name_mode_tests;
 #[cfg(test)]
 #[path = "config_wiring_tests.rs"]
 pub(crate) mod config_wiring_tests;
+
+#[cfg(test)]
+#[path = "transcript_isolation_tests.rs"]
+pub(crate) mod transcript_isolation_tests;
