@@ -3,10 +3,7 @@ use anyhow::Result;
 use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
-};
+use std::sync::{Arc, Mutex};
 use std::thread;
 #[test]
 fn fallback_endpoint_is_used_after_primary_http_error() -> Result<()> {
@@ -336,58 +333,38 @@ fn recall_loop_is_noop_when_no_tool_call() -> Result<()> {
     Ok(())
 }
 
-struct StubServer {
+/// A stub HTTP server that serves a deterministic queue of responses.
+/// Each incoming connection consumes one response from the queue in order.
+/// The thread exits when the queue is empty. No timers, no round counters.
+struct QueuedStub {
     port: u16,
-    shutdown: Arc<AtomicBool>,
-    handle: Option<std::thread::JoinHandle<()>>,
+    _handle: std::thread::JoinHandle<()>,
 }
 
-impl StubServer {
-    fn start() -> Self {
+impl QueuedStub {
+    fn new(responses: Vec<&'static str>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let shutdown_thread = Arc::clone(&shutdown);
         let handle = std::thread::spawn(move || {
-            let mut round = 0usize;
-            loop {
+            let mut iter = responses.into_iter();
+            while let Some(body) = iter.next() {
                 let (mut stream, _) = match listener.accept() {
                     Ok(s) => s,
                     Err(_) => break,
                 };
-                if shutdown_thread.load(Ordering::Relaxed) {
-                    break;
-                }
-                let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(2000)));
-                let mut buf = [0u8; 8192];
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(5000)));
+                let mut buf = [0u8; 4096];
                 let _ = stream.read(&mut buf);
-                let body_str = match round {
-                    0 | 1 => {
-                        round += 1;
-                        r#"{"choices":[{"message":{"content":"","tool_calls":[{"id":"call_stub_1","type":"function","function":{"name":"time.now","arguments":"{}"}}]}}],"model":"stub"}"#
-                    }
-                    _ => {
-                        round += 1;
-                        r#"{"choices":[{"message":{"content":"The current time was retrieved successfully."}}],"model":"stub"}"#
-                    }
-                };
                 let resp = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body_str.len(),
-                    body_str
+                    body.len(),
+                    body,
                 );
                 let _ = stream.write_all(resp.as_bytes());
                 let _ = stream.flush();
-                if round >= 3 {
-                    break;
-                }
             }
         });
-        Self {
-            port,
-            shutdown,
-            handle: Some(handle),
-        }
+        Self { port, _handle: handle }
     }
 
     fn base_url(&self) -> String {
@@ -395,24 +372,13 @@ impl StubServer {
     }
 }
 
-impl Drop for StubServer {
-    fn drop(&mut self) {
-        self.shutdown.store(true, Ordering::Relaxed);
-        if let Ok(socket) = std::net::TcpStream::connect_timeout(
-            &std::net::SocketAddr::from(([127, 0, 0, 1], self.port)),
-            std::time::Duration::from_millis(500),
-        ) {
-            drop(socket);
-        }
-        if let Some(h) = self.handle.take() {
-            let _ = h.join();
-        }
-    }
-}
+const TOOL_CALL_RESPONSE: &str = r#"{"choices":[{"message":{"content":"","tool_calls":[{"id":"call_stub_1","type":"function","function":{"name":"time.now","arguments":"{}"}}]}}],"model":"stub"}"#;
+const TEXT_RESPONSE: &str = r#"{"choices":[{"message":{"content":"The current time was retrieved successfully."}}],"model":"stub"}"#;
 
 #[test]
 fn stub_http_provider_completes_tool_loop() -> Result<()> {
-    let server = StubServer::start();
+    // Deterministic queue: round 0 tool call, round 1 tool call, round 2 text reply.
+    let server = QueuedStub::new(vec![TOOL_CALL_RESPONSE, TOOL_CALL_RESPONSE, TEXT_RESPONSE]);
     let mut config = common::test_config();
     config.openai_base_url = format!("{}/v1", server.base_url());
     config.openai_api_key = "stub-key".to_string();

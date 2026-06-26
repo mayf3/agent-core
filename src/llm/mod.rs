@@ -176,7 +176,7 @@ impl LlmClient for OpenAiCompatibleLlm {
                 },
             };
             return self
-                .request_endpoint(endpoint, fu.provider_turn.endpoint, &input, fu)
+                .request_endpoint(endpoint, fu.provider_turn.endpoint, &input, Some(fu))
                 .map_err(anyhow::Error::msg);
         }
         // No follow-up: normal primary → fallback routing.
@@ -190,7 +190,7 @@ impl LlmClient for OpenAiCompatibleLlm {
             &self.primary,
             EndpointChoice::Primary,
             &input,
-            &empty_followup(&input),
+            None,
         ) {
             Ok(output) => Ok(output),
             Err(error) => {
@@ -214,7 +214,7 @@ impl OpenAiCompatibleLlm {
             fallback,
             EndpointChoice::Fallback,
             input,
-            &empty_followup(input),
+            None,
         ) {
             Ok(output) => output,
             Err(error) => {
@@ -232,7 +232,7 @@ impl OpenAiCompatibleLlm {
         endpoint: &ModelEndpoint,
         choice: EndpointChoice,
         input: &LlmInput,
-        follow_up: &LlmFollowUp,
+        follow_up: Option<&LlmFollowUp>,
     ) -> std::result::Result<LlmOutput, String> {
         let mut tools =
             crate::domain::operation::provider_tools_for_grants(&input.granted_operations);
@@ -254,24 +254,28 @@ impl OpenAiCompatibleLlm {
             json!({"role": "system", "content": serialize_system_context(&input.blocks)}),
             json!({"role": "user", "content": input.user_text}),
         ];
-        // Structured follow-up transcript: assistant tool_calls + role:tool.
-        let turn = &follow_up.provider_turn;
-        messages.push(json!({
-            "role": "assistant",
-            "tool_calls": [{
-                "id": turn.provider_tool_call_id,
-                "type": "function",
-                "function": {
-                    "name": turn.wire_name,
-                    "arguments": turn.arguments_json,
-                }
-            }]
-        }));
-        messages.push(json!({
-            "role": "tool",
-            "tool_call_id": turn.provider_tool_call_id,
-            "content": follow_up.result_content,
-        }));
+        // Structured follow-up transcript: only when a real follow_up exists.
+        // First-round requests (None) send only system + user — no fabricated
+        // assistant/tool history.
+        if let Some(fu) = follow_up {
+            let turn = &fu.provider_turn;
+            messages.push(json!({
+                "role": "assistant",
+                "tool_calls": [{
+                    "id": turn.provider_tool_call_id,
+                    "type": "function",
+                    "function": {
+                        "name": turn.wire_name,
+                        "arguments": turn.arguments_json,
+                    }
+                }]
+            }));
+            messages.push(json!({
+                "role": "tool",
+                "tool_call_id": turn.provider_tool_call_id,
+                "content": fu.result_content,
+            }));
+        }
         let body = json!({
             "model": endpoint.model,
             "messages": messages,
@@ -300,22 +304,6 @@ impl OpenAiCompatibleLlm {
         let mode = tool_name_mode;
         let output = success_output(&endpoint.model, input.blocks.len(), value, &mode, choice);
         Ok(output)
-    }
-}
-
-/// A no-op follow-up used when there is no prior tool call (first round). The
-/// assistant/tool messages are harmless placeholders that providers ignore when
-/// the conversation has no prior tool_calls to match.
-fn empty_followup(_input: &LlmInput) -> LlmFollowUp {
-    LlmFollowUp {
-        provider_turn: ProviderToolTurn {
-            endpoint: EndpointChoice::Primary,
-            provider_tool_call_id: String::new(),
-            wire_name: String::new(),
-            canonical_operation: String::new(),
-            arguments_json: String::new(),
-        },
-        result_content: String::new(),
     }
 }
 
