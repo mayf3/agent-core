@@ -1,5 +1,5 @@
 use super::{
-    parsing::{self, ParsedToolCall},
+    parsing::{self},
     tool_call_id_hash, EndpointChoice, ToolCallResult, ToolNameMap, ToolNameMode,
 };
 use serde_json::json;
