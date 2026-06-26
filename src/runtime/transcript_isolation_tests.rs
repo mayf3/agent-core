@@ -16,7 +16,10 @@ mod transcript_isolation_tests {
     }
 
     /// Capture stub: serves queued responses, captures request bodies.
-    struct Capture { port: u16, reqs: Arc<Mutex<Vec<Value>>> }
+    struct Capture {
+        port: u16,
+        reqs: Arc<Mutex<Vec<Value>>>,
+    }
     impl Capture {
         fn new(responses: Vec<Value>) -> Self {
             let l = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -31,16 +34,25 @@ mod transcript_isolation_tests {
                     let mut tmp = [0u8; 4096];
                     loop {
                         let n = s.read(&mut tmp).unwrap_or(0);
-                        if n == 0 { break; }
+                        if n == 0 {
+                            break;
+                        }
                         buf.extend_from_slice(&tmp[..n]);
                         if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
                             let bs = pos + 4;
-                            let clen = std::str::from_utf8(&buf[..bs]).unwrap_or("")
-                                .lines().find_map(|l| {
+                            let clen = std::str::from_utf8(&buf[..bs])
+                                .unwrap_or("")
+                                .lines()
+                                .find_map(|l| {
                                     let (k, v) = l.split_once(':')?;
-                                    k.eq_ignore_ascii_case("content-length").then(|| v.trim().parse::<usize>().ok())
-                                }).flatten().unwrap_or(0);
-                            if clen == 0 || buf.len() >= bs + clen { break; }
+                                    k.eq_ignore_ascii_case("content-length")
+                                        .then(|| v.trim().parse::<usize>().ok())
+                                })
+                                .flatten()
+                                .unwrap_or(0);
+                            if clen == 0 || buf.len() >= bs + clen {
+                                break;
+                            }
                         }
                     }
                     if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
@@ -58,12 +70,19 @@ mod transcript_isolation_tests {
             });
             Self { port, reqs }
         }
-        fn url(&self) -> String { format!("http://127.0.0.1:{}/v1", self.port) }
-        fn requests(&self) -> Vec<Value> { self.reqs.lock().unwrap().clone() }
+        fn url(&self) -> String {
+            format!("http://127.0.0.1:{}/v1", self.port)
+        }
+        fn requests(&self) -> Vec<Value> {
+            self.reqs.lock().unwrap().clone()
+        }
     }
 
     /// 429 stub: returns 429 for every connection.
-    struct S429 { port: u16, hits: Arc<Mutex<usize>> }
+    struct S429 {
+        port: u16,
+        hits: Arc<Mutex<usize>>,
+    }
     impl S429 {
         fn new() -> Self {
             let l = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -81,8 +100,12 @@ mod transcript_isolation_tests {
             });
             Self { port, hits }
         }
-        fn url(&self) -> String { format!("http://127.0.0.1:{}/v1", self.port) }
-        fn hits(&self) -> usize { *self.hits.lock().unwrap() }
+        fn url(&self) -> String {
+            format!("http://127.0.0.1:{}/v1", self.port)
+        }
+        fn hits(&self) -> usize {
+            *self.hits.lock().unwrap()
+        }
     }
 
     fn time_tool_call(raw_id: &str) -> Value {
@@ -93,8 +116,11 @@ mod transcript_isolation_tests {
 
     #[test]
     fn first_round_no_followup_has_no_transcript_messages() -> Result<()> {
-        let srv = Capture::new(vec![json!({"model":"s","choices":[{"message":{"content":"hello"}}]})]);
-        let llm = OpenAiCompatibleLlm::new(srv.url(), "t".into(), "p".into(), 5000).with_indexed_primary();
+        let srv = Capture::new(vec![
+            json!({"model":"s","choices":[{"message":{"content":"hello"}}]}),
+        ]);
+        let llm = OpenAiCompatibleLlm::new(srv.url(), "t".into(), "p".into(), 5000)
+            .with_indexed_primary();
         let _ = llm.complete(LlmInput {
             blocks: vec![],
             user_text: "hi".into(),
@@ -105,9 +131,19 @@ mod transcript_isolation_tests {
         assert!(!reqs.is_empty(), "request captured");
         let msgs = reqs[0]["messages"].as_array().unwrap();
         let roles: Vec<&str> = msgs.iter().filter_map(|m| m["role"].as_str()).collect();
-        assert_eq!(roles, vec!["system", "user"], "first round must have only system+user");
-        assert!(!msgs.iter().any(|m| m["role"].as_str() == Some("assistant")), "no assistant message");
-        assert!(!msgs.iter().any(|m| m["role"].as_str() == Some("tool")), "no tool message");
+        assert_eq!(
+            roles,
+            vec!["system", "user"],
+            "first round must have only system+user"
+        );
+        assert!(
+            !msgs.iter().any(|m| m["role"].as_str() == Some("assistant")),
+            "no assistant message"
+        );
+        assert!(
+            !msgs.iter().any(|m| m["role"].as_str() == Some("tool")),
+            "no tool message"
+        );
         Ok(())
     }
 
@@ -137,7 +173,11 @@ mod transcript_isolation_tests {
         let j = JournalStore::in_memory()?;
         let g = Gateway::new(c.clone());
         let r = Runtime::new(c, llm);
-        let o = r.deliver(&j, &g, g.validate_ingress(&j, g.cli_ingress("time?".into())?)?)?;
+        let o = r.deliver(
+            &j,
+            &g,
+            g.validate_ingress(&j, g.cli_ingress("time?".into())?)?,
+        )?;
         assert!(!o.output.trim().is_empty());
         // Primary served both rounds (tool call + follow-up).
         assert_eq!(primary_srv.requests().len(), 2, "primary served 2 rounds");
@@ -145,11 +185,17 @@ mod transcript_isolation_tests {
         // Round 2 has structured transcript.
         let reqs = primary_srv.requests();
         let msgs = reqs[1]["messages"].as_array().unwrap();
-        assert!(msgs.iter().any(|m| m["role"].as_str() == Some("tool")), "round 2 has role:tool");
+        assert!(
+            msgs.iter().any(|m| m["role"].as_str() == Some("tool")),
+            "round 2 has role:tool"
+        );
         // Journal has no raw provider ID or wire name.
         let ev = j.events()?;
         let jt = serde_json::to_string(&ev).unwrap_or_default();
-        assert!(!jt.contains("call_primary_1"), "no raw provider ID in journal");
+        assert!(
+            !jt.contains("call_primary_1"),
+            "no raw provider ID in journal"
+        );
         assert!(!jt.contains("fn_0"), "no wire name in journal");
         Ok(())
     }
@@ -167,7 +213,8 @@ mod transcript_isolation_tests {
             json!({"model":"s","choices":[{"message":{"content":"b_reply"}}]}),
         ]);
         let llm = Arc::new(
-            OpenAiCompatibleLlm::new(srv.url(), "t".into(), "p".into(), 5000).with_indexed_primary()
+            OpenAiCompatibleLlm::new(srv.url(), "t".into(), "p".into(), 5000)
+                .with_indexed_primary(),
         );
         // Run A: follow_up with provider id call_A, wire fn_0, result result_A.
         let llm_a = Arc::clone(&llm);
@@ -212,35 +259,65 @@ mod transcript_isolation_tests {
         let reqs = srv.requests();
         assert_eq!(reqs.len(), 2, "two requests captured");
         // Find which request is A and which is B by their follow_up content.
-        let a_req = reqs.iter().find(|r| {
-            r["messages"].as_array().map(|m| {
-                m.iter().any(|msg| {
-                    msg["role"].as_str() == Some("tool")
-                        && msg["content"].as_str().unwrap_or("").contains("result_A")
-                })
-            }).unwrap_or(false)
-        }).expect("A's request found");
-        let b_req = reqs.iter().find(|r| {
-            r["messages"].as_array().map(|m| {
-                m.iter().any(|msg| {
-                    msg["role"].as_str() == Some("tool")
-                        && msg["content"].as_str().unwrap_or("").contains("result_B")
-                })
-            }).unwrap_or(false)
-        }).expect("B's request found");
+        let a_req = reqs
+            .iter()
+            .find(|r| {
+                r["messages"]
+                    .as_array()
+                    .map(|m| {
+                        m.iter().any(|msg| {
+                            msg["role"].as_str() == Some("tool")
+                                && msg["content"].as_str().unwrap_or("").contains("result_A")
+                        })
+                    })
+                    .unwrap_or(false)
+            })
+            .expect("A's request found");
+        let b_req = reqs
+            .iter()
+            .find(|r| {
+                r["messages"]
+                    .as_array()
+                    .map(|m| {
+                        m.iter().any(|msg| {
+                            msg["role"].as_str() == Some("tool")
+                                && msg["content"].as_str().unwrap_or("").contains("result_B")
+                        })
+                    })
+                    .unwrap_or(false)
+            })
+            .expect("B's request found");
         // A's assistant tool_call has call_A / fn_0.
-        let a_assistant = a_req["messages"].as_array().unwrap().iter()
-            .find(|m| m["role"].as_str() == Some("assistant")).unwrap();
+        let a_assistant = a_req["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["role"].as_str() == Some("assistant"))
+            .unwrap();
         assert_eq!(a_assistant["tool_calls"][0]["id"].as_str(), Some("call_A"));
-        assert_eq!(a_assistant["tool_calls"][0]["function"]["name"].as_str(), Some("fn_0"));
-        let a_tool = a_req["messages"].as_array().unwrap().iter()
-            .find(|m| m["role"].as_str() == Some("tool")).unwrap();
+        assert_eq!(
+            a_assistant["tool_calls"][0]["function"]["name"].as_str(),
+            Some("fn_0")
+        );
+        let a_tool = a_req["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["role"].as_str() == Some("tool"))
+            .unwrap();
         assert_eq!(a_tool["tool_call_id"].as_str(), Some("call_A"));
         // B's assistant tool_call has call_B / fn_1.
-        let b_assistant = b_req["messages"].as_array().unwrap().iter()
-            .find(|m| m["role"].as_str() == Some("assistant")).unwrap();
+        let b_assistant = b_req["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["role"].as_str() == Some("assistant"))
+            .unwrap();
         assert_eq!(b_assistant["tool_calls"][0]["id"].as_str(), Some("call_B"));
-        assert_eq!(b_assistant["tool_calls"][0]["function"]["name"].as_str(), Some("fn_1"));
+        assert_eq!(
+            b_assistant["tool_calls"][0]["function"]["name"].as_str(),
+            Some("fn_1")
+        );
         // No cross-contamination: A doesn't have call_B, B doesn't have call_A.
         let a_json = serde_json::to_string(a_req).unwrap();
         assert!(!a_json.contains("call_B"), "A leaked B's id");
@@ -258,12 +335,15 @@ mod transcript_isolation_tests {
             json!({"model":"s","choices":[{"message":{"content":"y"}}]}),
         ]);
         let llm = Arc::new(
-            OpenAiCompatibleLlm::new(srv.url(), "t".into(), "p".into(), 5000).with_indexed_primary()
+            OpenAiCompatibleLlm::new(srv.url(), "t".into(), "p".into(), 5000)
+                .with_indexed_primary(),
         );
         let l1 = Arc::clone(&llm);
         let h1 = thread::spawn(move || {
             l1.complete(LlmInput {
-                blocks: vec![], user_text: "a".into(), granted_operations: vec![],
+                blocks: vec![],
+                user_text: "a".into(),
+                granted_operations: vec![],
                 follow_up: Some(crate::llm::LlmFollowUp {
                     provider_turn: crate::llm::ProviderToolTurn {
                         endpoint: crate::llm::EndpointChoice::Primary,
@@ -279,7 +359,9 @@ mod transcript_isolation_tests {
         let l2 = Arc::clone(&llm);
         let h2 = thread::spawn(move || {
             l2.complete(LlmInput {
-                blocks: vec![], user_text: "b".into(), granted_operations: vec![],
+                blocks: vec![],
+                user_text: "b".into(),
+                granted_operations: vec![],
                 follow_up: Some(crate::llm::LlmFollowUp {
                     provider_turn: crate::llm::ProviderToolTurn {
                         endpoint: crate::llm::EndpointChoice::Primary,
@@ -298,14 +380,30 @@ mod transcript_isolation_tests {
         assert_eq!(reqs.len(), 2);
         // Each request has exactly one role:tool with its own result.
         for req in &reqs {
-            let tools: Vec<_> = req["messages"].as_array().unwrap().iter()
-                .filter(|m| m["role"].as_str() == Some("tool")).collect();
+            let tools: Vec<_> = req["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|m| m["role"].as_str() == Some("tool"))
+                .collect();
             assert_eq!(tools.len(), 1, "exactly one role:tool per request");
         }
-        let a_req = reqs.iter().find(|r| serde_json::to_string(r).unwrap().contains("result_A")).unwrap();
-        let b_req = reqs.iter().find(|r| serde_json::to_string(r).unwrap().contains("result_B")).unwrap();
-        assert!(!serde_json::to_string(a_req).unwrap().contains("result_B"), "A leaked B's result");
-        assert!(!serde_json::to_string(b_req).unwrap().contains("result_A"), "B leaked A's result");
+        let a_req = reqs
+            .iter()
+            .find(|r| serde_json::to_string(r).unwrap().contains("result_A"))
+            .unwrap();
+        let b_req = reqs
+            .iter()
+            .find(|r| serde_json::to_string(r).unwrap().contains("result_B"))
+            .unwrap();
+        assert!(
+            !serde_json::to_string(a_req).unwrap().contains("result_B"),
+            "A leaked B's result"
+        );
+        assert!(
+            !serde_json::to_string(b_req).unwrap().contains("result_A"),
+            "B leaked A's result"
+        );
         Ok(())
     }
 }

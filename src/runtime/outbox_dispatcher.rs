@@ -30,19 +30,26 @@ pub fn dispatch_once(journal: &JournalStore, adapter: &impl InvocationAdapter) -
         }
         Ok(receipt) if receipt.status == ReceiptStatus::Failed => {
             journal.fail_outbox_dispatch(
-                &invocation_id, &run_id, session_id.as_ref(), "definite_failure",
+                &invocation_id,
+                &run_id,
+                session_id.as_ref(),
+                "definite_failure",
             )?;
         }
         Ok(receipt) => {
             journal.unknown_outbox_dispatch(
-                &invocation_id, &run_id, session_id.as_ref(),
+                &invocation_id,
+                &run_id,
+                session_id.as_ref(),
                 &format!("unknown_receipt_status:{:?}", receipt.status),
             )?;
         }
         Err(error) => {
             let category = DispatchErrorCategory::from_error(&error);
             journal.unknown_outbox_dispatch(
-                &invocation_id, &run_id, session_id.as_ref(),
+                &invocation_id,
+                &run_id,
+                session_id.as_ref(),
                 category.as_str(),
             )?;
         }
@@ -151,7 +158,9 @@ mod tests {
         );
 
         assert_eq!(
-            journal.outbox_dispatch_status(&approved.intent().invocation_id)?.as_ref(),
+            journal
+                .outbox_dispatch_status(&approved.intent().invocation_id)?
+                .as_ref(),
             Some(&OutboxDispatchStatus::Succeeded)
         );
 
@@ -199,8 +208,10 @@ mod tests {
         let events = journal.events()?;
         let receipt_events: Vec<_> = events
             .iter()
-            .filter(|e| e.kind == JournalEventKind::ReceiptReceived
-                && e.correlation_id.as_deref() == Some(invocation_id.0.as_str()))
+            .filter(|e| {
+                e.kind == JournalEventKind::ReceiptReceived
+                    && e.correlation_id.as_deref() == Some(invocation_id.0.as_str())
+            })
             .collect();
         assert_eq!(receipt_events.len(), 1);
 
@@ -237,8 +248,10 @@ mod tests {
         let events = journal.events()?;
         let unknown_events: Vec<_> = events
             .iter()
-            .filter(|e| e.kind == JournalEventKind::OutboxDispatchUnknown
-                && e.correlation_id.as_deref() == Some(invocation_id.0.as_str()))
+            .filter(|e| {
+                e.kind == JournalEventKind::OutboxDispatchUnknown
+                    && e.correlation_id.as_deref() == Some(invocation_id.0.as_str())
+            })
             .collect();
         assert_eq!(unknown_events.len(), 1);
 
@@ -254,7 +267,9 @@ mod tests {
         struct InspectAdapter<'a>(&'a JournalStore);
         impl InvocationAdapter for InspectAdapter<'_> {
             fn execute(&self, invocation: &ApprovedInvocation) -> Result<Receipt> {
-                let status = self.0.outbox_dispatch_status(&invocation.intent().invocation_id)?;
+                let status = self
+                    .0
+                    .outbox_dispatch_status(&invocation.intent().invocation_id)?;
                 assert_eq!(status.as_ref(), Some(&OutboxDispatchStatus::Dispatching));
                 Ok(Receipt {
                     invocation_id: invocation.intent().invocation_id.clone(),
@@ -308,7 +323,10 @@ mod tests {
             let conn = journal.conn.lock().unwrap();
             conn.execute(
                 "UPDATE outbox_dispatches SET status = ?1 WHERE invocation_id = ?2",
-                params![OutboxDispatchStatus::Unknown.as_str(), approved.intent().invocation_id.0],
+                params![
+                    OutboxDispatchStatus::Unknown.as_str(),
+                    approved.intent().invocation_id.0
+                ],
             )?;
         }
 
@@ -336,7 +354,10 @@ mod tests {
             let conn = journal.conn.lock().unwrap();
             conn.execute(
                 "UPDATE outbox_dispatches SET status = ?1 WHERE invocation_id = ?2",
-                params![OutboxDispatchStatus::Succeeded.as_str(), approved.intent().invocation_id.0],
+                params![
+                    OutboxDispatchStatus::Succeeded.as_str(),
+                    approved.intent().invocation_id.0
+                ],
             )?;
         }
 
