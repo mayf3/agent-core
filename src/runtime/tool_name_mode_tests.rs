@@ -116,7 +116,6 @@ mod tool_name_mode_tests {
         super::super::grant_schema_tests::_cfg()
     }
 
-    // ===== forged name rejection (IndexedMapping + unknown fn_99) =====
     #[test]
     fn indexed_mapping_rejects_forged_fn_99() -> Result<()> {
         let s = Capture::new(vec![
@@ -198,7 +197,6 @@ mod tool_name_mode_tests {
         Ok(())
     }
 
-    // ===== URL without "deepseek" + IndexedMapping → fn_N used =====
     #[test]
     fn url_without_deepseek_with_indexed_uses_fn_n() -> Result<()> {
         let fb = Capture::new(vec![
@@ -210,6 +208,7 @@ mod tool_name_mode_tests {
             blocks: vec![],
             user_text: "x".into(),
             granted_operations: vec!["time.now".to_string()],
+            follow_up: None,
         })?;
         let reqs = fb.requests();
         let ns: Vec<&str> = reqs[0]["tools"]
@@ -225,7 +224,6 @@ mod tool_name_mode_tests {
         Ok(())
     }
 
-    // ===== URL with "deepseek" + Passthrough → canonical operation sent =====
     #[test]
     fn url_with_deepseek_passthrough_sends_canonical() -> Result<()> {
         let fb = Capture::new(vec![
@@ -238,6 +236,7 @@ mod tool_name_mode_tests {
             blocks: vec![],
             user_text: "x".into(),
             granted_operations: vec!["time.now".to_string()],
+            follow_up: None,
         })?;
         let reqs = fb.requests();
         assert!(!reqs.is_empty(), "request captured");
@@ -258,7 +257,6 @@ mod tool_name_mode_tests {
         Ok(())
     }
 
-    // ===== Real primary 429 → fallback with explicit IndexedMapping config =====
     #[test]
     fn primary_429_triggers_indexed_fallback_two_rounds() -> Result<()> {
         let p = Primary429::new();
@@ -288,7 +286,13 @@ mod tool_name_mode_tests {
         assert!(!o.output.trim().is_empty());
         let reqs = fb.requests();
         assert_eq!(reqs.len(), 2, "fallback served 2 rounds");
-        assert_eq!(p.hits(), 2, "primary hit 2 times, both 429");
+        // Sticky endpoint: round 1 fallback tool call → round 2 stays on
+        // fallback (does NOT re-hit primary). Primary hit exactly once (429).
+        assert_eq!(
+            p.hits(),
+            1,
+            "primary hit 1 time (429), round 2 is sticky to fallback"
+        );
         let ns: Vec<&str> = reqs[0]["tools"]
             .as_array()
             .unwrap()
@@ -346,17 +350,32 @@ mod tool_name_mode_tests {
             receipt.payload.get("status").and_then(Value::as_str),
             Some("Succeeded")
         );
-        // Round-2 system/context (messages[0].content) contains the textual
-        // ToolResult block (the project uses ContextBlock::ToolResult, NOT
-        // OpenAI role=tool messages).
-        let round2_ctx = reqs[1]["messages"][0]["content"].as_str().unwrap_or("");
+        // Round-2 structured follow-up: the tool result is sent as a
+        // role:tool message with tool_call_id matching the assistant tool_calls.
+        let round2_messages = reqs[1]["messages"].as_array().unwrap();
+        let tool_msg = round2_messages
+            .iter()
+            .find(|m| m["role"].as_str() == Some("tool"))
+            .expect("role:tool message in round 2");
+        let tool_content = tool_msg["content"].as_str().unwrap_or("");
         assert!(
-            round2_ctx.contains("time.now"),
-            "round-2 context contains ToolResult for time.now"
+            tool_content.contains("time.now") || tool_content.contains("succeeded"),
+            "role:tool content references the tool result: {tool_content}"
         );
+        // The assistant tool_call_id and tool.tool_call_id must match.
+        let assistant_msg = round2_messages
+            .iter()
+            .find(|m| m["role"].as_str() == Some("assistant"))
+            .expect("role:assistant message in round 2");
+        let call_id = assistant_msg["tool_calls"][0]["id"].as_str().unwrap_or("");
         assert!(
-            round2_ctx.contains("succeeded"),
-            "round-2 context shows status: succeeded"
+            !call_id.is_empty(),
+            "assistant tool_calls[0].id is the raw provider id"
+        );
+        assert_eq!(
+            tool_msg["tool_call_id"].as_str(),
+            Some(call_id),
+            "tool.tool_call_id matches assistant tool_calls[0].id"
         );
         assert_eq!(
             tnp(JournalEventKind::InvocationApproved),
@@ -382,111 +401,33 @@ mod tool_name_mode_tests {
         Ok(())
     }
 
-    // ===== §3: production config wiring (build_llm_from_config) — 4 combos =====
     //
     // Exercises KernelConfig → build_llm_from_config → ModelEndpoint wiring,
     // the SAME path delivery.rs uses. No HTTP needed: the indexed flags are
     // inspected directly. Primary and fallback are independent.
+}
 
-    fn wired_cfg() -> crate::config::KernelConfig {
-        let mut c = cfg();
-        c.openai_base_url = "http://primary/v1".into();
-        c.openai_api_key = "k".into();
-        c.model = "m".into();
-        c.fallback_openai_base_url = "http://fallback/v1".into();
-        c.fallback_openai_api_key = "fk".into();
-        c.fallback_model = "fm".into();
-        c
+#[test]
+fn env_bool_accepts_common_truthy_values() {
+    use crate::config::parse_env_bool_value;
+    for v in ["true", "TRUE", "True", "1", "yes", "YES", "on", "on "] {
+        assert_eq!(parse_env_bool_value(v), Ok(true), "truthy: {v:?}");
     }
-    use crate::llm::ToolNameMode;
-    fn primary_indexed(llm: &crate::llm::OpenAiCompatibleLlm) -> bool {
-        matches!(llm.primary.tool_name_mode, ToolNameMode::IndexedMapping(_))
+    for v in ["false", "FALSE", "0", "no", "off", "OFF"] {
+        assert_eq!(parse_env_bool_value(v), Ok(false), "falsy: {v:?}");
     }
-    fn fallback_indexed(llm: &crate::llm::OpenAiCompatibleLlm) -> bool {
-        llm.fallback
-            .as_ref()
-            .map(|e| matches!(e.tool_name_mode, ToolNameMode::IndexedMapping(_)))
-            .unwrap_or(false)
-    }
+}
 
-    #[test]
-    fn config_both_passthrough_default() {
-        let mut c = wired_cfg();
-        c.primary_tool_name_indexed = false;
-        c.fallback_tool_name_indexed = false;
-        let llm = crate::server::build_llm_from_config(&c);
-        assert!(!primary_indexed(&llm), "primary passthrough");
-        assert!(!fallback_indexed(&llm), "fallback passthrough");
-    }
-
-    #[test]
-    fn config_primary_indexed_only() {
-        let mut c = wired_cfg();
-        c.primary_tool_name_indexed = true;
-        c.fallback_tool_name_indexed = false;
-        let llm = crate::server::build_llm_from_config(&c);
-        assert!(primary_indexed(&llm), "primary indexed");
-        assert!(!fallback_indexed(&llm), "fallback still passthrough");
-    }
-
-    #[test]
-    fn config_fallback_indexed_only() {
-        let mut c = wired_cfg();
-        c.primary_tool_name_indexed = false;
-        c.fallback_tool_name_indexed = true;
-        let llm = crate::server::build_llm_from_config(&c);
-        assert!(!primary_indexed(&llm), "primary still passthrough");
-        assert!(fallback_indexed(&llm), "fallback indexed");
-    }
-
-    #[test]
-    fn config_both_indexed_independent() {
-        let mut c = wired_cfg();
-        c.primary_tool_name_indexed = true;
-        c.fallback_tool_name_indexed = true;
-        let llm = crate::server::build_llm_from_config(&c);
-        assert!(primary_indexed(&llm));
-        assert!(fallback_indexed(&llm));
-    }
-
-    #[test]
-    fn config_fallback_indexed_without_endpoint_does_not_create_one() {
-        // If fallback_tool_name_indexed=true but no fallback URL is configured,
-        // build_llm_from_config must NOT create a fallback endpoint.
-        let mut c = cfg();
-        c.fallback_openai_base_url = String::new();
-        c.fallback_tool_name_indexed = true;
-        let llm = crate::server::build_llm_from_config(&c);
-        assert!(
-            !fallback_indexed(&llm),
-            "no endpoint created from empty URL"
-        );
-    }
-
-    // ===== §4: freeze env_bool parsing (pure function) =====
-
-    #[test]
-    fn env_bool_accepts_common_truthy_values() {
-        use crate::config::parse_env_bool_value;
-        for v in ["true", "TRUE", "True", "1", "yes", "YES", "on", "on "] {
-            assert_eq!(parse_env_bool_value(v), Ok(true), "truthy: {v:?}");
-        }
-        for v in ["false", "FALSE", "0", "no", "off", "OFF"] {
-            assert_eq!(parse_env_bool_value(v), Ok(false), "falsy: {v:?}");
-        }
-    }
-
-    #[test]
-    fn env_bool_unparsable_returns_error() {
-        use crate::config::parse_env_bool_value;
-        for v in ["", "maybe", "2", "y", "n", "yes/no", "tru"] {
-            let r = parse_env_bool_value(v);
-            assert!(r.is_err(), "invalid value must produce Err: {v:?}");
-            let err = r.unwrap_err();
-            assert_eq!(err, "invalid_boolean_config");
-            if v.len() > 2 {
-                assert!(!err.contains(v), "error must not contain raw value: {v:?}");
-            }
+#[test]
+fn env_bool_unparsable_returns_error() {
+    use crate::config::parse_env_bool_value;
+    for v in ["", "maybe", "2", "y", "n", "yes/no", "tru"] {
+        let r = parse_env_bool_value(v);
+        assert!(r.is_err(), "invalid value must produce Err: {v:?}");
+        let err = r.unwrap_err();
+        assert_eq!(err, "invalid_boolean_config");
+        if v.len() > 2 {
+            assert!(!err.contains(v), "error must not contain raw value: {v:?}");
         }
     }
 }

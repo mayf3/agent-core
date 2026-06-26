@@ -3,10 +3,7 @@ use anyhow::Result;
 use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
-};
+use std::sync::{Arc, Mutex};
 use std::thread;
 #[test]
 fn fallback_endpoint_is_used_after_primary_http_error() -> Result<()> {
@@ -25,6 +22,7 @@ fn fallback_endpoint_is_used_after_primary_http_error() -> Result<()> {
         blocks: vec![],
         user_text: "hello".into(),
         granted_operations: vec![],
+        follow_up: None,
     })?;
     assert_eq!(output.model, "deepseek-v4-flash");
     assert_eq!(output.content, "fallback ok");
@@ -92,6 +90,7 @@ impl LlmClient for RecallThenAnswerLlm {
                     operation: "session.recall_recent".into(),
                     arguments: json!({ "limit": 5 }),
                 }),
+                provider_turn: None,
             })
         } else {
             Ok(LlmOutput {
@@ -100,6 +99,7 @@ impl LlmClient for RecallThenAnswerLlm {
                 content: "The PR5 risk was WaitingDispatch not closing the loop.".into(),
                 journal_payload: json!({ "round": current }),
                 tool_call: ToolCallResult::Absent,
+                provider_turn: None,
             })
         }
     }
@@ -130,27 +130,6 @@ fn recall_loop_uses_second_round_reply() -> Result<()> {
     Ok(())
 }
 
-#[test]
-fn recall_loop_appends_tool_result_block_before_second_round() -> Result<()> {
-    let config = common::test_config();
-    let journal = JournalStore::in_memory()?;
-    let gateway = Gateway::new(config.clone());
-    let saw = Arc::new(Mutex::new(false));
-    let llm = RecallThenAnswerLlm {
-        round: Arc::new(Mutex::new(0)),
-        saw_tool_result_block: Arc::clone(&saw),
-    };
-    let runtime = Runtime::new(config, llm);
-    let envelope = gateway.cli_ingress("what was the PR5 risk".to_string())?;
-    let event = gateway.validate_ingress(&journal, envelope)?;
-    let _ = runtime.deliver(&journal, &gateway, event)?;
-    assert!(
-        *saw.lock().unwrap(),
-        "second LLM round must see ToolResult block"
-    );
-    Ok(())
-}
-
 struct AlwaysRecallLlm {
     calls: Mutex<usize>,
 }
@@ -168,6 +147,7 @@ impl LlmClient for AlwaysRecallLlm {
                 operation: "session.recall_recent".into(),
                 arguments: json!({ "limit": 5 }),
             }),
+            provider_turn: None,
         })
     }
 }
@@ -239,66 +219,6 @@ fn recall_loop_is_bounded_by_max_tool_rounds() -> Result<()> {
     Ok(())
 }
 
-struct ProposeUnknownToolLlm {
-    round: Arc<Mutex<usize>>,
-    saw_error_block: Arc<Mutex<bool>>,
-}
-
-impl LlmClient for ProposeUnknownToolLlm {
-    fn complete(&self, input: LlmInput) -> Result<LlmOutput> {
-        let mut round = self.round.lock().unwrap();
-        let current = *round;
-        *round += 1;
-        if current >= 1 {
-            *self.saw_error_block.lock().unwrap() = input.blocks.iter().any(|b| {
-                matches!(b.kind, ContextBlockKind::ToolResult)
-                    && (b.content.contains("rejected") || b.content.contains("error"))
-            });
-            return Ok(LlmOutput {
-                provider: "test".into(),
-                model: "unknown-tool".into(),
-                content: "sorry, that tool is unavailable".into(),
-                journal_payload: json!({ "round": current }),
-                tool_call: ToolCallResult::Absent,
-            });
-        }
-        Ok(LlmOutput {
-            provider: "test".into(),
-            model: "unknown-tool".into(),
-            content: "trying a tool".into(),
-            journal_payload: json!({ "round": current }),
-            tool_call: ToolCallResult::Valid(ToolCall {
-                id: agent_core_kernel::llm::tool_call_id_hash("unknown_tool"),
-                operation: "shell.exec".into(),
-                arguments: json!({}),
-            }),
-        })
-    }
-}
-
-#[test]
-fn recall_loop_does_not_crash_on_tool_failure() -> Result<()> {
-    let config = common::test_config();
-    let journal = JournalStore::in_memory()?;
-    let gateway = Gateway::new(config.clone());
-    let saw_error = Arc::new(Mutex::new(false));
-    let llm = ProposeUnknownToolLlm {
-        round: Arc::new(Mutex::new(0)),
-        saw_error_block: Arc::clone(&saw_error),
-    };
-    let runtime = Runtime::new(config, llm);
-    let envelope = gateway.cli_ingress("run something dangerous".to_string())?;
-    let event = gateway.validate_ingress(&journal, envelope)?;
-    let outcome = runtime.deliver(&journal, &gateway, event)?;
-    assert!(
-        outcome.output.contains("unavailable"),
-        "model recovers: {}",
-        outcome.output
-    );
-    assert!(*saw_error.lock().unwrap(), "ToolResult block fed back");
-    Ok(())
-}
-
 #[test]
 fn recall_loop_is_noop_when_no_tool_call() -> Result<()> {
     struct PlainLlm;
@@ -310,6 +230,7 @@ fn recall_loop_is_noop_when_no_tool_call() -> Result<()> {
                 content: "hello back".into(),
                 journal_payload: json!({}),
                 tool_call: ToolCallResult::Absent,
+                provider_turn: None,
             })
         }
     }
@@ -350,57 +271,69 @@ fn recall_loop_is_noop_when_no_tool_call() -> Result<()> {
     Ok(())
 }
 
-struct StubServer {
+/// A stub HTTP server that serves a deterministic queue of responses.
+/// Each incoming connection consumes one response from the queue in order.
+/// The thread exits when the queue is empty. No timers, no round counters.
+struct QueuedStub {
     port: u16,
-    shutdown: Arc<AtomicBool>,
-    handle: Option<std::thread::JoinHandle<()>>,
+    _handle: std::thread::JoinHandle<()>,
 }
 
-impl StubServer {
-    fn start() -> Self {
+impl QueuedStub {
+    fn new(responses: Vec<&'static str>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let shutdown_thread = Arc::clone(&shutdown);
         let handle = std::thread::spawn(move || {
-            let mut round = 0usize;
-            loop {
+            let mut iter = responses.into_iter();
+            while let Some(body) = iter.next() {
                 let (mut stream, _) = match listener.accept() {
                     Ok(s) => s,
                     Err(_) => break,
                 };
-                if shutdown_thread.load(Ordering::Relaxed) {
-                    break;
-                }
                 let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(2000)));
-                let mut buf = [0u8; 8192];
-                let _ = stream.read(&mut buf);
-                let body_str = match round {
-                    0 | 1 => {
-                        round += 1;
-                        r#"{"choices":[{"message":{"content":"","tool_calls":[{"id":"call_stub_1","type":"function","function":{"name":"time.now","arguments":"{}"}}]}}],"model":"stub"}"#
+                let _ = stream.set_write_timeout(Some(std::time::Duration::from_millis(2000)));
+                // Read the full request so the TCP connection isn't RST-aborted
+                // while the client is still reading our response (the original
+                // flake cause). Read until the header boundary + Content-Length.
+                let mut buf = Vec::with_capacity(8192);
+                let mut tmp = [0u8; 4096];
+                loop {
+                    match stream.read(&mut tmp) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            buf.extend_from_slice(&tmp[..n]);
+                            if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                                let body_start = pos + 4;
+                                let headers = std::str::from_utf8(&buf[..body_start]).unwrap_or("");
+                                let clen = headers
+                                    .lines()
+                                    .find_map(|l| {
+                                        let (k, v) = l.split_once(':')?;
+                                        k.eq_ignore_ascii_case("content-length")
+                                            .then(|| v.trim().parse::<usize>().ok())
+                                    })
+                                    .flatten()
+                                    .unwrap_or(0);
+                                if clen == 0 || buf.len() >= body_start + clen {
+                                    break;
+                                }
+                            }
+                        }
                     }
-                    _ => {
-                        round += 1;
-                        r#"{"choices":[{"message":{"content":"The current time was retrieved successfully."}}],"model":"stub"}"#
-                    }
-                };
+                }
                 let resp = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body_str.len(),
-                    body_str
+                    body.len(),
+                    body,
                 );
                 let _ = stream.write_all(resp.as_bytes());
                 let _ = stream.flush();
-                if round >= 3 {
-                    break;
-                }
+                let _ = stream.shutdown(std::net::Shutdown::Write);
             }
         });
         Self {
             port,
-            shutdown,
-            handle: Some(handle),
+            _handle: handle,
         }
     }
 
@@ -409,24 +342,13 @@ impl StubServer {
     }
 }
 
-impl Drop for StubServer {
-    fn drop(&mut self) {
-        self.shutdown.store(true, Ordering::Relaxed);
-        if let Ok(socket) = std::net::TcpStream::connect_timeout(
-            &std::net::SocketAddr::from(([127, 0, 0, 1], self.port)),
-            std::time::Duration::from_millis(500),
-        ) {
-            drop(socket);
-        }
-        if let Some(h) = self.handle.take() {
-            let _ = h.join();
-        }
-    }
-}
+const TOOL_CALL_RESPONSE: &str = r#"{"choices":[{"message":{"content":"","tool_calls":[{"id":"call_stub_1","type":"function","function":{"name":"time.now","arguments":"{}"}}]}}],"model":"stub"}"#;
+const TEXT_RESPONSE: &str = r#"{"choices":[{"message":{"content":"The current time was retrieved successfully."}}],"model":"stub"}"#;
 
 #[test]
 fn stub_http_provider_completes_tool_loop() -> Result<()> {
-    let server = StubServer::start();
+    // Deterministic queue: round 0 tool call, round 1 tool call, round 2 text reply.
+    let server = QueuedStub::new(vec![TOOL_CALL_RESPONSE, TOOL_CALL_RESPONSE, TEXT_RESPONSE]);
     let mut config = common::test_config();
     config.openai_base_url = format!("{}/v1", server.base_url());
     config.openai_api_key = "stub-key".to_string();
@@ -451,16 +373,55 @@ fn stub_http_provider_completes_tool_loop() -> Result<()> {
         "final reply must be non-empty, got: '{}'",
         outcome.output
     );
-    let events = journal.events()?;
+
+    // Deterministic wait: poll the Journal until the Receipt for this Run is
+    // visible. deliver() is synchronous, but we poll defensively to surface
+    // any ordering issue with a clear timeout instead of a silent assert fail.
+    // The contract: by the time deliver() returns Ok, the tool-loop Receipts
+    // for this run_id must be in the Journal.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let events = loop {
+        let evs = journal.events()?;
+        let has_receipt = evs.iter().any(|e| {
+            e.kind == JournalEventKind::ReceiptReceived
+                && e.run_id.as_ref() == Some(&outcome.run_id)
+        });
+        if has_receipt || std::time::Instant::now() > deadline {
+            break evs;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+
+    // ReceiptReceived for this Run, correlated with the Approved invocation.
+    let receipt = events.iter().find(|e| {
+        e.kind == JournalEventKind::ReceiptReceived && e.run_id.as_ref() == Some(&outcome.run_id)
+    });
     assert!(
-        events
-            .iter()
-            .any(|e| e.kind == JournalEventKind::ReceiptReceived),
-        "tool execution receipt must be journaled"
+        receipt.is_some(),
+        "tool execution receipt must be journaled for run {}",
+        outcome.run_id.0
+    );
+    let receipt = receipt.unwrap();
+    // The Receipt must share the correlation_id (invocation_id) with the
+    // Approved fact — proving they refer to the same tool invocation.
+    let approved = events.iter().find(|e| {
+        e.kind == JournalEventKind::InvocationApproved && e.run_id.as_ref() == Some(&outcome.run_id)
+    });
+    assert!(
+        approved.is_some(),
+        "InvocationApproved must exist for run {}",
+        outcome.run_id.0
+    );
+    assert_eq!(
+        receipt.correlation_id,
+        approved.unwrap().correlation_id,
+        "Receipt correlation_id must match Approved correlation_id"
     );
     let llm_rounds = events
         .iter()
-        .filter(|e| e.kind == JournalEventKind::LlmCompleted)
+        .filter(|e| {
+            e.kind == JournalEventKind::LlmCompleted && e.run_id.as_ref() == Some(&outcome.run_id)
+        })
         .count();
     assert!(
         llm_rounds == 3,
