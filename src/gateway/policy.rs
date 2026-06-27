@@ -134,6 +134,7 @@ mod tests {
             status: RunStatus::Running,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            registry_snapshot_id: String::new(),
         }
     }
 

@@ -33,6 +33,7 @@ fn run_with_time_grant(session_id: &SessionId) -> Run {
         status: RunStatus::Running,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
+        registry_snapshot_id: String::new(),
     }
 }
 

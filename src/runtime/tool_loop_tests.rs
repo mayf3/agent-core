@@ -90,6 +90,7 @@ fn fixture() -> (
         status: RunStatus::Running,
         created_at: now,
         updated_at: now,
+        registry_snapshot_id: String::new(),
     };
     (journal, gateway, runtime, session, run)
 }

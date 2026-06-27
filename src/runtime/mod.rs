@@ -102,7 +102,10 @@ where
                 "conversation_key": session.conversation_key,
             }),
         )?;
-        let run = self.create_run(&session, &event);
+        let snapshot_id = journal
+            .current_registry_snapshot_id()
+            .unwrap_or_else(|_| String::new());
+        let run = self.create_run(&session, &event, &snapshot_id);
         journal.insert_run(&run)?;
         journal.append_event(
             JournalEventKind::RunStarted,
@@ -225,7 +228,10 @@ where
                 "conversation_key": session.conversation_key,
             }),
         )?;
-        let run = self.create_run(&session, &event);
+        let snapshot_id = journal
+            .current_registry_snapshot_id()
+            .unwrap_or_else(|_| String::new());
+        let run = self.create_run(&session, &event, &snapshot_id);
         journal.insert_run(&run)?;
         journal.append_event(
             JournalEventKind::RunStarted,
@@ -275,7 +281,7 @@ where
         })
     }
 
-    fn create_run(&self, session: &Session, event: &ValidatedEvent) -> Run {
+    fn create_run(&self, session: &Session, event: &ValidatedEvent, snapshot_id: &str) -> Run {
         let now = Utc::now();
         Run {
             id: RunId::new(),
@@ -288,6 +294,7 @@ where
             status: RunStatus::Running,
             created_at: now,
             updated_at: now,
+            registry_snapshot_id: snapshot_id.to_string(),
         }
     }
 
