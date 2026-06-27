@@ -154,8 +154,6 @@ pub fn compute_snapshot_id(specs: &[OperationSpec]) -> Result<String> {
     Ok(format!("snap_{digest}"))
 }
 
-
-
 /// Build a test snapshot from the builtin specs. Available in all build profiles
 /// so integration tests can use it without constructing one manually.
 pub fn test_snapshot() -> RegistrySnapshot {

@@ -9,8 +9,7 @@ use crate::domain::*;
 use crate::gateway::Gateway;
 use crate::journal::JournalStore;
 use crate::llm::{
-    EndpointChoice, LlmClient, LlmInput, LlmOutput, ProviderToolTurn, ToolCall,
-    ToolCallResult,
+    EndpointChoice, LlmClient, LlmInput, LlmOutput, ProviderToolTurn, ToolCall, ToolCallResult,
 };
 use crate::registry::snapshot::{BindingKind, OperationSpec, Risk};
 use crate::runtime::Runtime;
@@ -67,17 +66,15 @@ fn op(name: &str, risk: Risk, description: &str) -> OperationSpec {
     }
 }
 
-/// Fake LLM: emits a tool call on first round, text on subsequent.
+/// Fake LLM: emits a tool call every round.
 struct ToolCallLlm {
     operation: String,
-    second_text: String,
 }
 
 impl ToolCallLlm {
     fn new(operation: &str) -> Self {
         Self {
             operation: operation.into(),
-            second_text: "done".into(),
         }
     }
 }
@@ -138,14 +135,37 @@ fn c_gateway_op_existence_from_run_snapshot() -> Result<()> {
     let llm_a = ToolCallLlm::new("system.status");
     let rt_a = Runtime::new(cfg_a, llm_a);
     let ev_a = gw_a.validate_ingress(&journal, gw_a.cli_ingress("status".into())?)?;
-    let _ = rt_a.deliver(&journal, &gw_a, ev_a)?;
+    let run_a = rt_a.deliver(&journal, &gw_a, ev_a)?;
+    let run_a_id = run_a.run_id;
 
-    let events = journal.events()?;
-    let status_rejected = events.iter().filter(|e| {
-        e.kind == JournalEventKind::ToolCallRejected
-            && e.payload.get("error_category").and_then(Value::as_str) == Some("unknown_operation")
-    }).count();
-    assert!(status_rejected > 0, "system.status must be rejected in v1 (unknown)");
+    let run_a_events: Vec<_> = journal
+        .events()?
+        .into_iter()
+        .filter(|e| e.run_id == Some(run_a_id.clone()))
+        .collect();
+    let status_rejected = run_a_events
+        .iter()
+        .filter(|e| {
+            e.kind == JournalEventKind::ToolCallRejected
+                && e.payload.get("error_category").and_then(Value::as_str)
+                    == Some("unknown_operation")
+        })
+        .count();
+    assert!(
+        status_rejected > 0,
+        "Run A: system.status must be rejected (unknown)"
+    );
+    let run_a_succeeded = run_a_events
+        .iter()
+        .filter(|e| {
+            e.kind == JournalEventKind::ReceiptReceived
+                && e.payload.get("status").and_then(Value::as_str) == Some("Succeeded")
+        })
+        .count();
+    assert_eq!(
+        run_a_succeeded, 0,
+        "Run A must have 0 Succeeded Receipts (system.status not in v1)"
+    );
 
     // Run B bound to v2 — system.status exists.
     journal.activate_registry_snapshot(&s2.snapshot_id)?;
@@ -154,22 +174,37 @@ fn c_gateway_op_existence_from_run_snapshot() -> Result<()> {
     let llm_b = ToolCallLlm::new("system.status");
     let rt_b = Runtime::new(cfg_b, llm_b);
     let ev_b = gw_b.validate_ingress(&journal, gw_b.cli_ingress("status".into())?)?;
-    let _ = rt_b.deliver(&journal, &gw_b, ev_b)?;
+    let run_b = rt_b.deliver(&journal, &gw_b, ev_b)?;
+    let run_b_id = run_b.run_id;
 
-    let events2 = journal.events()?;
-    let status_issued = events2.iter().filter(|e| {
-        e.kind == JournalEventKind::ToolCallIssued
-            && e.payload.get("operation").and_then(Value::as_str)
-                .map(|s| s.starts_with("unknown_operation_"))
-                .unwrap_or(false) == false  // NOT sanitized = known op
-    }).count();
-    // system.status is a known catalog operation, so it won't be sanitized.
-    // ReceiptReceived doesn't carry operation name — count all succeeded receipts.
-    let succeeded_receipts = events2.iter().filter(|e| {
-        e.kind == JournalEventKind::ReceiptReceived
-            && e.payload.get("status").and_then(Value::as_str) == Some("Succeeded")
-    }).count();
-    assert!(succeeded_receipts > 0, "system.status must produce a Succeeded Receipt in v2");
+    let run_b_events: Vec<_> = journal
+        .events()?
+        .into_iter()
+        .filter(|e| e.run_id == Some(run_b_id.clone()))
+        .collect();
+    let run_b_unknown = run_b_events
+        .iter()
+        .filter(|e| {
+            e.kind == JournalEventKind::ToolCallRejected
+                && e.payload.get("error_category").and_then(Value::as_str)
+                    == Some("unknown_operation")
+        })
+        .count();
+    assert_eq!(
+        run_b_unknown, 0,
+        "Run B must have 0 unknown_operation rejections"
+    );
+    let run_b_succeeded = run_b_events
+        .iter()
+        .filter(|e| {
+            e.kind == JournalEventKind::ReceiptReceived
+                && e.payload.get("status").and_then(Value::as_str) == Some("Succeeded")
+        })
+        .count();
+    assert!(
+        run_b_succeeded > 0,
+        "Run B must have Succeeded Receipts (system.status in v2)"
+    );
 
     Ok(())
 }
@@ -203,14 +238,36 @@ fn d_risk_from_run_snapshot() -> Result<()> {
     let llm_a = ToolCallLlm::new("time.now");
     let rt_a = Runtime::new(cfg_a, llm_a);
     let ev_a = gw_a.validate_ingress(&journal, gw_a.cli_ingress("op".into())?)?;
-    let _ = rt_a.deliver(&journal, &gw_a, ev_a)?;
+    let run_a = rt_a.deliver(&journal, &gw_a, ev_a)?;
 
-    let events = journal.events()?;
-    let a_succeeded = events.iter().filter(|e| {
-        e.kind == JournalEventKind::ReceiptReceived
-            && e.payload.get("status").and_then(Value::as_str) == Some("Succeeded")
-    }).count();
-    assert!(a_succeeded > 0, "v1 ReadOnly time.now should produce Succeeded Receipts");
+    let a_events: Vec<_> = journal
+        .events()?
+        .into_iter()
+        .filter(|e| e.run_id == Some(run_a.run_id.clone()))
+        .collect();
+    let a_not_allowed = a_events
+        .iter()
+        .filter(|e| {
+            e.kind == JournalEventKind::ToolCallRejected
+                && e.payload.get("error_category").and_then(Value::as_str)
+                    == Some("operation_not_allowed")
+        })
+        .count();
+    assert_eq!(
+        a_not_allowed, 0,
+        "Run A (v1 ReadOnly) must have 0 operation_not_allowed"
+    );
+    let a_succeeded = a_events
+        .iter()
+        .filter(|e| {
+            e.kind == JournalEventKind::ReceiptReceived
+                && e.payload.get("status").and_then(Value::as_str) == Some("Succeeded")
+        })
+        .count();
+    assert!(
+        a_succeeded > 0,
+        "Run A (v1 ReadOnly) must have Succeeded Receipts"
+    );
 
     // Activate v2 (Write) for Run B.
     journal.activate_registry_snapshot(&s2.snapshot_id)?;
@@ -221,14 +278,36 @@ fn d_risk_from_run_snapshot() -> Result<()> {
     let llm_b = ToolCallLlm::new("time.now");
     let rt_b = Runtime::new(cfg_b, llm_b);
     let ev_b = gw_b.validate_ingress(&journal, gw_b.cli_ingress("op".into())?)?;
-    let _ = rt_b.deliver(&journal, &gw_b, ev_b)?;
+    let run_b = rt_b.deliver(&journal, &gw_b, ev_b)?;
 
-    let events2 = journal.events()?;
-    let b_rejected = events2.iter().filter(|e| {
-        e.kind == JournalEventKind::ToolCallRejected
-            && e.payload.get("error_category").and_then(Value::as_str) == Some("operation_not_allowed")
-    }).count();
-    assert!(b_rejected > 0, "v2 Write op must be rejected as operation_not_allowed");
+    let b_events: Vec<_> = journal
+        .events()?
+        .into_iter()
+        .filter(|e| e.run_id == Some(run_b.run_id.clone()))
+        .collect();
+    let b_not_allowed = b_events
+        .iter()
+        .filter(|e| {
+            e.kind == JournalEventKind::ToolCallRejected
+                && e.payload.get("error_category").and_then(Value::as_str)
+                    == Some("operation_not_allowed")
+        })
+        .count();
+    assert!(
+        b_not_allowed > 0,
+        "Run B (v2 Write) must be rejected as operation_not_allowed"
+    );
+    let b_succeeded = b_events
+        .iter()
+        .filter(|e| {
+            e.kind == JournalEventKind::ReceiptReceived
+                && e.payload.get("status").and_then(Value::as_str) == Some("Succeeded")
+        })
+        .count();
+    assert_eq!(
+        b_succeeded, 0,
+        "Run B (v2 Write) must have 0 Succeeded Receipts"
+    );
 
     Ok(())
 }
@@ -273,23 +352,42 @@ fn e_dispatch_from_binding_key() -> Result<()> {
     let _ = rt.deliver(&journal, &gw, ev)?;
 
     let events = journal.events()?;
-    let succeeded_receipts: Vec<_> = events.iter().filter(|e| {
-        e.kind == JournalEventKind::ReceiptReceived
-            && e.payload.get("status").and_then(Value::as_str) == Some("Succeeded")
-    }).collect();
-    assert!(!succeeded_receipts.is_empty(), "system.status should have Succeeded Receipts");
+    let succeeded_receipts: Vec<_> = events
+        .iter()
+        .filter(|e| {
+            e.kind == JournalEventKind::ReceiptReceived
+                && e.payload.get("status").and_then(Value::as_str) == Some("Succeeded")
+        })
+        .collect();
+    assert!(
+        !succeeded_receipts.is_empty(),
+        "system.status should have Succeeded Receipts"
+    );
     // Find receipt with time.now-specific characteristics.
-    let time_now_receipt = succeeded_receipts.iter().find(|e| {
-        e.payload.pointer("/output/iso").is_some()
-    });
-    assert!(time_now_receipt.is_some(), "At least one receipt must have 'iso' (time.now handler)");
+    let time_now_receipt = succeeded_receipts
+        .iter()
+        .find(|e| e.payload.pointer("/output/iso").is_some());
+    assert!(
+        time_now_receipt.is_some(),
+        "At least one receipt must have 'iso' (time.now handler)"
+    );
     let r = time_now_receipt.unwrap();
-    assert_eq!(r.payload.get("status").and_then(Value::as_str), Some("Succeeded"));
+    assert_eq!(
+        r.payload.get("status").and_then(Value::as_str),
+        Some("Succeeded")
+    );
     let output = r.payload.get("output").and_then(|o| o.as_object());
     assert!(output.is_some(), "Receipt must have output object");
     let out = output.unwrap();
-    assert!(out.contains_key("iso"), "time.now handler produces 'iso': {:?}", out.keys().collect::<Vec<_>>());
-    assert!(out.contains_key("epoch_ms"), "time.now handler produces 'epoch_ms'");
+    assert!(
+        out.contains_key("iso"),
+        "time.now handler produces 'iso': {:?}",
+        out.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        out.contains_key("epoch_ms"),
+        "time.now handler produces 'epoch_ms'"
+    );
 
     // New snapshot: system.status → binding_key "builtin.system_status" (default).
     let t_bound2 = OperationSpec {
@@ -313,30 +411,47 @@ fn e_dispatch_from_binding_key() -> Result<()> {
     let _ = rt2.deliver(&journal, &gw2, ev2)?;
 
     let events2 = journal.events()?;
-    let succeeded2: Vec<_> = events2.iter().filter(|e| {
-        e.kind == JournalEventKind::ReceiptReceived
-            && e.payload.get("status").and_then(Value::as_str) == Some("Succeeded")
-    }).collect();
-    assert!(succeeded2.len() >= 2, "Both runs should have Succeeded Receipts");
+    let succeeded2: Vec<_> = events2
+        .iter()
+        .filter(|e| {
+            e.kind == JournalEventKind::ReceiptReceived
+                && e.payload.get("status").and_then(Value::as_str) == Some("Succeeded")
+        })
+        .collect();
+    assert!(
+        succeeded2.len() >= 2,
+        "Both runs should have Succeeded Receipts"
+    );
     // Find the receipt with system.status-specific characteristics (has status, event_count, no iso).
     let status_receipt = succeeded2.iter().find(|e| {
         e.payload.pointer("/output/status").is_some()
             && e.payload.pointer("/output/event_count").is_some()
     });
-    assert!(status_receipt.is_some(), "A receipt must have 'status' and 'event_count' (status handler)");
+    assert!(
+        status_receipt.is_some(),
+        "A receipt must have 'status' and 'event_count' (status handler)"
+    );
     // Verify the status handler receipt does NOT have iso (time.now characteristic).
     // But iso from time.now handler will be there too. To check that the status handler was
     // used separately, look for a receipt with status field but no iso.
     // Actually, both the time.now receipt and the status receipt may exist.
     // The important thing is: at least one receipt exists with each handler's marks.
-    let time_now_receipts = succeeded2.iter().filter(|e| {
-        e.payload.pointer("/output/iso").is_some()
-    }).count();
-    let status_receipts = succeeded2.iter().filter(|e| {
-        e.payload.pointer("/output/status").is_some()
-    }).count();
-    assert!(time_now_receipts >= 1, "At least one receipt from time.now handler");
-    assert!(status_receipts >= 1, "At least one receipt from system.status handler");
+    let time_now_receipts = succeeded2
+        .iter()
+        .filter(|e| e.payload.pointer("/output/iso").is_some())
+        .count();
+    let status_receipts = succeeded2
+        .iter()
+        .filter(|e| e.payload.pointer("/output/status").is_some())
+        .count();
+    assert!(
+        time_now_receipts >= 1,
+        "At least one receipt from time.now handler"
+    );
+    assert!(
+        status_receipts >= 1,
+        "At least one receipt from system.status handler"
+    );
 
     Ok(())
 }

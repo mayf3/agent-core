@@ -8,14 +8,11 @@
 //! `Cargo.toml`.
 
 use super::sqlite::JournalStore;
-use crate::domain::{
-    InvocationId, OutboxDispatchStatus, PrincipalId, PrincipalSubject, PrincipalSource,
-    Run, RunId, RunPrincipal, RunStatus, SessionId, EventId,
-};
+use crate::domain::{InvocationId, OutboxDispatchStatus, Run, RunId};
 use anyhow::{anyhow, Result};
-use rusqlite::OptionalExtension;
 use chrono::Utc;
 use rusqlite::params;
+use rusqlite::OptionalExtension;
 use serde_json::json;
 
 impl JournalStore {
@@ -229,7 +226,20 @@ impl JournalStore {
                 },
             )
             .optional()?;
-        let Some((id, session_id, agent_id, trigger_event_id, principal_json, parent_run_id, delegated_by, status, created_at, updated_at, registry_snapshot_id)) = row else {
+        let Some((
+            id,
+            session_id,
+            agent_id,
+            trigger_event_id,
+            principal_json,
+            parent_run_id,
+            delegated_by,
+            status,
+            created_at,
+            updated_at,
+            registry_snapshot_id,
+        )) = row
+        else {
             return Ok(None);
         };
         let id: String = id;
@@ -260,8 +270,10 @@ impl JournalStore {
             parent_run_id: parent_run_id.map(RunId),
             delegated_by: delegated_by.map(PrincipalId),
             status: run_status,
-            created_at: chrono::DateTime::parse_from_rfc3339(&created_at)?.with_timezone(&chrono::Utc),
-            updated_at: chrono::DateTime::parse_from_rfc3339(&updated_at)?.with_timezone(&chrono::Utc),
+            created_at: chrono::DateTime::parse_from_rfc3339(&created_at)?
+                .with_timezone(&chrono::Utc),
+            updated_at: chrono::DateTime::parse_from_rfc3339(&updated_at)?
+                .with_timezone(&chrono::Utc),
             registry_snapshot_id: registry_snapshot_id.unwrap_or_default(),
         }))
     }

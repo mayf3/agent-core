@@ -18,8 +18,12 @@ pub use crate::gateway::ToolRejection;
 pub use tool_rejection::validate_model_arguments;
 
 #[cfg(test)]
-#[path = "tests/registry_snapshot_lifecycle.rs"]
-mod registry_snapshot_lifecycle;
+#[path = "tests/registry_snapshot_provider_context.rs"]
+mod registry_snapshot_provider_context;
+
+#[cfg(test)]
+#[path = "tests/registry_snapshot_recovery_failure.rs"]
+mod registry_snapshot_recovery_failure;
 
 #[cfg(test)]
 #[path = "tests/registry_snapshot_gateway.rs"]
@@ -114,18 +118,18 @@ where
             }),
         )?;
         // Blocker 2: snapshot_id must exist and be non-empty; failure prevents Run creation.
-        let snapshot_id = journal.current_registry_snapshot_id().map_err(|e| {
-            anyhow::anyhow!("registry_snapshot_unavailable: {e}")
-        })?;
+        let snapshot_id = journal
+            .current_registry_snapshot_id()
+            .map_err(|e| anyhow::anyhow!("registry_snapshot_unavailable: {e}"))?;
         if snapshot_id.is_empty() {
             anyhow::bail!("registry_snapshot_invalid: snapshot ID is empty");
         }
         // Load the snapshot BEFORE creating the Run. If the snapshot is
         // missing or corrupt, the error is deterministic
         // (registry_snapshot_unavailable) and no Run artifacts are created.
-        let snapshot = journal.load_registry_snapshot(&snapshot_id).map_err(|e| {
-            anyhow::anyhow!("registry_snapshot_unavailable: {e}")
-        })?;
+        let snapshot = journal
+            .load_registry_snapshot(&snapshot_id)
+            .map_err(|e| anyhow::anyhow!("registry_snapshot_unavailable: {e}"))?;
         let run = self.create_run(&session, &event, &snapshot_id);
         journal.insert_run(&run)?;
         journal.append_event(
@@ -198,7 +202,14 @@ where
         // re-invoke the LLM. Bounded by MAX_TOOL_ROUNDS; a no-op when the model
         // emits no tool call (backwards compatible).
         let llm = self.run_tool_recall_loop(
-            journal, gateway, &run, &session, &mut blocks, &text, first, &snapshot,
+            journal,
+            gateway,
+            &run,
+            &session,
+            &mut blocks,
+            &text,
+            first,
+            &snapshot,
         )?;
 
         // Never enqueue a blank reply (empty first-round content with no tool
@@ -230,7 +241,14 @@ where
                 "operation": approved.intent().operation,
             }),
         )?;
-        self.enqueue_or_pause(journal, &approved, &run, &session, &correlation_id, &snapshot)?;
+        self.enqueue_or_pause(
+            journal,
+            &approved,
+            &run,
+            &session,
+            &correlation_id,
+            &snapshot,
+        )?;
         Ok(RuntimeOutcome {
             run_id: run.id,
             session_id: session.id,
@@ -261,16 +279,16 @@ where
             }),
         )?;
         // Blocker 2: snapshot_id must exist and be non-empty; failure prevents Run creation.
-        let snapshot_id = journal.current_registry_snapshot_id().map_err(|e| {
-            anyhow::anyhow!("registry_snapshot_unavailable: {e}")
-        })?;
+        let snapshot_id = journal
+            .current_registry_snapshot_id()
+            .map_err(|e| anyhow::anyhow!("registry_snapshot_unavailable: {e}"))?;
         if snapshot_id.is_empty() {
             anyhow::bail!("registry_snapshot_invalid: snapshot ID is empty");
         }
         // Load the snapshot BEFORE creating the Run.
-        let snapshot = journal.load_registry_snapshot(&snapshot_id).map_err(|e| {
-            anyhow::anyhow!("registry_snapshot_unavailable: {e}")
-        })?;
+        let snapshot = journal
+            .load_registry_snapshot(&snapshot_id)
+            .map_err(|e| anyhow::anyhow!("registry_snapshot_unavailable: {e}"))?;
         let run = self.create_run(&session, &event, &snapshot_id);
         journal.insert_run(&run)?;
         journal.append_event(
@@ -314,7 +332,14 @@ where
                 "operation": approved.intent().operation,
             }),
         )?;
-        self.enqueue_or_pause(journal, &approved, &run, &session, &correlation_id, &snap_for_gateway)?;
+        self.enqueue_or_pause(
+            journal,
+            &approved,
+            &run,
+            &session,
+            &correlation_id,
+            &snap_for_gateway,
+        )?;
         Ok(RuntimeOutcome {
             run_id: run.id,
             session_id: session.id,

@@ -289,8 +289,8 @@ mod tool_name_mode_tests {
             &g,
             g.validate_ingress(&j, g.cli_ingress("time?".to_string())?)?,
         )?;
-	        assert!(!o.output.trim().is_empty());
-	        let reqs = fb.requests();
+        assert!(!o.output.trim().is_empty());
+        let reqs = fb.requests();
         assert_eq!(reqs.len(), 2, "fallback served 2 rounds");
         // Primary is hit exactly once (initial round 429) because follow-up
         // routing is sticky to the fallback endpoint.

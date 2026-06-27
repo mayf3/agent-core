@@ -92,7 +92,9 @@ fn gateway_rejects_stdout_target_mismatch() -> Result<()> {
         idempotency_key: None,
     };
     let snap = agent_core_kernel::registry::snapshot::test_snapshot();
-    assert!(gateway.approve_invocation(intent, &run, &session, &snap).is_err());
+    assert!(gateway
+        .approve_invocation(intent, &run, &session, &snap)
+        .is_err());
     Ok(())
 }
 #[test]

@@ -453,7 +453,10 @@ mod tests {
         assert_eq!(baseline.grants.len(), augmented.grants.len());
         assert_eq!(augmented.grants[0].operation, STDOUT_SEND_TEXT);
         // No extra operations added by empty config.
-        assert!(!augmented.grants.iter().any(|g| g.operation == FEISHU_SEND_MESSAGE));
+        assert!(!augmented
+            .grants
+            .iter()
+            .any(|g| g.operation == FEISHU_SEND_MESSAGE));
     }
 
     #[test]

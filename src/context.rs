@@ -115,7 +115,11 @@ impl ContextAssembler {
             self.max_block_chars,
         )
     }
-    fn tool_catalog_block(&self, granted_operations: &[String], snapshot: &RegistrySnapshot) -> ContextBlock {
+    fn tool_catalog_block(
+        &self,
+        granted_operations: &[String],
+        snapshot: &RegistrySnapshot,
+    ) -> ContextBlock {
         let content = snapshot.catalog_for_context_grants(granted_operations);
         block(
             ContextBlockKind::ToolCatalog,
