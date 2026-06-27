@@ -54,7 +54,7 @@ fn context_assembler_loads_files_catalog_recent_and_truncates() -> Result<()> {
         &event,
         "current text that is intentionally longer than the tiny budget",
         &grants,
-        None,
+        &agent_core_kernel::registry::snapshot::test_snapshot(),
     )?;
 
     let root_block = block(&blocks, ContextBlockKind::RootSystem);

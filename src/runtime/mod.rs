@@ -4,6 +4,7 @@ use crate::domain::*;
 use crate::gateway::Gateway;
 use crate::journal::JournalStore;
 use crate::llm::{LlmClient, LlmInput};
+use crate::registry::snapshot::RegistrySnapshot;
 use anyhow::{bail, Result};
 use chrono::Utc;
 use serde_json::json;
@@ -45,7 +46,8 @@ where
 
     /// Phase 2 M2d: decide whether an approved invocation is dispatched now or
     /// paused for human approval. ReadOnly ops queue immediately; Write ops
-    /// pause when require_write_approval is enabled.
+    /// pause when require_write_approval is enabled. Risk is determined from
+    /// the Run's pinned registry snapshot, not the static catalog.
     fn enqueue_or_pause(
         &self,
         journal: &JournalStore,
@@ -53,12 +55,13 @@ where
         run: &Run,
         session: &Session,
         correlation_id: &str,
+        snapshot: &RegistrySnapshot,
     ) -> Result<()> {
-        let risk = crate::domain::operation::lookup(&approved.intent().operation)
-            .map(|spec| spec.risk)
-            .unwrap_or(crate::domain::operation::Risk::Write);
-        let pause =
-            self.config.require_write_approval && risk == crate::domain::operation::Risk::Write;
+        let is_write = snapshot
+            .lookup(&approved.intent().operation)
+            .map(|spec| spec.risk == crate::registry::snapshot::Risk::Write)
+            .unwrap_or(true);
+        let pause = self.config.require_write_approval && is_write;
         if pause {
             journal.append_event(
                 JournalEventKind::ApprovalRequested,
@@ -146,7 +149,7 @@ where
             &event,
             &text,
             &granted_operations,
-            Some(&snapshot),
+            &snapshot,
         )?;
         journal.append_event(
             JournalEventKind::ContextBuilt,
@@ -203,7 +206,7 @@ where
                 "idempotency_key": intent.idempotency_key,
             }),
         )?;
-        let approved = gateway.approve_invocation(intent, &run, &session)?;
+        let approved = gateway.approve_invocation(intent, &run, &session, &snapshot)?;
         journal.append_event(
             JournalEventKind::InvocationApproved,
             Some(&run.id),
@@ -214,7 +217,7 @@ where
                 "operation": approved.intent().operation,
             }),
         )?;
-        self.enqueue_or_pause(journal, &approved, &run, &session, &correlation_id)?;
+        self.enqueue_or_pause(journal, &approved, &run, &session, &correlation_id, &snapshot)?;
         Ok(RuntimeOutcome {
             run_id: run.id,
             session_id: session.id,
@@ -264,6 +267,8 @@ where
                 "principal_id": run.principal.principal_id.0,
             }),
         )?;
+        // Load the Run's pinned registry snapshot for Gateway and enqueue/pause.
+        let snapshot = journal.load_registry_snapshot(&run.registry_snapshot_id)?;
         let RuntimeEventPayload::UserMessage {
             text,
             message_id,
@@ -282,7 +287,7 @@ where
                 "idempotency_key": intent.idempotency_key,
             }),
         )?;
-        let approved = gateway.approve_invocation(intent, &run, &session)?;
+        let approved = gateway.approve_invocation(intent, &run, &session, &snapshot)?;
         journal.append_event(
             JournalEventKind::InvocationApproved,
             Some(&run.id),
@@ -293,7 +298,7 @@ where
                 "operation": approved.intent().operation,
             }),
         )?;
-        self.enqueue_or_pause(journal, &approved, &run, &session, &correlation_id)?;
+        self.enqueue_or_pause(journal, &approved, &run, &session, &correlation_id, &snapshot)?;
         Ok(RuntimeOutcome {
             run_id: run.id,
             session_id: session.id,

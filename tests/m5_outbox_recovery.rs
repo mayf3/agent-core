@@ -338,6 +338,7 @@ fn stale_dispatching_routes_by_terminal_fact_not_all_unknown() -> Result<()> {
         ("reply:unknown", JournalEventKind::OutboxDispatchUnknown, json!({ "error": "previous_recovery_incomplete" })),
     ];
     let mut invocation_ids = Vec::new();
+    let snap = agent_core_kernel::registry::snapshot::test_snapshot();
     for (suffix, _kind, _payload) in &cases {
         let approved = gateway.approve_invocation(
             InvocationIntent {
@@ -349,6 +350,7 @@ fn stale_dispatching_routes_by_terminal_fact_not_all_unknown() -> Result<()> {
             },
             &run,
             &session,
+            &snap,
         )?;
         invocation_ids.push(approved.intent().invocation_id.clone());
         journal.queue_outbox_dispatch(&approved, Some(&session.id))?;

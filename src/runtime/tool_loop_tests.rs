@@ -347,6 +347,7 @@ fn sanitize_operation_keeps_catalog_and_collapses_unknown() {
 fn idempotency_key_is_run_turn_index_scoped() {
     use crate::gateway::validate_tool_call;
     use crate::llm::tool_call_id_hash;
+    use crate::registry::snapshot::test_snapshot;
     let raw_id = "call_abc123";
     let hashed = tool_call_id_hash(raw_id);
     let mk = |op: &str| ToolCall {
@@ -355,32 +356,33 @@ fn idempotency_key_is_run_turn_index_scoped() {
         arguments: json!({}),
     };
     let run = RunId::new();
-    let k1 = validate_tool_call(&mk("time.now"), &run, 0, 0).unwrap();
-    let k2 = validate_tool_call(&mk("time.now"), &run, 0, 0).unwrap();
+    let snap = test_snapshot();
+    let k1 = validate_tool_call(&mk("time.now"), &run, 0, 0, &snap).unwrap();
+    let k2 = validate_tool_call(&mk("time.now"), &run, 0, 0, &snap).unwrap();
     assert_eq!(k1.idempotency_key, k2.idempotency_key, "stable");
     assert_ne!(
-        validate_tool_call(&mk("time.now"), &run, 0, 0)
+        validate_tool_call(&mk("time.now"), &run, 1, 0, &snap)
             .unwrap()
             .idempotency_key,
-        validate_tool_call(&mk("time.now"), &run, 1, 0)
+        validate_tool_call(&mk("time.now"), &run, 0, 0, &snap)
             .unwrap()
             .idempotency_key,
         "turn"
     );
     assert_ne!(
-        validate_tool_call(&mk("time.now"), &run, 0, 0)
+        validate_tool_call(&mk("time.now"), &run, 0, 0, &snap)
             .unwrap()
             .idempotency_key,
-        validate_tool_call(&mk("time.now"), &run, 0, 1)
+        validate_tool_call(&mk("time.now"), &run, 0, 1, &snap)
             .unwrap()
             .idempotency_key,
         "index"
     );
     assert_ne!(
-        validate_tool_call(&mk("time.now"), &run, 0, 0)
+        validate_tool_call(&mk("time.now"), &run, 0, 0, &snap)
             .unwrap()
             .idempotency_key,
-        validate_tool_call(&mk("time.now"), &RunId::new(), 0, 0)
+        validate_tool_call(&mk("time.now"), &RunId::new(), 0, 0, &snap)
             .unwrap()
             .idempotency_key,
         "run"

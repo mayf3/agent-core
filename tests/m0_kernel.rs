@@ -91,7 +91,8 @@ fn gateway_rejects_stdout_target_mismatch() -> Result<()> {
         arguments: json!({ "session_id": "session_other", "text": "bad" }),
         idempotency_key: None,
     };
-    assert!(gateway.approve_invocation(intent, &run, &session).is_err());
+    let snap = agent_core_kernel::registry::snapshot::test_snapshot();
+    assert!(gateway.approve_invocation(intent, &run, &session, &snap).is_err());
     Ok(())
 }
 #[test]

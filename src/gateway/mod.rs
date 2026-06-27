@@ -1,6 +1,7 @@
 use crate::config::KernelConfig;
 use crate::domain::*;
 use crate::journal::JournalStore;
+use crate::registry::snapshot::RegistrySnapshot;
 use anyhow::{bail, Result};
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
@@ -61,13 +62,14 @@ impl Gateway {
         intent: InvocationIntent,
         run: &Run,
         session: &Session,
+        snapshot: &RegistrySnapshot,
     ) -> Result<ApprovedInvocation> {
         // Access control runs through the fixed, pure policy pipeline
         // (Phase 2 M2c); see `src/gateway/policy.rs`. The first denial wins
         // and its reason is surfaced verbatim, preserving the prior error
         // messages (`capability_not_enabled` / `operation_not_allowed` /
         // `target_session_mismatch`).
-        match policy::evaluate_policy(&intent, run, session) {
+        match policy::evaluate_policy(&intent, run, session, snapshot) {
             PolicyVerdict::Deny(reason) => bail!("{reason}"),
             PolicyVerdict::Allow => {}
         }
