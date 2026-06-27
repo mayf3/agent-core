@@ -52,7 +52,9 @@ pub fn builtin_specs() -> Vec<OperationSpec> {
         OperationSpec {
             name: "session.recall_recent".into(),
             risk: Risk::ReadOnly,
-            description: "Recall recent messages from the current session (read-only, current session only).".into(),
+            description:
+                "Recall recent messages from the current session (read-only, current session only)."
+                    .into(),
             parameters: json!({"type": "object", "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 20, "description": "Max messages to recall (default 5)."}, "query": {"type": "string", "description": "Optional case-insensitive substring filter."}}, "required": [], "additionalProperties": false}),
             idempotent: true,
             binding_kind: BindingKind::Builtin,
@@ -61,7 +63,9 @@ pub fn builtin_specs() -> Vec<OperationSpec> {
         OperationSpec {
             name: "system.status".into(),
             risk: Risk::ReadOnly,
-            description: "Return system health and projection summary (aggregate counts only, no secrets).".into(),
+            description:
+                "Return system health and projection summary (aggregate counts only, no secrets)."
+                    .into(),
             parameters: json!({"type": "object", "properties": {}, "required": [], "additionalProperties": false}),
             idempotent: true,
             binding_kind: BindingKind::Builtin,
@@ -99,7 +103,10 @@ impl Registry {
     pub fn create_snapshot(&self, specs: Vec<OperationSpec>) -> Result<RegistrySnapshot> {
         let snapshot_id = compute_snapshot_id(&specs)?;
         let created_at = chrono::Utc::now();
-        let conn = self.conn.lock().map_err(|_| anyhow!("registry mutex poisoned"))?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow!("registry mutex poisoned"))?;
 
         // Check if this snapshot already exists.
         let existing: Option<String> = conn
@@ -178,7 +185,10 @@ impl Registry {
                 }
             }
         }
-        let conn = self.conn.lock().map_err(|_| anyhow!("registry mutex poisoned"))?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow!("registry mutex poisoned"))?;
         let snap = self.load_snapshot_inner(&conn, snapshot_id)?;
         Ok(Arc::new(snap))
     }
@@ -193,7 +203,8 @@ impl Registry {
             params![snapshot_id],
             |row| row.get(0),
         )?;
-        let created_at = chrono::DateTime::parse_from_rfc3339(&created_at_str)?.with_timezone(&chrono::Utc);
+        let created_at =
+            chrono::DateTime::parse_from_rfc3339(&created_at_str)?.with_timezone(&chrono::Utc);
 
         let mut stmt = conn.prepare(
             "SELECT operation_name, risk, description, parameters_json, idempotent, binding_kind, binding_key
@@ -253,7 +264,10 @@ impl Registry {
     /// baseline snapshot ID. Called at boot after ensure_baseline_snapshot.
     pub fn backfill_null_runs(&self) -> Result<usize> {
         let baseline = self.current_snapshot_id()?;
-        let conn = self.conn.lock().map_err(|_| anyhow!("registry mutex poisoned"))?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow!("registry mutex poisoned"))?;
         let count = conn.execute(
             "UPDATE runs SET registry_snapshot_id = ?1 WHERE registry_snapshot_id IS NULL",
             params![&baseline],
@@ -268,8 +282,10 @@ mod tests {
 
     fn in_memory() -> Registry {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(include_str!("../../migrations/0001_init.sql")).unwrap();
-        conn.execute_batch(include_str!("../../migrations/0002_registry_snapshots.sql")).unwrap();
+        conn.execute_batch(include_str!("../../migrations/0001_init.sql"))
+            .unwrap();
+        conn.execute_batch(include_str!("../../migrations/0002_registry_snapshots.sql"))
+            .unwrap();
         Registry::new(conn).unwrap()
     }
 
@@ -294,8 +310,10 @@ mod tests {
         let snap_id;
         {
             let conn = Connection::open(&db_path).unwrap();
-            conn.execute_batch(include_str!("../../migrations/0001_init.sql")).unwrap();
-            conn.execute_batch(include_str!("../../migrations/0002_registry_snapshots.sql")).unwrap();
+            conn.execute_batch(include_str!("../../migrations/0001_init.sql"))
+                .unwrap();
+            conn.execute_batch(include_str!("../../migrations/0002_registry_snapshots.sql"))
+                .unwrap();
             let reg = Registry::new(conn).unwrap();
             snap_id = reg.current_snapshot_id().unwrap();
         }
@@ -337,11 +355,17 @@ mod tests {
         let snap = reg.load_snapshot(&id).unwrap();
         let recall = snap.lookup("session.recall_recent").unwrap();
         assert_eq!(
-            recall.parameters.pointer("/properties/limit/maximum").and_then(|v| v.as_i64()),
+            recall
+                .parameters
+                .pointer("/properties/limit/maximum")
+                .and_then(|v| v.as_i64()),
             Some(20)
         );
         assert_eq!(
-            recall.parameters.pointer("/additionalProperties").and_then(|v| v.as_bool()),
+            recall
+                .parameters
+                .pointer("/additionalProperties")
+                .and_then(|v| v.as_bool()),
             Some(false)
         );
     }

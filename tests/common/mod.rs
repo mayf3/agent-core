@@ -68,6 +68,7 @@ pub fn test_run(config: &KernelConfig, session: &Session) -> Run {
         status: RunStatus::Running,
         created_at: Utc::now(),
         updated_at: Utc::now(),
+        registry_snapshot_id: String::new(),
     }
 }
 
@@ -117,5 +118,6 @@ pub fn runtime_run(run_id: &RunId, session_id: &SessionId) -> Run {
         status: RunStatus::Running,
         created_at: Utc::now(),
         updated_at: Utc::now(),
+        registry_snapshot_id: String::new(),
     }
 }

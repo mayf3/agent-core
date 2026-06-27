@@ -34,10 +34,7 @@ impl super::JournalStore {
 
     /// Create (or return existing) an immutable snapshot from specs. If the same
     /// canonical digest already exists, the existing snapshot is returned.
-    pub fn create_registry_snapshot(
-        &self,
-        specs: Vec<OperationSpec>,
-    ) -> Result<RegistrySnapshot> {
+    pub fn create_registry_snapshot(&self, specs: Vec<OperationSpec>) -> Result<RegistrySnapshot> {
         let snapshot_id = compute_snapshot_id(&specs)?;
         let created_at = chrono::Utc::now();
         let conn = self
