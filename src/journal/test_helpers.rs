@@ -8,8 +8,12 @@
 //! `Cargo.toml`.
 
 use super::sqlite::JournalStore;
-use crate::domain::{InvocationId, OutboxDispatchStatus};
+use crate::domain::{
+    InvocationId, OutboxDispatchStatus, PrincipalId, PrincipalSubject, PrincipalSource,
+    Run, RunId, RunPrincipal, RunStatus, SessionId, EventId,
+};
 use anyhow::{anyhow, Result};
+use rusqlite::OptionalExtension;
 use chrono::Utc;
 use rusqlite::params;
 use serde_json::json;
@@ -153,5 +157,112 @@ impl JournalStore {
             params![if ack { 1 } else { 0 }, invocation_id.0],
         )?;
         Ok(())
+    }
+
+    /// Total number of entries in the `runs` table.
+    pub fn run_count(&self) -> Result<i64> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow!("journal mutex poisoned"))?;
+        conn.query_row("SELECT COUNT(*) FROM runs", [], |row| row.get(0))
+            .map_err(Into::into)
+    }
+
+    /// Number of runs currently in `Running` status.
+    pub fn running_run_count(&self) -> Result<i64> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow!("journal mutex poisoned"))?;
+        conn.query_row(
+            "SELECT COUNT(*) FROM runs WHERE status = 'Running'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
+    }
+
+    /// Set the cached current snapshot ID without creating or verifying the
+    /// snapshot. Used to test dangling-snapshot scenarios.
+    pub fn set_current_snapshot_id_for_test(&self, snapshot_id: &str) {
+        *self.current_snapshot_id.lock().unwrap() = Some(snapshot_id.to_string());
+    }
+
+    /// Create an in-memory journal with the CURRENT snapshot cleared after
+    /// creation, so the registry is effectively uninitialized. Used to test
+    /// deliver failure when no current snapshot exists.
+    pub fn in_memory_without_registry() -> Result<Self> {
+        let store = Self::in_memory()?;
+        // Clear the cached snapshot ID — this simulates an uninitialized
+        // registry without needing access to private with_conn/migrate.
+        *store.current_snapshot_id.lock().unwrap() = None;
+        Ok(store)
+    }
+
+    /// Look up a Run by ID.
+    pub fn run(&self, run_id: &RunId) -> Result<Option<Run>> {
+        use crate::domain::*;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow!("journal mutex poisoned"))?;
+        let row: Option<(String, String, String, String, String, Option<String>, Option<String>, String, String, String, Option<String>)> = conn
+            .query_row(
+                "SELECT id, session_id, agent_id, trigger_event_id, principal_json, parent_run_id, delegated_by, status, created_at, updated_at, registry_snapshot_id
+                 FROM runs WHERE id = ?1",
+                params![run_id.0],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                        row.get(9)?,
+                        row.get(10)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((id, session_id, agent_id, trigger_event_id, principal_json, parent_run_id, delegated_by, status, created_at, updated_at, registry_snapshot_id)) = row else {
+            return Ok(None);
+        };
+        let id: String = id;
+        let session_id: String = session_id;
+        let agent_id: String = agent_id;
+        let trigger_event_id: String = trigger_event_id;
+        let status: String = status;
+        let created_at: String = created_at;
+        let updated_at: String = updated_at;
+        let parent_run_id: Option<String> = parent_run_id;
+        let delegated_by: Option<String> = delegated_by;
+        let registry_snapshot_id: Option<String> = registry_snapshot_id;
+        let principal: RunPrincipal = serde_json::from_str(&principal_json)?;
+        let run_status = match status.as_str() {
+            "Running" => RunStatus::Running,
+            "WaitingDispatch" => RunStatus::WaitingDispatch,
+            "Completed" => RunStatus::Completed,
+            "Failed" => RunStatus::Failed,
+            "AwaitingApproval" => RunStatus::AwaitingApproval,
+            _ => RunStatus::Unknown,
+        };
+        Ok(Some(Run {
+            id: RunId(id),
+            session_id: SessionId(session_id),
+            agent_id: AgentId(agent_id),
+            trigger_event_id: EventId(trigger_event_id),
+            principal,
+            parent_run_id: parent_run_id.map(RunId),
+            delegated_by: delegated_by.map(PrincipalId),
+            status: run_status,
+            created_at: chrono::DateTime::parse_from_rfc3339(&created_at)?.with_timezone(&chrono::Utc),
+            updated_at: chrono::DateTime::parse_from_rfc3339(&updated_at)?.with_timezone(&chrono::Utc),
+            registry_snapshot_id: registry_snapshot_id.unwrap_or_default(),
+        }))
     }
 }
