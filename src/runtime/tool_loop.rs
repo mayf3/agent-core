@@ -74,9 +74,9 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
                 ToolCallResult::Valid(tool_call) => {
                     let this_tool = tool_index;
                     tool_index += 1;
-                    let outcome = self.handle_inline_tool_call(
-                        journal, gateway, run, session, &tool_call, turn_index, this_tool, Some(snapshot),
-                    )?;
+	                    let outcome = self.handle_inline_tool_call(
+	                        journal, gateway, run, session, &tool_call, turn_index, this_tool, snapshot,
+	                    )?;
                     match outcome {
                         ToolCallOutcome::Fatal { category } => {
                             return self.terminate_run_failure(journal, run, session, category);

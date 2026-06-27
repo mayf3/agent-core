@@ -125,6 +125,7 @@ mod transcript_isolation_tests {
             blocks: vec![],
             user_text: "hi".into(),
             granted_operations: vec!["time.now".into()],
+            provider_tools: vec![],
             follow_up: None,
         })?;
         let reqs = srv.requests();
@@ -223,6 +224,7 @@ mod transcript_isolation_tests {
                 blocks: vec![],
                 user_text: "a".into(),
                 granted_operations: vec![],
+                provider_tools: vec![],
                 follow_up: Some(crate::llm::LlmFollowUp {
                     provider_turn: crate::llm::ProviderToolTurn {
                         endpoint: crate::llm::EndpointChoice::Primary,
@@ -242,6 +244,7 @@ mod transcript_isolation_tests {
                 blocks: vec![],
                 user_text: "b".into(),
                 granted_operations: vec![],
+                provider_tools: vec![],
                 follow_up: Some(crate::llm::LlmFollowUp {
                     provider_turn: crate::llm::ProviderToolTurn {
                         endpoint: crate::llm::EndpointChoice::Primary,
@@ -344,6 +347,7 @@ mod transcript_isolation_tests {
                 blocks: vec![],
                 user_text: "a".into(),
                 granted_operations: vec![],
+                provider_tools: vec![],
                 follow_up: Some(crate::llm::LlmFollowUp {
                     provider_turn: crate::llm::ProviderToolTurn {
                         endpoint: crate::llm::EndpointChoice::Primary,
@@ -362,6 +366,7 @@ mod transcript_isolation_tests {
                 blocks: vec![],
                 user_text: "b".into(),
                 granted_operations: vec![],
+                provider_tools: vec![],
                 follow_up: Some(crate::llm::LlmFollowUp {
                     provider_turn: crate::llm::ProviderToolTurn {
                         endpoint: crate::llm::EndpointChoice::Primary,

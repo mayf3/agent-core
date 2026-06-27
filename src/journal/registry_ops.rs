@@ -25,9 +25,15 @@ impl super::JournalStore {
     }
 
     /// The currently active snapshot ID (for new Run creation).
+    /// Auto-creates the baseline snapshot if none exists (idempotent),
+    /// so tests don't need an explicit ensure_baseline_registry() call.
     pub fn current_registry_snapshot_id(&self) -> Result<String> {
-        let guard = self.current_snapshot_id.lock().unwrap();
-        guard
+        if self.current_snapshot_id.lock().unwrap().is_none() {
+            let _ = self.ensure_baseline_registry()?;
+        }
+        self.current_snapshot_id
+            .lock()
+            .unwrap()
             .clone()
             .ok_or_else(|| anyhow!("no active registry snapshot"))
     }

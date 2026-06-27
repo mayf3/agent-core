@@ -59,7 +59,7 @@ fn time_now_walks_intent_policy_adapter_receipt() -> Result<()> {
         arguments: json!({ "session_id": session.id.0 }),
         idempotency_key: Some("time:1".to_string()),
     };
-    let approved = gateway.approve_invocation(intent, &run, &session, None)?;
+    let approved = gateway.approve_invocation(intent, &run, &session)?;
     let receipt = agent_core_kernel::adapters::TimeAdapter.execute(&approved)?;
     assert_eq!(receipt.status, ReceiptStatus::Succeeded);
     assert!(receipt.external_ref.is_none());
@@ -81,7 +81,7 @@ fn time_now_denied_without_grant() -> Result<()> {
         idempotency_key: Some("time:2".to_string()),
     };
     let err = gateway
-        .approve_invocation(intent, &run, &session, None)
+        .approve_invocation(intent, &run, &session)
         .unwrap_err();
     assert!(err.to_string().contains("capability_not_enabled"));
     Ok(())

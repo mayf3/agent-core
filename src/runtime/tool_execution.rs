@@ -82,22 +82,12 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
         tool_call: &ToolCall,
         turn_index: usize,
         tool_index: usize,
-        snapshot: Option<&RegistrySnapshot>,
+        snapshot: &RegistrySnapshot,
     ) -> Result<ToolCallOutcome> {
         let audited_op = sanitize_operation_for_audit(&tool_call.operation);
 
-        // Blocker 1c+d: snapshot-based operation check before Gateway validation.
-        // If the operation doesn't exist in the Run's pinned snapshot, reject
-        // immediately without consulting the static catalog.
-        if let Some(snap) = snapshot {
-            if snap.lookup(&tool_call.operation).is_none() {
-                return self.record_rejection(
-                    journal, run, session, &tool_call.id,
-                    &audited_op, crate::gateway::ToolRejection::UnknownOperation,
-                );
-            }
-        }
-
+        // Always write ToolCallIssued first (audit trail), even for operations
+        // that will be rejected by the snapshot pre-check below.
         if let Some(fatal) = append_or_fatal(
             journal,
             JournalEventKind::ToolCallIssued,
@@ -108,6 +98,19 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
         ) {
             return Ok(fatal);
         }
+
+        // Look up the operation in the Run's pinned RegistrySnapshot.
+        // This is the single authoritative source — Gateway and dispatch both
+        // use the resolved operation definition, never the static catalog.
+        let spec = match snapshot.lookup(&tool_call.operation) {
+            Some(s) => s,
+            None => {
+                return self.record_rejection(
+                    journal, run, session, &tool_call.id,
+                    &audited_op, crate::gateway::ToolRejection::UnknownOperation,
+                );
+            }
+        };
 
         let mut intent =
             match crate::gateway::validate_tool_call(tool_call, &run.id, turn_index, tool_index) {
@@ -187,8 +190,8 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
         }
 
         let exec_result: Result<(serde_json::Value, String)> =
-            match approved.intent().operation.as_str() {
-                crate::domain::operation::TIME_NOW => crate::adapters::TimeAdapter
+            match spec.binding_key.as_str() {
+                "builtin.time_now" => crate::adapters::TimeAdapter
                     .execute(&approved)
                     .map(|receipt| {
                         let text = receipt
@@ -199,11 +202,11 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
                             .to_string();
                         (receipt.output, text)
                     }),
-                crate::domain::operation::SESSION_RECALL_RECENT => {
+                "builtin.session_recall_recent" => {
                     Self::execute_session_recall(journal, &session.id, &approved)
                         .map(|(_, output, text)| (output, text))
                 }
-                crate::domain::operation::SYSTEM_STATUS => crate::capabilities::execute(journal)
+                "builtin.system_status" => crate::capabilities::execute(journal)
                     .map(|output| {
                         let text = output
                             .get("summary")
@@ -212,7 +215,7 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
                             .to_string();
                         (output, text)
                     }),
-                _ => Err(anyhow::anyhow!("unreachable inline operation")),
+                _ => Err(anyhow::anyhow!("registry_binding_invalid: {}", spec.binding_key)),
             };
         let (status, output, text) = match exec_result {
             Ok((output, text)) => (

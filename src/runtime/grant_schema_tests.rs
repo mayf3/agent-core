@@ -189,6 +189,7 @@ fn request_includes_time_now_when_granted() -> Result<()> {
         blocks: vec![],
         user_text: "x".into(),
         granted_operations: vec!["time.now".to_string(), "system.status".to_string()],
+        provider_tools: vec![],
         follow_up: None,
     })?;
     let requests = server.requests();
@@ -240,6 +241,7 @@ fn request_omits_time_now_when_not_granted() -> Result<()> {
         blocks: vec![],
         user_text: "x".into(),
         granted_operations: vec!["session.recall_recent".to_string()],
+        provider_tools: vec![],
         follow_up: None,
     })?;
     let requests = server.requests();
@@ -274,6 +276,7 @@ fn misconfigured_write_grant_not_in_tools() -> Result<()> {
         blocks: vec![],
         user_text: "x".into(),
         granted_operations: vec!["feishu.send_message".to_string()],
+        provider_tools: vec![],
         follow_up: None,
     })?;
     let requests = server.requests();
@@ -470,7 +473,7 @@ fn granted_time_now_completes_real_http_tool_loop() {
         .iter()
         .filter_map(|tool| tool.pointer("/function/name").and_then(Value::as_str))
         .collect();
-    assert_eq!(names, vec!["time.now", "session.recall_recent"]);
+    assert_eq!(names, vec!["session.recall_recent", "time.now"]);
     let followup_context = requests[1]
         .pointer("/messages/0/content")
         .and_then(Value::as_str)
