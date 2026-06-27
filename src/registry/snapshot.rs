@@ -156,8 +156,9 @@ pub fn compute_snapshot_id(specs: &[OperationSpec]) -> Result<String> {
 
 
 
-#[cfg(test)]
-pub(crate) fn test_snapshot() -> RegistrySnapshot {
+/// Build a test snapshot from the builtin specs. Available in all build profiles
+/// so integration tests can use it without constructing one manually.
+pub fn test_snapshot() -> RegistrySnapshot {
     use crate::registry::store::builtin_specs;
     let operations = builtin_specs();
     RegistrySnapshot {
