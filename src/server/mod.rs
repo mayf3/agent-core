@@ -37,6 +37,10 @@ pub fn serve(config: KernelConfig) -> Result<()> {
     let running = Arc::new(AtomicBool::new(true));
     install_shutdown_handler(&running)?;
     let journal = Arc::new(JournalStore::open(&config.db_path)?);
+    // Initialize the registry (creates baseline snapshot, sets current,
+    // backfills old Runs). This must succeed — without a registry, no Run
+    // can be created.
+    journal.initialize_registry()?;
     let recovered = journal.recover_unknown_invocations()?;
     if recovered > 0 {
         println!("agent-core recovered {recovered} unknown invocation(s)");

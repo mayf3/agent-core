@@ -12,10 +12,24 @@ use rusqlite::params;
 use std::sync::Arc;
 
 impl super::JournalStore {
-    /// Ensure the baseline registry snapshot exists and cache it as the current
-    /// snapshot. Called at Kernel boot (after migrate). Also backfills old Runs
-    /// with NULL registry_snapshot_id.
-    pub fn ensure_baseline_registry(&self) -> Result<String> {
+    /// Initialize the registry at Kernel boot: ensure the baseline snapshot
+    /// exists, set it as current, and backfill old Runs. This is the **only**
+    /// path that writes or sets the current snapshot ID — the runtime getter
+    /// `current_registry_snapshot_id()` is a pure read. Called after `migrate()`
+    /// during `JournalStore::open` or `serve` startup.
+    ///
+    /// Idempotent: if the baseline snapshot already exists (same canonical ID),
+    /// it is reused; if `current_snapshot_id` is already set, it is preserved.
+    pub fn initialize_registry(&self) -> Result<String> {
+        // Only set the current ID once — subsequent calls are no-ops.
+        if self.current_snapshot_id.lock().unwrap().is_some() {
+            return self
+                .current_snapshot_id
+                .lock()
+                .unwrap()
+                .clone()
+                .ok_or_else(|| anyhow!("registry_initialized_but_id_missing"));
+        }
         let snapshot = self.create_registry_snapshot(builtin_specs())?;
         let snapshot_id = snapshot.snapshot_id.clone();
         *self.current_snapshot_id.lock().unwrap() = Some(snapshot_id.clone());
@@ -24,18 +38,16 @@ impl super::JournalStore {
         Ok(snapshot_id)
     }
 
-    /// The currently active snapshot ID (for new Run creation).
-    /// Auto-creates the baseline snapshot if none exists (idempotent),
-    /// so tests don't need an explicit ensure_baseline_registry() call.
+    /// Read-only getter for the currently active registry snapshot ID.
+    /// Returns `registry_snapshot_unavailable` if the registry has not been
+    /// initialized (e.g. `initialize_registry()` was never called, or the
+    /// cached ID was cleared). Never creates or switches snapshots.
     pub fn current_registry_snapshot_id(&self) -> Result<String> {
-        if self.current_snapshot_id.lock().unwrap().is_none() {
-            let _ = self.ensure_baseline_registry()?;
-        }
         self.current_snapshot_id
             .lock()
             .unwrap()
             .clone()
-            .ok_or_else(|| anyhow!("no active registry snapshot"))
+            .ok_or_else(|| anyhow!("registry_snapshot_unavailable: no current registry snapshot"))
     }
 
     /// Create (or return existing) an immutable snapshot from specs. If the same
