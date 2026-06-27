@@ -180,6 +180,18 @@ impl JournalStore {
         .map_err(Into::into)
     }
 
+    /// Total number of registry snapshots.
+    pub fn registry_snapshot_count(&self) -> Result<i64> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow!("journal mutex poisoned"))?;
+        conn.query_row("SELECT COUNT(*) FROM registry_snapshots", [], |row| {
+            row.get(0)
+        })
+        .map_err(Into::into)
+    }
+
     /// Set the cached current snapshot ID without creating or verifying the
     /// snapshot. Used to test dangling-snapshot scenarios.
     pub fn set_current_snapshot_id_for_test(&self, snapshot_id: &str) {

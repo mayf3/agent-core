@@ -6,19 +6,16 @@
 //! G1 — Current snapshot missing → deliver fails cleanly.
 //! G2 — Current snapshot ID points to nonexistent snapshot → deliver fails cleanly.
 
+use crate::adapters::InvocationAdapter;
 use crate::config::KernelConfig;
 use crate::domain::*;
 use crate::gateway::Gateway;
 use crate::journal::JournalStore;
-use crate::llm::{
-    EndpointChoice, LlmClient, LlmInput, LlmOutput, ProviderToolTurn, ToolCall, ToolCallResult,
-};
 use crate::registry::snapshot::{BindingKind, OperationSpec, Risk};
 use crate::runtime::Runtime;
 use anyhow::Result;
 use serde_json::{json, Value};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
 
 // ---- Fixtures ----
 
@@ -76,6 +73,7 @@ fn v1_specs() -> Vec<OperationSpec> {
     ]
 }
 
+#[allow(dead_code)]
 fn v2_specs() -> Vec<OperationSpec> {
     vec![
         OperationSpec {
@@ -99,89 +97,25 @@ fn v2_specs() -> Vec<OperationSpec> {
     ]
 }
 
-/// Fake LLM: captures provider_tools from each round as JSON values (Clone).
-/// Uses Arc<Mutex> so data survives ownership transfer to Runtime.
-/// Optionally activates a snapshot after the first captured round, before
-/// returning the tool call — used to activate v2 mid-Run.
-/// Shared journal via Arc<JournalStore> for in-memory database access.
-struct CaptureLlm {
-    captured_tools: Arc<Mutex<Vec<Vec<Value>>>>,
-    captured_catalogs: Arc<Mutex<Vec<String>>>,
-    remaining_tool_rounds: Mutex<usize>,
-    activate_snapshot_after_round1: Option<(Arc<JournalStore>, String)>,
-}
-
-impl CaptureLlm {
-    fn new(
-        emit_tool: bool,
-        activate_snapshot_after_round1: Option<(Arc<JournalStore>, String)>,
-    ) -> (Self, Arc<Mutex<Vec<Vec<Value>>>>, Arc<Mutex<Vec<String>>>) {
-        let tools = Arc::new(Mutex::new(Vec::new()));
-        let catalogs = Arc::new(Mutex::new(Vec::new()));
-        let llm = Self {
-            captured_tools: Arc::clone(&tools),
-            captured_catalogs: Arc::clone(&catalogs),
-            remaining_tool_rounds: Mutex::new(if emit_tool { 1 } else { 0 }),
-            activate_snapshot_after_round1,
-        };
-        (llm, tools, catalogs)
+/// Fake LLM that counts invocations.
+struct CountingLlm(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+impl CountingLlm {
+    fn new() -> (Self, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        let c = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        (Self(c.clone()), c)
     }
 }
-
-impl LlmClient for CaptureLlm {
-    fn complete(&self, input: LlmInput) -> Result<LlmOutput> {
-        let cat = input
-            .blocks
-            .iter()
-            .find(|b| matches!(b.kind, ContextBlockKind::ToolCatalog))
-            .map(|b| b.content.clone())
-            .unwrap_or_default();
-        self.captured_tools
-            .lock()
-            .unwrap()
-            .push(input.provider_tools);
-        self.captured_catalogs.lock().unwrap().push(cat);
-        let round = self.captured_tools.lock().unwrap().len();
-        // After capturing round 1 data (which is v1), activate the next
-        // snapshot before returning the tool call. The follow-up round will
-        // then see v2 as current, but Run A's pre-computed provider_tools/
-        // Context are v1 so they won't drift.
-        if round == 1 {
-            if let Some((ref journal, ref snap_id)) = self.activate_snapshot_after_round1 {
-                let _ = journal.activate_registry_snapshot(snap_id);
-            }
-        }
-        let mut remaining = self.remaining_tool_rounds.lock().unwrap();
-        if *remaining > 0 {
-            *remaining -= 1;
-            Ok(LlmOutput {
-                provider: "test".into(),
-                model: "test".into(),
-                content: String::new(),
-                journal_payload: json!({"status": "ok"}),
-                tool_call: ToolCallResult::Valid(ToolCall {
-                    id: "call_test".into(),
-                    operation: "time.now".into(),
-                    arguments: json!({}),
-                }),
-                provider_turn: Some(ProviderToolTurn {
-                    endpoint: EndpointChoice::Primary,
-                    provider_tool_call_id: "call_test_raw".into(),
-                    wire_name: "time.now".into(),
-                    canonical_operation: "time.now".into(),
-                    arguments_json: "{}".into(),
-                }),
-            })
-        } else {
-            Ok(LlmOutput {
-                provider: "test".into(),
-                model: "test".into(),
-                content: "done".into(),
-                journal_payload: json!({"status": "ok"}),
-                tool_call: ToolCallResult::Absent,
-                provider_turn: None,
-            })
-        }
+impl crate::llm::LlmClient for CountingLlm {
+    fn complete(&self, _input: crate::llm::LlmInput) -> anyhow::Result<crate::llm::LlmOutput> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(crate::llm::LlmOutput {
+            provider: "test".into(),
+            model: "test".into(),
+            content: "ok".into(),
+            journal_payload: serde_json::json!({}),
+            tool_call: crate::llm::ToolCallResult::Absent,
+            provider_turn: None,
+        })
     }
 }
 
@@ -220,6 +154,37 @@ fn g1_current_snapshot_missing_deliver_fails_cleanly() -> Result<()> {
     assert_eq!(journal.run_count()?, run_count_before, "No new Run");
     assert_eq!(journal.running_run_count()?, 0, "No Running runs");
 
+    Ok(())
+}
+
+#[test]
+fn g1_current_snapshot_missing_echo_fails_cleanly() -> Result<()> {
+    let journal = JournalStore::in_memory_without_registry()?;
+    let config = test_config();
+    let gateway = Gateway::new(config.clone());
+    let llm = crate::llm::LocalEchoLlm;
+
+    let envelope = gateway.cli_ingress("hi".into())?;
+    let event = gateway.validate_ingress(&journal, envelope)?;
+    let event_count_before = journal.event_count()?;
+    let run_count_before = journal.run_count()?;
+    let runtime = Runtime::new(config, llm);
+    let err = match runtime.deliver_echo(&journal, &gateway, event) {
+        Err(e) => e.to_string(),
+        Ok(_) => String::new(),
+    };
+    assert!(!err.is_empty(), "deliver_echo must fail when no snapshot");
+    assert!(
+        err.contains("registry_snapshot_unavailable"),
+        "error must contain registry_snapshot_unavailable, got: {err}"
+    );
+    assert_eq!(
+        journal.event_count()?,
+        event_count_before + 1,
+        "SessionReady event"
+    );
+    assert_eq!(journal.run_count()?, run_count_before, "No new Run");
+    assert_eq!(journal.running_run_count()?, 0, "No Running runs");
     Ok(())
 }
 
@@ -266,6 +231,39 @@ fn g2_current_snapshot_dangling_deliver_fails_cleanly() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn g2_current_snapshot_dangling_echo_fails_cleanly() -> Result<()> {
+    let journal = JournalStore::in_memory_without_registry()?;
+    journal.set_current_snapshot_id_for_test(
+        "snap_nonexistent_00000000000000000000000000000000000000000000",
+    );
+    let config = test_config();
+    let gateway = Gateway::new(config.clone());
+
+    let envelope = gateway.cli_ingress("hi".into())?;
+    let event = gateway.validate_ingress(&journal, envelope)?;
+    let event_count_before = journal.event_count()?;
+    let run_count_before = journal.run_count()?;
+    let runtime = Runtime::new(config, crate::llm::LocalEchoLlm);
+    let err = match runtime.deliver_echo(&journal, &gateway, event) {
+        Err(e) => e.to_string(),
+        Ok(_) => String::new(),
+    };
+    assert!(!err.is_empty(), "deliver_echo must fail");
+    assert!(
+        err.contains("registry_snapshot_unavailable"),
+        "error: {err}"
+    );
+    assert_eq!(
+        journal.event_count()?,
+        event_count_before + 1,
+        "SessionReady"
+    );
+    assert_eq!(journal.run_count()?, run_count_before, "No new Run");
+    assert_eq!(journal.running_run_count()?, 0, "No Running runs");
+    Ok(())
+}
+
 // ========================================================================
 // F  — Restart recovery preserves snapshot binding
 // ========================================================================
@@ -291,7 +289,7 @@ fn f_restart_recovery_preserves_snapshot_binding() -> Result<()> {
         v1_snapshot_id = snap_v1.snapshot_id.clone();
         journal.activate_registry_snapshot(&v1_snapshot_id)?;
 
-        let (llm, _tools_f, _catalogs_f) = CaptureLlm::new(false, None);
+        let (llm, _counter) = CountingLlm::new();
         let runtime = Runtime::new(config, llm);
         let envelope = gateway.cli_ingress("test".into())?;
         let event = gateway.validate_ingress(&journal, envelope)?;
@@ -379,6 +377,67 @@ fn f_restart_recovery_preserves_snapshot_binding() -> Result<()> {
         assert_eq!(
             spec.binding_key, "builtin.time_now",
             "binding_key must come from v1 snapshot"
+        );
+
+        // === REAL GATEWAY AND DISPATCH ===
+        // Use the restored Run + snapshot to validate a real tool call through
+        // the production Gateway and dispatch pipeline.
+        use crate::gateway::validate_tool_call;
+        use crate::llm::tool_call_id_hash;
+
+        let hashed_id = tool_call_id_hash("call_restored_time");
+        let tool_call = crate::llm::ToolCall {
+            id: hashed_id,
+            operation: "time.now".into(),
+            arguments: json!({}),
+        };
+
+        // 1. validate_tool_call — uses loaded snapshot for existence + risk.
+        let intent = validate_tool_call(&tool_call, &run.id, 0, 0, &snap)
+            .expect("time.now must validate against restored v1 snapshot");
+        assert_eq!(
+            intent.operation, "time.now",
+            "Approved operation must be time.now"
+        );
+
+        // 2. Gateway::approve_invocation — uses restored Run grants + snapshot.
+        let session = journal.get_or_create_session(&SessionTarget {
+            agent_id: run.agent_id.clone(),
+            channel: ChannelKind::Cli,
+            conversation_key: run.session_id.0.clone(),
+        })?;
+        let approved = crate::gateway::Gateway::new(test_config()).approve_invocation(
+            crate::domain::InvocationIntent {
+                invocation_id: intent.invocation_id,
+                run_id: run.id.clone(),
+                operation: intent.operation.clone(),
+                arguments: json!({"session_id": session.id.0}),
+                idempotency_key: intent.idempotency_key.clone(),
+            },
+            &run,
+            &session,
+            &snap,
+        )?;
+        assert_eq!(
+            approved.intent().operation,
+            "time.now",
+            "Approved operation must be time.now"
+        );
+
+        // 3+4. Dispatch via binding_key — TimeAdapter (for builtin.time_now).
+        let receipt = crate::adapters::TimeAdapter.execute(&approved)?;
+        assert_eq!(
+            receipt.status,
+            crate::domain::ReceiptStatus::Succeeded,
+            "time.now must succeed from restored v1 snapshot"
+        );
+        assert!(
+            receipt.output.get("iso").is_some(),
+            "time.now output must contain 'iso'"
+        );
+        assert!(
+            receipt.output.get("epoch_ms").is_some(),
+            "time.now output must contain 'epoch_ms'"
         );
     }
 
