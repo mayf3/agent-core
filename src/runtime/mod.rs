@@ -102,9 +102,13 @@ where
                 "conversation_key": session.conversation_key,
             }),
         )?;
-        let snapshot_id = journal
-            .current_registry_snapshot_id()
-            .unwrap_or_else(|_| String::new());
+        // Blocker 2: snapshot_id must exist and be non-empty; failure prevents Run creation.
+        let snapshot_id = journal.current_registry_snapshot_id().map_err(|e| {
+            anyhow::anyhow!("registry_snapshot_unavailable: {e}")
+        })?;
+        if snapshot_id.is_empty() {
+            anyhow::bail!("registry_snapshot_invalid: snapshot ID is empty");
+        }
         let run = self.create_run(&session, &event, &snapshot_id);
         journal.insert_run(&run)?;
         journal.append_event(
@@ -131,12 +135,18 @@ where
             .iter()
             .map(|g| g.operation.clone())
             .collect();
+
+        // Load the Run's pinned registry snapshot — required for Context,
+        // Provider tools, and Gateway validation.
+        let snapshot = journal.load_registry_snapshot(&run.registry_snapshot_id)?;
+
         let mut blocks = ContextAssembler::from_config(&self.config).build(
             journal,
             &session,
             &event,
             &text,
             &granted_operations,
+            Some(&snapshot),
         )?;
         journal.append_event(
             JournalEventKind::ContextBuilt,
@@ -166,8 +176,9 @@ where
         // read-only tool call, execute it, append a ToolResult block, and
         // re-invoke the LLM. Bounded by MAX_TOOL_ROUNDS; a no-op when the model
         // emits no tool call (backwards compatible).
-        let llm =
-            self.run_tool_recall_loop(journal, gateway, &run, &session, &mut blocks, &text, first)?;
+        let llm = self.run_tool_recall_loop(
+            journal, gateway, &run, &session, &mut blocks, &text, first, &snapshot,
+        )?;
 
         // Never enqueue a blank reply (empty first-round content with no tool
         // call, or empty second-round content). The fallback is a fixed,
@@ -187,7 +198,15 @@ where
                 "idempotency_key": intent.idempotency_key,
             }),
         )?;
-        let approved = gateway.approve_invocation(intent, &run, &session)?;
+        let approved = {
+            let result = if run.registry_snapshot_id.is_empty() {
+                gateway.approve_invocation(intent, &run, &session, None)
+            } else {
+                let snap = journal.load_registry_snapshot(&run.registry_snapshot_id)?;
+                gateway.approve_invocation(intent, &run, &session, Some(&snap))
+            };
+            result?
+        };
         journal.append_event(
             JournalEventKind::InvocationApproved,
             Some(&run.id),
@@ -228,9 +247,13 @@ where
                 "conversation_key": session.conversation_key,
             }),
         )?;
-        let snapshot_id = journal
-            .current_registry_snapshot_id()
-            .unwrap_or_else(|_| String::new());
+        // Blocker 2: snapshot_id must exist and be non-empty; failure prevents Run creation.
+        let snapshot_id = journal.current_registry_snapshot_id().map_err(|e| {
+            anyhow::anyhow!("registry_snapshot_unavailable: {e}")
+        })?;
+        if snapshot_id.is_empty() {
+            anyhow::bail!("registry_snapshot_invalid: snapshot ID is empty");
+        }
         let run = self.create_run(&session, &event, &snapshot_id);
         journal.insert_run(&run)?;
         journal.append_event(
@@ -262,7 +285,15 @@ where
                 "idempotency_key": intent.idempotency_key,
             }),
         )?;
-        let approved = gateway.approve_invocation(intent, &run, &session)?;
+        let approved = {
+            let result = if run.registry_snapshot_id.is_empty() {
+                gateway.approve_invocation(intent, &run, &session, None)
+            } else {
+                let snap = journal.load_registry_snapshot(&run.registry_snapshot_id)?;
+                gateway.approve_invocation(intent, &run, &session, Some(&snap))
+            };
+            result?
+        };
         journal.append_event(
             JournalEventKind::InvocationApproved,
             Some(&run.id),
