@@ -108,9 +108,9 @@ fn rejected_tool_call_writes_issued_and_rejected_not_invocation() {
         operation: "shell.exec".into(),
         arguments: json!({}),
     };
-    assert!(runtime
-        .handle_inline_tool_call(&journal, &gateway, &run, &session, &bad_op, 0, 0)
-        .is_ok());
+	    assert!(runtime
+	        .handle_inline_tool_call(&journal, &gateway, &run, &session, &bad_op, 0, 0, &crate::registry::snapshot::test_snapshot())
+	        .is_ok());
     let events = journal.events().unwrap();
     assert_eq!(count(&events, JournalEventKind::ToolCallIssued), 1);
     assert_eq!(count(&events, JournalEventKind::ToolCallRejected), 1);
@@ -150,7 +150,7 @@ fn successful_tool_call_writes_proposed_approved_succeeded_receipt() {
         arguments: json!({}),
     };
     assert!(runtime
-        .handle_inline_tool_call(&journal, &gateway, &run, &session, &tc, 0, 0)
+        .handle_inline_tool_call(&journal, &gateway, &run, &session, &tc, 0, 0, &crate::registry::snapshot::test_snapshot())
         .is_ok());
     let events = journal.events().unwrap();
     assert_eq!(count(&events, JournalEventKind::ToolCallIssued), 1);
@@ -180,7 +180,7 @@ fn capability_failure_writes_failed_receipt_not_running() {
     };
     assert!(
         runtime
-            .handle_inline_tool_call(&journal, &gateway, &run, &session, &tc, 0, 0)
+            .handle_inline_tool_call(&journal, &gateway, &run, &session, &tc, 0, 0, &crate::registry::snapshot::test_snapshot())
             .is_ok(),
         "capability failure is a ToolResult, not Err"
     );
@@ -240,7 +240,7 @@ fn empty_recall_returns_succeeded_empty_messages() {
         arguments: json!({}),
     };
     assert!(runtime
-        .handle_inline_tool_call(&journal, &gateway, &run, &session, &tc, 0, 0)
+        .handle_inline_tool_call(&journal, &gateway, &run, &session, &tc, 0, 0, &crate::registry::snapshot::test_snapshot())
         .is_ok());
     let events = journal.events().unwrap();
     let receipt = events
@@ -318,7 +318,7 @@ fn untrusted_operation_never_leaks_raw_into_journal() {
             operation: raw_op.clone(),
             arguments: json!({}),
         };
-        let _ = runtime.handle_inline_tool_call(&journal, &gateway, &run, &session, &tc, 0, 0);
+        let _ = runtime.handle_inline_tool_call(&journal, &gateway, &run, &session, &tc, 0, 0, &crate::registry::snapshot::test_snapshot());
         let j = serde_json::to_string(&journal.events().unwrap()).unwrap();
         assert!(!j.contains(&raw_op), "[{}] raw leaked", label);
         assert!(
@@ -355,32 +355,32 @@ fn idempotency_key_is_run_turn_index_scoped() {
         arguments: json!({}),
     };
     let run = RunId::new();
-    let k1 = validate_tool_call(&mk("time.now", None), &run, 0, 0).unwrap();
-    let k2 = validate_tool_call(&mk("time.now", None), &run, 0, 0).unwrap();
+    let k1 = validate_tool_call(&mk("time.now"), &run, 0, 0).unwrap();
+    let k2 = validate_tool_call(&mk("time.now"), &run, 0, 0).unwrap();
     assert_eq!(k1.idempotency_key, k2.idempotency_key, "stable");
     assert_ne!(
-        validate_tool_call(&mk("time.now", None), &run, 0, 0)
+        validate_tool_call(&mk("time.now"), &run, 0, 0)
             .unwrap()
             .idempotency_key,
-        validate_tool_call(&mk("time.now", None), &run, 1, 0)
+        validate_tool_call(&mk("time.now"), &run, 1, 0)
             .unwrap()
             .idempotency_key,
         "turn"
     );
     assert_ne!(
-        validate_tool_call(&mk("time.now", None), &run, 0, 0)
+        validate_tool_call(&mk("time.now"), &run, 0, 0)
             .unwrap()
             .idempotency_key,
-        validate_tool_call(&mk("time.now", None), &run, 0, 1)
+        validate_tool_call(&mk("time.now"), &run, 0, 1)
             .unwrap()
             .idempotency_key,
         "index"
     );
     assert_ne!(
-        validate_tool_call(&mk("time.now", None), &run, 0, 0)
+        validate_tool_call(&mk("time.now"), &run, 0, 0)
             .unwrap()
             .idempotency_key,
-        validate_tool_call(&mk("time.now", None), &RunId::new(), 0, 0)
+        validate_tool_call(&mk("time.now"), &RunId::new(), 0, 0)
             .unwrap()
             .idempotency_key,
         "run"
@@ -443,7 +443,7 @@ fn policy_denial_writes_rejected_with_correlation() {
         operation: "time.now".into(),
         arguments: json!({}),
     };
-    let _ = runtime.handle_inline_tool_call(&journal, &gateway, &run, &session, &tc, 0, 0);
+    let _ = runtime.handle_inline_tool_call(&journal, &gateway, &run, &session, &tc, 0, 0, &crate::registry::snapshot::test_snapshot());
     let events = journal.events().unwrap();
     assert_eq!(count(&events, JournalEventKind::InvocationProposed), 1);
     assert_eq!(count(&events, JournalEventKind::ToolCallRejected), 1);

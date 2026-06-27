@@ -208,6 +208,7 @@ mod tool_name_mode_tests {
             blocks: vec![],
             user_text: "x".into(),
             granted_operations: vec!["time.now".to_string()],
+            provider_tools: vec![],
             follow_up: None,
         })?;
         let reqs = fb.requests();
@@ -236,6 +237,7 @@ mod tool_name_mode_tests {
             blocks: vec![],
             user_text: "x".into(),
             granted_operations: vec!["time.now".to_string()],
+            provider_tools: vec![],
             follow_up: None,
         })?;
         let reqs = fb.requests();

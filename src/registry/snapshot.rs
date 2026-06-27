@@ -154,6 +154,19 @@ pub fn compute_snapshot_id(specs: &[OperationSpec]) -> Result<String> {
     Ok(format!("snap_{digest}"))
 }
 
+
+
+#[cfg(test)]
+pub(crate) fn test_snapshot() -> RegistrySnapshot {
+    use crate::registry::store::builtin_specs;
+    let operations = builtin_specs();
+    RegistrySnapshot {
+        snapshot_id: "snap_test_default".to_string(),
+        created_at: chrono::Utc::now(),
+        operations,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

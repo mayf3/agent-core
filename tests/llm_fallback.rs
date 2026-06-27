@@ -22,6 +22,7 @@ fn fallback_endpoint_is_used_after_primary_http_error() -> Result<()> {
         blocks: vec![],
         user_text: "hello".into(),
         granted_operations: vec![],
+        provider_tools: vec![],
         follow_up: None,
     })?;
     assert_eq!(output.model, "deepseek-v4-flash");
