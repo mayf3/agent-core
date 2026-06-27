@@ -158,10 +158,15 @@ where
                 "kinds": blocks.iter().map(|block| format!("{:?}", block.kind)).collect::<Vec<_>>(),
             }),
         )?;
+        // Provider tools are derived from the Run's pinned registry snapshot
+        // once here. All LLM rounds for this Run reuse the same tools list.
+        let provider_tools = snapshot.provider_tools_for_grants(&granted_operations);
+
         let first = self.llm.complete(LlmInput {
             blocks: blocks.clone(),
             user_text: text.clone(),
             granted_operations: granted_operations.clone(),
+            provider_tools: provider_tools.clone(),
             follow_up: None,
         })?;
         journal.append_event(
@@ -198,15 +203,7 @@ where
                 "idempotency_key": intent.idempotency_key,
             }),
         )?;
-        let approved = {
-            let result = if run.registry_snapshot_id.is_empty() {
-                gateway.approve_invocation(intent, &run, &session, None)
-            } else {
-                let snap = journal.load_registry_snapshot(&run.registry_snapshot_id)?;
-                gateway.approve_invocation(intent, &run, &session, Some(&snap))
-            };
-            result?
-        };
+        let approved = gateway.approve_invocation(intent, &run, &session)?;
         journal.append_event(
             JournalEventKind::InvocationApproved,
             Some(&run.id),
@@ -285,15 +282,7 @@ where
                 "idempotency_key": intent.idempotency_key,
             }),
         )?;
-        let approved = {
-            let result = if run.registry_snapshot_id.is_empty() {
-                gateway.approve_invocation(intent, &run, &session, None)
-            } else {
-                let snap = journal.load_registry_snapshot(&run.registry_snapshot_id)?;
-                gateway.approve_invocation(intent, &run, &session, Some(&snap))
-            };
-            result?
-        };
+        let approved = gateway.approve_invocation(intent, &run, &session)?;
         journal.append_event(
             JournalEventKind::InvocationApproved,
             Some(&run.id),
