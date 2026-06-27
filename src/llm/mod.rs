@@ -227,12 +227,8 @@ impl OpenAiCompatibleLlm {
     ) -> std::result::Result<LlmOutput, String> {
         // Provider tools are derived from the Run's pinned registry snapshot
         // at Runtime::deliver() time and passed in LlmInput.provider_tools.
-        let mut tools: Vec<Value> = if input.provider_tools.is_empty() {
-            // Backward-compatible fallback for tests: use static catalog.
-            crate::domain::operation::provider_tools_for_grants(&input.granted_operations)
-        } else {
-            input.provider_tools.clone()
-        };
+        // Empty tools means no ReadOnly operations are granted.
+        let mut tools: Vec<Value> = input.provider_tools.clone();
         let tool_name_mode = match &endpoint.tool_name_mode {
             ToolNameMode::Passthrough => ToolNameMode::Passthrough,
             ToolNameMode::IndexedMapping(_) => {

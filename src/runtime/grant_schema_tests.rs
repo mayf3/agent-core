@@ -185,11 +185,13 @@ fn request_includes_time_now_when_granted() -> Result<()> {
         "local-stub".into(),
         3000,
     );
+    let snap = crate::registry::snapshot::test_snapshot();
+    let provider_tools = snap.provider_tools_for_grants(&["time.now".to_string(), "system.status".to_string()]);
     let _ = llm.complete(LlmInput {
         blocks: vec![],
         user_text: "x".into(),
         granted_operations: vec!["time.now".to_string(), "system.status".to_string()],
-        provider_tools: vec![],
+        provider_tools,
         follow_up: None,
     })?;
     let requests = server.requests();
@@ -236,12 +238,14 @@ fn request_omits_time_now_when_not_granted() -> Result<()> {
         "local-stub".into(),
         3000,
     );
+    let snap = crate::registry::snapshot::test_snapshot();
+    let provider_tools = snap.provider_tools_for_grants(&["session.recall_recent".to_string()]);
     // Grant only session.recall_recent — NOT time.now.
     let _ = llm.complete(LlmInput {
         blocks: vec![],
         user_text: "x".into(),
         granted_operations: vec!["session.recall_recent".to_string()],
-        provider_tools: vec![],
+        provider_tools,
         follow_up: None,
     })?;
     let requests = server.requests();
@@ -272,11 +276,14 @@ fn misconfigured_write_grant_not_in_tools() -> Result<()> {
         "local-stub".into(),
         3000,
     );
+    // Write operations produce an empty provider_tools list — the test
+    // verifies that even when granted, Write ops don't appear in tools.
+    let provider_tools: Vec<serde_json::Value> = vec![];
     let _ = llm.complete(LlmInput {
         blocks: vec![],
         user_text: "x".into(),
         granted_operations: vec!["feishu.send_message".to_string()],
-        provider_tools: vec![],
+        provider_tools,
         follow_up: None,
     })?;
     let requests = server.requests();
