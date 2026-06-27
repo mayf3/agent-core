@@ -11,13 +11,12 @@ use std::sync::Mutex;
 
 pub struct JournalStore {
     pub(crate) conn: Mutex<Connection>,
+    /// The cached current registry snapshot ID. Set at boot by
+    /// `ensure_baseline_snapshot`. New Runs pin this value.
+    pub(crate) current_snapshot_id: Mutex<Option<String>>,
     /// Test-only fault flag: when true, `recent_user_messages` returns a
     /// deterministic `Err`, while every other Journal operation (event append,
     /// run status update, fail_run, hash-chain verification) keeps working.
-    /// This lets the capability-failure test exercise the real Runtime
-    /// production chain (a real Failed Receipt is written to a writable
-    /// Journal) instead of dropping a table or faking the error. Compiled out
-    /// of production builds (`cargo build` never enables `test-helpers`).
     #[cfg(any(test, feature = "test-helpers"))]
     pub(crate) recall_failure_for_test: std::sync::atomic::AtomicBool,
 }
@@ -25,7 +24,7 @@ pub struct JournalStore {
 /// The schema `PRAGMA user_version` this kernel writes and understands.
 /// Bumped only when `migrations/` gains a new applied migration. The startup
 /// `migrate()` refuses to run against a DB whose version is newer than this.
-const CURRENT_SCHEMA_VERSION: i64 = 1;
+const CURRENT_SCHEMA_VERSION: i64 = 2;
 
 impl JournalStore {
     pub fn open(path: &Path) -> Result<Self> {
@@ -48,6 +47,7 @@ impl JournalStore {
     fn with_conn(conn: Connection) -> Self {
         Self {
             conn: Mutex::new(conn),
+            current_snapshot_id: Mutex::new(None),
             recall_failure_for_test: std::sync::atomic::AtomicBool::new(false),
         }
     }
@@ -56,6 +56,7 @@ impl JournalStore {
     fn with_conn(conn: Connection) -> Self {
         Self {
             conn: Mutex::new(conn),
+            current_snapshot_id: Mutex::new(None),
         }
     }
 
@@ -399,8 +400,15 @@ impl JournalStore {
             );
         }
         if applied == 0 {
-            // Fresh database: run the base migration and stamp the version.
+            // Fresh database: run all migrations and stamp the version.
             conn.execute_batch(include_str!("../../migrations/0001_init.sql"))?;
+            conn.execute_batch(include_str!("../../migrations/0002_registry_snapshots.sql"))?;
+            super::queue::migrate(&conn)?;
+            backfill_feishu_message_dedup(&conn)?;
+            conn.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
+        } else if applied == 1 {
+            // v1 → v2: add registry snapshot tables + runs column.
+            conn.execute_batch(include_str!("../../migrations/0002_registry_snapshots.sql"))?;
             super::queue::migrate(&conn)?;
             backfill_feishu_message_dedup(&conn)?;
             conn.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
