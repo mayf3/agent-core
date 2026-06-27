@@ -263,7 +263,7 @@ mod tool_name_mode_tests {
     fn primary_429_triggers_indexed_fallback_two_rounds() -> Result<()> {
         let p = Primary429::new();
         let fb = Capture::new(vec![
-            json!({"model":"s","choices":[{"message":{"content":"","tool_calls":[{"id":"fb1","type":"function","function":{"name":"fn_0","arguments":"{}"}}]}}]}),
+            json!({"model":"s","choices":[{"message":{"content":"","tool_calls":[{"id":"fb1","type":"function","function":{"name":"fn_2","arguments":"{}"}}]}}]}),
             json!({"model":"s","choices":[{"message":{"content":"done"}}]}),
         ]);
         let mut c = cfg();
