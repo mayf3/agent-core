@@ -40,6 +40,7 @@ fn approved_for_run(
     idempotency: &str,
     decision: &str,
 ) -> Result<ApprovedInvocation> {
+    let snap = agent_core_kernel::registry::snapshot::test_snapshot();
     gateway.approve_invocation(
         InvocationIntent {
             invocation_id: InvocationId(format!("reply:{decision}")),
@@ -62,8 +63,8 @@ fn approved_for_run(
             status: RunStatus::Running,
             created_at: Utc::now(),
             updated_at: Utc::now(),
-                registry_snapshot_id: String::new(),
-    },
+            registry_snapshot_id: String::new(),
+        },
         &Session {
             id: session_id.clone(),
             agent_id: AgentId("main".to_string()),
@@ -75,6 +76,7 @@ fn approved_for_run(
             status: SessionStatus::Active,
             version: 1,
         },
+        &snap,
     )
 }
 

@@ -346,12 +346,15 @@ fn validate_tool_call_accepts_time_now_and_rejects_others() {
     use agent_core_kernel::gateway::validate_tool_call;
     use agent_core_kernel::domain::RunId;
     use agent_core_kernel::llm::ToolCall;
+    use agent_core_kernel::registry::snapshot::test_snapshot;
     use serde_json::json;
+    let snap = test_snapshot();
     let ok = validate_tool_call(
         &ToolCall { id: "c1".into(), operation: "time.now".into(), arguments: json!({}) },
         &RunId::new(),
         0,
         0,
+        &snap,
     );
     assert!(ok.is_ok(), "time.now should be accepted");
     let unknown = validate_tool_call(
@@ -359,6 +362,7 @@ fn validate_tool_call_accepts_time_now_and_rejects_others() {
         &RunId::new(),
         0,
         0,
+        &snap,
     );
     assert!(unknown.is_err(), "unknown op rejected");
     let write_op = validate_tool_call(
@@ -366,6 +370,7 @@ fn validate_tool_call_accepts_time_now_and_rejects_others() {
         &RunId::new(),
         0,
         0,
+        &snap,
     );
     assert!(write_op.is_err(), "Write op rejected via tool-call path");
 }

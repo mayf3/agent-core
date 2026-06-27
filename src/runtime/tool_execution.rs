@@ -113,7 +113,7 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
         };
 
         let mut intent =
-            match crate::gateway::validate_tool_call(tool_call, &run.id, turn_index, tool_index) {
+            match crate::gateway::validate_tool_call(tool_call, &run.id, turn_index, tool_index, snapshot) {
                 Ok(intent) => intent,
                 Err(rejection) => {
                     return self.record_rejection(
@@ -155,7 +155,7 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
             return Ok(fatal);
         }
 
-        let approved = match gateway.approve_invocation(intent, run, session) {
+        let approved = match gateway.approve_invocation(intent, run, session, snapshot) {
             Ok(approved) => approved,
             Err(_) => {
                 if let Some(fatal) = append_or_fatal(

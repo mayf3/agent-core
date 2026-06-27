@@ -40,6 +40,7 @@ fn approved_for_run(
     session_id: &SessionId,
     decision: &str,
 ) -> Result<ApprovedInvocation> {
+    let snap = agent_core_kernel::registry::snapshot::test_snapshot();
     gateway.approve_invocation(
         InvocationIntent {
             invocation_id: InvocationId(format!("reply:{decision}")),
@@ -62,8 +63,8 @@ fn approved_for_run(
             status: RunStatus::Running,
             created_at: Utc::now(),
             updated_at: Utc::now(),
-                registry_snapshot_id: String::new(),
-    },
+            registry_snapshot_id: String::new(),
+        },
         &Session {
             id: session_id.clone(),
             agent_id: AgentId("main".to_string()),
@@ -75,6 +76,7 @@ fn approved_for_run(
             status: SessionStatus::Active,
             version: 1,
         },
+        &snap,
     )
 }
 
@@ -246,6 +248,7 @@ fn terminal_states_are_not_leased_by_dispatcher() -> Result<()> {
             journal.insert_run(&run)?;
             let config = common::test_config();
             let gateway = Gateway::new(config);
+            let snap = agent_core_kernel::registry::snapshot::test_snapshot();
             let approved = gateway.approve_invocation(
                 InvocationIntent {
                     invocation_id: InvocationId(format!("reply:skip_{status:?}")),
@@ -266,6 +269,7 @@ fn terminal_states_are_not_leased_by_dispatcher() -> Result<()> {
                     status: SessionStatus::Active,
                     version: 1,
                 },
+                &snap,
             )?;
             let invocation_id = approved.intent().invocation_id.clone();
             journal.queue_outbox_dispatch(&approved, None)?;
@@ -327,6 +331,7 @@ fn terminal_transition_guard_rejects_non_dispatching_state() -> Result<()> {
     journal.insert_run(&run)?;
     let config = common::test_config();
     let gateway = Gateway::new(config);
+    let snap = agent_core_kernel::registry::snapshot::test_snapshot();
     let approved = gateway.approve_invocation(
         InvocationIntent {
             invocation_id: InvocationId("reply:guard".to_string()),
@@ -347,6 +352,7 @@ fn terminal_transition_guard_rejects_non_dispatching_state() -> Result<()> {
             status: SessionStatus::Active,
             version: 1,
         },
+        &snap,
     )?;
     let invocation_id = approved.intent().invocation_id.clone();
     journal.queue_outbox_dispatch(&approved, None)?;

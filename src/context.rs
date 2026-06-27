@@ -28,7 +28,7 @@ impl ContextAssembler {
         event: &ValidatedEvent,
         user_text: &str,
         granted_operations: &[String],
-        snapshot: Option<&RegistrySnapshot>,
+        snapshot: &RegistrySnapshot,
     ) -> Result<Vec<ContextBlock>> {
         let recent = self.recent_block(journal, session, &event.event_id.0)?;
         let mut blocks = vec![
@@ -115,11 +115,8 @@ impl ContextAssembler {
             self.max_block_chars,
         )
     }
-    fn tool_catalog_block(&self, granted_operations: &[String], snapshot: Option<&RegistrySnapshot>) -> ContextBlock {
-        let content = match snapshot {
-            Some(snap) => snap.catalog_for_context_grants(granted_operations),
-            None => crate::domain::operation::catalog_for_context_grants(granted_operations),
-        };
+    fn tool_catalog_block(&self, granted_operations: &[String], snapshot: &RegistrySnapshot) -> ContextBlock {
+        let content = snapshot.catalog_for_context_grants(granted_operations);
         block(
             ContextBlockKind::ToolCatalog,
             &content,

@@ -171,8 +171,9 @@ mod grants_context_tests {
             version: 1,
         };
         let event = empty_event(&session);
+        let snap = crate::registry::snapshot::test_snapshot();
         ContextAssembler::from_config(&cfg)
-            .build(&journal, &session, &event, "hi", grants, None)
+            .build(&journal, &session, &event, "hi", grants, &snap)
             .unwrap()
     }
     fn catalog_block_text(blocks: &[ContextBlock]) -> String {

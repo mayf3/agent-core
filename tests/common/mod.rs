@@ -90,6 +90,7 @@ pub fn approved_stdout_invocation(
     run: &Run,
     session: &Session,
 ) -> anyhow::Result<ApprovedInvocation> {
+    let snap = agent_core_kernel::registry::snapshot::test_snapshot();
     gateway.approve_invocation(
         InvocationIntent {
             invocation_id: InvocationId("reply:run_test".to_string()),
@@ -103,6 +104,7 @@ pub fn approved_stdout_invocation(
         },
         run,
         session,
+        &snap,
     )
 }
 

@@ -7,9 +7,9 @@
 //!
 //! See `docs/decisions/tool-call-execution-loop.md` §4.
 
-use crate::domain::operation::{self, Risk};
 use crate::domain::{InvocationId, InvocationIntent, RunId};
 use crate::llm::ToolCall;
+use crate::registry::snapshot::{RegistrySnapshot, Risk};
 
 /// Typed, bounded reasons for rejecting a model tool call before capability
 /// execution. Messages never include provider input or infrastructure errors.
@@ -60,7 +60,7 @@ impl ToolRejection {
 /// Validate a model-emitted tool call and convert it into an
 /// [`InvocationIntent`]. Returns a typed [`ToolRejection`] (without executing
 /// anything) when:
-/// - the operation is not in the catalog (`UnknownOperation`);
+/// - the operation is not in the provided registry snapshot (`UnknownOperation`);
 /// - the operation is `Risk::Write` (`OperationNotAllowed`) — the MVP
 ///   restricts this path to `ReadOnly` only;
 /// - the arguments are not a JSON object (`MalformedArguments`).
@@ -84,8 +84,9 @@ pub fn validate_tool_call(
     run_id: &RunId,
     turn_index: usize,
     tool_index: usize,
+    snapshot: &RegistrySnapshot,
 ) -> Result<InvocationIntent, ToolRejection> {
-    let Some(spec) = operation::lookup(&call.operation) else {
+    let Some(spec) = snapshot.lookup(&call.operation) else {
         return Err(ToolRejection::UnknownOperation);
     };
     if spec.risk != Risk::ReadOnly {
@@ -123,10 +124,14 @@ mod tests {
         }
     }
 
+    fn snap() -> crate::registry::snapshot::RegistrySnapshot {
+        crate::registry::snapshot::test_snapshot()
+    }
+
     #[test]
     fn accepts_valid_readonly_operation() {
         let run_id = RunId::new();
-        let intent = validate_tool_call(&call("time.now"), &run_id, 0, 0).unwrap();
+        let intent = validate_tool_call(&call("time.now"), &run_id, 0, 0, &snap()).unwrap();
         assert_eq!(intent.operation, "time.now");
         // Key composition: tool:{run_id}:{turn}:{index}:{provider_digest}
         let expected_key = format!("tool:{}:{}:{}:{}", run_id.0, 0, 0, "hashed_call_1");
@@ -139,8 +144,9 @@ mod tests {
     #[test]
     fn same_provider_id_different_run_produces_different_keys() {
         let c = call("time.now");
-        let intent_a = validate_tool_call(&c, &RunId::new(), 0, 0).unwrap();
-        let intent_b = validate_tool_call(&c, &RunId::new(), 0, 0).unwrap();
+        let snap = crate::registry::snapshot::test_snapshot();
+        let intent_a = validate_tool_call(&c, &RunId::new(), 0, 0, &snap).unwrap();
+        let intent_b = validate_tool_call(&c, &RunId::new(), 0, 0, &snap).unwrap();
         assert_ne!(
             intent_a.idempotency_key, intent_b.idempotency_key,
             "same provider_id + different run_id must produce different keys"
@@ -151,8 +157,9 @@ mod tests {
     fn same_run_same_turn_same_index_is_stable() {
         let c = call("time.now");
         let run = RunId::new();
-        let intent_1 = validate_tool_call(&c, &run, 0, 0).unwrap();
-        let intent_2 = validate_tool_call(&c, &run, 0, 0).unwrap();
+        let s = snap();
+        let intent_1 = validate_tool_call(&c, &run, 0, 0, &s).unwrap();
+        let intent_2 = validate_tool_call(&c, &run, 0, 0, &s).unwrap();
         assert_eq!(
             intent_1.idempotency_key, intent_2.idempotency_key,
             "same (run,turn,index) must be stable"
@@ -164,8 +171,9 @@ mod tests {
         // Provider reusing the same tool_call.id across turns must NOT collide.
         let c = call("time.now");
         let run = RunId::new();
-        let turn_0 = validate_tool_call(&c, &run, 0, 0).unwrap();
-        let turn_1 = validate_tool_call(&c, &run, 1, 0).unwrap();
+        let s = snap();
+        let turn_0 = validate_tool_call(&c, &run, 0, 0, &s).unwrap();
+        let turn_1 = validate_tool_call(&c, &run, 1, 0, &s).unwrap();
         assert_ne!(
             turn_0.idempotency_key, turn_1.idempotency_key,
             "different turn must produce different keys"
@@ -177,8 +185,9 @@ mod tests {
         // Multiple tool calls in the same turn must NOT collide.
         let c = call("time.now");
         let run = RunId::new();
-        let idx_0 = validate_tool_call(&c, &run, 0, 0).unwrap();
-        let idx_1 = validate_tool_call(&c, &run, 0, 1).unwrap();
+        let s = snap();
+        let idx_0 = validate_tool_call(&c, &run, 0, 0, &s).unwrap();
+        let idx_1 = validate_tool_call(&c, &run, 0, 1, &s).unwrap();
         assert_ne!(
             idx_0.idempotency_key, idx_1.idempotency_key,
             "different index must produce different keys"
@@ -196,7 +205,8 @@ mod tests {
             operation: "time.now".to_string(),
             arguments: json!({}),
         };
-        let intent = validate_tool_call(&c, &RunId::new(), 0, 0).unwrap();
+        let s = snap();
+        let intent = validate_tool_call(&c, &RunId::new(), 0, 0, &s).unwrap();
         let key = intent.idempotency_key.unwrap();
         assert!(
             !key.contains(raw_id),
@@ -211,7 +221,7 @@ mod tests {
 
     #[test]
     fn rejects_unknown_operation_typed() {
-        let err = validate_tool_call(&call("shell.exec"), &RunId::new(), 0, 0).unwrap_err();
+        let err = validate_tool_call(&call("shell.exec"), &RunId::new(), 0, 0, &snap()).unwrap_err();
         assert_eq!(err, ToolRejection::UnknownOperation);
         assert_eq!(err.category(), "unknown_operation");
     }
@@ -219,7 +229,7 @@ mod tests {
     #[test]
     fn rejects_write_operation_typed() {
         let err =
-            validate_tool_call(&call("feishu.send_message"), &RunId::new(), 0, 0).unwrap_err();
+            validate_tool_call(&call("feishu.send_message"), &RunId::new(), 0, 0, &snap()).unwrap_err();
         assert_eq!(err, ToolRejection::OperationNotAllowed);
         assert_eq!(err.category(), "operation_not_allowed");
     }
@@ -228,7 +238,7 @@ mod tests {
     fn rejects_non_object_arguments_typed() {
         let mut c = call("time.now");
         c.arguments = json!("not-an-object");
-        let err = validate_tool_call(&c, &RunId::new(), 0, 0).unwrap_err();
+        let err = validate_tool_call(&c, &RunId::new(), 0, 0, &snap()).unwrap_err();
         assert_eq!(err, ToolRejection::MalformedArguments);
         assert_eq!(err.category(), "malformed_arguments");
     }
