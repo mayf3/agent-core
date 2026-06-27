@@ -301,43 +301,12 @@ fn misconfigured_write_grant_not_in_tools() -> Result<()> {
         tool_names.is_empty(),
         "Write op must not enter tools: {tool_names:?}"
     );
-    Ok(())
+        Ok(())
 }
-pub(crate) fn _cfg() -> KernelConfig {
-    use std::path::PathBuf;
-    KernelConfig {
-        db_path: PathBuf::from(":memory:"),
-        data_dir: PathBuf::from("."),
-        agent_id: AgentId("main".into()),
-        root_dir: PathBuf::from("."),
-        kernel_port: 4130,
-        connector_execute_url: String::new(),
-        ipc_token: "test".into(),
-        feishu_allowed_open_ids: vec![],
-        feishu_allowed_chat_ids: vec![],
-        feishu_require_group_mention: true,
-        openai_base_url: String::new(),
-        openai_api_key: String::new(),
-        model: String::new(),
-        fallback_openai_base_url: String::new(),
-        fallback_openai_api_key: String::new(),
-        fallback_model: String::new(),
-        model_timeout_ms: 100,
-        context_recent_messages: 6,
-        context_max_block_chars: 4000,
-        outbox_dispatcher_enabled: false,
-        outbox_dispatcher_poll_interval_ms: 10,
-        // time.now deliberately NOT granted here.
-        extra_allowed_operations: vec![],
-        require_write_approval: false,
-        write_approval_ttl_secs: 0,
-        fallback_tool_name_indexed: false,
-        primary_tool_name_indexed: false,
-    }
-}
+
 #[test]
 fn ungranted_provider_time_now_is_rejected_by_gateway() {
-    let mut cfg = _cfg();
+    let mut cfg = super::tool_loop_tests::test_config();
     let server = CaptureServer::start(vec![
         json!({
             "model": "local-stub",
@@ -416,7 +385,7 @@ fn ungranted_provider_time_now_is_rejected_by_gateway() {
 // ===== §9: full time.now tool loop (granted) =====
 #[test]
 fn granted_time_now_completes_real_http_tool_loop() {
-    let mut cfg = _cfg();
+    let mut cfg = super::tool_loop_tests::test_config();
     cfg.extra_allowed_operations = vec!["time.now".to_string()];
     let server = CaptureServer::start(vec![
         json!({

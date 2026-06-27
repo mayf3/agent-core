@@ -153,6 +153,7 @@ fn approval_state_is_durable_across_reopen() -> Result<()> {
     config.require_write_approval = true;
     let run_id = {
         let journal = JournalStore::open(&db_path)?;
+        journal.initialize_registry()?;
         let gateway = Gateway::new(config.clone());
         let runtime = Runtime::new(config, LocalEchoLlm);
         let envelope = gateway.cli_ingress("hi".to_string())?;

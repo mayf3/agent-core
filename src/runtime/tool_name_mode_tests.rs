@@ -113,7 +113,7 @@ mod tool_name_mode_tests {
     }
 
     fn cfg() -> crate::config::KernelConfig {
-        super::super::grant_schema_tests::_cfg()
+        super::super::tool_loop_tests::test_config()
     }
 
     #[test]

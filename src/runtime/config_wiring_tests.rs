@@ -4,7 +4,7 @@ mod config_wiring_tests {
     use crate::llm::{OpenAiCompatibleLlm, ToolNameMode};
 
     fn cfg() -> KernelConfig {
-        super::super::grant_schema_tests::_cfg()
+        super::super::tool_loop_tests::test_config()
     }
 
     fn wired_cfg() -> KernelConfig {
