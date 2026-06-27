@@ -237,7 +237,24 @@ fn a_provider_tools_pinned_to_run_snapshot() -> Result<()> {
     }
     drop(t);
 
-    // v2 should now be active (activated by the CaptureLlm callback).
+    // Prove both rounds belong to Run A: scan journal events for
+    // LlmCompleted matching run_a.run_id. There must be ≥2 (rounds 1 and 2).
+    let run_a_llm_events: Vec<_> = jref
+        .events()
+        .unwrap()
+        .into_iter()
+        .filter(|e| {
+            e.kind == JournalEventKind::LlmCompleted && e.run_id == Some(run_a.run_id.clone())
+        })
+        .collect();
+    assert!(
+        run_a_llm_events.len() >= 2,
+        "Run A must have >=2 LlmCompleted events (rounds 1+2), got {}",
+        run_a_llm_events.len()
+    );
+
+    // v2 should now be active (activated by the CaptureLlm callback after
+    // round 1 capture but before returning the tool call).
     assert_eq!(
         jref.current_registry_snapshot_id()?,
         v2_id,
