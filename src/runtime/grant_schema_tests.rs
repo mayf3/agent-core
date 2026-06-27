@@ -1,4 +1,3 @@
-use crate::config::KernelConfig;
 use crate::domain::operation::{provider_tool_definition, provider_tools_for_grants};
 use crate::domain::*;
 use crate::gateway::Gateway;
@@ -186,7 +185,8 @@ fn request_includes_time_now_when_granted() -> Result<()> {
         3000,
     );
     let snap = crate::registry::snapshot::test_snapshot();
-    let provider_tools = snap.provider_tools_for_grants(&["time.now".to_string(), "system.status".to_string()]);
+    let provider_tools =
+        snap.provider_tools_for_grants(&["time.now".to_string(), "system.status".to_string()]);
     let _ = llm.complete(LlmInput {
         blocks: vec![],
         user_text: "x".into(),
@@ -301,7 +301,7 @@ fn misconfigured_write_grant_not_in_tools() -> Result<()> {
         tool_names.is_empty(),
         "Write op must not enter tools: {tool_names:?}"
     );
-        Ok(())
+    Ok(())
 }
 
 #[test]

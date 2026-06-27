@@ -221,15 +221,16 @@ mod tests {
 
     #[test]
     fn rejects_unknown_operation_typed() {
-        let err = validate_tool_call(&call("shell.exec"), &RunId::new(), 0, 0, &snap()).unwrap_err();
+        let err =
+            validate_tool_call(&call("shell.exec"), &RunId::new(), 0, 0, &snap()).unwrap_err();
         assert_eq!(err, ToolRejection::UnknownOperation);
         assert_eq!(err.category(), "unknown_operation");
     }
 
     #[test]
     fn rejects_write_operation_typed() {
-        let err =
-            validate_tool_call(&call("feishu.send_message"), &RunId::new(), 0, 0, &snap()).unwrap_err();
+        let err = validate_tool_call(&call("feishu.send_message"), &RunId::new(), 0, 0, &snap())
+            .unwrap_err();
         assert_eq!(err, ToolRejection::OperationNotAllowed);
         assert_eq!(err.category(), "operation_not_allowed");
     }

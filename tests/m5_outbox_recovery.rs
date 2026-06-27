@@ -333,9 +333,21 @@ fn stale_dispatching_routes_by_terminal_fact_not_all_unknown() -> Result<()> {
     let run = common::test_run(&config, &session);
 
     let cases = [
-        ("reply:succeeded", JournalEventKind::ReceiptReceived, json!({ "status": "Succeeded", "output_kind": "text" })),
-        ("reply:failed", JournalEventKind::ReceiptReceived, json!({ "status": "Failed", "output_kind": "error" })),
-        ("reply:unknown", JournalEventKind::OutboxDispatchUnknown, json!({ "error": "previous_recovery_incomplete" })),
+        (
+            "reply:succeeded",
+            JournalEventKind::ReceiptReceived,
+            json!({ "status": "Succeeded", "output_kind": "text" }),
+        ),
+        (
+            "reply:failed",
+            JournalEventKind::ReceiptReceived,
+            json!({ "status": "Failed", "output_kind": "error" }),
+        ),
+        (
+            "reply:unknown",
+            JournalEventKind::OutboxDispatchUnknown,
+            json!({ "error": "previous_recovery_incomplete" }),
+        ),
     ];
     let mut invocation_ids = Vec::new();
     let snap = agent_core_kernel::registry::snapshot::test_snapshot();

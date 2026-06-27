@@ -106,26 +106,31 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
             Some(s) => s,
             None => {
                 return self.record_rejection(
-                    journal, run, session, &tool_call.id,
-                    &audited_op, crate::gateway::ToolRejection::UnknownOperation,
+                    journal,
+                    run,
+                    session,
+                    &tool_call.id,
+                    &audited_op,
+                    crate::gateway::ToolRejection::UnknownOperation,
                 );
             }
         };
 
-        let mut intent =
-            match crate::gateway::validate_tool_call(tool_call, &run.id, turn_index, tool_index, snapshot) {
-                Ok(intent) => intent,
-                Err(rejection) => {
-                    return self.record_rejection(
-                        journal,
-                        run,
-                        session,
-                        &tool_call.id,
-                        &audited_op,
-                        rejection,
-                    )
-                }
-            };
+        let mut intent = match crate::gateway::validate_tool_call(
+            tool_call, &run.id, turn_index, tool_index, snapshot,
+        ) {
+            Ok(intent) => intent,
+            Err(rejection) => {
+                return self.record_rejection(
+                    journal,
+                    run,
+                    session,
+                    &tool_call.id,
+                    &audited_op,
+                    rejection,
+                )
+            }
+        };
         if let Err(rejection) = validate_model_arguments(&intent.operation, &intent.arguments) {
             return self.record_rejection(
                 journal,
@@ -189,34 +194,35 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
             return Ok(fatal);
         }
 
-        let exec_result: Result<(serde_json::Value, String)> =
-            match spec.binding_key.as_str() {
-                "builtin.time_now" => crate::adapters::TimeAdapter
-                    .execute(&approved)
-                    .map(|receipt| {
-                        let text = receipt
-                            .output
-                            .get("iso")
-                            .and_then(|value| value.as_str())
-                            .unwrap_or("ok")
-                            .to_string();
-                        (receipt.output, text)
-                    }),
-                "builtin.session_recall_recent" => {
-                    Self::execute_session_recall(journal, &session.id, &approved)
-                        .map(|(_, output, text)| (output, text))
-                }
-                "builtin.system_status" => crate::capabilities::execute(journal)
-                    .map(|output| {
-                        let text = output
-                            .get("summary")
-                            .and_then(|value| value.as_str())
-                            .unwrap_or("ok")
-                            .to_string();
-                        (output, text)
-                    }),
-                _ => Err(anyhow::anyhow!("registry_binding_invalid: {}", spec.binding_key)),
-            };
+        let exec_result: Result<(serde_json::Value, String)> = match spec.binding_key.as_str() {
+            "builtin.time_now" => crate::adapters::TimeAdapter
+                .execute(&approved)
+                .map(|receipt| {
+                    let text = receipt
+                        .output
+                        .get("iso")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("ok")
+                        .to_string();
+                    (receipt.output, text)
+                }),
+            "builtin.session_recall_recent" => {
+                Self::execute_session_recall(journal, &session.id, &approved)
+                    .map(|(_, output, text)| (output, text))
+            }
+            "builtin.system_status" => crate::capabilities::execute(journal).map(|output| {
+                let text = output
+                    .get("summary")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("ok")
+                    .to_string();
+                (output, text)
+            }),
+            _ => Err(anyhow::anyhow!(
+                "registry_binding_invalid: {}",
+                spec.binding_key
+            )),
+        };
         let (status, output, text) = match exec_result {
             Ok((output, text)) => (
                 ReceiptStatus::Succeeded,
