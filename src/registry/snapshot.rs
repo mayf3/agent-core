@@ -69,6 +69,14 @@ pub struct RegistrySnapshot {
 }
 
 impl RegistrySnapshot {
+    /// An empty snapshot for testing edge cases.
+    pub fn empty() -> Self {
+        Self {
+            snapshot_id: String::new(),
+            created_at: Utc::now(),
+            operations: vec![],
+        }
+    }
     /// Look up an operation by name.
     pub fn lookup(&self, name: &str) -> Option<&OperationSpec> {
         self.operations.iter().find(|op| op.name == name)

@@ -355,32 +355,32 @@ fn idempotency_key_is_run_turn_index_scoped() {
         arguments: json!({}),
     };
     let run = RunId::new();
-    let k1 = validate_tool_call(&mk("time.now"), &run, 0, 0).unwrap();
-    let k2 = validate_tool_call(&mk("time.now"), &run, 0, 0).unwrap();
+    let k1 = validate_tool_call(&mk("time.now", None), &run, 0, 0).unwrap();
+    let k2 = validate_tool_call(&mk("time.now", None), &run, 0, 0).unwrap();
     assert_eq!(k1.idempotency_key, k2.idempotency_key, "stable");
     assert_ne!(
-        validate_tool_call(&mk("time.now"), &run, 0, 0)
+        validate_tool_call(&mk("time.now", None), &run, 0, 0)
             .unwrap()
             .idempotency_key,
-        validate_tool_call(&mk("time.now"), &run, 1, 0)
+        validate_tool_call(&mk("time.now", None), &run, 1, 0)
             .unwrap()
             .idempotency_key,
         "turn"
     );
     assert_ne!(
-        validate_tool_call(&mk("time.now"), &run, 0, 0)
+        validate_tool_call(&mk("time.now", None), &run, 0, 0)
             .unwrap()
             .idempotency_key,
-        validate_tool_call(&mk("time.now"), &run, 0, 1)
+        validate_tool_call(&mk("time.now", None), &run, 0, 1)
             .unwrap()
             .idempotency_key,
         "index"
     );
     assert_ne!(
-        validate_tool_call(&mk("time.now"), &run, 0, 0)
+        validate_tool_call(&mk("time.now", None), &run, 0, 0)
             .unwrap()
             .idempotency_key,
-        validate_tool_call(&mk("time.now"), &RunId::new(), 0, 0)
+        validate_tool_call(&mk("time.now", None), &RunId::new(), 0, 0)
             .unwrap()
             .idempotency_key,
         "run"

@@ -7,6 +7,7 @@ use crate::domain::*;
 use crate::gateway::{Gateway, ToolRejection};
 use crate::journal::JournalStore;
 use crate::llm::{LlmClient, ToolCall};
+use crate::registry::snapshot::RegistrySnapshot;
 use anyhow::Result;
 use serde_json::json;
 
@@ -81,8 +82,24 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
         tool_call: &ToolCall,
         turn_index: usize,
         tool_index: usize,
+        snapshot: &RegistrySnapshot,
     ) -> Result<ToolCallOutcome> {
         let audited_op = sanitize_operation_for_audit(&tool_call.operation);
+
+        // Blocker 1c+d: snapshot-based operation check before Gateway validation.
+        // If the operation doesn't exist in the Run's pinned snapshot, reject
+        // immediately without consulting the static catalog.
+        if snapshot.lookup(&tool_call.operation).is_none() {
+            return self.record_rejection(
+                journal,
+                run,
+                session,
+                &tool_call.id,
+                &audited_op,
+                crate::gateway::ToolRejection::UnknownOperation,
+            );
+        }
+
         if let Some(fatal) = append_or_fatal(
             journal,
             JournalEventKind::ToolCallIssued,

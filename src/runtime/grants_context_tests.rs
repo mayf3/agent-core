@@ -172,7 +172,7 @@ mod grants_context_tests {
         };
         let event = empty_event(&session);
         ContextAssembler::from_config(&cfg)
-            .build(&journal, &session, &event, "hi", grants)
+            .build(&journal, &session, &event, "hi", grants, None)
             .unwrap()
     }
     fn catalog_block_text(blocks: &[ContextBlock]) -> String {

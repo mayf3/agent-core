@@ -2,6 +2,7 @@ use crate::domain::*;
 use crate::gateway::Gateway;
 use crate::journal::JournalStore;
 use crate::llm::{LlmClient, LlmFollowUp, LlmInput, LlmOutput, ProviderToolTurn, ToolCallResult};
+use crate::registry::snapshot::RegistrySnapshot;
 use crate::runtime::tool_rejection::sanitize_operation_for_audit;
 use anyhow::Result;
 use serde_json::json;
@@ -25,6 +26,7 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
         blocks: &mut Vec<ContextBlock>,
         user_text: &str,
         mut llm: LlmOutput,
+        snapshot: &RegistrySnapshot,
     ) -> Result<LlmOutput> {
         let mut tool_index: usize = 0;
         // Run-local follow-up state: the provider turn from the first round,
@@ -67,7 +69,7 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
                     let this_tool = tool_index;
                     tool_index += 1;
                     let outcome = self.handle_inline_tool_call(
-                        journal, gateway, run, session, &tool_call, turn_index, this_tool,
+                        journal, gateway, run, session, &tool_call, turn_index, this_tool, snapshot,
                     )?;
                     match outcome {
                         ToolCallOutcome::Fatal { category } => {
