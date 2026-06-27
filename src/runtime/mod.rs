@@ -17,6 +17,14 @@ mod tool_rejection;
 pub use crate::gateway::ToolRejection;
 pub use tool_rejection::validate_model_arguments;
 
+#[cfg(test)]
+#[path = "tests/registry_snapshot_lifecycle.rs"]
+mod registry_snapshot_lifecycle;
+
+#[cfg(test)]
+#[path = "tests/registry_snapshot_gateway.rs"]
+mod registry_snapshot_gateway;
+
 pub struct Runtime<L> {
     config: KernelConfig,
     llm: L,
@@ -115,7 +123,9 @@ where
         // Load the snapshot BEFORE creating the Run. If the snapshot is
         // missing or corrupt, the error is deterministic
         // (registry_snapshot_unavailable) and no Run artifacts are created.
-        let snapshot = journal.load_registry_snapshot(&snapshot_id)?;
+        let snapshot = journal.load_registry_snapshot(&snapshot_id).map_err(|e| {
+            anyhow::anyhow!("registry_snapshot_unavailable: {e}")
+        })?;
         let run = self.create_run(&session, &event, &snapshot_id);
         journal.insert_run(&run)?;
         journal.append_event(
@@ -258,7 +268,9 @@ where
             anyhow::bail!("registry_snapshot_invalid: snapshot ID is empty");
         }
         // Load the snapshot BEFORE creating the Run.
-        let snapshot = journal.load_registry_snapshot(&snapshot_id)?;
+        let snapshot = journal.load_registry_snapshot(&snapshot_id).map_err(|e| {
+            anyhow::anyhow!("registry_snapshot_unavailable: {e}")
+        })?;
         let run = self.create_run(&session, &event, &snapshot_id);
         journal.insert_run(&run)?;
         journal.append_event(
