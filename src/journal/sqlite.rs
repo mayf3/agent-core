@@ -11,8 +11,7 @@ use std::sync::Mutex;
 
 pub struct JournalStore {
     pub(crate) conn: Mutex<Connection>,
-    /// The cached current registry snapshot ID. Set at boot by
-    /// `ensure_baseline_snapshot`. New Runs pin this value.
+    /// Cached current registry snapshot ID. Set by initialize_registry at boot.
     pub(crate) current_snapshot_id: Mutex<Option<String>>,
     /// deterministic `Err`, while every other Journal operation (event append,
     /// run status update, fail_run, hash-chain verification) keeps working.
@@ -38,6 +37,8 @@ impl JournalStore {
     pub fn in_memory() -> Result<Self> {
         let store = Self::with_conn(Connection::open_in_memory()?);
         store.migrate()?;
+        // Auto-init registry for tests; production uses open() + explicit init.
+        store.initialize_registry()?;
         Ok(store)
     }
 
@@ -57,7 +58,6 @@ impl JournalStore {
             current_snapshot_id: Mutex::new(None),
         }
     }
-
     /// The applied schema version (`PRAGMA user_version`). Useful for
     /// operators and tests to confirm which migration level a database is at.
     pub fn schema_version(&self) -> Result<i64> {

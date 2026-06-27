@@ -112,6 +112,10 @@ where
         if snapshot_id.is_empty() {
             anyhow::bail!("registry_snapshot_invalid: snapshot ID is empty");
         }
+        // Load the snapshot BEFORE creating the Run. If the snapshot is
+        // missing or corrupt, the error is deterministic
+        // (registry_snapshot_unavailable) and no Run artifacts are created.
+        let snapshot = journal.load_registry_snapshot(&snapshot_id)?;
         let run = self.create_run(&session, &event, &snapshot_id);
         journal.insert_run(&run)?;
         journal.append_event(
@@ -139,9 +143,8 @@ where
             .map(|g| g.operation.clone())
             .collect();
 
-        // Load the Run's pinned registry snapshot — required for Context,
-        // Provider tools, and Gateway validation.
-        let snapshot = journal.load_registry_snapshot(&run.registry_snapshot_id)?;
+        // The loaded snapshot (Arc clone) is used throughout the Run's
+        // lifetime for Context, Provider tools, and Gateway validation.
 
         let mut blocks = ContextAssembler::from_config(&self.config).build(
             journal,
@@ -254,6 +257,8 @@ where
         if snapshot_id.is_empty() {
             anyhow::bail!("registry_snapshot_invalid: snapshot ID is empty");
         }
+        // Load the snapshot BEFORE creating the Run.
+        let snapshot = journal.load_registry_snapshot(&snapshot_id)?;
         let run = self.create_run(&session, &event, &snapshot_id);
         journal.insert_run(&run)?;
         journal.append_event(
@@ -267,8 +272,7 @@ where
                 "principal_id": run.principal.principal_id.0,
             }),
         )?;
-        // Load the Run's pinned registry snapshot for Gateway and enqueue/pause.
-        let snapshot = journal.load_registry_snapshot(&run.registry_snapshot_id)?;
+        let snap_for_gateway = snapshot;
         let RuntimeEventPayload::UserMessage {
             text,
             message_id,
@@ -287,7 +291,7 @@ where
                 "idempotency_key": intent.idempotency_key,
             }),
         )?;
-        let approved = gateway.approve_invocation(intent, &run, &session, &snapshot)?;
+        let approved = gateway.approve_invocation(intent, &run, &session, &snap_for_gateway)?;
         journal.append_event(
             JournalEventKind::InvocationApproved,
             Some(&run.id),
@@ -298,7 +302,7 @@ where
                 "operation": approved.intent().operation,
             }),
         )?;
-        self.enqueue_or_pause(journal, &approved, &run, &session, &correlation_id, &snapshot)?;
+        self.enqueue_or_pause(journal, &approved, &run, &session, &correlation_id, &snap_for_gateway)?;
         Ok(RuntimeOutcome {
             run_id: run.id,
             session_id: session.id,
