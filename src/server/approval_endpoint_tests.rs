@@ -66,6 +66,7 @@ fn paused_run() -> anyhow::Result<(String, Arc<JournalStore>, Arc<crate::gateway
     use crate::runtime::Runtime;
     let config = approval_config();
     let journal = Arc::new(JournalStore::in_memory()?);
+    journal.initialize_registry()?;
     let gateway = Arc::new(Gateway::new(config.clone()));
     let runtime = Runtime::new(config, LocalEchoLlm);
     let envelope = gateway.cli_ingress("hi".to_string())?;
@@ -141,6 +142,7 @@ fn approve_endpoint_rejects_missing_run_id() -> anyhow::Result<()> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
     let addr = listener.local_addr()?;
     let journal = Arc::new(JournalStore::in_memory()?);
+    journal.initialize_registry()?;
     let gateway = Arc::new(crate::gateway::Gateway::new(approval_config()));
     let journal_c = Arc::clone(&journal);
     let gateway_c = Arc::clone(&gateway);

@@ -12,7 +12,7 @@ mod transcript_isolation_tests {
     use std::thread;
 
     fn cfg() -> crate::config::KernelConfig {
-        super::super::grant_schema_tests::_cfg()
+        super::super::tool_loop_tests::test_config()
     }
 
     /// Capture stub: serves queued responses, captures request bodies.
