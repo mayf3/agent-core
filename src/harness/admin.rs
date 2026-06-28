@@ -43,8 +43,9 @@ pub fn handle_register_bundle(journal: &JournalStore, body: &Value) -> Result<Va
 
     // Persist the canonical manifest (re-serialized from validated struct,
     // not the raw request body — this strips declared_hash, normalizes key
-    // order, and ensures consistency).
-    let canonical_json = serde_json::to_string(&manifest)?;
+    // order, sorts operations by name, and ensures byte-level consistency
+    // between hash and storage).
+    let canonical_json = serde_json::to_string(&manifest::canonical_manifest_value(&manifest))?;
     let now = chrono::Utc::now().to_rfc3339();
 
     // Check for duplicate (same bundle_id + bundle_version).
@@ -68,7 +69,7 @@ pub fn handle_register_bundle(journal: &JournalStore, body: &Value) -> Result<Va
 
     insert_bundle(journal, &bundle_hash, &manifest, &canonical_json, &now)?;
 
-    let _ = journal.append_event(
+    journal.append_event(
         JournalEventKind::HarnessBundleRegistered,
         None,
         None,
@@ -79,7 +80,7 @@ pub fn handle_register_bundle(journal: &JournalStore, body: &Value) -> Result<Va
             "bundle_version": manifest.bundle_version,
             "operation_count": manifest.operations.len(),
         }),
-    );
+    )?;
 
     Ok(serde_json::json!({
         "ok": true,
@@ -150,7 +151,7 @@ pub fn handle_compose_snapshot(
     // Create the snapshot (idempotent: same specs → same ID).
     let snap = journal.create_registry_snapshot(all_ops)?;
 
-    let _ = journal.append_event(
+    journal.append_event(
         JournalEventKind::RegistrySnapshotComposed,
         None,
         None,
@@ -161,7 +162,7 @@ pub fn handle_compose_snapshot(
             "candidate_snapshot_id": snap.snapshot_id,
             "operation_count": snap.operations.len(),
         }),
-    );
+    )?;
 
     Ok(serde_json::json!({
         "ok": true,
@@ -170,25 +171,9 @@ pub fn handle_compose_snapshot(
 }
 
 /// Activate a snapshot (or rollback to a historical one).
-pub fn handle_activate_snapshot(
-    journal: &JournalStore,
-    snapshot_id: &str,
-    correlation_id: Option<&str>,
-) -> Result<Value> {
+pub fn handle_activate_snapshot(journal: &JournalStore, snapshot_id: &str) -> Result<Value> {
     let previous = journal.current_registry_snapshot_id().ok();
     journal.activate_registry_snapshot(snapshot_id)?;
-
-    let corr = correlation_id.unwrap_or("admin").to_string();
-    let _ = journal.append_event(
-        JournalEventKind::RegistrySnapshotActivated,
-        None,
-        None,
-        Some(&corr),
-        serde_json::json!({
-            "previous_snapshot_id": previous,
-            "new_snapshot_id": snapshot_id,
-        }),
-    );
 
     Ok(serde_json::json!({
         "ok": true,

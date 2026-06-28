@@ -1,6 +1,10 @@
 -- Migration 0003: Harness Control Plane
 -- Adds tables for external harness bundle registration, runtime
--- registration, and explicit channel-level operation grants.
+-- registration, explicit channel-level operation grants, and durable
+-- registry current-state persistence.
+--
+-- The registry_current_state table ensures that activate / rollback
+-- survive restart. It is a singleton row (CHECK singleton_id = 1).
 
 CREATE TABLE IF NOT EXISTS harness_bundles (
     bundle_hash       TEXT PRIMARY KEY,
@@ -29,4 +33,10 @@ CREATE TABLE IF NOT EXISTS channel_operation_grants (
     operation_name  TEXT NOT NULL,
     created_at      TEXT NOT NULL,
     PRIMARY KEY(channel, operation_name)
+);
+
+CREATE TABLE IF NOT EXISTS registry_current_state (
+    singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+    snapshot_id  TEXT NOT NULL REFERENCES registry_snapshots(snapshot_id),
+    updated_at   TEXT NOT NULL
 );

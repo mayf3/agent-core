@@ -2,40 +2,90 @@
 //! SQLite connection as the rest of the Journal, sharing its mutex. The
 //! registry tables (migration 0002) store immutable snapshots that each Run
 //! pins to for its lifetime.
+//!
+//! The current snapshot is durable in `registry_current_state` (migration 0003)
+//! so that activation and rollback survive restart.
 
 use crate::registry::snapshot::{
     compute_snapshot_id, BindingKind, OperationSpec, RegistrySnapshot, Risk,
 };
 use crate::registry::store::builtin_specs;
 use anyhow::{anyhow, Result};
-use rusqlite::params;
+use chrono::Utc;
+use rusqlite::{params, OptionalExtension};
 use std::sync::Arc;
 
 impl super::JournalStore {
-    /// Initialize the registry at Kernel boot: ensure the baseline snapshot
-    /// exists, set it as current, and backfill old Runs. This is the **only**
-    /// path that writes or sets the current snapshot ID — the runtime getter
-    /// `current_registry_snapshot_id()` is a pure read. Called after `migrate()`
-    /// during `JournalStore::open` or `serve` startup.
+    /// Initialize the registry at Kernel boot: read durable current snapshot
+    /// from DB if one exists; otherwise create baseline, persist it as current,
+    /// and backfill old Runs. This is the **only** path that sets the current
+    /// snapshot ID at startup.
     ///
-    /// Idempotent: if the baseline snapshot already exists (same canonical ID),
-    /// it is reused; if `current_snapshot_id` is already set, it is preserved.
+    /// **Persistence contract**: the `registry_current_state` singleton row is
+    /// the source of truth. If it exists its `snapshot_id` must be loadable and
+    /// strictly decodable — otherwise boot fails (never silently fall back to
+    /// baseline).
     pub fn initialize_registry(&self) -> Result<String> {
-        // Only set the current ID once — subsequent calls are no-ops.
-        if self.current_snapshot_id.lock().unwrap().is_some() {
-            return self
-                .current_snapshot_id
-                .lock()
-                .unwrap()
-                .clone()
-                .ok_or_else(|| anyhow!("registry_initialized_but_id_missing"));
+        // 1. Try to read the durable current snapshot from DB.
+        if let Some(snapshot_id) = self.read_persistent_current()? {
+            // Verify the snapshot is loadable (triggers strict decode).
+            let _ = self.load_registry_snapshot(&snapshot_id)?;
+            *self.current_snapshot_id.lock().unwrap() = Some(snapshot_id.clone());
+            let _ = self.backfill_null_registry_snapshot(&snapshot_id);
+            return Ok(snapshot_id);
         }
+
+        // 2. No durable current exists — create baseline, persist, backfill.
         let snapshot = self.create_registry_snapshot(builtin_specs())?;
         let snapshot_id = snapshot.snapshot_id.clone();
+        self.write_persistent_current(&snapshot_id)?;
         *self.current_snapshot_id.lock().unwrap() = Some(snapshot_id.clone());
-        // Backfill old Runs with NULL snapshot ID.
         let _ = self.backfill_null_registry_snapshot(&snapshot_id);
         Ok(snapshot_id)
+    }
+
+    /// Read the durable current snapshot_id from `registry_current_state`.
+    /// Returns `None` if the table exists but is empty (fresh DB with migration
+    /// 0003 applied but no row yet).
+    fn read_persistent_current(&self) -> Result<Option<String>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow!("journal mutex poisoned"))?;
+        // Check if the table exists.
+        let table_exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='registry_current_state'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+        if !table_exists {
+            return Ok(None);
+        }
+        let id: Option<String> = conn
+            .query_row(
+                "SELECT snapshot_id FROM registry_current_state WHERE singleton_id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(id)
+    }
+
+    /// Write (or update) the durable current snapshot_id.
+    fn write_persistent_current(&self, snapshot_id: &str) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow!("journal mutex poisoned"))?;
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT OR REPLACE INTO registry_current_state (singleton_id, snapshot_id, updated_at)
+             VALUES (1, ?1, ?2)",
+            params![snapshot_id, now],
+        )?;
+        Ok(())
     }
 
     /// Read-only getter for the currently active registry snapshot ID.
@@ -194,10 +244,40 @@ impl super::JournalStore {
         })
     }
 
-    /// Activate a snapshot as current (for new Runs). Internal/test-only.
+    /// Activate a snapshot as current (for new Runs). Persists the choice
+    /// durably in `registry_current_state` so it survives restart.
+    ///
+    /// Transaction boundary: verify target exists → update persistent current
+    /// → append RegistrySnapshotActivated event → commit. On failure the
+    /// durable current and memory pointer are both unchanged.
     pub fn activate_registry_snapshot(&self, snapshot_id: &str) -> Result<()> {
-        // Verify it exists.
+        // Verify it exists (triggers strict decode).
         let _ = self.load_registry_snapshot(snapshot_id)?;
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow!("journal mutex poisoned"))?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let now = Utc::now().to_rfc3339();
+        // Update persistent current.
+        tx.execute(
+            "INSERT OR REPLACE INTO registry_current_state (singleton_id, snapshot_id, updated_at)
+             VALUES (1, ?1, ?2)",
+            params![snapshot_id, now],
+        )?;
+        // Append RegistrySnapshotActivated event.
+        let payload = serde_json::json!({
+            "snapshot_id": snapshot_id,
+            "activated_at": now,
+        });
+        crate::journal::hash_chain::append_event_in_transaction(
+            &tx,
+            "RegistrySnapshotActivated",
+            &serde_json::to_string(&payload)?,
+            &now,
+        )?;
+        tx.commit()?;
+        // On success, update the in-memory pointer.
         *self.current_snapshot_id.lock().unwrap() = Some(snapshot_id.to_string());
         Ok(())
     }

@@ -63,7 +63,7 @@ pub fn handle_admin_request(
                 .get("snapshot_id")
                 .and_then(Value::as_str)
                 .unwrap_or("");
-            admin::handle_activate_snapshot(journal, snap_id, None)
+            admin::handle_activate_snapshot(journal, snap_id)
         }
         ("GET", "/registry") => admin::handle_registry_info(journal),
         ("PUT", p) if p.starts_with("/grants/") => {
@@ -186,41 +186,6 @@ mod tests {
         let text = String::from_utf8_lossy(&buf);
         let body_text = text.split("\r\n\r\n").nth(1).unwrap_or("").trim();
         serde_json::from_str(body_text).unwrap_or_else(|_| json!({}))
-    }
-
-    /// Drive handle_admin_request via a TCP loopback round-trip; return JSON body.
-    fn admin_request(method: &str, path: &str, token: Option<&str>, body: Value) -> Value {
-        let config = admin_config();
-        let journal = Arc::new(JournalStore::in_memory().expect("in-memory"));
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        let j = Arc::clone(&journal);
-        let c = config.clone();
-        let body_bytes = serde_json::to_vec(&body).unwrap();
-        let body_for_thread = body.clone();
-        let token_str = token.map(|t| t.to_string());
-        let method_owned = method.to_string();
-        let path_owned = path.to_string();
-        let handle = std::thread::spawn(move || {
-            let (mut conn, _) = listener.accept().unwrap();
-            let request = HttpRequest {
-                method: method_owned,
-                path: path_owned,
-                bearer_token: token_str,
-                body: serde_json::to_vec(&body_for_thread).unwrap(),
-            };
-            handle_admin_request(&mut conn, &c, &j, &request).ok();
-        });
-        let mut stream = std::net::TcpStream::connect(addr).unwrap();
-        let auth = token.map(|t| format!("Bearer {}", t)).unwrap_or_default();
-        let req_line = format!(
-            "{method} {path} HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAuthorization: {auth}\r\n\r\n",
-            body_bytes.len(),
-        );
-        stream.write_all(req_line.as_bytes()).unwrap();
-        stream.write_all(&body_bytes).unwrap();
-        handle.join().unwrap();
-        read_body(&mut stream)
     }
 
     fn admin_request_status(method: &str, path: &str, token: Option<&str>, body: Value) -> u16 {
