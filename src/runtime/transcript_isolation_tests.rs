@@ -132,7 +132,7 @@ mod transcript_isolation_tests {
             user_text: "hi".into(),
             granted_operations: vec!["time.now".into()],
             provider_tools,
-            follow_up: None,
+            follow_ups: vec![],
         })?;
         let reqs = srv.requests();
         assert!(!reqs.is_empty(), "request captured");
@@ -231,7 +231,7 @@ mod transcript_isolation_tests {
                 user_text: "a".into(),
                 granted_operations: vec![],
                 provider_tools: vec![],
-                follow_up: Some(crate::llm::LlmFollowUp {
+                follow_ups: vec![crate::llm::LlmFollowUp {
                     provider_turn: crate::llm::ProviderToolTurn {
                         endpoint: crate::llm::EndpointChoice::Primary,
                         provider_tool_call_id: "call_A".into(),
@@ -240,7 +240,7 @@ mod transcript_isolation_tests {
                         arguments_json: "{}".into(),
                     },
                     result_content: "status: succeeded\noutput: result_A".into(),
-                }),
+                }],
             })
         });
         // Run B: follow_up with provider id call_B, wire fn_1, result result_B.
@@ -251,7 +251,7 @@ mod transcript_isolation_tests {
                 user_text: "b".into(),
                 granted_operations: vec![],
                 provider_tools: vec![],
-                follow_up: Some(crate::llm::LlmFollowUp {
+                follow_ups: vec![crate::llm::LlmFollowUp {
                     provider_turn: crate::llm::ProviderToolTurn {
                         endpoint: crate::llm::EndpointChoice::Primary,
                         provider_tool_call_id: "call_B".into(),
@@ -260,7 +260,7 @@ mod transcript_isolation_tests {
                         arguments_json: "{}".into(),
                     },
                     result_content: "status: succeeded\noutput: result_B".into(),
-                }),
+                }],
             })
         });
         handle_a.join().unwrap()?;
@@ -354,7 +354,7 @@ mod transcript_isolation_tests {
                 user_text: "a".into(),
                 granted_operations: vec![],
                 provider_tools: vec![],
-                follow_up: Some(crate::llm::LlmFollowUp {
+                follow_ups: vec![crate::llm::LlmFollowUp {
                     provider_turn: crate::llm::ProviderToolTurn {
                         endpoint: crate::llm::EndpointChoice::Primary,
                         provider_tool_call_id: "call_same".into(),
@@ -363,7 +363,7 @@ mod transcript_isolation_tests {
                         arguments_json: "{}".into(),
                     },
                     result_content: "result_A".into(),
-                }),
+                }],
             })
         });
         let l2 = Arc::clone(&llm);
@@ -373,7 +373,7 @@ mod transcript_isolation_tests {
                 user_text: "b".into(),
                 granted_operations: vec![],
                 provider_tools: vec![],
-                follow_up: Some(crate::llm::LlmFollowUp {
+                follow_ups: vec![crate::llm::LlmFollowUp {
                     provider_turn: crate::llm::ProviderToolTurn {
                         endpoint: crate::llm::EndpointChoice::Primary,
                         provider_tool_call_id: "call_same".into(),
@@ -382,7 +382,7 @@ mod transcript_isolation_tests {
                         arguments_json: "{}".into(),
                     },
                     result_content: "result_B".into(),
-                }),
+                }],
             })
         });
         h1.join().unwrap()?;

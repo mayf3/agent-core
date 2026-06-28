@@ -41,6 +41,7 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
         // Run-local follow-up state: the provider turn from the first round,
         // carried explicitly through LlmInput — never shared client state.
         let mut pending_turn: Option<ProviderToolTurn> = llm.provider_turn.take();
+        let mut follow_ups: Vec<LlmFollowUp> = vec![];
         for turn_index in 0..MAX_TOOL_ROUNDS {
             match llm.tool_call.clone() {
                 ToolCallResult::Absent => return Ok(llm),
@@ -64,14 +65,17 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
                                 provider_turn: pt,
                                 result_content: text,
                             });
+                            if let Some(fu) = fu {
+                                follow_ups.push(fu);
+                            }
                             llm = self.complete_after_tool_result(
                                 journal,
                                 run,
                                 session,
                                 blocks,
                                 user_text,
-                                fu,
                                 &provider_tools,
+                                &follow_ups,
                             )?;
                             if llm.tool_call.is_absent() {
                                 return Ok(llm);
@@ -109,14 +113,17 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
                                 provider_turn: pt,
                                 result_content: text.clone(),
                             });
+                            if let Some(fu) = fu {
+                                follow_ups.push(fu);
+                            }
                             llm = self.complete_after_tool_result(
                                 journal,
                                 run,
                                 session,
                                 blocks,
                                 user_text,
-                                fu,
                                 &provider_tools,
+                                &follow_ups,
                             )?;
                             pending_turn = llm.provider_turn.take();
                             if llm.tool_call.is_absent() {
@@ -147,8 +154,8 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
         session: &Session,
         blocks: &[ContextBlock],
         user_text: &str,
-        follow_up: Option<LlmFollowUp>,
         provider_tools: &[serde_json::Value],
+        follow_ups: &[LlmFollowUp],
     ) -> Result<LlmOutput> {
         let next = match self.llm.complete(LlmInput {
             blocks: blocks.to_vec(),
@@ -160,7 +167,7 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
                 .map(|g| g.operation.clone())
                 .collect(),
             provider_tools: provider_tools.to_vec(),
-            follow_up,
+            follow_ups: follow_ups.to_vec(),
         }) {
             Ok(next) => next,
             Err(_) => {
