@@ -25,7 +25,10 @@ pub fn grant_operation(
 ) -> Result<OperationGrant, anyhow::Error> {
     validate_channel(channel)?;
     let now = Utc::now().to_rfc3339();
-    let conn = journal.conn.lock().map_err(|_| anyhow::anyhow!("journal mutex poisoned"))?;
+    let conn = journal
+        .conn
+        .lock()
+        .map_err(|_| anyhow::anyhow!("journal mutex poisoned"))?;
     conn.execute(
         "INSERT OR IGNORE INTO channel_operation_grants (channel, operation_name, created_at) VALUES (?1, ?2, ?3)",
         rusqlite::params![channel, operation_name, now],
@@ -34,7 +37,9 @@ pub fn grant_operation(
 
     let _ = journal.append_event(
         JournalEventKind::OperationGrantChanged,
-        None, None, None,
+        None,
+        None,
+        None,
         serde_json::json!({
             "channel": channel,
             "operation_name": operation_name,
@@ -56,7 +61,10 @@ pub fn revoke_operation(
     operation_name: &str,
 ) -> Result<(), anyhow::Error> {
     validate_channel(channel)?;
-    let conn = journal.conn.lock().map_err(|_| anyhow::anyhow!("journal mutex poisoned"))?;
+    let conn = journal
+        .conn
+        .lock()
+        .map_err(|_| anyhow::anyhow!("journal mutex poisoned"))?;
     conn.execute(
         "DELETE FROM channel_operation_grants WHERE channel = ?1 AND operation_name = ?2",
         rusqlite::params![channel, operation_name],
@@ -65,7 +73,9 @@ pub fn revoke_operation(
 
     let _ = journal.append_event(
         JournalEventKind::OperationGrantChanged,
-        None, None, None,
+        None,
+        None,
+        None,
         serde_json::json!({
             "channel": channel,
             "operation_name": operation_name,
@@ -81,7 +91,10 @@ pub fn list_grants(
     journal: &JournalStore,
     channel: Option<&str>,
 ) -> Result<Vec<OperationGrant>, anyhow::Error> {
-    let conn = journal.conn.lock().map_err(|_| anyhow::anyhow!("journal mutex poisoned"))?;
+    let conn = journal
+        .conn
+        .lock()
+        .map_err(|_| anyhow::anyhow!("journal mutex poisoned"))?;
     let mut stmt = if let Some(_ch) = channel {
         let s = conn.prepare(
             "SELECT channel, operation_name, created_at FROM channel_operation_grants WHERE channel = ?1 ORDER BY operation_name"
@@ -98,7 +111,8 @@ pub fn list_grants(
     } else {
         stmt.query_map([], map_grant)?
     };
-    rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
 }
 
 /// Get all granted operation names for a channel.
@@ -107,12 +121,16 @@ pub fn get_channel_grants(
     channel: &ChannelKind,
 ) -> Result<Vec<String>, anyhow::Error> {
     let ch_str = format!("{:?}", channel);
-    let conn = journal.conn.lock().map_err(|_| anyhow::anyhow!("journal mutex poisoned"))?;
+    let conn = journal
+        .conn
+        .lock()
+        .map_err(|_| anyhow::anyhow!("journal mutex poisoned"))?;
     let mut stmt = conn.prepare(
         "SELECT operation_name FROM channel_operation_grants WHERE channel = ?1 ORDER BY operation_name"
     )?;
     let rows = stmt.query_map(rusqlite::params![ch_str], |row| row.get::<_, String>(0))?;
-    rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
 }
 
 // ---- Principal derivation ----
@@ -131,8 +149,7 @@ pub fn derive_grants(
     snapshot: &crate::registry::snapshot::RegistrySnapshot,
 ) -> Result<Vec<CapabilityGrant>, anyhow::Error> {
     // Start with baseline grants (reply + standard tools).
-    let baseline = crate::domain::operation::ExecutionProfile::for_channel(channel.clone())
-        .grants;
+    let baseline = crate::domain::operation::ExecutionProfile::for_channel(channel.clone()).grants;
 
     // Add DB-level channel grants.
     let db_grants = get_channel_grants(journal, channel)?;
