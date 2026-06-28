@@ -74,6 +74,24 @@ pub struct PreparedOperation {
     pub bundle_hash: String,
 }
 
+/// The single result of manifest validation. Everything derives from the
+/// same canonical value: bundle hash, persisted JSON, idempotent comparison,
+/// HTTP response payload, and snapshot `OperationSpec` generation.
+#[derive(Debug, Clone)]
+pub struct ValidatedCanonicalManifest {
+    /// The canonical JSON value (operations sorted by name, keys sorted
+    /// recursively). This is the source of truth for everything below.
+    pub canonical_value: serde_json::Value,
+    /// Serialized `canonical_value` — byte-string stored as `manifest_json`.
+    pub canonical_json: String,
+    /// Deterministic bundle hash over `canonical_json`.
+    pub bundle_hash: String,
+    /// Parsed manifest struct with original operation order (not canonical).
+    pub manifest: HarnessBundleManifest,
+    /// Prepared operations for snapshot composition, derived from canonical ops.
+    pub operation_specs: Vec<OperationSpec>,
+}
+
 // ---- Manifest Validation ----
 
 /// Validate a raw manifest JSON against all PR 2A constraints.
@@ -326,6 +344,103 @@ fn canonicalize_json(value: &serde_json::Value) -> Result<serde_json::Value> {
         }
         other => Ok(other.clone()),
     }
+}
+
+// ---- Validated Canonical Manifest ----
+
+/// Validate a raw manifest and produce a `ValidatedCanonicalManifest`.
+/// This is the single path that creates manifests for storage, hashing,
+/// and snapshot composition. Everything derives from the same canonical value.
+pub fn validate_to_canonical(
+    raw: &serde_json::Value,
+    declared_hash: Option<&str>,
+) -> Result<ValidatedCanonicalManifest> {
+    let canon_raw = canonicalize_json(raw)?;
+    let manifest: HarnessBundleManifest = serde_json::from_value(canon_raw)
+        .map_err(|e| anyhow!("manifest_invalid: parse error: {e}"))?;
+
+    // Re-validate.
+    if manifest.manifest_version != "v1" {
+        bail!(
+            "manifest_invalid: manifest_version must be v1, got {}",
+            manifest.manifest_version
+        );
+    }
+    if manifest.protocol_version != "v1" {
+        bail!(
+            "manifest_invalid: protocol_version must be v1, got {}",
+            manifest.protocol_version
+        );
+    }
+    if manifest.bundle_id.is_empty() || !is_valid_name(&manifest.bundle_id) {
+        bail!("manifest_invalid: bundle_id is empty or contains illegal characters");
+    }
+    if manifest.bundle_version.is_empty() {
+        bail!("manifest_invalid: bundle_version must not be empty");
+    }
+    if manifest.operations.is_empty() {
+        bail!("manifest_invalid: operations must not be empty");
+    }
+    if manifest.operations.len() > MAX_OPERATIONS {
+        bail!(
+            "manifest_invalid: too many operations: {} > max {MAX_OPERATIONS}",
+            manifest.operations.len()
+        );
+    }
+    for (i, op) in manifest.operations.iter().enumerate() {
+        validate_operation(op, i)?;
+    }
+
+    // Build the single canonical value.
+    let canonical_value = canonical_manifest_value(&manifest);
+    let canonical_json = serde_json::to_string(&canonical_value)?;
+    let mut hasher = Sha256::new();
+    hasher.update(canonical_json.as_bytes());
+    let bundle_hash = format!("sha256:{}", hex::encode(hasher.finalize()));
+
+    // Verify declared hash if present.
+    if let Some(declared) = declared_hash {
+        if !declared.is_empty() && declared != bundle_hash {
+            bail!("manifest_invalid: declared bundle hash '{declared}' does not match computed '{bundle_hash}'");
+        }
+    }
+
+    // Build OperationSpecs from canonical operations.
+    let ops_val = canonical_value
+        .get("operations")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| anyhow!("manifest_invalid: missing operations in canonical value"))?;
+    let mut operation_specs = Vec::with_capacity(ops_val.len());
+    for op_val in ops_val {
+        let name = op_val["name"].as_str().unwrap_or("").to_string();
+        let description = op_val["description"].as_str().unwrap_or("").to_string();
+        let parameters = op_val["parameters"].clone();
+        let risk_str = op_val["risk"].as_str().unwrap_or("ReadOnly");
+        let idempotent = op_val["idempotent"].as_bool().unwrap_or(true);
+        let risk = match risk_str {
+            "ReadOnly" => Risk::ReadOnly,
+            _ => Risk::ReadOnly,
+        };
+        let binding_key = format!("harness:{}:{}", bundle_hash, name);
+        let spec = OperationSpec {
+            name,
+            risk,
+            description,
+            parameters,
+            idempotent,
+            binding_kind: BindingKind::ExternalHarness,
+            binding_key,
+        };
+        operation_specs.push(spec);
+    }
+
+    Ok(ValidatedCanonicalManifest {
+        canonical_value,
+        canonical_json,
+        bundle_hash,
+        manifest,
+        operation_specs,
+    })
 }
 
 // ---- Bundle Hash ----
