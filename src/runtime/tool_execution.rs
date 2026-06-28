@@ -43,6 +43,33 @@ fn rejected_result(rejection: ToolRejection) -> ToolCallOutcome {
     }
 }
 
+/// Produce a Failed Receipt for a binding that cannot execute (e.g.
+/// ExternalHarness in PR 2A). Returns a ToolCallOutcome with the bounded
+/// error category so the Journal receives a proper ReceiptReceived.
+fn execute_and_record_failed_receipt(
+    journal: &JournalStore,
+    run: &Run,
+    session: &Session,
+    correlation_id: &str,
+    approved: &ApprovedInvocation,
+    error_category: &str,
+) -> ToolCallOutcome {
+    let output = json!({"error_category": error_category});
+    let text = format!("status: execution_failed\nerror_category: {error_category}");
+    let _ = journal.append_event(
+        JournalEventKind::ReceiptReceived,
+        Some(&run.id),
+        Some(&session.id),
+        Some(correlation_id),
+        json!({
+            "invocation_id": approved.intent().invocation_id,
+            "status": "Failed",
+            "output": output,
+        }),
+    );
+    ToolCallOutcome::ToolResult { text }
+}
+
 /// Production inline binding dispatch + receipt recording.
 /// This is the single authoritative binding_key → handler match used by
 /// both `handle_inline_tool_call` (the tool loop) and tests that need to
@@ -55,6 +82,19 @@ pub(crate) fn dispatch_builtin_binding(
     session: &Session,
     correlation_id: &str,
 ) -> ToolCallOutcome {
+    // PR 2A: ExternalHarness operations are not yet executable.
+    // Return a Failed Receipt with a bounded error category.
+    use crate::registry::snapshot::BindingKind;
+    if spec.binding_kind == BindingKind::ExternalHarness {
+        return execute_and_record_failed_receipt(
+            journal,
+            run,
+            session,
+            correlation_id,
+            approved,
+            "binding_not_executable",
+        );
+    }
     let exec_result: Result<(serde_json::Value, String)> = match spec.binding_key.as_str() {
         "builtin.time_now" => crate::adapters::TimeAdapter
             .execute(approved)

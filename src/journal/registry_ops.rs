@@ -151,14 +151,30 @@ impl super::JournalStore {
                 let binding_key: String = row.get(6)?;
                 let risk = match risk_str.as_str() {
                     "ReadOnly" => Risk::ReadOnly,
-                    _ => Risk::Write,
+                    "Write" => Risk::Write,
+                    other => {
+                        return Err(rusqlite::Error::InvalidParameterName(format!(
+                            "unknown risk string '{other}' in snapshot {snapshot_id}"
+                        )))
+                    }
                 };
                 let binding_kind = match binding_kind_str.as_str() {
                     "Builtin" => BindingKind::Builtin,
-                    _ => BindingKind::Builtin,
+                    "ExternalHarness" => BindingKind::ExternalHarness,
+                    other => {
+                        return Err(rusqlite::Error::InvalidParameterName(format!(
+                            "unknown binding_kind string '{other}' in snapshot {snapshot_id}"
+                        )))
+                    }
                 };
-                let parameters: serde_json::Value =
-                    serde_json::from_str(&params_json).unwrap_or(serde_json::json!({}));
+                let parameters: serde_json::Value = match serde_json::from_str(&params_json) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return Err(rusqlite::Error::InvalidParameterName(format!(
+                            "invalid parameters JSON in snapshot {snapshot_id}: {e}"
+                        )))
+                    }
+                };
                 Ok(OperationSpec {
                     name,
                     risk,
