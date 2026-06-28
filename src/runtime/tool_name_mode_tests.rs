@@ -113,7 +113,7 @@ mod tool_name_mode_tests {
     }
 
     fn cfg() -> crate::config::KernelConfig {
-        super::super::grant_schema_tests::_cfg()
+        super::super::tool_loop_tests::test_config()
     }
 
     #[test]
@@ -202,12 +202,15 @@ mod tool_name_mode_tests {
         let fb = Capture::new(vec![
             json!({"model":"s","choices":[{"message":{"content":"ok"}}]}),
         ]);
+        let snap = crate::registry::snapshot::test_snapshot();
+        let provider_tools = snap.provider_tools_for_grants(&["time.now".to_string()]);
         let llm =
             OpenAiCompatibleLlm::new(fb.url(), "t".into(), "p".into(), 5000).with_indexed_primary();
         let _ = llm.complete(crate::llm::LlmInput {
             blocks: vec![],
             user_text: "x".into(),
             granted_operations: vec!["time.now".to_string()],
+            provider_tools,
             follow_up: None,
         })?;
         let reqs = fb.requests();
@@ -229,6 +232,8 @@ mod tool_name_mode_tests {
         let fb = Capture::new(vec![
             json!({"model":"s","choices":[{"message":{"content":"ok"}}]}),
         ]);
+        let snap = crate::registry::snapshot::test_snapshot();
+        let provider_tools = snap.provider_tools_for_grants(&["time.now".to_string()]);
         // Put "deepseek" in the path; mode stays Passthrough (no with_indexed_*).
         let url = fb.url().replace("/v1", "/deepseek/v1");
         let llm = OpenAiCompatibleLlm::new(url, "t".into(), "p".into(), 5000);
@@ -236,6 +241,7 @@ mod tool_name_mode_tests {
             blocks: vec![],
             user_text: "x".into(),
             granted_operations: vec!["time.now".to_string()],
+            provider_tools,
             follow_up: None,
         })?;
         let reqs = fb.requests();
@@ -261,7 +267,7 @@ mod tool_name_mode_tests {
     fn primary_429_triggers_indexed_fallback_two_rounds() -> Result<()> {
         let p = Primary429::new();
         let fb = Capture::new(vec![
-            json!({"model":"s","choices":[{"message":{"content":"","tool_calls":[{"id":"fb1","type":"function","function":{"name":"fn_0","arguments":"{}"}}]}}]}),
+            json!({"model":"s","choices":[{"message":{"content":"","tool_calls":[{"id":"fb1","type":"function","function":{"name":"fn_1","arguments":"{}"}}]}}]}),
             json!({"model":"s","choices":[{"message":{"content":"done"}}]}),
         ]);
         let mut c = cfg();
@@ -286,13 +292,9 @@ mod tool_name_mode_tests {
         assert!(!o.output.trim().is_empty());
         let reqs = fb.requests();
         assert_eq!(reqs.len(), 2, "fallback served 2 rounds");
-        // Sticky endpoint: round 1 fallback tool call → round 2 stays on
-        // fallback (does NOT re-hit primary). Primary hit exactly once (429).
-        assert_eq!(
-            p.hits(),
-            1,
-            "primary hit 1 time (429), round 2 is sticky to fallback"
-        );
+        // Primary is hit exactly once (initial round 429) because follow-up
+        // routing is sticky to the fallback endpoint.
+        assert_eq!(p.hits(), 1, "primary hit exactly once");
         let ns: Vec<&str> = reqs[0]["tools"]
             .as_array()
             .unwrap()

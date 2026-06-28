@@ -68,6 +68,7 @@ pub fn test_run(config: &KernelConfig, session: &Session) -> Run {
         status: RunStatus::Running,
         created_at: Utc::now(),
         updated_at: Utc::now(),
+        registry_snapshot_id: String::new(),
     }
 }
 
@@ -89,6 +90,7 @@ pub fn approved_stdout_invocation(
     run: &Run,
     session: &Session,
 ) -> anyhow::Result<ApprovedInvocation> {
+    let snap = agent_core_kernel::registry::snapshot::test_snapshot();
     gateway.approve_invocation(
         InvocationIntent {
             invocation_id: InvocationId("reply:run_test".to_string()),
@@ -102,6 +104,7 @@ pub fn approved_stdout_invocation(
         },
         run,
         session,
+        &snap,
     )
 }
 
@@ -117,5 +120,6 @@ pub fn runtime_run(run_id: &RunId, session_id: &SessionId) -> Run {
         status: RunStatus::Running,
         created_at: Utc::now(),
         updated_at: Utc::now(),
+        registry_snapshot_id: String::new(),
     }
 }

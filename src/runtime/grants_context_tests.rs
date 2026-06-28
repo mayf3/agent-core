@@ -152,7 +152,7 @@ mod grants_context_tests {
     fn test_config() -> KernelConfig {
         // Reuse _cfg() but point root_dir at a nonexistent path so the Context
         // assembler uses safe fallback text (exercises the no-chat-only path).
-        let mut c = super::super::grant_schema_tests::_cfg();
+        let mut c = super::super::tool_loop_tests::test_config();
         c.root_dir = PathBuf::from("/nonexistent-agent-core-root-xyz");
         c
     }
@@ -171,8 +171,9 @@ mod grants_context_tests {
             version: 1,
         };
         let event = empty_event(&session);
+        let snap = crate::registry::snapshot::test_snapshot();
         ContextAssembler::from_config(&cfg)
-            .build(&journal, &session, &event, "hi", grants)
+            .build(&journal, &session, &event, "hi", grants, &snap)
             .unwrap()
     }
     fn catalog_block_text(blocks: &[ContextBlock]) -> String {

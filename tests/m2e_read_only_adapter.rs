@@ -33,6 +33,7 @@ fn run_with_time_grant(session_id: &SessionId) -> Run {
         status: RunStatus::Running,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
+        registry_snapshot_id: String::new(),
     }
 }
 
@@ -58,7 +59,8 @@ fn time_now_walks_intent_policy_adapter_receipt() -> Result<()> {
         arguments: json!({ "session_id": session.id.0 }),
         idempotency_key: Some("time:1".to_string()),
     };
-    let approved = gateway.approve_invocation(intent, &run, &session)?;
+    let snap = agent_core_kernel::registry::snapshot::test_snapshot();
+    let approved = gateway.approve_invocation(intent, &run, &session, &snap)?;
     let receipt = agent_core_kernel::adapters::TimeAdapter.execute(&approved)?;
     assert_eq!(receipt.status, ReceiptStatus::Succeeded);
     assert!(receipt.external_ref.is_none());
@@ -79,8 +81,9 @@ fn time_now_denied_without_grant() -> Result<()> {
         arguments: json!({ "session_id": session.id.0 }),
         idempotency_key: Some("time:2".to_string()),
     };
+    let snap = agent_core_kernel::registry::snapshot::test_snapshot();
     let err = gateway
-        .approve_invocation(intent, &run, &session)
+        .approve_invocation(intent, &run, &session, &snap)
         .unwrap_err();
     assert!(err.to_string().contains("capability_not_enabled"));
     Ok(())
@@ -220,6 +223,8 @@ fn session_recall_does_not_cross_sessions() -> Result<()> {
 #[test]
 fn validate_accepts_session_recall() {
     use agent_core_kernel::gateway::validate_tool_call;
+    use agent_core_kernel::registry::snapshot::test_snapshot;
+    let snap = test_snapshot();
     assert!(validate_tool_call(
         &ToolCall {
             id: "c1".into(),
@@ -229,6 +234,7 @@ fn validate_accepts_session_recall() {
         &RunId::new(),
         0,
         0,
+        &snap,
     )
     .is_ok());
 }
@@ -236,6 +242,8 @@ fn validate_accepts_session_recall() {
 #[test]
 fn validate_rejects_write_via_tool_call() {
     use agent_core_kernel::gateway::validate_tool_call;
+    use agent_core_kernel::registry::snapshot::test_snapshot;
+    let snap = test_snapshot();
     let err = validate_tool_call(
         &ToolCall {
             id: "c1".into(),
@@ -245,6 +253,7 @@ fn validate_rejects_write_via_tool_call() {
         &RunId::new(),
         0,
         0,
+        &snap,
     )
     .unwrap_err();
     assert_eq!(
@@ -279,6 +288,8 @@ fn execute_system_status_returns_aggregate_journal_counts() -> Result<()> {
 fn system_status_tool_call_is_validated_as_read_only() {
     use agent_core_kernel::domain::RunId;
     use agent_core_kernel::gateway::validate_tool_call;
+    use agent_core_kernel::registry::snapshot::test_snapshot;
+    let snap = test_snapshot();
     assert!(validate_tool_call(
         &ToolCall {
             id: "c1".into(),
@@ -288,6 +299,7 @@ fn system_status_tool_call_is_validated_as_read_only() {
         &RunId::new(),
         0,
         0,
+        &snap,
     )
     .is_ok());
 }
@@ -298,13 +310,15 @@ fn system_status_grant_check_passes_with_baseline_profile() -> Result<()> {
     // should accept it. We verify the catalog + validate_tool_call chain.
     use agent_core_kernel::domain::RunId;
     use agent_core_kernel::gateway::validate_tool_call;
+    use agent_core_kernel::registry::snapshot::test_snapshot;
+    let snap = test_snapshot();
     let tool_call = ToolCall {
         id: "c2".into(),
         operation: "system.status".into(),
         arguments: json!({}),
     };
     assert!(
-        validate_tool_call(&tool_call, &RunId::new(), 0, 0).is_ok(),
+        validate_tool_call(&tool_call, &RunId::new(), 0, 0, &snap).is_ok(),
         "system.status should be accepted as a read-only tool call"
     );
     Ok(())

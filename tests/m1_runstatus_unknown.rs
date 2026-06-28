@@ -26,6 +26,7 @@ fn unknown_recovery_advances_run_status_to_unknown() -> Result<()> {
     run.id = RunId("run_runstatus_unknown".to_string());
     run.status = RunStatus::WaitingDispatch;
     journal.insert_run(&run)?;
+    let snap = agent_core_kernel::registry::snapshot::test_snapshot();
     let approved = gateway.approve_invocation(
         InvocationIntent {
             invocation_id: InvocationId("reply:run_runstatus_unknown".to_string()),
@@ -36,6 +37,7 @@ fn unknown_recovery_advances_run_status_to_unknown() -> Result<()> {
         },
         &run,
         &session,
+        &snap,
     )?;
     let invocation_id = approved.intent().invocation_id.clone();
 

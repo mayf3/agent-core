@@ -141,7 +141,10 @@ mod tests {
         assert!(metrics.last_error_category().is_none());
         metrics.record_tick("2026-01-01T00:00:00Z".to_string());
         metrics.record_error_category("timeout".to_string());
-        assert_eq!(metrics.last_tick_at().as_deref(), Some("2026-01-01T00:00:00Z"));
+        assert_eq!(
+            metrics.last_tick_at().as_deref(),
+            Some("2026-01-01T00:00:00Z")
+        );
         assert_eq!(metrics.last_error_category().as_deref(), Some("timeout"));
     }
 }

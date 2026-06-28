@@ -22,6 +22,7 @@ impl InvocationAdapter for OkAdapter {
 #[test]
 fn run_dispatcher_sends_pending_outbox() -> Result<()> {
     let journal = Arc::new(JournalStore::in_memory()?);
+    journal.initialize_registry()?;
     let running = Arc::new(AtomicBool::new(true));
     let running_stop = Arc::clone(&running);
 
@@ -72,6 +73,7 @@ fn run_dispatcher_sends_pending_outbox() -> Result<()> {
 #[test]
 fn run_dispatcher_skips_unknown_outbox() -> Result<()> {
     let journal = Arc::new(JournalStore::in_memory()?);
+    journal.initialize_registry()?;
     let running = Arc::new(AtomicBool::new(true));
     let running_stop = Arc::clone(&running);
 
@@ -120,6 +122,7 @@ fn run_dispatcher_skips_unknown_outbox() -> Result<()> {
 #[test]
 fn run_dispatcher_stops_on_shutdown() -> Result<()> {
     let journal = Arc::new(JournalStore::in_memory()?);
+    journal.initialize_registry()?;
     let running = Arc::new(AtomicBool::new(true));
     let running_stop = Arc::clone(&running);
 
@@ -146,6 +149,7 @@ fn run_dispatcher_updates_shared_metrics() -> Result<()> {
     // exit. This is what feeds the outbox_dispatcher_running /
     // last_dispatch_tick_at health fields (HANDOVER §4.4).
     let journal = Arc::new(JournalStore::in_memory()?);
+    journal.initialize_registry()?;
     let running = Arc::new(AtomicBool::new(true));
     let running_stop = Arc::clone(&running);
     let metrics = Arc::new(DispatcherMetrics::new());
@@ -186,6 +190,7 @@ fn run_dispatcher_records_loop_error_category_on_failure() -> Result<()> {
     // We force a loop-level Err by dropping the outbox table so any dispatch
     // attempt fails at the journal layer.
     let journal = Arc::new(JournalStore::in_memory()?);
+    journal.initialize_registry()?;
     let running = Arc::new(AtomicBool::new(true));
     let running_stop = Arc::clone(&running);
     let metrics = Arc::new(DispatcherMetrics::new());
@@ -248,6 +253,7 @@ fn disabled_dispatcher_loop_returns_without_draining_outbox() -> Result<()> {
     };
 
     let journal = Arc::new(JournalStore::in_memory()?);
+    journal.initialize_registry()?;
     let approved = ApprovedInvocation::new(
         InvocationIntent {
             invocation_id: InvocationId::new(),
@@ -301,6 +307,7 @@ fn run_dispatcher_drains_multiple_pending_rows() -> Result<()> {
     }
 
     let journal = Arc::new(JournalStore::in_memory()?);
+    journal.initialize_registry()?;
     let running = Arc::new(AtomicBool::new(true));
     let running_stop = Arc::clone(&running);
 
@@ -424,6 +431,7 @@ fn paused_run_for_sweep(ttl: u64) -> Result<(String, Arc<JournalStore>)> {
     config.require_write_approval = true;
     config.write_approval_ttl_secs = ttl;
     let journal = Arc::new(JournalStore::in_memory()?);
+    journal.initialize_registry()?;
     let gateway = Arc::new(Gateway::new(config.clone()));
     let runtime = Runtime::new(config, LocalEchoLlm);
     let envelope = gateway.cli_ingress("hi".to_string())?;

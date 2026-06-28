@@ -181,7 +181,10 @@ impl JournalStore {
                )",
         )?;
         let rows = stmt.query_map(
-            params![OutboxDispatchStatus::Dispatching.as_str(), now_text.as_str()],
+            params![
+                OutboxDispatchStatus::Dispatching.as_str(),
+                now_text.as_str()
+            ],
             |row| {
                 let invocation_id: String = row.get(0)?;
                 let terminal_kind: Option<String> = row.get(1)?;

@@ -82,6 +82,7 @@ fn gateway_rejects_stdout_target_mismatch() -> Result<()> {
         status: RunStatus::Running,
         created_at: Utc::now(),
         updated_at: Utc::now(),
+        registry_snapshot_id: String::new(),
     };
     let intent = InvocationIntent {
         invocation_id: InvocationId::new(),
@@ -90,7 +91,10 @@ fn gateway_rejects_stdout_target_mismatch() -> Result<()> {
         arguments: json!({ "session_id": "session_other", "text": "bad" }),
         idempotency_key: None,
     };
-    assert!(gateway.approve_invocation(intent, &run, &session).is_err());
+    let snap = agent_core_kernel::registry::snapshot::test_snapshot();
+    assert!(gateway
+        .approve_invocation(intent, &run, &session, &snap)
+        .is_err());
     Ok(())
 }
 #[test]
@@ -144,6 +148,7 @@ fn journal_recovery_marks_unknown_invocations() -> Result<()> {
         status: RunStatus::Running,
         created_at: Utc::now(),
         updated_at: Utc::now(),
+        registry_snapshot_id: String::new(),
     };
     journal.insert_run(&run)?;
     journal.append_event(
@@ -327,6 +332,7 @@ fn openai_compatible_llm_missing_config_returns_friendly_output() -> Result<()> 
         blocks: vec![],
         user_text: "hello".to_string(),
         granted_operations: vec![],
+        provider_tools: vec![],
         follow_up: None,
     })?;
     assert_eq!(output.provider, "openai-compatible");
@@ -352,6 +358,7 @@ fn zai_model_prefix_is_normalized_for_zai_endpoint() -> Result<()> {
         blocks: vec![],
         user_text: "hello".to_string(),
         granted_operations: vec![],
+        provider_tools: vec![],
         follow_up: None,
     })?;
     assert_eq!(output.model, "glm-5.1");
@@ -376,6 +383,7 @@ fn provider_model_prefix_is_preserved_for_generic_endpoint() -> Result<()> {
         blocks: vec![],
         user_text: "hello".to_string(),
         granted_operations: vec![],
+        provider_tools: vec![],
         follow_up: None,
     })?;
     assert_eq!(output.model, "zai/glm-5.1");

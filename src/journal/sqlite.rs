@@ -11,21 +11,17 @@ use std::sync::Mutex;
 
 pub struct JournalStore {
     pub(crate) conn: Mutex<Connection>,
-    /// Test-only fault flag: when true, `recent_user_messages` returns a
+    /// Cached current registry snapshot ID. Set by initialize_registry at boot.
+    pub(crate) current_snapshot_id: Mutex<Option<String>>,
     /// deterministic `Err`, while every other Journal operation (event append,
     /// run status update, fail_run, hash-chain verification) keeps working.
-    /// This lets the capability-failure test exercise the real Runtime
-    /// production chain (a real Failed Receipt is written to a writable
-    /// Journal) instead of dropping a table or faking the error. Compiled out
-    /// of production builds (`cargo build` never enables `test-helpers`).
     #[cfg(any(test, feature = "test-helpers"))]
     pub(crate) recall_failure_for_test: std::sync::atomic::AtomicBool,
 }
 
-/// The schema `PRAGMA user_version` this kernel writes and understands.
-/// Bumped only when `migrations/` gains a new applied migration. The startup
+/// The schema `PRAGMA user_version` this kernel writes and understands. Bumped only when `migrations/` gains a new applied migration. The startup
 /// `migrate()` refuses to run against a DB whose version is newer than this.
-const CURRENT_SCHEMA_VERSION: i64 = 1;
+const CURRENT_SCHEMA_VERSION: i64 = 2;
 
 impl JournalStore {
     pub fn open(path: &Path) -> Result<Self> {
@@ -41,6 +37,8 @@ impl JournalStore {
     pub fn in_memory() -> Result<Self> {
         let store = Self::with_conn(Connection::open_in_memory()?);
         store.migrate()?;
+        // Auto-init registry for tests; production uses open() + explicit init.
+        store.initialize_registry()?;
         Ok(store)
     }
 
@@ -48,6 +46,7 @@ impl JournalStore {
     fn with_conn(conn: Connection) -> Self {
         Self {
             conn: Mutex::new(conn),
+            current_snapshot_id: Mutex::new(None),
             recall_failure_for_test: std::sync::atomic::AtomicBool::new(false),
         }
     }
@@ -56,9 +55,9 @@ impl JournalStore {
     fn with_conn(conn: Connection) -> Self {
         Self {
             conn: Mutex::new(conn),
+            current_snapshot_id: Mutex::new(None),
         }
     }
-
     /// The applied schema version (`PRAGMA user_version`). Useful for
     /// operators and tests to confirm which migration level a database is at.
     pub fn schema_version(&self) -> Result<i64> {
@@ -196,8 +195,8 @@ impl JournalStore {
             .map_err(|_| anyhow!("journal mutex poisoned"))?;
         conn.execute(
             "INSERT INTO runs
-             (id, session_id, agent_id, trigger_event_id, principal_json, parent_run_id, delegated_by, status, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+             (id, session_id, agent_id, trigger_event_id, principal_json, parent_run_id, delegated_by, status, created_at, updated_at, registry_snapshot_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 run.id.0,
                 run.session_id.0,
@@ -209,6 +208,11 @@ impl JournalStore {
                 format!("{:?}", run.status),
                 run.created_at.to_rfc3339(),
                 run.updated_at.to_rfc3339(),
+                if run.registry_snapshot_id.is_empty() {
+                    None
+                } else {
+                    Some(&run.registry_snapshot_id)
+                },
             ],
         )?;
         Ok(())
@@ -299,12 +303,8 @@ impl JournalStore {
         self.recent_user_messages_inner(session_id, limit)
     }
 
-    /// Capability-boundary recall: identical to [`recent_user_messages`] but
-    /// honors the test-only deterministic fault flag. Used only by the
-    /// `session.recall_recent` capability (`execute_session_recall`), NOT by
-    /// the context assembler's RecentMessages block — so a fault can be
-    /// injected precisely at the capability boundary while context building
-    /// and every other Journal operation keep working.
+    /// Capability-boundary recall: identical to [`recent_user_messages`] but honors the test-only deterministic fault flag. Used only by the
+    /// `session.recall_recent` capability (`execute_session_recall`), NOT by the context assembler's RecentMessages block — so a fault can be injected precisely at the capability boundary while context building and every other Journal operation keep working.
     #[doc(hidden)]
     pub(crate) fn recent_user_messages_for_capability(
         &self,
@@ -399,8 +399,15 @@ impl JournalStore {
             );
         }
         if applied == 0 {
-            // Fresh database: run the base migration and stamp the version.
+            // Fresh database: run all migrations and stamp the version.
             conn.execute_batch(include_str!("../../migrations/0001_init.sql"))?;
+            conn.execute_batch(include_str!("../../migrations/0002_registry_snapshots.sql"))?;
+            super::queue::migrate(&conn)?;
+            backfill_feishu_message_dedup(&conn)?;
+            conn.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
+        } else if applied == 1 {
+            // v1 → v2: add registry snapshot tables + runs column.
+            conn.execute_batch(include_str!("../../migrations/0002_registry_snapshots.sql"))?;
             super::queue::migrate(&conn)?;
             backfill_feishu_message_dedup(&conn)?;
             conn.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;

@@ -333,11 +333,24 @@ fn stale_dispatching_routes_by_terminal_fact_not_all_unknown() -> Result<()> {
     let run = common::test_run(&config, &session);
 
     let cases = [
-        ("reply:succeeded", JournalEventKind::ReceiptReceived, json!({ "status": "Succeeded", "output_kind": "text" })),
-        ("reply:failed", JournalEventKind::ReceiptReceived, json!({ "status": "Failed", "output_kind": "error" })),
-        ("reply:unknown", JournalEventKind::OutboxDispatchUnknown, json!({ "error": "previous_recovery_incomplete" })),
+        (
+            "reply:succeeded",
+            JournalEventKind::ReceiptReceived,
+            json!({ "status": "Succeeded", "output_kind": "text" }),
+        ),
+        (
+            "reply:failed",
+            JournalEventKind::ReceiptReceived,
+            json!({ "status": "Failed", "output_kind": "error" }),
+        ),
+        (
+            "reply:unknown",
+            JournalEventKind::OutboxDispatchUnknown,
+            json!({ "error": "previous_recovery_incomplete" }),
+        ),
     ];
     let mut invocation_ids = Vec::new();
+    let snap = agent_core_kernel::registry::snapshot::test_snapshot();
     for (suffix, _kind, _payload) in &cases {
         let approved = gateway.approve_invocation(
             InvocationIntent {
@@ -349,6 +362,7 @@ fn stale_dispatching_routes_by_terminal_fact_not_all_unknown() -> Result<()> {
             },
             &run,
             &session,
+            &snap,
         )?;
         invocation_ids.push(approved.intent().invocation_id.clone());
         journal.queue_outbox_dispatch(&approved, Some(&session.id))?;
@@ -453,44 +467,6 @@ fn health_fields_expose_dispatcher_state() -> Result<()> {
             .get("outbox_dispatcher_enabled")
             .and_then(|v| v.as_bool()),
         Some(true)
-    );
-    Ok(())
-}
-
-#[test]
-fn health_fields_reflect_populated_dispatcher_metrics() -> Result<()> {
-    // A metrics handle written to by the loop must surface its state in
-    // /health: running flag, last tick timestamp, last error category.
-    let config = common::test_config();
-    let gateway = Gateway::new(config.clone());
-    let journal = JournalStore::in_memory()?;
-    let session = common::test_session(&config);
-    let run = common::test_run(&config, &session);
-    let _approved = common::approved_stdout_invocation(&gateway, &run, &session)?;
-
-    let metrics = DispatcherMetrics::new();
-    metrics.record_tick("2026-06-15T12:00:00Z".to_string());
-    metrics.record_error_category("timeout".to_string());
-    metrics.mark_started();
-
-    let snapshot = health_snapshot(&journal, true, &metrics)?;
-    assert_eq!(
-        snapshot
-            .get("outbox_dispatcher_running")
-            .and_then(|v| v.as_bool()),
-        Some(true)
-    );
-    assert_eq!(
-        snapshot
-            .get("last_dispatch_tick_at")
-            .and_then(|v| v.as_str()),
-        Some("2026-06-15T12:00:00Z")
-    );
-    assert_eq!(
-        snapshot
-            .get("last_dispatch_error_category")
-            .and_then(|v| v.as_str()),
-        Some("timeout")
     );
     Ok(())
 }

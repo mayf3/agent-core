@@ -27,6 +27,7 @@ fn seed_run(journal: &JournalStore) -> Result<(RunId, SessionId)> {
         status: RunStatus::Running,
         created_at: Utc::now(),
         updated_at: Utc::now(),
+        registry_snapshot_id: String::new(),
     };
     journal.insert_run(&run)?;
     Ok((run_id, session_id))
@@ -39,6 +40,7 @@ fn approved_for_run(
     idempotency: &str,
     decision: &str,
 ) -> Result<ApprovedInvocation> {
+    let snap = agent_core_kernel::registry::snapshot::test_snapshot();
     gateway.approve_invocation(
         InvocationIntent {
             invocation_id: InvocationId(format!("reply:{decision}")),
@@ -61,6 +63,7 @@ fn approved_for_run(
             status: RunStatus::Running,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            registry_snapshot_id: String::new(),
         },
         &Session {
             id: session_id.clone(),
@@ -73,6 +76,7 @@ fn approved_for_run(
             status: SessionStatus::Active,
             version: 1,
         },
+        &snap,
     )
 }
 
@@ -141,13 +145,11 @@ fn dispatch_success_completes_run() -> Result<()> {
     );
     assert_eq!(journal.run_status(&run_id)?.as_deref(), Some("Completed"));
     assert!(journal.events()?.iter().any(|event| {
-        event.kind == JournalEventKind::RunCompleted
-            && event.run_id.as_ref() == Some(&run_id)
+        event.kind == JournalEventKind::RunCompleted && event.run_id.as_ref() == Some(&run_id)
     }));
     assert!(journal.events()?.iter().any(|event| {
         event.kind == JournalEventKind::ReceiptReceived
-            && event.correlation_id.as_deref()
-                == Some(approved.intent().invocation_id.0.as_str())
+            && event.correlation_id.as_deref() == Some(approved.intent().invocation_id.0.as_str())
     }));
     assert!(journal.verify_hash_chain()?);
     Ok(())
@@ -179,8 +181,7 @@ fn dispatch_definite_failure_fails_run() -> Result<()> {
     );
     assert_eq!(journal.run_status(&run_id)?.as_deref(), Some("Failed"));
     assert!(journal.events()?.iter().any(|event| {
-        event.kind == JournalEventKind::RunFailed
-            && event.run_id.as_ref() == Some(&run_id)
+        event.kind == JournalEventKind::RunFailed && event.run_id.as_ref() == Some(&run_id)
     }));
     assert_eq!(
         journal

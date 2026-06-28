@@ -156,10 +156,7 @@ fn atomic_write(path: &Path, content: &str) -> Result<()> {
     fs::create_dir_all(dir)?;
     let pid = std::process::id();
     let seq = WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let base = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("tmpl");
+    let base = path.file_name().and_then(|n| n.to_str()).unwrap_or("tmpl");
     let tmp_name = format!(".{base}.tmp.{pid}.{seq}");
     let tmp = dir.join(&tmp_name);
     let result: Result<()> = (|| {
@@ -468,21 +465,32 @@ mod tests {
         let p1 = p.clone();
         let p2 = p.clone();
         let t1 = std::thread::spawn(move || {
-            for _ in 0..10 { atomic_write(&p1, "from-a").ok(); }
+            for _ in 0..10 {
+                atomic_write(&p1, "from-a").ok();
+            }
         });
         let t2 = std::thread::spawn(move || {
-            for _ in 0..10 { atomic_write(&p2, "from-b").ok(); }
+            for _ in 0..10 {
+                atomic_write(&p2, "from-b").ok();
+            }
         });
-        t1.join().unwrap(); t2.join().unwrap();
+        t1.join().unwrap();
+        t2.join().unwrap();
         let content = std::fs::read_to_string(&p).unwrap();
         assert!(content == "from-a" || content == "from-b");
-        assert!(!std::fs::read_dir(&dir).unwrap().any(|e|
-            e.unwrap().file_name().to_string_lossy().contains(".tmp.")));
+        assert!(!std::fs::read_dir(&dir).unwrap().any(|e| e
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains(".tmp.")));
         // Stale .tmp file must not collide with new temp file.
         std::fs::write(&dir.join(".stale.tmp"), "stale").unwrap();
         let fresh = dir.join("fresh.md");
         atomic_write(&fresh, "fresh").unwrap();
-        assert_eq!(std::fs::read_to_string(&dir.join(".stale.tmp")).unwrap(), "stale");
+        assert_eq!(
+            std::fs::read_to_string(&dir.join(".stale.tmp")).unwrap(),
+            "stale"
+        );
         assert_eq!(std::fs::read_to_string(&fresh).unwrap(), "fresh");
         let _ = std::fs::remove_dir_all(&dir);
     }

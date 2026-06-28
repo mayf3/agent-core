@@ -7,6 +7,7 @@ use crate::domain::*;
 use crate::gateway::{Gateway, ToolRejection};
 use crate::journal::JournalStore;
 use crate::llm::{LlmClient, ToolCall};
+use crate::registry::snapshot::RegistrySnapshot;
 use anyhow::Result;
 use serde_json::json;
 
@@ -40,6 +41,76 @@ fn rejected_result(rejection: ToolRejection) -> ToolCallOutcome {
             rejection.safe_message()
         ),
     }
+}
+
+/// Production inline binding dispatch + receipt recording.
+/// This is the single authoritative binding_key → handler match used by
+/// both `handle_inline_tool_call` (the tool loop) and tests that need to
+/// verify dispatch from a restored Run snapshot.
+pub(crate) fn dispatch_builtin_binding(
+    spec: &crate::registry::snapshot::OperationSpec,
+    approved: &ApprovedInvocation,
+    journal: &JournalStore,
+    run: &Run,
+    session: &Session,
+    correlation_id: &str,
+) -> ToolCallOutcome {
+    let exec_result: Result<(serde_json::Value, String)> = match spec.binding_key.as_str() {
+        "builtin.time_now" => crate::adapters::TimeAdapter
+            .execute(approved)
+            .map(|receipt| {
+                let text = receipt
+                    .output
+                    .get("iso")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("ok")
+                    .to_string();
+                (receipt.output, text)
+            }),
+        "builtin.session_recall_recent" => {
+            crate::runtime::tool_rejection::execute_session_recall(journal, &session.id, approved)
+                .map(|(_, output, text)| (output, text))
+        }
+        "builtin.system_status" => crate::capabilities::execute(journal).map(|output| {
+            let text = output
+                .get("summary")
+                .and_then(|value| value.as_str())
+                .unwrap_or("ok")
+                .to_string();
+            (output, text)
+        }),
+        _ => Err(anyhow::anyhow!(
+            "registry_binding_invalid: {}",
+            spec.binding_key
+        )),
+    };
+    let (status, output, text) = match exec_result {
+        Ok((output, text)) => (
+            ReceiptStatus::Succeeded,
+            output,
+            format!("status: succeeded\noutput: {text}"),
+        ),
+        Err(_) => (
+            ReceiptStatus::Failed,
+            json!({"error_category": "capability_execution_failed"}),
+            "status: execution_failed\nerror_category: capability_execution_failed".to_string(),
+        ),
+    };
+    if let Some(fatal) = append_or_fatal(
+        journal,
+        JournalEventKind::ReceiptReceived,
+        run,
+        session,
+        Some(correlation_id),
+        json!({
+            "invocation_id": approved.intent().invocation_id,
+            "status": format!("{:?}", status),
+            "output": output,
+        }),
+    ) {
+        return fatal;
+    }
+    ToolCallOutcome::ToolResult { text }
 }
 
 impl<L: LlmClient + 'static> super::Runtime<L> {
@@ -81,8 +152,12 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
         tool_call: &ToolCall,
         turn_index: usize,
         tool_index: usize,
+        snapshot: &RegistrySnapshot,
     ) -> Result<ToolCallOutcome> {
         let audited_op = sanitize_operation_for_audit(&tool_call.operation);
+
+        // Always write ToolCallIssued first (audit trail), even for operations
+        // that will be rejected by the snapshot pre-check below.
         if let Some(fatal) = append_or_fatal(
             journal,
             JournalEventKind::ToolCallIssued,
@@ -94,20 +169,38 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
             return Ok(fatal);
         }
 
-        let mut intent =
-            match crate::gateway::validate_tool_call(tool_call, &run.id, turn_index, tool_index) {
-                Ok(intent) => intent,
-                Err(rejection) => {
-                    return self.record_rejection(
-                        journal,
-                        run,
-                        session,
-                        &tool_call.id,
-                        &audited_op,
-                        rejection,
-                    )
-                }
-            };
+        // Look up the operation in the Run's pinned RegistrySnapshot.
+        // This is the single authoritative source — Gateway and dispatch both
+        // use the resolved operation definition, never the static catalog.
+        let spec = match snapshot.lookup(&tool_call.operation) {
+            Some(s) => s,
+            None => {
+                return self.record_rejection(
+                    journal,
+                    run,
+                    session,
+                    &tool_call.id,
+                    &audited_op,
+                    crate::gateway::ToolRejection::UnknownOperation,
+                );
+            }
+        };
+
+        let mut intent = match crate::gateway::validate_tool_call(
+            tool_call, &run.id, turn_index, tool_index, snapshot,
+        ) {
+            Ok(intent) => intent,
+            Err(rejection) => {
+                return self.record_rejection(
+                    journal,
+                    run,
+                    session,
+                    &tool_call.id,
+                    &audited_op,
+                    rejection,
+                )
+            }
+        };
         if let Err(rejection) = validate_model_arguments(&intent.operation, &intent.arguments) {
             return self.record_rejection(
                 journal,
@@ -137,7 +230,7 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
             return Ok(fatal);
         }
 
-        let approved = match gateway.approve_invocation(intent, run, session) {
+        let approved = match gateway.approve_invocation(intent, run, session, snapshot) {
             Ok(approved) => approved,
             Err(_) => {
                 if let Some(fatal) = append_or_fatal(
@@ -171,61 +264,14 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
             return Ok(fatal);
         }
 
-        let exec_result: Result<(serde_json::Value, String)> =
-            match approved.intent().operation.as_str() {
-                crate::domain::operation::TIME_NOW => crate::adapters::TimeAdapter
-                    .execute(&approved)
-                    .map(|receipt| {
-                        let text = receipt
-                            .output
-                            .get("iso")
-                            .and_then(|value| value.as_str())
-                            .unwrap_or("ok")
-                            .to_string();
-                        (receipt.output, text)
-                    }),
-                crate::domain::operation::SESSION_RECALL_RECENT => {
-                    Self::execute_session_recall(journal, &session.id, &approved)
-                        .map(|(_, output, text)| (output, text))
-                }
-                crate::domain::operation::SYSTEM_STATUS => crate::capabilities::execute(journal)
-                    .map(|output| {
-                        let text = output
-                            .get("summary")
-                            .and_then(|value| value.as_str())
-                            .unwrap_or("ok")
-                            .to_string();
-                        (output, text)
-                    }),
-                _ => Err(anyhow::anyhow!("unreachable inline operation")),
-            };
-        let (status, output, text) = match exec_result {
-            Ok((output, text)) => (
-                ReceiptStatus::Succeeded,
-                output,
-                format!("status: succeeded\noutput: {text}"),
-            ),
-            Err(_) => (
-                ReceiptStatus::Failed,
-                json!({"error_category": "capability_execution_failed"}),
-                "status: execution_failed\nerror_category: capability_execution_failed".to_string(),
-            ),
-        };
-        if let Some(fatal) = append_or_fatal(
+        return Ok(dispatch_builtin_binding(
+            spec,
+            &approved,
             journal,
-            JournalEventKind::ReceiptReceived,
             run,
             session,
-            Some(&correlation_id),
-            json!({
-                "invocation_id": approved.intent().invocation_id,
-                "status": format!("{:?}", status),
-                "output": output,
-            }),
-        ) {
-            return Ok(fatal);
-        }
-        Ok(ToolCallOutcome::ToolResult { text })
+            &correlation_id,
+        ));
     }
 
     fn record_rejection(

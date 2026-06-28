@@ -14,8 +14,8 @@
 //!
 //! See `docs/decisions/phase2-invocation-gateway-scoping.md` (M2c).
 
-use crate::domain::operation;
 use crate::domain::{InvocationIntent, Run, Session};
+use crate::registry::snapshot::RegistrySnapshot;
 
 /// The verdict of the invocation policy pipeline.
 ///
@@ -54,8 +54,8 @@ impl PolicyVerdict {
 ///
 /// 1. **Grant** — the run's principal must hold a capability grant for the
 ///    operation; else `capability_not_enabled: {op}`.
-/// 2. **Catalog** — the operation must be in the operation catalog; else
-///    `operation_not_allowed: {op}`.
+/// 2. **Catalog** — the operation must be in the pinned registry snapshot;
+///    else `operation_not_allowed: {op}`.
 /// 3. **Session scope** — the intent's `session_id` argument must equal the
 ///    run's session; else `target_session_mismatch`.
 ///
@@ -63,7 +63,12 @@ impl PolicyVerdict {
 /// is intentionally **not** part of the access pipeline — it is a schema
 /// concern (M2a's `argument_schema`, deferred) and stays in
 /// `approve_invocation`, where it produces `missing string argument: {key}`.
-pub fn evaluate_policy(intent: &InvocationIntent, run: &Run, session: &Session) -> PolicyVerdict {
+pub fn evaluate_policy(
+    intent: &InvocationIntent,
+    run: &Run,
+    session: &Session,
+    snapshot: &RegistrySnapshot,
+) -> PolicyVerdict {
     // Stage 1: capability grant.
     let has_grant = run
         .principal
@@ -74,8 +79,8 @@ pub fn evaluate_policy(intent: &InvocationIntent, run: &Run, session: &Session) 
         return PolicyVerdict::deny(format!("capability_not_enabled: {}", intent.operation));
     }
 
-    // Stage 2: operation catalog allowlist (single source of truth, M2a).
-    if !operation::is_allowed(&intent.operation) {
+    // Stage 2: operation catalog allowlist from the pinned registry snapshot.
+    if snapshot.lookup(&intent.operation).is_none() {
         return PolicyVerdict::deny(format!("operation_not_allowed: {}", intent.operation));
     }
 
@@ -134,6 +139,7 @@ mod tests {
             status: RunStatus::Running,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            registry_snapshot_id: String::new(),
         }
     }
 
@@ -149,31 +155,34 @@ mod tests {
 
     #[test]
     fn allows_when_grant_catalog_and_session_all_match() {
+        let s = crate::registry::snapshot::test_snapshot();
         let session = session_with_id("session_current");
         let run = run_with_grants(vec![CapabilityGrant {
-            operation: operation::STDOUT_SEND_TEXT.to_string(),
+            operation: STDOUT_SEND_TEXT.to_string(),
             scope: "current_session".to_string(),
         }]);
-        let intent = intent(operation::STDOUT_SEND_TEXT, "session_current");
+        let intent = intent(STDOUT_SEND_TEXT, "session_current");
         assert_eq!(
-            evaluate_policy(&intent, &run, &session),
+            evaluate_policy(&intent, &run, &session, &s),
             PolicyVerdict::Allow
         );
     }
 
     #[test]
     fn denies_when_principal_lacks_grant() {
+        let s = crate::registry::snapshot::test_snapshot();
         let session = session_with_id("session_current");
         let run = run_with_grants(vec![]);
-        let intent = intent(operation::STDOUT_SEND_TEXT, "session_current");
+        let intent = intent(STDOUT_SEND_TEXT, "session_current");
         assert_eq!(
-            evaluate_policy(&intent, &run, &session),
+            evaluate_policy(&intent, &run, &session, &s),
             PolicyVerdict::deny("capability_not_enabled: stdout.send_text")
         );
     }
 
     #[test]
     fn denies_when_operation_not_in_catalog() {
+        let s = crate::registry::snapshot::test_snapshot();
         // The principal "holds" a grant for an op that is not catalogued. The
         // catalog stage must still deny it (grant ≠ allowlist).
         let session = session_with_id("session_current");
@@ -183,60 +192,63 @@ mod tests {
         }]);
         let intent = intent("shell.exec", "session_current");
         assert_eq!(
-            evaluate_policy(&intent, &run, &session),
+            evaluate_policy(&intent, &run, &session, &s),
             PolicyVerdict::deny("operation_not_allowed: shell.exec")
         );
     }
 
     #[test]
     fn denies_on_session_mismatch() {
+        let s = crate::registry::snapshot::test_snapshot();
         let session = session_with_id("session_current");
         let run = run_with_grants(vec![CapabilityGrant {
-            operation: operation::STDOUT_SEND_TEXT.to_string(),
+            operation: STDOUT_SEND_TEXT.to_string(),
             scope: "current_session".to_string(),
         }]);
-        let intent = intent(operation::STDOUT_SEND_TEXT, "session_other");
+        let intent = intent(STDOUT_SEND_TEXT, "session_other");
         assert_eq!(
-            evaluate_policy(&intent, &run, &session),
+            evaluate_policy(&intent, &run, &session, &s),
             PolicyVerdict::deny("target_session_mismatch")
         );
     }
 
     #[test]
     fn denies_on_missing_session_argument() {
+        let s = crate::registry::snapshot::test_snapshot();
         // A missing session_id must be treated as a mismatch, not an allow —
         // the intent may never act outside (or ambiguously regarding) its
         // session.
         let session = session_with_id("session_current");
         let run = run_with_grants(vec![CapabilityGrant {
-            operation: operation::STDOUT_SEND_TEXT.to_string(),
+            operation: STDOUT_SEND_TEXT.to_string(),
             scope: "current_session".to_string(),
         }]);
         let intent = InvocationIntent {
             invocation_id: InvocationId::new(),
             run_id: RunId::new(),
-            operation: operation::STDOUT_SEND_TEXT.to_string(),
+            operation: STDOUT_SEND_TEXT.to_string(),
             arguments: json!({}),
             idempotency_key: None,
         };
         assert_eq!(
-            evaluate_policy(&intent, &run, &session),
+            evaluate_policy(&intent, &run, &session, &s),
             PolicyVerdict::deny("target_session_mismatch")
         );
     }
 
     #[test]
     fn pipeline_is_pure_no_state_required() {
+        let s = crate::registry::snapshot::test_snapshot();
         // evaluate_policy takes only borrowed domain values; it reads no
         // Gateway/config. Calling it twice with the same inputs is stable.
         let session = session_with_id("s");
         let run = run_with_grants(vec![CapabilityGrant {
-            operation: operation::FEISHU_SEND_MESSAGE.to_string(),
+            operation: FEISHU_SEND_MESSAGE.to_string(),
             scope: "current_session".to_string(),
         }]);
-        let intent = intent(operation::FEISHU_SEND_MESSAGE, "s");
-        let first = evaluate_policy(&intent, &run, &session);
-        let second = evaluate_policy(&intent, &run, &session);
+        let intent = intent(FEISHU_SEND_MESSAGE, "s");
+        let first = evaluate_policy(&intent, &run, &session, &s);
+        let second = evaluate_policy(&intent, &run, &session, &s);
         assert_eq!(first, second);
         assert!(first.is_allow());
     }

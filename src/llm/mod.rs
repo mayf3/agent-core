@@ -13,11 +13,12 @@ pub struct LlmInput {
     pub blocks: Vec<ContextBlock>,
     pub user_text: String,
     pub granted_operations: Vec<String>,
+    /// Pre-computed provider tool definitions derived from the Run's registry
+    /// snapshot at creation time. All LLM rounds for the same Run reuse the
+    /// same tools list — never regenerated from the live/static catalog.
+    pub provider_tools: Vec<serde_json::Value>,
     /// Structured tool follow-up for the second round: the provider-side
     /// tool_call transcript (raw id, wire name, args) + bounded result content.
-    /// When present, the LLM sends `role: assistant` + `role: tool` messages to
-    /// the **source endpoint** that returned the tool call (sticky). This is
-    /// Run-local state threaded through LlmInput — never shared client state.
     pub follow_up: Option<LlmFollowUp>,
 }
 
@@ -224,8 +225,10 @@ impl OpenAiCompatibleLlm {
         input: &LlmInput,
         follow_up: Option<&LlmFollowUp>,
     ) -> std::result::Result<LlmOutput, String> {
-        let mut tools =
-            crate::domain::operation::provider_tools_for_grants(&input.granted_operations);
+        // Provider tools are derived from the Run's pinned registry snapshot
+        // at Runtime::deliver() time and passed in LlmInput.provider_tools.
+        // Empty tools means no ReadOnly operations are granted.
+        let mut tools: Vec<Value> = input.provider_tools.clone();
         let tool_name_mode = match &endpoint.tool_name_mode {
             ToolNameMode::Passthrough => ToolNameMode::Passthrough,
             ToolNameMode::IndexedMapping(_) => {

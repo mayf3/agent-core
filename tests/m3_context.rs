@@ -1,13 +1,26 @@
 use agent_core_kernel::config::KernelConfig;
 use agent_core_kernel::context::ContextAssembler;
 use agent_core_kernel::domain::*;
+use agent_core_kernel::gateway::Gateway;
 use agent_core_kernel::journal::JournalStore;
+use agent_core_kernel::runtime::Runtime;
 use anyhow::Result;
 use chrono::Utc;
 use serde_json::json;
 use std::fs;
 use std::path::PathBuf;
 use uuid::Uuid;
+
+mod common;
+
+fn count_kind(journal: &JournalStore, run_id: &RunId, kind: JournalEventKind) -> usize {
+    journal
+        .events()
+        .unwrap()
+        .iter()
+        .filter(|e| e.run_id.as_ref() == Some(run_id) && e.kind == kind)
+        .count()
+}
 
 #[test]
 fn context_assembler_loads_files_catalog_recent_and_truncates() -> Result<()> {
@@ -54,6 +67,7 @@ fn context_assembler_loads_files_catalog_recent_and_truncates() -> Result<()> {
         &event,
         "current text that is intentionally longer than the tiny budget",
         &grants,
+        &agent_core_kernel::registry::snapshot::test_snapshot(),
     )?;
 
     let root_block = block(&blocks, ContextBlockKind::RootSystem);
@@ -182,4 +196,95 @@ fn test_config(root_dir: PathBuf) -> KernelConfig {
         fallback_tool_name_indexed: false,
         primary_tool_name_indexed: false,
     }
+}
+
+struct ToolCallLlm(std::sync::Mutex<usize>);
+
+impl agent_core_kernel::llm::LlmClient for ToolCallLlm {
+    fn complete(
+        &self,
+        _input: agent_core_kernel::llm::LlmInput,
+    ) -> Result<agent_core_kernel::llm::LlmOutput> {
+        let mut calls = self.0.lock().unwrap();
+        let round = *calls;
+        *calls += 1;
+        Ok(agent_core_kernel::llm::LlmOutput {
+            provider: "local".to_string(),
+            model: "tool-call-test".to_string(),
+            content: if round == 0 {
+                "calling"
+            } else {
+                "time retrieved"
+            }
+            .to_string(),
+            journal_payload: json!({ "round": round }),
+            tool_call: if round == 0 {
+                agent_core_kernel::llm::ToolCallResult::Valid(agent_core_kernel::llm::ToolCall {
+                    id: agent_core_kernel::llm::tool_call_id_hash("call_time_once"),
+                    operation: "time.now".to_string(),
+                    arguments: json!({}),
+                })
+            } else {
+                agent_core_kernel::llm::ToolCallResult::Absent
+            },
+            provider_turn: None,
+        })
+    }
+}
+
+#[test]
+fn time_now_tool_call_executes_once_inline() -> Result<()> {
+    let mut config = common::test_config();
+    config.extra_allowed_operations = vec!["time.now".to_string()];
+    let journal = JournalStore::in_memory()?;
+    let gateway = Gateway::new(config.clone());
+    let runtime = Runtime::new(config, ToolCallLlm(std::sync::Mutex::new(0)));
+    let envelope = gateway.cli_ingress("what time is it?".to_string())?;
+    let event = gateway.validate_ingress(&journal, envelope)?;
+    let outcome = runtime.deliver(&journal, &gateway, event)?;
+    let events = journal.events()?;
+
+    let time_now_proposed = events
+        .iter()
+        .filter(|event| {
+            event.run_id.as_ref() == Some(&outcome.run_id)
+                && event.kind == JournalEventKind::InvocationProposed
+                && event
+                    .payload
+                    .get("operation")
+                    .and_then(|value| value.as_str())
+                    == Some("time.now")
+        })
+        .count();
+    let time_now_approved = events
+        .iter()
+        .filter(|event| {
+            event.run_id.as_ref() == Some(&outcome.run_id)
+                && event.kind == JournalEventKind::InvocationApproved
+                && event
+                    .payload
+                    .get("operation")
+                    .and_then(|value| value.as_str())
+                    == Some("time.now")
+        })
+        .count();
+
+    assert_eq!(time_now_proposed, 1, "time.now must be proposed once");
+    assert_eq!(time_now_approved, 1, "time.now must be approved once");
+    assert_eq!(
+        count_kind(&journal, &outcome.run_id, JournalEventKind::ReceiptReceived),
+        1,
+        "inline time.now must write one receipt"
+    );
+    assert_eq!(
+        count_kind(&journal, &outcome.run_id, JournalEventKind::DispatchStarted),
+        0,
+        "inline time.now must not enter the outbox dispatcher"
+    );
+    assert_eq!(
+        count_kind(&journal, &outcome.run_id, JournalEventKind::OutboxQueued),
+        1,
+        "only the normal text reply should be queued"
+    );
+    Ok(())
 }
