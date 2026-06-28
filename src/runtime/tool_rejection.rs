@@ -10,6 +10,7 @@ use crate::domain::operation;
 use crate::domain::{ApprovedInvocation, ReceiptStatus, SessionId};
 use crate::gateway::ToolRejection;
 use crate::journal::JournalStore;
+use crate::registry::snapshot::OperationSpec;
 use anyhow::Result;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -116,9 +117,14 @@ pub(crate) fn execute_session_recall(
 
 /// Schema validation of model arguments for catalogued operations. Returns a
 /// typed [`ToolRejection`] on failure — never a raw string.
+///
+/// Known builtin operations use explicit typed validation for precision. All
+/// other operations (ExternalHarness, future bindings) are validated against
+/// the `OperationSpec.parameters` JSON Schema from the pinned snapshot.
 pub fn validate_model_arguments(
     operation: &str,
     arguments: &serde_json::Value,
+    spec: &OperationSpec,
 ) -> Result<(), ToolRejection> {
     let Some(map) = arguments.as_object() else {
         return Err(ToolRejection::MalformedArguments);
@@ -149,8 +155,99 @@ pub fn validate_model_arguments(
                 }
             }
         }
-        _ => return Err(ToolRejection::UnknownOperation),
+        _ => {
+            // Snapshot-aware validation against OperationSpec.parameters.
+            validate_against_schema(arguments, &spec.parameters)?;
+        }
     }
+    Ok(())
+}
+
+/// Validate model arguments against a JSON Schema subset defined in
+/// `OperationSpec.parameters`. Supports the subset required for harness
+/// operations: type checking, required fields, and additionalProperties.
+///
+/// Returns Err(ToolRejection::InvalidArguments) on mismatch — never exposes
+/// the schema internals to the model.
+fn validate_against_schema(
+    arguments: &serde_json::Value,
+    schema: &serde_json::Value,
+) -> Result<(), ToolRejection> {
+    // Root must be an object.
+    let map = match arguments.as_object() {
+        Some(m) => m,
+        None => return Err(ToolRejection::MalformedArguments),
+    };
+
+    // Extract schema properties (if present).
+    let props = schema
+        .get("properties")
+        .and_then(|v| v.as_object())
+        .map(|p| p.iter().map(|(k, v)| (k.as_str(), v)).collect::<Vec<_>>())
+        .unwrap_or_default();
+
+    // Check required fields.
+    if let Some(required) = schema.get("required").and_then(|v| v.as_array()) {
+        for req in required {
+            let key = match req.as_str() {
+                Some(k) => k,
+                None => continue,
+            };
+            if !map.contains_key(key) {
+                return Err(ToolRejection::InvalidArguments);
+            }
+        }
+    }
+
+    // Validate each argument against its property schema.
+    for (key, value) in map {
+        let prop_schema = props.iter().find(|(k, _)| *k == key).map(|(_, v)| v);
+
+        // If additionalProperties is false, reject unknown keys.
+        if prop_schema.is_none() {
+            let additional = schema
+                .get("additionalProperties")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            if !additional {
+                return Err(ToolRejection::InvalidArguments);
+            }
+            continue; // No schema to validate against — accept.
+        }
+
+        let prop_schema = prop_schema.unwrap();
+
+        // Check property type.
+        if let Some(expected_type) = prop_schema.get("type").and_then(|v| v.as_str()) {
+            let type_ok = match expected_type {
+                "string" => value.is_string(),
+                "number" => value.is_number(),
+                "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+                "boolean" => value.is_boolean(),
+                "object" => value.is_object(),
+                "array" => value.is_array(),
+                _ => true, // Unknown type keyword — accept (forward compat).
+            };
+            if !type_ok {
+                return Err(ToolRejection::InvalidArguments);
+            }
+        }
+
+        // Check min/max constraints for numeric types.
+        if let Some(n) = value.as_f64() {
+            if let Some(min) = prop_schema.get("minimum").and_then(|v| v.as_f64()) {
+                if n < min {
+                    return Err(ToolRejection::InvalidArguments);
+                }
+            }
+            if let Some(max) = prop_schema.get("maximum").and_then(|v| v.as_f64()) {
+                if n > max {
+                    return Err(ToolRejection::InvalidArguments);
+                }
+            }
+        }
+    }
+
     Ok(())
 }
 

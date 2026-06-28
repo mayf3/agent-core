@@ -1,26 +1,85 @@
 use serde_json::json;
 
+/// Minimal OperationSpec for testing schema validation.
+fn spec(name: &str, params: serde_json::Value) -> crate::registry::snapshot::OperationSpec {
+    use crate::registry::snapshot::{BindingKind, Risk};
+    crate::registry::snapshot::OperationSpec {
+        name: name.into(),
+        risk: Risk::ReadOnly,
+        description: "test".into(),
+        parameters: params,
+        idempotent: true,
+        binding_kind: BindingKind::Builtin,
+        binding_key: "builtin.test".into(),
+    }
+}
+
 #[test]
 fn validate_model_arguments_returns_typed_rejections() {
     use crate::gateway::ToolRejection;
     use crate::runtime::validate_model_arguments;
+
+    // Known typed operations keep their existing validation.
     assert_eq!(
-        validate_model_arguments("system.status", &json!({"x": 1})),
+        validate_model_arguments(
+            "system.status",
+            &json!({"x": 1}),
+            &spec(
+                "system.status",
+                json!({"type": "object", "properties": {}, "required": [], "additionalProperties": false})
+            ),
+        ),
         Err(ToolRejection::InvalidArguments)
     );
     assert_eq!(
-        validate_model_arguments("session.recall_recent", &json!({"limit": 0})),
+        validate_model_arguments(
+            "session.recall_recent",
+            &json!({"limit": 0}),
+            &spec(
+                "session.recall_recent",
+                json!({"type": "object", "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 20}}}),
+            )
+        ),
         Err(ToolRejection::InvalidArguments)
     );
     assert_eq!(
-        validate_model_arguments("time.now", &json!("nope")),
+        validate_model_arguments(
+            "time.now",
+            &json!("nope"),
+            &spec("time.now", json!({"type": "object"})),
+        ),
         Err(ToolRejection::MalformedArguments)
     );
+
+    // Unknown operations in the `_` arm are validated against the spec schema.
+    // Empty params with no constraints → valid.
+    assert!(validate_model_arguments(
+        "harness.op",
+        &json!({}),
+        &spec("harness.op", json!({"type": "object"})),
+    )
+    .is_ok());
+
+    // Unknown operation with unknown key and additionalProperties: false → rejected.
     assert_eq!(
-        validate_model_arguments("shell.exec", &json!({})),
-        Err(ToolRejection::UnknownOperation)
+        validate_model_arguments(
+            "harness.op",
+            &json!({"unknown_key": "value"}),
+            &spec(
+                "harness.op",
+                json!({"type": "object", "properties": {}, "required": [], "additionalProperties": false})
+            ),
+        ),
+        Err(ToolRejection::InvalidArguments)
     );
-    assert!(validate_model_arguments("time.now", &json!({})).is_ok());
+
+    // Known typed operations still pass with valid args.
+    assert!(validate_model_arguments(
+        "time.now",
+        &json!({}),
+        &spec("time.now", json!({"type": "object"})),
+    )
+    .is_ok());
 }
 
 #[test]

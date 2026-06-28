@@ -185,8 +185,7 @@ impl super::JournalStore {
                     binding_key,
                 })
             })?
-            .filter_map(|r| r.ok())
-            .collect();
+            .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(RegistrySnapshot {
             snapshot_id: snapshot_id.to_string(),

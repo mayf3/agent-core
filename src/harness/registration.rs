@@ -206,3 +206,43 @@ fn update_registration(
     )?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_endpoint_accepts_localhost() {
+        assert!(validate_endpoint("http://127.0.0.1:8080").is_ok());
+    }
+
+    #[test]
+    fn validate_endpoint_rejects_non_localhost() {
+        assert!(validate_endpoint("http://example.com:8080").is_err());
+    }
+
+    #[test]
+    fn validate_endpoint_rejects_empty_port() {
+        assert!(validate_endpoint("http://127.0.0.1:").is_err());
+    }
+
+    #[test]
+    fn validate_endpoint_rejects_port_zero() {
+        assert!(validate_endpoint("http://127.0.0.1:0").is_err());
+    }
+
+    #[test]
+    fn validate_endpoint_rejects_path_in_port() {
+        assert!(validate_endpoint("http://127.0.0.1:8080/path").is_err());
+    }
+
+    #[test]
+    fn validate_endpoint_rejects_query_in_port() {
+        assert!(validate_endpoint("http://127.0.0.1:8080?query=1").is_err());
+    }
+
+    #[test]
+    fn validate_endpoint_rejects_non_numeric_port() {
+        assert!(validate_endpoint("http://127.0.0.1:abcd").is_err());
+    }
+}
