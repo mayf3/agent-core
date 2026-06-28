@@ -220,6 +220,10 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
 mod tool_loop_tests;
 
 #[cfg(test)]
+#[path = "tool_loop_extra_tests.rs"]
+mod tool_loop_extra_tests;
+
+#[cfg(test)]
 #[path = "blank_reply_tests.rs"]
 mod blank_reply_tests;
 
