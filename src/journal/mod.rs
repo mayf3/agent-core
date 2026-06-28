@@ -1,5 +1,5 @@
 mod approval;
-mod hash_chain;
+pub mod hash_chain;
 mod outbox;
 mod outbox_queue;
 mod queue;

@@ -4,12 +4,13 @@
 //! All routes require `Authorization: Bearer <admin_token>`.
 
 use crate::config::KernelConfig;
-use crate::domain::*;
+
 use crate::harness::grants::{self};
-use crate::harness::manifest::{self, HarnessBundleManifest, PreparedOperation};
+use crate::harness::manifest::{self, HarnessBundleManifest};
 use crate::harness::registration::{self};
 use crate::journal::JournalStore;
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
+use rusqlite::OptionalExtension;
 use serde_json::Value;
 
 /// Check if the admin token is configured.
@@ -29,62 +30,78 @@ pub fn validate_admin_token(config: &KernelConfig, token: Option<&str>) -> Resul
 }
 
 /// Register a new harness bundle from a manifest.
+/// Uses a single transaction for state write + Journal event.
 pub fn handle_register_bundle(journal: &JournalStore, body: &Value) -> Result<Value> {
     let declared_hash = body.get("bundle_hash").and_then(Value::as_str);
-    let manifest: HarnessBundleManifest = manifest::validate_manifest(body, declared_hash)?;
-    let bundle_hash = manifest::compute_bundle_hash(&manifest);
-
-    // Build prepared operations to verify they are valid.
-    let _prepared: Vec<PreparedOperation> = manifest
-        .operations
-        .iter()
-        .map(|op| manifest::prepare_operation(op, &bundle_hash))
-        .collect();
-
-    // Persist the canonical manifest (re-serialized from validated struct,
-    // not the raw request body — this strips declared_hash, normalizes key
-    // order, sorts operations by name, and ensures byte-level consistency
-    // between hash and storage).
-    let canonical_json = serde_json::to_string(&manifest::canonical_manifest_value(&manifest))?;
+    let vcm = manifest::validate_to_canonical(body, declared_hash)?;
     let now = chrono::Utc::now().to_rfc3339();
 
-    // Check for duplicate (same bundle_id + bundle_version).
-    if let Some(existing_hash) =
-        find_bundle_by_id_version(journal, &manifest.bundle_id, &manifest.bundle_version)?
-    {
-        if existing_hash != bundle_hash {
+    let mut conn = journal
+        .conn
+        .lock()
+        .map_err(|_| anyhow!("journal mutex poisoned"))?;
+
+    // Check for duplicate (same bundle_id + bundle_version) — inside tx.
+    let existing: Option<String> = conn
+        .query_row(
+            "SELECT bundle_hash FROM harness_bundles WHERE bundle_id = ?1 AND bundle_version = ?2",
+            rusqlite::params![vcm.manifest.bundle_id, vcm.manifest.bundle_version],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+
+    if let Some(existing_hash) = existing {
+        if existing_hash != vcm.bundle_hash {
             bail!(
                 "bundle_conflict: bundle_id={} bundle_version={} already exists with different content",
-                manifest.bundle_id,
-                manifest.bundle_version
+                vcm.manifest.bundle_id,
+                vcm.manifest.bundle_version
             );
         }
-        // Idempotent: same hash already registered.
+        // Idempotent: same hash already registered. No event needed.
+        drop(conn);
         return Ok(serde_json::json!({
             "ok": true,
-            "bundle_hash": bundle_hash,
+            "bundle_hash": vcm.bundle_hash,
             "idempotent": true,
         }));
     }
 
-    insert_bundle(journal, &bundle_hash, &manifest, &canonical_json, &now)?;
-
-    journal.append_event(
-        JournalEventKind::HarnessBundleRegistered,
-        None,
-        None,
-        None,
-        serde_json::json!({
-            "bundle_hash": bundle_hash,
-            "bundle_id": manifest.bundle_id,
-            "bundle_version": manifest.bundle_version,
-            "operation_count": manifest.operations.len(),
-        }),
+    // Begin transaction for state + event.
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    tx.execute(
+        "INSERT INTO harness_bundles (bundle_hash, manifest_version, protocol_version, bundle_id, bundle_version, manifest_json, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        rusqlite::params![
+            vcm.bundle_hash,
+            vcm.manifest.manifest_version,
+            vcm.manifest.protocol_version,
+            vcm.manifest.bundle_id,
+            vcm.manifest.bundle_version,
+            vcm.canonical_json,
+            now,
+        ],
     )?;
+
+    crate::journal::hash_chain::append_event_in_transaction(
+        &tx,
+        "HarnessBundleRegistered",
+        &serde_json::to_string(&serde_json::json!({
+            "bundle_hash": vcm.bundle_hash,
+            "bundle_id": vcm.manifest.bundle_id,
+            "bundle_version": vcm.manifest.bundle_version,
+            "operation_count": vcm.manifest.operations.len(),
+        }))?,
+        &now,
+    )?;
+
+    tx.commit()?;
+    drop(conn);
 
     Ok(serde_json::json!({
         "ok": true,
-        "bundle_hash": bundle_hash,
+        "bundle_hash": vcm.bundle_hash,
+        "operation_specs": vcm.operation_specs,
     }))
 }
 
@@ -151,18 +168,26 @@ pub fn handle_compose_snapshot(
     // Create the snapshot (idempotent: same specs → same ID).
     let snap = journal.create_registry_snapshot(all_ops)?;
 
-    journal.append_event(
-        JournalEventKind::RegistrySnapshotComposed,
-        None,
-        None,
-        None,
-        serde_json::json!({
-            "base_snapshot_id": base_snapshot_id,
-            "bundle_hashes": hashes_sorted,
-            "candidate_snapshot_id": snap.snapshot_id,
-            "operation_count": snap.operations.len(),
-        }),
-    )?;
+    // Compose must be atomic: snapshot created + event in same tx.
+    {
+        let mut conn = journal
+            .conn
+            .lock()
+            .map_err(|_| anyhow!("journal mutex poisoned"))?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        crate::journal::hash_chain::append_event_in_transaction(
+            &tx,
+            "RegistrySnapshotComposed",
+            &serde_json::to_string(&serde_json::json!({
+                "base_snapshot_id": base_snapshot_id,
+                "bundle_hashes": hashes_sorted,
+                "candidate_snapshot_id": snap.snapshot_id,
+                "operation_count": snap.operations.len(),
+            }))?,
+            &chrono::Utc::now().to_rfc3339(),
+        )?;
+        tx.commit()?;
+    }
 
     Ok(serde_json::json!({
         "ok": true,
@@ -245,54 +270,6 @@ pub fn handle_registry_info(journal: &JournalStore) -> Result<Value> {
 }
 
 // ---- Private helpers ----
-
-fn find_bundle_by_id_version(
-    journal: &JournalStore,
-    bundle_id: &str,
-    bundle_version: &str,
-) -> Result<Option<String>> {
-    let conn = journal
-        .conn
-        .lock()
-        .map_err(|_| anyhow::anyhow!("journal mutex poisoned"))?;
-    let result = conn.query_row(
-        "SELECT bundle_hash FROM harness_bundles WHERE bundle_id = ?1 AND bundle_version = ?2",
-        rusqlite::params![bundle_id, bundle_version],
-        |row| row.get::<_, String>(0),
-    );
-    match result {
-        Ok(h) => Ok(Some(h)),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-        Err(e) => Err(e.into()),
-    }
-}
-
-fn insert_bundle(
-    journal: &JournalStore,
-    bundle_hash: &str,
-    manifest: &HarnessBundleManifest,
-    canonical_json: &str,
-    now: &str,
-) -> Result<()> {
-    let conn = journal
-        .conn
-        .lock()
-        .map_err(|_| anyhow::anyhow!("journal mutex poisoned"))?;
-    conn.execute(
-        "INSERT INTO harness_bundles (bundle_hash, manifest_version, protocol_version, bundle_id, bundle_version, manifest_json, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        rusqlite::params![
-            bundle_hash,
-            manifest.manifest_version,
-            manifest.protocol_version,
-            manifest.bundle_id,
-            manifest.bundle_version,
-            canonical_json,
-            now,
-        ],
-    )?;
-    Ok(())
-}
 
 fn list_bundles(journal: &JournalStore) -> Result<Vec<Value>> {
     let conn = journal
