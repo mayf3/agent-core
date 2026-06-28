@@ -17,9 +17,12 @@ pub struct LlmInput {
     /// snapshot at creation time. All LLM rounds for the same Run reuse the
     /// same tools list — never regenerated from the live/static catalog.
     pub provider_tools: Vec<serde_json::Value>,
-    /// Structured tool follow-up for the second round: the provider-side
-    /// tool_call transcript (raw id, wire name, args) + bounded result content.
-    pub follow_up: Option<LlmFollowUp>,
+    /// Accumulated tool follow-ups for multi-round transcripts. Each entry
+    /// contains one provider-side tool_call + its result. All prior rounds
+    /// are included so the model sees the complete conversation history.
+    /// An empty vec means first round. The vec is ordered chronologically
+    /// by round (index 0 = first tool round).
+    pub follow_ups: Vec<LlmFollowUp>,
 }
 
 pub struct LlmOutput {
@@ -166,9 +169,10 @@ impl OpenAiCompatibleLlm {
 
 impl LlmClient for OpenAiCompatibleLlm {
     fn complete(&self, input: LlmInput) -> Result<LlmOutput> {
-        // Sticky follow-up: if a follow_up names the source endpoint, request
-        // ONLY that endpoint (do not cross providers).
-        if let Some(fu) = &input.follow_up {
+        // Sticky endpoint: if the most recent follow_up names a source
+        // endpoint, route there (all prior rounds are included via
+        // input.follow_ups, but the endpoint choice uses the last round).
+        if let Some(fu) = input.follow_ups.last() {
             let endpoint = match fu.provider_turn.endpoint {
                 EndpointChoice::Primary => &self.primary,
                 EndpointChoice::Fallback => match &self.fallback {
@@ -177,17 +181,17 @@ impl LlmClient for OpenAiCompatibleLlm {
                 },
             };
             return self
-                .request_endpoint(endpoint, fu.provider_turn.endpoint, &input, Some(fu))
+                .request_endpoint(endpoint, fu.provider_turn.endpoint, &input)
                 .map_err(anyhow::Error::msg);
         }
-        // No follow-up: normal primary → fallback routing.
+        // No follow-ups: normal primary → fallback routing.
         if !self.primary.is_configured() {
             return Ok(match self.try_fallback(&input, "model_config_required") {
                 Some(o) => o,
                 None => config_required_output(&self.primary.model, input.blocks.len()),
             });
         }
-        match self.request_endpoint(&self.primary, EndpointChoice::Primary, &input, None) {
+        match self.request_endpoint(&self.primary, EndpointChoice::Primary, &input) {
             Ok(output) => Ok(output),
             Err(error) => {
                 if let Some(output) = self.try_fallback(&input, error.as_str()) {
@@ -206,7 +210,7 @@ impl LlmClient for OpenAiCompatibleLlm {
 impl OpenAiCompatibleLlm {
     fn try_fallback(&self, input: &LlmInput, primary_error: &str) -> Option<LlmOutput> {
         let fallback = self.fallback.as_ref()?;
-        let output = match self.request_endpoint(fallback, EndpointChoice::Fallback, input, None) {
+        let output = match self.request_endpoint(fallback, EndpointChoice::Fallback, input) {
             Ok(output) => output,
             Err(error) => {
                 request_failed_output(&fallback.model, input.blocks.len(), error.as_str())
@@ -223,7 +227,6 @@ impl OpenAiCompatibleLlm {
         endpoint: &ModelEndpoint,
         choice: EndpointChoice,
         input: &LlmInput,
-        follow_up: Option<&LlmFollowUp>,
     ) -> std::result::Result<LlmOutput, String> {
         // Provider tools are derived from the Run's pinned registry snapshot
         // at Runtime::deliver() time and passed in LlmInput.provider_tools.
@@ -247,10 +250,8 @@ impl OpenAiCompatibleLlm {
             json!({"role": "system", "content": serialize_system_context(&input.blocks)}),
             json!({"role": "user", "content": input.user_text}),
         ];
-        // Structured follow-up transcript: only when a real follow_up exists.
-        // First-round requests (None) send only system + user — no fabricated
-        // assistant/tool history.
-        if let Some(fu) = follow_up {
+        // Accumulated tool transcript: all prior rounds appended in order.
+        for fu in &input.follow_ups {
             let turn = &fu.provider_turn;
             messages.push(json!({
                 "role": "assistant",
