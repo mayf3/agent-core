@@ -1,4 +1,3 @@
-use crate::config::KernelConfig;
 use crate::domain::operation::{provider_tool_definition, provider_tools_for_grants};
 use crate::domain::*;
 use crate::gateway::Gateway;
@@ -185,10 +184,14 @@ fn request_includes_time_now_when_granted() -> Result<()> {
         "local-stub".into(),
         3000,
     );
+    let snap = crate::registry::snapshot::test_snapshot();
+    let provider_tools =
+        snap.provider_tools_for_grants(&["time.now".to_string(), "system.status".to_string()]);
     let _ = llm.complete(LlmInput {
         blocks: vec![],
         user_text: "x".into(),
         granted_operations: vec!["time.now".to_string(), "system.status".to_string()],
+        provider_tools,
         follow_up: None,
     })?;
     let requests = server.requests();
@@ -235,11 +238,14 @@ fn request_omits_time_now_when_not_granted() -> Result<()> {
         "local-stub".into(),
         3000,
     );
+    let snap = crate::registry::snapshot::test_snapshot();
+    let provider_tools = snap.provider_tools_for_grants(&["session.recall_recent".to_string()]);
     // Grant only session.recall_recent — NOT time.now.
     let _ = llm.complete(LlmInput {
         blocks: vec![],
         user_text: "x".into(),
         granted_operations: vec!["session.recall_recent".to_string()],
+        provider_tools,
         follow_up: None,
     })?;
     let requests = server.requests();
@@ -270,10 +276,14 @@ fn misconfigured_write_grant_not_in_tools() -> Result<()> {
         "local-stub".into(),
         3000,
     );
+    // Write operations produce an empty provider_tools list — the test
+    // verifies that even when granted, Write ops don't appear in tools.
+    let provider_tools: Vec<serde_json::Value> = vec![];
     let _ = llm.complete(LlmInput {
         blocks: vec![],
         user_text: "x".into(),
         granted_operations: vec!["feishu.send_message".to_string()],
+        provider_tools,
         follow_up: None,
     })?;
     let requests = server.requests();
@@ -293,41 +303,10 @@ fn misconfigured_write_grant_not_in_tools() -> Result<()> {
     );
     Ok(())
 }
-pub(crate) fn _cfg() -> KernelConfig {
-    use std::path::PathBuf;
-    KernelConfig {
-        db_path: PathBuf::from(":memory:"),
-        data_dir: PathBuf::from("."),
-        agent_id: AgentId("main".into()),
-        root_dir: PathBuf::from("."),
-        kernel_port: 4130,
-        connector_execute_url: String::new(),
-        ipc_token: "test".into(),
-        feishu_allowed_open_ids: vec![],
-        feishu_allowed_chat_ids: vec![],
-        feishu_require_group_mention: true,
-        openai_base_url: String::new(),
-        openai_api_key: String::new(),
-        model: String::new(),
-        fallback_openai_base_url: String::new(),
-        fallback_openai_api_key: String::new(),
-        fallback_model: String::new(),
-        model_timeout_ms: 100,
-        context_recent_messages: 6,
-        context_max_block_chars: 4000,
-        outbox_dispatcher_enabled: false,
-        outbox_dispatcher_poll_interval_ms: 10,
-        // time.now deliberately NOT granted here.
-        extra_allowed_operations: vec![],
-        require_write_approval: false,
-        write_approval_ttl_secs: 0,
-        fallback_tool_name_indexed: false,
-        primary_tool_name_indexed: false,
-    }
-}
+
 #[test]
 fn ungranted_provider_time_now_is_rejected_by_gateway() {
-    let mut cfg = _cfg();
+    let mut cfg = super::tool_loop_tests::test_config();
     let server = CaptureServer::start(vec![
         json!({
             "model": "local-stub",
@@ -406,7 +385,7 @@ fn ungranted_provider_time_now_is_rejected_by_gateway() {
 // ===== §9: full time.now tool loop (granted) =====
 #[test]
 fn granted_time_now_completes_real_http_tool_loop() {
-    let mut cfg = _cfg();
+    let mut cfg = super::tool_loop_tests::test_config();
     cfg.extra_allowed_operations = vec!["time.now".to_string()];
     let server = CaptureServer::start(vec![
         json!({
@@ -470,7 +449,7 @@ fn granted_time_now_completes_real_http_tool_loop() {
         .iter()
         .filter_map(|tool| tool.pointer("/function/name").and_then(Value::as_str))
         .collect();
-    assert_eq!(names, vec!["time.now", "session.recall_recent"]);
+    assert_eq!(names, vec!["session.recall_recent", "time.now"]);
     let followup_context = requests[1]
         .pointer("/messages/0/content")
         .and_then(Value::as_str)

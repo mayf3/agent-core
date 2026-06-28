@@ -40,6 +40,7 @@ fn approved_for_run(
     session_id: &SessionId,
     decision: &str,
 ) -> Result<ApprovedInvocation> {
+    let snap = agent_core_kernel::registry::snapshot::test_snapshot();
     gateway.approve_invocation(
         InvocationIntent {
             invocation_id: InvocationId(format!("reply:{decision}")),
@@ -62,6 +63,7 @@ fn approved_for_run(
             status: RunStatus::Running,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            registry_snapshot_id: String::new(),
         },
         &Session {
             id: session_id.clone(),
@@ -74,10 +76,14 @@ fn approved_for_run(
             status: SessionStatus::Active,
             version: 1,
         },
+        &snap,
     )
 }
 
-fn seed_pending_outbox(journal: &JournalStore, decision: &str) -> Result<(RunId, SessionId, ApprovedInvocation, InvocationId)> {
+fn seed_pending_outbox(
+    journal: &JournalStore,
+    decision: &str,
+) -> Result<(RunId, SessionId, ApprovedInvocation, InvocationId)> {
     let run_id = RunId::new();
     let session_id = SessionId(format!("session_retry_{decision}"));
     let run = Run {
@@ -91,6 +97,7 @@ fn seed_pending_outbox(journal: &JournalStore, decision: &str) -> Result<(RunId,
         status: RunStatus::Running,
         created_at: Utc::now(),
         updated_at: Utc::now(),
+        registry_snapshot_id: String::new(),
     };
     journal.insert_run(&run)?;
 
@@ -105,8 +112,7 @@ fn seed_pending_outbox(journal: &JournalStore, decision: &str) -> Result<(RunId,
 #[test]
 fn retryable_failed_with_due_available_at_is_redispatched() -> Result<()> {
     let journal = JournalStore::in_memory()?;
-    let (run_id, session_id, approved, invocation_id) =
-        seed_pending_outbox(&journal, "retry_due")?;
+    let (run_id, session_id, approved, invocation_id) = seed_pending_outbox(&journal, "retry_due")?;
 
     // First lease+dispatch lands in retryable_failed with available_at in the future.
     journal.lease_next_outbox_dispatch()?;
@@ -130,7 +136,10 @@ fn retryable_failed_with_due_available_at_is_redispatched() -> Result<()> {
         receipt_status: ReceiptStatus::Succeeded,
     };
     let skipped = dispatch_once(&journal, &cold_adapter)?;
-    assert!(!skipped, "retryable_failed with available_at in future must not be leased");
+    assert!(
+        !skipped,
+        "retryable_failed with available_at in future must not be leased"
+    );
     assert!(cold_calls.lock().unwrap().is_empty());
 
     // available_at now in the past: dispatcher must lease + execute + succeed.
@@ -141,7 +150,10 @@ fn retryable_failed_with_due_available_at_is_redispatched() -> Result<()> {
         receipt_status: ReceiptStatus::Succeeded,
     };
     let dispatched = dispatch_once(&journal, &hot_adapter)?;
-    assert!(dispatched, "retryable_failed with available_at<=now must be leased");
+    assert!(
+        dispatched,
+        "retryable_failed with available_at<=now must be leased"
+    );
 
     let pushed = hot_calls.lock().unwrap().clone();
     assert_eq!(pushed.len(), 1);
@@ -166,8 +178,7 @@ fn retryable_failed_with_due_available_at_is_redispatched() -> Result<()> {
     // Run was completed by the succeed path.
     assert_eq!(journal.run_status(&run_id)?.as_deref(), Some("Completed"));
     assert!(journal.events()?.iter().any(|event| {
-        event.kind == JournalEventKind::RunCompleted
-            && event.run_id.as_ref() == Some(&run_id)
+        event.kind == JournalEventKind::RunCompleted && event.run_id.as_ref() == Some(&run_id)
     }));
     assert!(journal.verify_hash_chain()?);
     let _ = approved;
@@ -198,9 +209,15 @@ fn retryable_failed_with_future_available_at_is_not_redispatched() -> Result<()>
     };
     for _ in 0..3 {
         let processed = dispatch_once(&journal, &adapter)?;
-        assert!(!processed, "dispatcher must not lease a not-yet-due retryable row");
+        assert!(
+            !processed,
+            "dispatcher must not lease a not-yet-due retryable row"
+        );
     }
-    assert!(calls.lock().unwrap().is_empty(), "adapter must not be called");
+    assert!(
+        calls.lock().unwrap().is_empty(),
+        "adapter must not be called"
+    );
 
     assert_eq!(
         journal.outbox_dispatch_status(&invocation_id)?.as_ref(),
@@ -239,10 +256,12 @@ fn terminal_states_are_not_leased_by_dispatcher() -> Result<()> {
                 status: RunStatus::Running,
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
+                registry_snapshot_id: String::new(),
             };
             journal.insert_run(&run)?;
             let config = common::test_config();
             let gateway = Gateway::new(config);
+            let snap = agent_core_kernel::registry::snapshot::test_snapshot();
             let approved = gateway.approve_invocation(
                 InvocationIntent {
                     invocation_id: InvocationId(format!("reply:skip_{status:?}")),
@@ -263,6 +282,7 @@ fn terminal_states_are_not_leased_by_dispatcher() -> Result<()> {
                     status: SessionStatus::Active,
                     version: 1,
                 },
+                &snap,
             )?;
             let invocation_id = approved.intent().invocation_id.clone();
             journal.queue_outbox_dispatch(&approved, None)?;
@@ -319,10 +339,12 @@ fn terminal_transition_guard_rejects_non_dispatching_state() -> Result<()> {
         status: RunStatus::Running,
         created_at: Utc::now(),
         updated_at: Utc::now(),
+        registry_snapshot_id: String::new(),
     };
     journal.insert_run(&run)?;
     let config = common::test_config();
     let gateway = Gateway::new(config);
+    let snap = agent_core_kernel::registry::snapshot::test_snapshot();
     let approved = gateway.approve_invocation(
         InvocationIntent {
             invocation_id: InvocationId("reply:guard".to_string()),
@@ -343,6 +365,7 @@ fn terminal_transition_guard_rejects_non_dispatching_state() -> Result<()> {
             status: SessionStatus::Active,
             version: 1,
         },
+        &snap,
     )?;
     let invocation_id = approved.intent().invocation_id.clone();
     journal.queue_outbox_dispatch(&approved, None)?;

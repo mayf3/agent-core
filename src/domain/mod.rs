@@ -4,12 +4,12 @@ use serde_json::Value;
 use std::path::PathBuf;
 use uuid::Uuid;
 
-pub mod status;
-pub mod retry;
 pub mod operation;
-pub use status::*;
-pub use retry::*;
+pub mod retry;
+pub mod status;
 pub use operation::*;
+pub use retry::*;
+pub use status::*;
 
 macro_rules! id_type {
     ($name:ident, $prefix:literal) => {
@@ -117,6 +117,11 @@ pub struct Run {
     pub status: RunStatus,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// The immutable registry snapshot this Run is pinned to. Context,
+    /// Provider tools, and Gateway validation all read from this snapshot.
+    /// Non-empty for all new Runs; old Runs are backfilled at boot.
+    #[serde(default)]
+    pub registry_snapshot_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

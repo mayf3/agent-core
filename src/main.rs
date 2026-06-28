@@ -23,6 +23,7 @@ fn run_cli(args: &[String]) -> Result<()> {
     let options = CliOptions::parse(args)?;
     let config = KernelConfig::from_cli(options.db_path);
     let journal = JournalStore::open(&config.db_path)?;
+    journal.initialize_registry()?;
     let gateway = Gateway::new(config.clone());
     let runtime = Runtime::new(config, LocalEchoLlm);
     let envelope = gateway.cli_ingress(options.text)?;

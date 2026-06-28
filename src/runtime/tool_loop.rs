@@ -2,6 +2,7 @@ use crate::domain::*;
 use crate::gateway::Gateway;
 use crate::journal::JournalStore;
 use crate::llm::{LlmClient, LlmFollowUp, LlmInput, LlmOutput, ProviderToolTurn, ToolCallResult};
+use crate::registry::snapshot::RegistrySnapshot;
 use crate::runtime::tool_rejection::sanitize_operation_for_audit;
 use anyhow::Result;
 use serde_json::json;
@@ -25,8 +26,18 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
         blocks: &mut Vec<ContextBlock>,
         user_text: &str,
         mut llm: LlmOutput,
+        snapshot: &RegistrySnapshot,
     ) -> Result<LlmOutput> {
         let mut tool_index: usize = 0;
+        // Pre-compute provider tools from the pinned snapshot — same list
+        // for all LLM rounds of this Run.
+        let provider_tools = snapshot.provider_tools_for_grants(
+            &run.principal
+                .grants
+                .iter()
+                .map(|g| g.operation.clone())
+                .collect::<Vec<_>>(),
+        );
         // Run-local follow-up state: the provider turn from the first round,
         // carried explicitly through LlmInput — never shared client state.
         let mut pending_turn: Option<ProviderToolTurn> = llm.provider_turn.take();
@@ -54,7 +65,13 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
                                 result_content: text,
                             });
                             llm = self.complete_after_tool_result(
-                                journal, run, session, blocks, user_text, fu,
+                                journal,
+                                run,
+                                session,
+                                blocks,
+                                user_text,
+                                fu,
+                                &provider_tools,
                             )?;
                             if llm.tool_call.is_absent() {
                                 return Ok(llm);
@@ -67,7 +84,7 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
                     let this_tool = tool_index;
                     tool_index += 1;
                     let outcome = self.handle_inline_tool_call(
-                        journal, gateway, run, session, &tool_call, turn_index, this_tool,
+                        journal, gateway, run, session, &tool_call, turn_index, this_tool, snapshot,
                     )?;
                     match outcome {
                         ToolCallOutcome::Fatal { category } => {
@@ -93,7 +110,13 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
                                 result_content: text.clone(),
                             });
                             llm = self.complete_after_tool_result(
-                                journal, run, session, blocks, user_text, fu,
+                                journal,
+                                run,
+                                session,
+                                blocks,
+                                user_text,
+                                fu,
+                                &provider_tools,
                             )?;
                             pending_turn = llm.provider_turn.take();
                             if llm.tool_call.is_absent() {
@@ -125,6 +148,7 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
         blocks: &[ContextBlock],
         user_text: &str,
         follow_up: Option<LlmFollowUp>,
+        provider_tools: &[serde_json::Value],
     ) -> Result<LlmOutput> {
         let next = match self.llm.complete(LlmInput {
             blocks: blocks.to_vec(),
@@ -135,6 +159,7 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
                 .iter()
                 .map(|g| g.operation.clone())
                 .collect(),
+            provider_tools: provider_tools.to_vec(),
             follow_up,
         }) {
             Ok(next) => next,
@@ -188,19 +213,15 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
             "tool loop infrastructure failure: {category}; run_status_recorded={run_status_recorded}; failure_fact_recorded={failure_fact_recorded}"
         ))
     }
-
-    pub(crate) fn execute_session_recall(
-        journal: &JournalStore,
-        session_id: &SessionId,
-        approved: &ApprovedInvocation,
-    ) -> Result<(ReceiptStatus, serde_json::Value, String)> {
-        crate::runtime::tool_rejection::execute_session_recall(journal, session_id, approved)
-    }
 }
 
 #[cfg(test)]
 #[path = "tool_loop_tests.rs"]
 mod tool_loop_tests;
+
+#[cfg(test)]
+#[path = "tool_loop_extra_tests.rs"]
+mod tool_loop_extra_tests;
 
 #[cfg(test)]
 #[path = "blank_reply_tests.rs"]

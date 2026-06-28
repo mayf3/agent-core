@@ -1,6 +1,7 @@
 use crate::config::KernelConfig;
 use crate::domain::*;
 use crate::journal::JournalStore;
+use crate::registry::snapshot::RegistrySnapshot;
 use anyhow::{bail, Result};
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
@@ -61,13 +62,14 @@ impl Gateway {
         intent: InvocationIntent,
         run: &Run,
         session: &Session,
+        snapshot: &RegistrySnapshot,
     ) -> Result<ApprovedInvocation> {
         // Access control runs through the fixed, pure policy pipeline
         // (Phase 2 M2c); see `src/gateway/policy.rs`. The first denial wins
         // and its reason is surfaced verbatim, preserving the prior error
         // messages (`capability_not_enabled` / `operation_not_allowed` /
         // `target_session_mismatch`).
-        match policy::evaluate_policy(&intent, run, session) {
+        match policy::evaluate_policy(&intent, run, session, snapshot) {
             PolicyVerdict::Deny(reason) => bail!("{reason}"),
             PolicyVerdict::Allow => {}
         }
@@ -120,11 +122,9 @@ impl Gateway {
                 principal_id: PrincipalId("cli:local".to_string()),
                 subject: PrincipalSubject::LocalUser,
                 source: PrincipalSource::Cli,
-                grants: crate::domain::operation::ExecutionProfile::for_channel(
-                    ChannelKind::Cli,
-                )
-                .with_extra(&self.config.extra_allowed_operations)
-                .grants,
+                grants: crate::domain::operation::ExecutionProfile::for_channel(ChannelKind::Cli)
+                    .with_extra(&self.config.extra_allowed_operations)
+                    .grants,
                 requester_id: Some("cli:local".to_string()),
             },
             session_target: SessionTarget {

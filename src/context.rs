@@ -1,6 +1,7 @@
 use crate::config::KernelConfig;
 use crate::domain::*;
 use crate::journal::JournalStore;
+use crate::registry::snapshot::RegistrySnapshot;
 use anyhow::Result;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -27,6 +28,7 @@ impl ContextAssembler {
         event: &ValidatedEvent,
         user_text: &str,
         granted_operations: &[String],
+        snapshot: &RegistrySnapshot,
     ) -> Result<Vec<ContextBlock>> {
         let recent = self.recent_block(journal, session, &event.event_id.0)?;
         let mut blocks = vec![
@@ -64,7 +66,7 @@ impl ContextAssembler {
                 Compressibility::Never,
             ),
             self.skill_catalog_block(),
-            self.tool_catalog_block(granted_operations),
+            self.tool_catalog_block(granted_operations, snapshot),
             self.file_block(
                 ContextBlockKind::ActiveSkill,
                 "skills/chat/SKILL.md",
@@ -113,12 +115,12 @@ impl ContextAssembler {
             self.max_block_chars,
         )
     }
-    fn tool_catalog_block(&self, granted_operations: &[String]) -> ContextBlock {
-        // ToolCatalog is derived from the current Run's grants ∩ the ReadOnly
-        // catalog — exactly the same operation set as the provider `tools`
-        // schema. An un-granted or Write operation is never shown. The Gateway
-        // remains the independent final authorization boundary.
-        let content = crate::domain::operation::catalog_for_context_grants(granted_operations);
+    fn tool_catalog_block(
+        &self,
+        granted_operations: &[String],
+        snapshot: &RegistrySnapshot,
+    ) -> ContextBlock {
+        let content = snapshot.catalog_for_context_grants(granted_operations);
         block(
             ContextBlockKind::ToolCatalog,
             &content,

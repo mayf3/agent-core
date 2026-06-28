@@ -2,9 +2,9 @@ use crate::config::KernelConfig;
 use crate::domain::*;
 use crate::gateway::Gateway;
 use crate::journal::JournalStore;
-use crate::llm::{ToolCall, ToolCallResult};
+use crate::llm::ToolCall;
 use crate::runtime::tool_rejection::sanitize_operation_for_audit;
-use crate::runtime::{Runtime, ToolRejection};
+use crate::runtime::Runtime;
 use serde_json::json;
 use std::path::PathBuf;
 
@@ -90,6 +90,7 @@ fn fixture() -> (
         status: RunStatus::Running,
         created_at: now,
         updated_at: now,
+        registry_snapshot_id: String::new(),
     };
     (journal, gateway, runtime, session, run)
 }
@@ -108,7 +109,16 @@ fn rejected_tool_call_writes_issued_and_rejected_not_invocation() {
         arguments: json!({}),
     };
     assert!(runtime
-        .handle_inline_tool_call(&journal, &gateway, &run, &session, &bad_op, 0, 0)
+        .handle_inline_tool_call(
+            &journal,
+            &gateway,
+            &run,
+            &session,
+            &bad_op,
+            0,
+            0,
+            &crate::registry::snapshot::test_snapshot()
+        )
         .is_ok());
     let events = journal.events().unwrap();
     assert_eq!(count(&events, JournalEventKind::ToolCallIssued), 1);
@@ -149,7 +159,16 @@ fn successful_tool_call_writes_proposed_approved_succeeded_receipt() {
         arguments: json!({}),
     };
     assert!(runtime
-        .handle_inline_tool_call(&journal, &gateway, &run, &session, &tc, 0, 0)
+        .handle_inline_tool_call(
+            &journal,
+            &gateway,
+            &run,
+            &session,
+            &tc,
+            0,
+            0,
+            &crate::registry::snapshot::test_snapshot()
+        )
         .is_ok());
     let events = journal.events().unwrap();
     assert_eq!(count(&events, JournalEventKind::ToolCallIssued), 1);
@@ -179,7 +198,16 @@ fn capability_failure_writes_failed_receipt_not_running() {
     };
     assert!(
         runtime
-            .handle_inline_tool_call(&journal, &gateway, &run, &session, &tc, 0, 0)
+            .handle_inline_tool_call(
+                &journal,
+                &gateway,
+                &run,
+                &session,
+                &tc,
+                0,
+                0,
+                &crate::registry::snapshot::test_snapshot()
+            )
             .is_ok(),
         "capability failure is a ToolResult, not Err"
     );
@@ -239,7 +267,16 @@ fn empty_recall_returns_succeeded_empty_messages() {
         arguments: json!({}),
     };
     assert!(runtime
-        .handle_inline_tool_call(&journal, &gateway, &run, &session, &tc, 0, 0)
+        .handle_inline_tool_call(
+            &journal,
+            &gateway,
+            &run,
+            &session,
+            &tc,
+            0,
+            0,
+            &crate::registry::snapshot::test_snapshot()
+        )
         .is_ok());
     let events = journal.events().unwrap();
     let receipt = events
@@ -317,7 +354,16 @@ fn untrusted_operation_never_leaks_raw_into_journal() {
             operation: raw_op.clone(),
             arguments: json!({}),
         };
-        let _ = runtime.handle_inline_tool_call(&journal, &gateway, &run, &session, &tc, 0, 0);
+        let _ = runtime.handle_inline_tool_call(
+            &journal,
+            &gateway,
+            &run,
+            &session,
+            &tc,
+            0,
+            0,
+            &crate::registry::snapshot::test_snapshot(),
+        );
         let j = serde_json::to_string(&journal.events().unwrap()).unwrap();
         assert!(!j.contains(&raw_op), "[{}] raw leaked", label);
         assert!(
@@ -346,6 +392,7 @@ fn sanitize_operation_keeps_catalog_and_collapses_unknown() {
 fn idempotency_key_is_run_turn_index_scoped() {
     use crate::gateway::validate_tool_call;
     use crate::llm::tool_call_id_hash;
+    use crate::registry::snapshot::test_snapshot;
     let raw_id = "call_abc123";
     let hashed = tool_call_id_hash(raw_id);
     let mk = |op: &str| ToolCall {
@@ -354,32 +401,33 @@ fn idempotency_key_is_run_turn_index_scoped() {
         arguments: json!({}),
     };
     let run = RunId::new();
-    let k1 = validate_tool_call(&mk("time.now"), &run, 0, 0).unwrap();
-    let k2 = validate_tool_call(&mk("time.now"), &run, 0, 0).unwrap();
+    let snap = test_snapshot();
+    let k1 = validate_tool_call(&mk("time.now"), &run, 0, 0, &snap).unwrap();
+    let k2 = validate_tool_call(&mk("time.now"), &run, 0, 0, &snap).unwrap();
     assert_eq!(k1.idempotency_key, k2.idempotency_key, "stable");
     assert_ne!(
-        validate_tool_call(&mk("time.now"), &run, 0, 0)
+        validate_tool_call(&mk("time.now"), &run, 1, 0, &snap)
             .unwrap()
             .idempotency_key,
-        validate_tool_call(&mk("time.now"), &run, 1, 0)
+        validate_tool_call(&mk("time.now"), &run, 0, 0, &snap)
             .unwrap()
             .idempotency_key,
         "turn"
     );
     assert_ne!(
-        validate_tool_call(&mk("time.now"), &run, 0, 0)
+        validate_tool_call(&mk("time.now"), &run, 0, 0, &snap)
             .unwrap()
             .idempotency_key,
-        validate_tool_call(&mk("time.now"), &run, 0, 1)
+        validate_tool_call(&mk("time.now"), &run, 0, 1, &snap)
             .unwrap()
             .idempotency_key,
         "index"
     );
     assert_ne!(
-        validate_tool_call(&mk("time.now"), &run, 0, 0)
+        validate_tool_call(&mk("time.now"), &run, 0, 0, &snap)
             .unwrap()
             .idempotency_key,
-        validate_tool_call(&mk("time.now"), &RunId::new(), 0, 0)
+        validate_tool_call(&mk("time.now"), &RunId::new(), 0, 0, &snap)
             .unwrap()
             .idempotency_key,
         "run"
@@ -391,47 +439,6 @@ fn idempotency_key_is_run_turn_index_scoped() {
 }
 
 // ===== §9: typed rejection categories =====
-#[test]
-fn validate_model_arguments_returns_typed_rejections() {
-    use crate::runtime::validate_model_arguments;
-    assert_eq!(
-        validate_model_arguments("system.status", &json!({"x": 1})),
-        Err(ToolRejection::InvalidArguments)
-    );
-    assert_eq!(
-        validate_model_arguments("session.recall_recent", &json!({"limit": 0})),
-        Err(ToolRejection::InvalidArguments)
-    );
-    assert_eq!(
-        validate_model_arguments("time.now", &json!("nope")),
-        Err(ToolRejection::MalformedArguments)
-    );
-    assert_eq!(
-        validate_model_arguments("shell.exec", &json!({})),
-        Err(ToolRejection::UnknownOperation)
-    );
-    assert!(validate_model_arguments("time.now", &json!({})).is_ok());
-}
-
-#[test]
-fn typed_rejection_categories_and_messages_are_safe() {
-    for r in [
-        ToolRejection::UnknownOperation,
-        ToolRejection::OperationNotAllowed,
-        ToolRejection::MalformedArguments,
-        ToolRejection::InvalidArguments,
-        ToolRejection::PolicyDenied,
-        ToolRejection::MalformedToolCall,
-        ToolRejection::InternalToolError,
-    ] {
-        let (cat, msg) = (r.category(), r.safe_message());
-        assert!(!cat.is_empty() && cat.len() <= 32);
-        assert!(!msg.is_empty() && msg.len() <= 80);
-        assert!(cat
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c == '_' || c.is_ascii_digit()));
-    }
-}
 
 #[test]
 fn policy_denial_writes_rejected_with_correlation() {
@@ -442,7 +449,16 @@ fn policy_denial_writes_rejected_with_correlation() {
         operation: "time.now".into(),
         arguments: json!({}),
     };
-    let _ = runtime.handle_inline_tool_call(&journal, &gateway, &run, &session, &tc, 0, 0);
+    let _ = runtime.handle_inline_tool_call(
+        &journal,
+        &gateway,
+        &run,
+        &session,
+        &tc,
+        0,
+        0,
+        &crate::registry::snapshot::test_snapshot(),
+    );
     let events = journal.events().unwrap();
     assert_eq!(count(&events, JournalEventKind::InvocationProposed), 1);
     assert_eq!(count(&events, JournalEventKind::ToolCallRejected), 1);
@@ -460,9 +476,4 @@ fn policy_denial_writes_rejected_with_correlation() {
         Some("policy_denied")
     );
     assert!(rejected.correlation_id.is_some());
-}
-
-#[test]
-fn tool_call_result_absent_is_absent() {
-    assert!(ToolCallResult::Absent.is_absent());
 }

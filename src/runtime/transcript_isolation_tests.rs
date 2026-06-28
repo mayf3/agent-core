@@ -12,7 +12,7 @@ mod transcript_isolation_tests {
     use std::thread;
 
     fn cfg() -> crate::config::KernelConfig {
-        super::super::grant_schema_tests::_cfg()
+        super::super::tool_loop_tests::test_config()
     }
 
     /// Capture stub: serves queued responses, captures request bodies.
@@ -108,6 +108,11 @@ mod transcript_isolation_tests {
         }
     }
 
+    fn time_now_provider_tools() -> Vec<serde_json::Value> {
+        crate::registry::snapshot::test_snapshot()
+            .provider_tools_for_grants(&["time.now".to_string()])
+    }
+
     fn time_tool_call(raw_id: &str) -> Value {
         json!({"model":"s","choices":[{"message":{"content":"","tool_calls":[{"id":raw_id,"type":"function","function":{"name":"fn_0","arguments":"{}"}}]}}]})
     }
@@ -119,12 +124,14 @@ mod transcript_isolation_tests {
         let srv = Capture::new(vec![
             json!({"model":"s","choices":[{"message":{"content":"hello"}}]}),
         ]);
+        let provider_tools = time_now_provider_tools();
         let llm = OpenAiCompatibleLlm::new(srv.url(), "t".into(), "p".into(), 5000)
             .with_indexed_primary();
         let _ = llm.complete(LlmInput {
             blocks: vec![],
             user_text: "hi".into(),
             granted_operations: vec!["time.now".into()],
+            provider_tools,
             follow_up: None,
         })?;
         let reqs = srv.requests();
@@ -223,6 +230,7 @@ mod transcript_isolation_tests {
                 blocks: vec![],
                 user_text: "a".into(),
                 granted_operations: vec![],
+                provider_tools: vec![],
                 follow_up: Some(crate::llm::LlmFollowUp {
                     provider_turn: crate::llm::ProviderToolTurn {
                         endpoint: crate::llm::EndpointChoice::Primary,
@@ -242,6 +250,7 @@ mod transcript_isolation_tests {
                 blocks: vec![],
                 user_text: "b".into(),
                 granted_operations: vec![],
+                provider_tools: vec![],
                 follow_up: Some(crate::llm::LlmFollowUp {
                     provider_turn: crate::llm::ProviderToolTurn {
                         endpoint: crate::llm::EndpointChoice::Primary,
@@ -344,6 +353,7 @@ mod transcript_isolation_tests {
                 blocks: vec![],
                 user_text: "a".into(),
                 granted_operations: vec![],
+                provider_tools: vec![],
                 follow_up: Some(crate::llm::LlmFollowUp {
                     provider_turn: crate::llm::ProviderToolTurn {
                         endpoint: crate::llm::EndpointChoice::Primary,
@@ -362,6 +372,7 @@ mod transcript_isolation_tests {
                 blocks: vec![],
                 user_text: "b".into(),
                 granted_operations: vec![],
+                provider_tools: vec![],
                 follow_up: Some(crate::llm::LlmFollowUp {
                     provider_turn: crate::llm::ProviderToolTurn {
                         endpoint: crate::llm::EndpointChoice::Primary,

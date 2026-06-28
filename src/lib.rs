@@ -7,5 +7,6 @@ pub mod domain;
 pub mod gateway;
 pub mod journal;
 pub mod llm;
+pub mod registry;
 pub mod runtime;
 pub mod server;

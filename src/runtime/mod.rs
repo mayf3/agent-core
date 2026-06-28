@@ -4,6 +4,7 @@ use crate::domain::*;
 use crate::gateway::Gateway;
 use crate::journal::JournalStore;
 use crate::llm::{LlmClient, LlmInput};
+use crate::registry::snapshot::RegistrySnapshot;
 use anyhow::{bail, Result};
 use chrono::Utc;
 use serde_json::json;
@@ -15,6 +16,22 @@ mod tool_rejection;
 
 pub use crate::gateway::ToolRejection;
 pub use tool_rejection::validate_model_arguments;
+
+#[cfg(test)]
+#[path = "tests/registry_snapshot_provider_context.rs"]
+mod registry_snapshot_provider_context;
+
+#[cfg(test)]
+#[path = "tests/registry_snapshot_recovery_failure.rs"]
+mod registry_snapshot_recovery_failure;
+
+#[cfg(test)]
+#[path = "tests/registry_snapshot_failure.rs"]
+mod registry_snapshot_failure;
+
+#[cfg(test)]
+#[path = "tests/registry_snapshot_gateway.rs"]
+mod registry_snapshot_gateway;
 
 pub struct Runtime<L> {
     config: KernelConfig,
@@ -45,7 +62,8 @@ where
 
     /// Phase 2 M2d: decide whether an approved invocation is dispatched now or
     /// paused for human approval. ReadOnly ops queue immediately; Write ops
-    /// pause when require_write_approval is enabled.
+    /// pause when require_write_approval is enabled. Risk is determined from
+    /// the Run's pinned registry snapshot, not the static catalog.
     fn enqueue_or_pause(
         &self,
         journal: &JournalStore,
@@ -53,12 +71,13 @@ where
         run: &Run,
         session: &Session,
         correlation_id: &str,
+        snapshot: &RegistrySnapshot,
     ) -> Result<()> {
-        let risk = crate::domain::operation::lookup(&approved.intent().operation)
-            .map(|spec| spec.risk)
-            .unwrap_or(crate::domain::operation::Risk::Write);
-        let pause =
-            self.config.require_write_approval && risk == crate::domain::operation::Risk::Write;
+        let is_write = snapshot
+            .lookup(&approved.intent().operation)
+            .map(|spec| spec.risk == crate::registry::snapshot::Risk::Write)
+            .unwrap_or(true);
+        let pause = self.config.require_write_approval && is_write;
         if pause {
             journal.append_event(
                 JournalEventKind::ApprovalRequested,
@@ -102,7 +121,20 @@ where
                 "conversation_key": session.conversation_key,
             }),
         )?;
-        let run = self.create_run(&session, &event);
+        // Blocker 2: snapshot_id must exist and be non-empty; failure prevents Run creation.
+        let snapshot_id = journal
+            .current_registry_snapshot_id()
+            .map_err(|e| anyhow::anyhow!("registry_snapshot_unavailable: {e}"))?;
+        if snapshot_id.is_empty() {
+            anyhow::bail!("registry_snapshot_invalid: snapshot ID is empty");
+        }
+        // Load the snapshot BEFORE creating the Run. If the snapshot is
+        // missing or corrupt, the error is deterministic
+        // (registry_snapshot_unavailable) and no Run artifacts are created.
+        let snapshot = journal
+            .load_registry_snapshot(&snapshot_id)
+            .map_err(|e| anyhow::anyhow!("registry_snapshot_unavailable: {e}"))?;
+        let run = self.create_run(&session, &event, &snapshot_id);
         journal.insert_run(&run)?;
         journal.append_event(
             JournalEventKind::RunStarted,
@@ -128,12 +160,17 @@ where
             .iter()
             .map(|g| g.operation.clone())
             .collect();
+
+        // The loaded snapshot (Arc clone) is used throughout the Run's
+        // lifetime for Context, Provider tools, and Gateway validation.
+
         let mut blocks = ContextAssembler::from_config(&self.config).build(
             journal,
             &session,
             &event,
             &text,
             &granted_operations,
+            &snapshot,
         )?;
         journal.append_event(
             JournalEventKind::ContextBuilt,
@@ -145,10 +182,15 @@ where
                 "kinds": blocks.iter().map(|block| format!("{:?}", block.kind)).collect::<Vec<_>>(),
             }),
         )?;
+        // Provider tools are derived from the Run's pinned registry snapshot
+        // once here. All LLM rounds for this Run reuse the same tools list.
+        let provider_tools = snapshot.provider_tools_for_grants(&granted_operations);
+
         let first = self.llm.complete(LlmInput {
             blocks: blocks.clone(),
             user_text: text.clone(),
             granted_operations: granted_operations.clone(),
+            provider_tools: provider_tools.clone(),
             follow_up: None,
         })?;
         journal.append_event(
@@ -163,8 +205,16 @@ where
         // read-only tool call, execute it, append a ToolResult block, and
         // re-invoke the LLM. Bounded by MAX_TOOL_ROUNDS; a no-op when the model
         // emits no tool call (backwards compatible).
-        let llm =
-            self.run_tool_recall_loop(journal, gateway, &run, &session, &mut blocks, &text, first)?;
+        let llm = self.run_tool_recall_loop(
+            journal,
+            gateway,
+            &run,
+            &session,
+            &mut blocks,
+            &text,
+            first,
+            &snapshot,
+        )?;
 
         // Never enqueue a blank reply (empty first-round content with no tool
         // call, or empty second-round content). The fallback is a fixed,
@@ -184,7 +234,7 @@ where
                 "idempotency_key": intent.idempotency_key,
             }),
         )?;
-        let approved = gateway.approve_invocation(intent, &run, &session)?;
+        let approved = gateway.approve_invocation(intent, &run, &session, &snapshot)?;
         journal.append_event(
             JournalEventKind::InvocationApproved,
             Some(&run.id),
@@ -195,7 +245,14 @@ where
                 "operation": approved.intent().operation,
             }),
         )?;
-        self.enqueue_or_pause(journal, &approved, &run, &session, &correlation_id)?;
+        self.enqueue_or_pause(
+            journal,
+            &approved,
+            &run,
+            &session,
+            &correlation_id,
+            &snapshot,
+        )?;
         Ok(RuntimeOutcome {
             run_id: run.id,
             session_id: session.id,
@@ -225,7 +282,18 @@ where
                 "conversation_key": session.conversation_key,
             }),
         )?;
-        let run = self.create_run(&session, &event);
+        // Blocker 2: snapshot_id must exist and be non-empty; failure prevents Run creation.
+        let snapshot_id = journal
+            .current_registry_snapshot_id()
+            .map_err(|e| anyhow::anyhow!("registry_snapshot_unavailable: {e}"))?;
+        if snapshot_id.is_empty() {
+            anyhow::bail!("registry_snapshot_invalid: snapshot ID is empty");
+        }
+        // Load the snapshot BEFORE creating the Run.
+        let snapshot = journal
+            .load_registry_snapshot(&snapshot_id)
+            .map_err(|e| anyhow::anyhow!("registry_snapshot_unavailable: {e}"))?;
+        let run = self.create_run(&session, &event, &snapshot_id);
         journal.insert_run(&run)?;
         journal.append_event(
             JournalEventKind::RunStarted,
@@ -238,6 +306,7 @@ where
                 "principal_id": run.principal.principal_id.0,
             }),
         )?;
+        let snap_for_gateway = snapshot;
         let RuntimeEventPayload::UserMessage {
             text,
             message_id,
@@ -256,7 +325,7 @@ where
                 "idempotency_key": intent.idempotency_key,
             }),
         )?;
-        let approved = gateway.approve_invocation(intent, &run, &session)?;
+        let approved = gateway.approve_invocation(intent, &run, &session, &snap_for_gateway)?;
         journal.append_event(
             JournalEventKind::InvocationApproved,
             Some(&run.id),
@@ -267,7 +336,14 @@ where
                 "operation": approved.intent().operation,
             }),
         )?;
-        self.enqueue_or_pause(journal, &approved, &run, &session, &correlation_id)?;
+        self.enqueue_or_pause(
+            journal,
+            &approved,
+            &run,
+            &session,
+            &correlation_id,
+            &snap_for_gateway,
+        )?;
         Ok(RuntimeOutcome {
             run_id: run.id,
             session_id: session.id,
@@ -275,7 +351,7 @@ where
         })
     }
 
-    fn create_run(&self, session: &Session, event: &ValidatedEvent) -> Run {
+    fn create_run(&self, session: &Session, event: &ValidatedEvent, snapshot_id: &str) -> Run {
         let now = Utc::now();
         Run {
             id: RunId::new(),
@@ -288,6 +364,7 @@ where
             status: RunStatus::Running,
             created_at: now,
             updated_at: now,
+            registry_snapshot_id: snapshot_id.to_string(),
         }
     }
 

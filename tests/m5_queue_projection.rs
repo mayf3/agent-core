@@ -211,7 +211,8 @@ fn outbox_queue_is_idempotent_and_journaled() -> Result<()> {
         }),
         idempotency_key: Some("stdout-reply:run_test".to_string()),
     };
-    let approved = gateway.approve_invocation(intent, &run, &session)?;
+    let snap = agent_core_kernel::registry::snapshot::test_snapshot();
+    let approved = gateway.approve_invocation(intent, &run, &session, &snap)?;
 
     let first = journal.queue_outbox_dispatch(&approved, Some(&session.id))?;
     let second = journal.queue_outbox_dispatch(&approved, Some(&session.id))?;
@@ -299,6 +300,7 @@ fn test_run(config: &KernelConfig, session: &Session) -> Run {
         status: RunStatus::Running,
         created_at: Utc::now(),
         updated_at: Utc::now(),
+        registry_snapshot_id: String::new(),
     }
 }
 
@@ -307,6 +309,7 @@ fn approved_stdout_invocation(
     run: &Run,
     session: &Session,
 ) -> Result<ApprovedInvocation> {
+    let snap = agent_core_kernel::registry::snapshot::test_snapshot();
     gateway.approve_invocation(
         InvocationIntent {
             invocation_id: InvocationId("reply:run_test".to_string()),
@@ -320,5 +323,6 @@ fn approved_stdout_invocation(
         },
         run,
         session,
+        &snap,
     )
 }

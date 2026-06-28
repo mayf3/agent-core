@@ -209,3 +209,44 @@ fn legacy_only_database_still_reopens_cleanly() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+mod common;
+use agent_core_kernel::gateway::Gateway;
+use agent_core_kernel::server::{health_snapshot, DispatcherMetrics};
+#[test]
+fn health_fields_reflect_populated_dispatcher_metrics() -> Result<()> {
+    // A metrics handle written to by the loop must surface its state in
+    // /health: running flag, last tick timestamp, last error category.
+    let config = common::test_config();
+    let gateway = Gateway::new(config.clone());
+    let journal = JournalStore::in_memory()?;
+    let session = common::test_session(&config);
+    let run = common::test_run(&config, &session);
+    let _approved = common::approved_stdout_invocation(&gateway, &run, &session)?;
+
+    let metrics = DispatcherMetrics::new();
+    metrics.record_tick("2026-06-15T12:00:00Z".to_string());
+    metrics.record_error_category("timeout".to_string());
+    metrics.mark_started();
+
+    let snapshot = health_snapshot(&journal, true, &metrics)?;
+    assert_eq!(
+        snapshot
+            .get("outbox_dispatcher_running")
+            .and_then(|v| v.as_bool()),
+        Some(true)
+    );
+    assert_eq!(
+        snapshot
+            .get("last_dispatch_tick_at")
+            .and_then(|v| v.as_str()),
+        Some("2026-06-15T12:00:00Z")
+    );
+    assert_eq!(
+        snapshot
+            .get("last_dispatch_error_category")
+            .and_then(|v| v.as_str()),
+        Some("timeout")
+    );
+    Ok(())
+}
