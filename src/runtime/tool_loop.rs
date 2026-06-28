@@ -213,14 +213,6 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
             "tool loop infrastructure failure: {category}; run_status_recorded={run_status_recorded}; failure_fact_recorded={failure_fact_recorded}"
         ))
     }
-
-    pub(crate) fn execute_session_recall(
-        journal: &JournalStore,
-        session_id: &SessionId,
-        approved: &ApprovedInvocation,
-    ) -> Result<(ReceiptStatus, serde_json::Value, String)> {
-        crate::runtime::tool_rejection::execute_session_recall(journal, session_id, approved)
-    }
 }
 
 #[cfg(test)]

@@ -6,7 +6,6 @@
 //! G1 — Current snapshot missing → deliver fails cleanly.
 //! G2 — Current snapshot ID points to nonexistent snapshot → deliver fails cleanly.
 
-use crate::adapters::InvocationAdapter;
 use crate::config::KernelConfig;
 use crate::domain::*;
 use crate::gateway::Gateway;
@@ -424,20 +423,72 @@ fn f_restart_recovery_preserves_snapshot_binding() -> Result<()> {
             "Approved operation must be time.now"
         );
 
-        // 3+4. Dispatch via binding_key — TimeAdapter (for builtin.time_now).
-        let receipt = crate::adapters::TimeAdapter.execute(&approved)?;
+        // 3+4. Production inline dispatch via dispatch_builtin_binding.
+        //     This is the SINGLE authoritative binding_key → handler match
+        //     that the tool loop also calls. The same code path handles
+        //     ReceiptReceived journal recording.
+        let correlation_id = approved.intent().invocation_id.0.clone();
+        let outcome = crate::runtime::tool_execution::dispatch_builtin_binding(
+            &spec,
+            &approved,
+            &journal,
+            &run,
+            &session,
+            &correlation_id,
+        );
+        let out_text = match &outcome {
+            crate::runtime::tool_loop::ToolCallOutcome::ToolResult { text } => text.clone(),
+            _ => String::new(),
+        };
+        assert!(
+            !out_text.is_empty(),
+            "expected ToolResult, got non-ToolResult"
+        );
+        assert!(
+            out_text.contains("succeeded"),
+            "outcome must indicate success: {out_text}"
+        );
+
+        // Verify ReceiptReceived was written to journal for this run/invocation.
+        let receipt_events: Vec<_> = journal
+            .events()
+            .unwrap()
+            .into_iter()
+            .filter(|e| {
+                e.kind == JournalEventKind::ReceiptReceived
+                    && e.run_id == Some(run.id.clone())
+                    && e.payload.get("invocation_id").and_then(Value::as_str)
+                        == Some(&approved.intent().invocation_id.0)
+            })
+            .collect();
         assert_eq!(
-            receipt.status,
-            crate::domain::ReceiptStatus::Succeeded,
-            "time.now must succeed from restored v1 snapshot"
+            receipt_events.len(),
+            1,
+            "exactly one ReceiptReceived must exist for run_id={:?} invocation={}",
+            run.id,
+            approved.intent().invocation_id.0
+        );
+        let receipt = &receipt_events[0];
+        assert_eq!(
+            receipt.payload.get("status").and_then(Value::as_str),
+            Some("Succeeded"),
+            "Receipt must be Succeeded"
         );
         assert!(
-            receipt.output.get("iso").is_some(),
-            "time.now output must contain 'iso'"
+            receipt
+                .payload
+                .pointer("/output/iso")
+                .and_then(Value::as_str)
+                .is_some(),
+            "output must contain 'iso' (time.now handler)"
         );
         assert!(
-            receipt.output.get("epoch_ms").is_some(),
-            "time.now output must contain 'epoch_ms'"
+            receipt
+                .payload
+                .pointer("/output/epoch_ms")
+                .and_then(Value::as_number)
+                .is_some(),
+            "output must contain 'epoch_ms' (time.now handler)"
         );
     }
 
