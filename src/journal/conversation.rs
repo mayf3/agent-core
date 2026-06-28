@@ -1,24 +1,26 @@
 //! Session conversation turn history for context assembly.
 //!
-//! ``recent_conversation_turns`` returns user/assistant pairs for past runs
-//! in the same session. ``recent_user_messages`` (legacy) returns only user
-//! messages and is used by the ``session.recall_recent`` capability.
+//! Uses explicit `AssistantReplyDelivered` journal events paired by run_id.
+//! No guessing from arbitrary `ReceiptReceived.output` values.
+//! `recent_user_messages` (legacy) returns user-only messages for the
+//! `session.recall_recent` capability.
 
 use crate::domain::{JournalEventKind, SessionId};
 use anyhow::Result;
 use serde_json::Value;
+use std::collections::HashMap;
 
 impl super::JournalStore {
-    /// Collect recent conversation turns (user + assistant text) for a session.
-    /// Orders by event sequence, pairs user messages with their corresponding
-    /// assistant reply. Returns at most ``limit`` complete turns.
+    /// Collect recent complete conversation turns for a session.
+    /// A complete turn = user message + AssistantReplyDelivered (same run_id).
+    /// Returns at most `limit` complete turns, ordered by run creation.
     ///
-    /// - Assistant text comes from the final successfully sent reply
-    ///   (``output.text`` in ``ReceiptReceived`` with correlation_id starting
-    ///   with ``"reply:"``).
-    /// - Turns where the assistant has not yet replied are omitted.
-    /// - The current user's own message is excluded via ``skip_event_id``.
-    /// - Session-isolated: only events matching ``session_id``.
+    /// - User text from IngressAccepted → SessionReady pairing.
+    /// - Assistant text from AssistantReplyDelivered events.
+    /// - Paired by matching the run_id that triggered both.
+    /// - Incomplete runs (no AssistantReplyDelivered) are excluded.
+    /// - The current event (`skip_event_id`) is excluded.
+    /// - Session-isolated: only events in the requested session.
     pub fn recent_conversation_turns(
         &self,
         session_id: &SessionId,
@@ -30,95 +32,97 @@ impl super::JournalStore {
         }
         let events = self.events()?;
 
-        // 1. Collect user messages from IngressAccepted (excluding current).
-        let mut ingress_text_by_event: std::collections::HashMap<String, String> =
-            std::collections::HashMap::new();
-        for event in &events {
-            if event.kind != JournalEventKind::IngressAccepted {
+        // 1. Collect user text: IngressAccepted → SessionReady in this session.
+        let ingress_text: HashMap<String, String> = events
+            .iter()
+            .filter(|e| e.kind == JournalEventKind::IngressAccepted)
+            .filter_map(|e| {
+                let event_id = e.payload.get("event_id")?.as_str()?;
+                if Some(event_id) == skip_event_id {
+                    return None; // Skip current message.
+                }
+                let text = e.payload.get("text")?.as_str()?;
+                Some((event_id.to_string(), text.to_string()))
+            })
+            .collect();
+
+        // 2. Find run_ids for each user ingress in this session.
+        //    RunStarted has correlation_id = ingress event_id.
+        let mut ingress_run: HashMap<String, String> = HashMap::new();
+        for e in &events {
+            if e.kind != JournalEventKind::RunStarted || e.session_id.as_ref() != Some(session_id) {
                 continue;
             }
-            let Some(event_id) = event.payload.get("event_id").and_then(Value::as_str) else {
+            let Some(corr) = &e.correlation_id else {
                 continue;
             };
-            if Some(event_id) == skip_event_id {
-                continue;
+            if ingress_text.contains_key(corr) {
+                // correlation_id of RunStarted = the triggering event_id
+                // But also need run_id. RunStarted payload.run_id?
+                let run_id = e.payload.get("run_id").and_then(Value::as_str);
+                if let Some(rid) = run_id {
+                    ingress_run.insert(corr.clone(), rid.to_string());
+                }
             }
-            let Some(text) = event.payload.get("text").and_then(Value::as_str) else {
-                continue;
-            };
-            ingress_text_by_event.insert(event_id.to_string(), text.to_string());
         }
 
-        // 2. Collect user messages for this session (in sequence order).
-        let mut user_events: Vec<(i64, String)> = vec![];
-        for event in &events {
-            if event.kind != JournalEventKind::SessionReady
-                || event.session_id.as_ref() != Some(session_id)
+        // 3. Collect AssistantReplyDelivered in this session, keyed by run_id.
+        let mut reply_by_run: HashMap<String, (i64, String)> = HashMap::new();
+        for e in &events {
+            if e.kind != JournalEventKind::AssistantReplyDelivered
+                || e.session_id.as_ref() != Some(session_id)
             {
                 continue;
             }
-            let Some(ingress_event_id) = &event.correlation_id else {
+            let Some(run_id) = e.payload.get("run_id").and_then(Value::as_str) else {
                 continue;
             };
-            if skip_event_id.map_or(false, |skip| ingress_event_id == skip) {
-                continue;
-            }
-            let Some(text) = ingress_text_by_event.get(ingress_event_id) else {
+            let Some(text) = e.payload.get("text").and_then(Value::as_str) else {
                 continue;
             };
-            user_events.push((event.sequence, text.clone()));
+            // Only keep the first (earliest) delivery per run to handle
+            // idempotent retry.
+            reply_by_run
+                .entry(run_id.to_string())
+                .or_insert((e.sequence, text.to_string()));
         }
 
-        // 3. Collect assistant reply texts from ReceiptReceived for reply ops.
-        let mut reply_texts: Vec<(i64, String)> = vec![];
-        for event in &events {
-            if event.kind != JournalEventKind::ReceiptReceived
-                || event.session_id.as_ref() != Some(session_id)
-            {
+        // 4. Build turns: pair user ingress by matching run_id.
+        //    For each RunStarted in this session, look up the user text
+        //    from its correlation_id (ingress event_id), then look up the
+        //    assistant reply by the same run_id.
+        //    Collect in chronological order (by RunStarted sequence).
+        let mut run_events: Vec<(i64, String, String)> = vec![]; // (seq, user_text, run_id)
+        for e in &events {
+            if e.kind != JournalEventKind::RunStarted || e.session_id.as_ref() != Some(session_id) {
                 continue;
             }
-            let Some(corr) = &event.correlation_id else {
+            let Some(corr) = &e.correlation_id else {
                 continue;
             };
-            if !corr.starts_with("reply:") {
-                continue;
-            }
-            let Some(text) = event
-                .payload
-                .get("output")
-                .and_then(|o| o.get("text"))
-                .and_then(Value::as_str)
-            else {
+            let Some(user_text) = ingress_text.get(corr) else {
                 continue;
             };
-            reply_texts.push((event.sequence, text.to_string()));
+            let Some(run_id) = e.payload.get("run_id").and_then(Value::as_str) else {
+                continue;
+            };
+            run_events.push((e.sequence, user_text.clone(), run_id.to_string()));
         }
 
-        user_events.sort_by_key(|(seq, _)| *seq);
-        reply_texts.sort_by_key(|(seq, _)| *seq);
-
-        // 4. Interleave by sequence order.
-        let mut turns: Vec<(String, String)> = vec![];
-        let mut reply_idx = 0;
-        for (user_seq, user_text) in &user_events {
-            while reply_idx < reply_texts.len() && reply_texts[reply_idx].0 < *user_seq {
-                reply_idx += 1;
-            }
-            if reply_idx < reply_texts.len() {
-                turns.push((user_text.clone(), reply_texts[reply_idx].1.clone()));
-                reply_idx += 1;
-            } else {
-                // No reply yet — include user message without assistant turn.
-                turns.push((user_text.clone(), String::new()));
+        // 5. Match each run with its assistant reply, collect complete turns.
+        let mut complete_turns: Vec<(String, String)> = vec![]; // (user, assistant)
+        for (_seq, user_text, run_id) in &run_events {
+            if let Some((_, assistant_text)) = reply_by_run.get(run_id) {
+                complete_turns.push((user_text.clone(), assistant_text.clone()));
             }
         }
 
-        let start = turns.len().saturating_sub(limit);
-        Ok(turns[start..].to_vec())
+        // 6. Keep last `limit` complete turns.
+        let start = complete_turns.len().saturating_sub(limit);
+        Ok(complete_turns[start..].to_vec())
     }
 
-    /// Return recent user messages (legacy — only user, no assistant). Used by
-    /// the ``session.recall_recent`` capability.
+    /// Return recent user messages (legacy — only user, no assistant).
     pub fn recent_user_messages(
         &self,
         session_id: &SessionId,
@@ -130,8 +134,7 @@ impl super::JournalStore {
         self.recent_user_messages_inner(session_id, limit)
     }
 
-    /// Capability-boundary recall: identical to ``recent_user_messages`` but
-    /// honors the test-only deterministic fault flag.
+    /// Capability-boundary recall.
     #[doc(hidden)]
     pub(crate) fn recent_user_messages_for_capability(
         &self,
@@ -157,7 +160,8 @@ impl super::JournalStore {
         limit: usize,
     ) -> Result<Vec<(String, String)>> {
         let events = self.events()?;
-        let mut ingress_text_by_event = std::collections::HashMap::new();
+        let mut ingress_text_by_event: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
         for event in &events {
             if event.kind != JournalEventKind::IngressAccepted {
                 continue;
