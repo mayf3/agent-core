@@ -136,18 +136,27 @@ impl ContextAssembler {
         session: &Session,
         current_event_id: &str,
     ) -> Result<Option<ContextBlock>> {
-        let messages = journal
-            .recent_user_messages(&session.id, self.recent_messages + 1)?
-            .into_iter()
-            .filter(|(event_id, _)| event_id != current_event_id)
-            .map(|(_, text)| format!("User: {text}"))
-            .collect::<Vec<_>>();
-        if messages.is_empty() {
+        let turns = journal.recent_conversation_turns(
+            &session.id,
+            self.recent_messages,
+            Some(current_event_id),
+        )?;
+        if turns.is_empty() {
             return Ok(None);
         }
+        let formatted: Vec<String> = turns
+            .into_iter()
+            .flat_map(|(user, assistant)| {
+                let mut pair = vec![format!("User: {user}")];
+                if !assistant.is_empty() {
+                    pair.push(format!("Assistant: {assistant}"));
+                }
+                pair
+            })
+            .collect();
         Ok(Some(block(
             ContextBlockKind::RecentMessages,
-            &messages.join("\n"),
+            &formatted.join("\n"),
             Compressibility::Summarizable,
             "journal/recent_messages",
             self.max_block_chars,
