@@ -459,7 +459,6 @@ impl JournalStore {
         .map_err(Into::into)
     }
 }
-
 fn backfill_feishu_message_dedup(conn: &Connection) -> Result<()> {
     let rows = {
         let mut stmt = conn.prepare(
