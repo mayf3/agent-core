@@ -135,25 +135,30 @@ pub fn get_channel_grants(
 
 // ---- Principal derivation ----
 
-/// Derive the grants for a principal given its channel and the pinned
-/// registry snapshot. This is the single entry point that replaces the
-/// scattered manual grant construction in Gateway ingress paths.
+/// Derive the grants for a principal given its channel, the pinned
+/// registry snapshot, and operator-configured extras. This is the single
+/// entry point that replaces the scattered manual grant construction in
+/// Gateway ingress paths.
 ///
 /// The result includes:
 /// - Baseline grants from `ExecutionProfile::for_channel(channel)`
+/// - Extra operation grants from `KernelConfig.extra_allowed_operations`
 /// - Extra operation grants from `channel_operation_grants` table
 /// - Operations NOT present in the snapshot are filtered out
 pub fn derive_grants(
     journal: &JournalStore,
     channel: &ChannelKind,
     snapshot: &crate::registry::snapshot::RegistrySnapshot,
+    extra_allowed_operations: &[String],
 ) -> Result<Vec<CapabilityGrant>, anyhow::Error> {
-    // Start with baseline grants (reply + standard tools).
-    let baseline = crate::domain::operation::ExecutionProfile::for_channel(channel.clone()).grants;
+    // Start with baseline grants (reply + standard tools) + config extras.
+    let profile =
+        crate::domain::operation::ExecutionProfile::for_channel(channel.clone())
+            .with_extra(extra_allowed_operations);
+    let mut all = profile.grants;
 
-    // Add DB-level channel grants.
+    // Add DB-level channel grants (from admin grant/revoke API).
     let db_grants = get_channel_grants(journal, channel)?;
-    let mut all: Vec<CapabilityGrant> = baseline;
     for op_name in &db_grants {
         if !all.iter().any(|g| &g.operation == op_name) {
             all.push(CapabilityGrant {
