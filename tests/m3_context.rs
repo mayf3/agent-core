@@ -108,6 +108,27 @@ fn link_user_message(
         Some(event_id),
         json!({ "session_id": session_id.0 }),
     )?;
+    let run_id = RunId(format!("run_{event_id}"));
+    journal.append_event(
+        JournalEventKind::RunStarted,
+        Some(&run_id),
+        Some(session_id),
+        Some(event_id),
+        json!({"run_id": run_id.0}),
+    )?;
+    journal.append_event(
+        JournalEventKind::AssistantReplyDelivered,
+        Some(&run_id),
+        Some(session_id),
+        Some(&format!("reply:{}", run_id.0)),
+        json!({
+            "session_id": session_id.0,
+            "run_id": run_id.0,
+            "invocation_id": format!("reply:{}", run_id.0),
+            "channel": "feishu",
+            "text": format!("ack: {text}"),
+        }),
+    )?;
     Ok(())
 }
 

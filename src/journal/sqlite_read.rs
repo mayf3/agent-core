@@ -61,6 +61,7 @@ pub(crate) fn parse_kind(value: &str) -> JournalEventKind {
         "OutboxDispatchDead" => JournalEventKind::OutboxDispatchDead,
         "DispatchStarted" => JournalEventKind::DispatchStarted,
         "ReceiptReceived" => JournalEventKind::ReceiptReceived,
+        "AssistantReplyDelivered" => JournalEventKind::AssistantReplyDelivered,
         "WorkerJobDead" => JournalEventKind::WorkerJobDead,
         "RunCompleted" => JournalEventKind::RunCompleted,
         "RunFailed" => JournalEventKind::RunFailed,
