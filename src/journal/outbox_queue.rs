@@ -158,7 +158,7 @@ impl JournalStore {
             json!({
                 "status": format!("{:?}", receipt.status),
                 "external_ref": receipt.external_ref,
-                "output_kind": "text",
+                "output": receipt.output,
             }),
         )?;
         tx.execute(

@@ -432,7 +432,13 @@ fn mark_fallback(mut output: LlmOutput, primary_model: &str, primary_error: &str
 fn serialize_system_context(blocks: &[ContextBlock]) -> String {
     blocks
         .iter()
-        .filter(|block| !matches!(block.kind, crate::domain::ContextBlockKind::UserMessage))
+        .filter(|block| {
+            !matches!(
+                block.kind,
+                crate::domain::ContextBlockKind::UserMessage
+                    | crate::domain::ContextBlockKind::ToolResult
+            )
+        })
         .map(|block| format!("## {:?}\n{}", block.kind, block.content))
         .collect::<Vec<_>>()
         .join("\n\n")
