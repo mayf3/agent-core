@@ -41,8 +41,10 @@ pub fn handle_register_bundle(journal: &JournalStore, body: &Value) -> Result<Va
         .map(|op| manifest::prepare_operation(op, &bundle_hash))
         .collect();
 
-    // Persist the manifest.
-    let canonical_json = serde_json::to_string(body)?;
+    // Persist the canonical manifest (re-serialized from validated struct,
+    // not the raw request body — this strips declared_hash, normalizes key
+    // order, and ensures consistency).
+    let canonical_json = serde_json::to_string(&manifest)?;
     let now = chrono::Utc::now().to_rfc3339();
 
     // Check for duplicate (same bundle_id + bundle_version).

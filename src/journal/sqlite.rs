@@ -18,8 +18,9 @@ pub struct JournalStore {
     #[cfg(any(test, feature = "test-helpers"))]
     pub(crate) recall_failure_for_test: std::sync::atomic::AtomicBool,
 }
-/// The schema `PRAGMA user_version` this kernel writes and understands. Bumped only when `migrations/` gains a new applied migration. The startup
-/// `migrate()` refuses to run against a DB whose version is newer than this.
+/// The schema PRAGMA user_version this kernel writes and understands.
+/// Bumped to 3 for harness control plane tables. The startup migrate()
+/// refuses to run against a DB newer than this.
 const CURRENT_SCHEMA_VERSION: i64 = 3;
 
 impl JournalStore {
@@ -32,7 +33,6 @@ impl JournalStore {
         store.migrate()?;
         Ok(store)
     }
-
     pub fn in_memory() -> Result<Self> {
         let store = Self::with_conn(Connection::open_in_memory()?);
         store.migrate()?;
@@ -66,7 +66,6 @@ impl JournalStore {
             .map_err(|_| anyhow!("journal mutex poisoned"))?;
         Ok(conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))?)
     }
-
     pub fn append_event(
         &self,
         kind: JournalEventKind,
@@ -130,7 +129,6 @@ impl JournalStore {
             created_at,
         })
     }
-
     pub fn reserve_ingress(
         &self,
         source: &str,
@@ -148,7 +146,6 @@ impl JournalStore {
         )?;
         Ok(changed == 1)
     }
-
     pub fn get_or_create_session(&self, target: &SessionTarget) -> Result<Session> {
         if let Some(session) = self.find_session(target)? {
             return Ok(session);
@@ -186,7 +183,6 @@ impl JournalStore {
         )?;
         Ok(session)
     }
-
     pub fn insert_run(&self, run: &Run) -> Result<()> {
         let conn = self
             .conn

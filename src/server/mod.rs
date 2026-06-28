@@ -2,13 +2,12 @@ use crate::config::KernelConfig;
 use crate::domain::{OutboxDispatchStatus, RunId};
 use crate::gateway::Gateway;
 use crate::journal::JournalStore;
+mod admin_handler;
 mod delivery;
 mod dispatcher_metrics;
-
+use anyhow::{bail, Result};
 #[cfg(test)]
 pub(crate) use delivery::build_llm_from_config;
-
-use anyhow::{bail, Result};
 use delivery::{
     recover_undelivered_ingress, start_approval_expiry_loop, start_outbox_dispatcher_loop,
     start_worker_loop,
@@ -23,7 +22,6 @@ use std::sync::{
 };
 use std::thread;
 use std::time::Duration;
-
 pub fn serve(config: KernelConfig) -> Result<()> {
     if config.ipc_token.is_empty() {
         bail!("AGENT_CORE_IPC_TOKEN is required for serve");
@@ -110,7 +108,6 @@ pub fn serve(config: KernelConfig) -> Result<()> {
     println!("agent-core kernel stopped gracefully");
     Ok(())
 }
-
 fn log_dispatcher_startup_state(journal: &JournalStore, enabled: bool) -> Result<()> {
     let pending = journal.outbox_status_count(OutboxDispatchStatus::Pending)?;
     let unknown = journal.outbox_status_count(OutboxDispatchStatus::Unknown)?;
@@ -123,7 +120,6 @@ fn log_dispatcher_startup_state(journal: &JournalStore, enabled: bool) -> Result
     println!("unknown items will not be retried automatically");
     Ok(())
 }
-
 fn install_shutdown_handler(running: &Arc<AtomicBool>) -> Result<()> {
     let signal = Arc::clone(running);
     ctrlc::set_handler(move || {
@@ -131,7 +127,6 @@ fn install_shutdown_handler(running: &Arc<AtomicBool>) -> Result<()> {
     })
     .map_err(|error| anyhow::anyhow!("failed to install shutdown handler: {error}"))
 }
-
 fn handle_connection(
     stream: &mut TcpStream,
     config: &KernelConfig,
@@ -153,10 +148,11 @@ fn handle_connection(
             )?,
         );
     }
-    // All non-/health routes are POST under /v1/* and require the IPC bearer
-    // token. `/v1/approve` and `/v1/deny` (Phase 2 M2d follow-up) resume/deny a
-    // run paused in `AwaitingApproval` over the wire — the durable equivalent of
-    // the in-process `Gateway::approve_run`/`deny_run` API.
+    if request.path.starts_with("/v1/admin/") {
+        return admin_handler::handle_admin_request(stream, &config, &journal, &request);
+    }
+    // All non-admin non-/health routes are POST under /v1/* and require the
+    // IPC bearer token.
     if request.method != "POST" || !request.path.starts_with("/v1/") {
         return write_json(stream, 404, json!({ "ok": false, "error": "not_found" }));
     }
@@ -211,7 +207,6 @@ fn handle_ingress(
         }),
     )
 }
-
 /// Phase 2 M2d follow-up: handle `POST /v1/approve` (`approved == true`) and
 /// `POST /v1/deny` (`approved == false`). Body: `{ "run_id": "<id>" }`. Both
 /// delegate to the (idempotent) `Gateway::approve_run`/`deny_run`. A run that
@@ -248,7 +243,6 @@ fn handle_approval_decision(
         }),
     )
 }
-
 pub fn health_snapshot(
     journal: &JournalStore,
     outbox_dispatcher_enabled: bool,
@@ -325,14 +319,12 @@ pub fn health_snapshot(
         }).collect::<Vec<_>>(),
     }))
 }
-
 struct HttpRequest {
     method: String,
     path: String,
     bearer_token: Option<String>,
     body: Vec<u8>,
 }
-
 fn read_request(stream: &mut TcpStream) -> Result<HttpRequest> {
     let mut buffer = Vec::new();
     let mut temp = [0_u8; 1024];
@@ -358,7 +350,6 @@ fn read_request(stream: &mut TcpStream) -> Result<HttpRequest> {
     }
     bail!("empty request")
 }
-
 fn parse_request(buffer: &[u8]) -> Result<HttpRequest> {
     let header_end =
         find_header_end(buffer).ok_or_else(|| anyhow::anyhow!("missing HTTP headers"))?;
@@ -389,7 +380,6 @@ fn parse_request(buffer: &[u8]) -> Result<HttpRequest> {
         body: buffer[header_end + 4..].to_vec(),
     })
 }
-
 fn write_json(stream: &mut TcpStream, status: u16, body: Value) -> Result<()> {
     let reason = if status == 200 {
         "OK"
@@ -409,11 +399,9 @@ fn write_json(stream: &mut TcpStream, status: u16, body: Value) -> Result<()> {
     stream.write_all(response.as_bytes())?;
     Ok(())
 }
-
 fn find_header_end(buffer: &[u8]) -> Option<usize> {
     buffer.windows(4).position(|window| window == b"\r\n\r\n")
 }
-
 fn content_length(head: &str) -> usize {
     for line in head.lines() {
         let Some((name, value)) = line.split_once(':') else {
@@ -425,7 +413,6 @@ fn content_length(head: &str) -> usize {
     }
     0
 }
-
 #[cfg(test)]
 #[path = "approval_endpoint_tests.rs"]
 mod approval_endpoint_tests;
