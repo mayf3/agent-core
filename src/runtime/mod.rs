@@ -135,6 +135,25 @@ where
             .load_registry_snapshot(&snapshot_id)
             .map_err(|e| anyhow::anyhow!("registry_snapshot_unavailable: {e}"))?;
         let run = self.create_run(&session, &event, &snapshot_id);
+
+        // Blocker 2: derive grants from the pinned snapshot. This replaces
+        // the static ingress-time grants (from `ExecutionProfile::for_channel`
+        // and `extra_allowed_operations`) with the full grant set that also
+        // includes any admin-granted operations from `channel_operation_grants`
+        // and is filtered to only operations present in the pinned snapshot.
+        let derived_grants = crate::harness::grants::derive_grants(
+            journal,
+            &session.channel,
+            &snapshot,
+            &self.config.extra_allowed_operations,
+        )?;
+        let run = Run {
+            principal: RunPrincipal {
+                grants: derived_grants,
+                ..run.principal
+            },
+            ..run
+        };
         journal.insert_run(&run)?;
         journal.append_event(
             JournalEventKind::RunStarted,
@@ -294,6 +313,25 @@ where
             .load_registry_snapshot(&snapshot_id)
             .map_err(|e| anyhow::anyhow!("registry_snapshot_unavailable: {e}"))?;
         let run = self.create_run(&session, &event, &snapshot_id);
+
+        // Blocker 2: derive grants from the pinned snapshot. This replaces
+        // the static ingress-time grants (from `ExecutionProfile::for_channel`
+        // and `extra_allowed_operations`) with the full grant set that also
+        // includes any admin-granted operations from `channel_operation_grants`
+        // and is filtered to only operations present in the pinned snapshot.
+        let derived_grants = crate::harness::grants::derive_grants(
+            journal,
+            &session.channel,
+            &snapshot,
+            &self.config.extra_allowed_operations,
+        )?;
+        let run = Run {
+            principal: RunPrincipal {
+                grants: derived_grants,
+                ..run.principal
+            },
+            ..run
+        };
         journal.insert_run(&run)?;
         journal.append_event(
             JournalEventKind::RunStarted,
