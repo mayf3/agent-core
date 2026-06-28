@@ -185,9 +185,71 @@ fn f_restart_recovery_preserves_snapshot_binding() -> Result<()> {
             "binding_key must come from v1 snapshot"
         );
 
+        // === ACTIVATE v2, PROVE RESTORED RUN STAYS ON v1 ===
+        // Create a v2 snapshot with a distinctly different description.
+        let v2_specs = vec![
+            OperationSpec {
+                name: "stdout.send_text".into(),
+                risk: Risk::Write,
+                description: "send reply".into(),
+                parameters: json!({"type": "object"}),
+                idempotent: false,
+                binding_kind: BindingKind::Builtin,
+                binding_key: "builtin.stdout_send_text".into(),
+            },
+            OperationSpec {
+                name: "time.now".into(),
+                risk: Risk::ReadOnly,
+                description: "v2 description".into(),
+                parameters: json!({"type": "object", "v2_marker": true, "additionalProperties": false}),
+                idempotent: true,
+                binding_kind: BindingKind::Builtin,
+                binding_key: "builtin.time_now".into(),
+            },
+        ];
+        let snap_v2 = journal.create_registry_snapshot(v2_specs)?;
+        let v2_snapshot_id = snap_v2.snapshot_id.clone();
+        journal.activate_registry_snapshot(&v2_snapshot_id)?;
+
+        // Frozen assertion 1: current has switched to v2.
+        assert_eq!(
+            journal.current_registry_snapshot_id()?,
+            v2_snapshot_id,
+            "current must be v2 after activation"
+        );
+
+        // Frozen assertion 2: v1 and v2 IDs must differ.
+        assert_ne!(
+            v1_snapshot_id, v2_snapshot_id,
+            "v1 and v2 snapshot IDs must differ"
+        );
+
+        // Frozen assertion 3: restored Run still fixed to v1.
+        assert_eq!(
+            run.registry_snapshot_id, v1_snapshot_id,
+            "restored Run's registry_snapshot_id must remain v1"
+        );
+
+        // Verify v2 content is different from v1.
+        let current_snap = journal.load_registry_snapshot(&v2_snapshot_id)?;
+        assert_eq!(
+            current_snap.lookup("time.now").unwrap().description,
+            "v2 description",
+            "current (v2) snapshot must have v2 description"
+        );
+
+        // Verify restored Run still loads v1 content.
+        let restored_snap = journal.load_registry_snapshot(&run.registry_snapshot_id)?;
+        assert_eq!(
+            restored_snap.lookup("time.now").unwrap().description,
+            "v1 description",
+            "restored Run's snapshot must have v1 description"
+        );
+
         // === REAL GATEWAY AND DISPATCH ===
-        // Use the restored Run + snapshot to validate a real tool call through
-        // the production Gateway and dispatch pipeline.
+        // Use the restored Run + snapshot (still v1) to validate a real
+        // tool call through the production Gateway and dispatch pipeline.
+        // Even though current=v2, the restored Run's binding is pinned to v1.
         use crate::gateway::validate_tool_call;
         use crate::llm::tool_call_id_hash;
 
