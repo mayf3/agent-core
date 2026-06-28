@@ -423,6 +423,11 @@ pub enum JournalEventKind {
     // elapsed (operator never decided). Terminal — the run fails. See
     // docs/decisions/m2d-durable-approval.md.
     ApprovalExpired,
+    HarnessBundleRegistered,
+    HarnessRuntimeRegistered,
+    RegistrySnapshotComposed,
+    RegistrySnapshotActivated,
+    OperationGrantChanged,
     /// Sentinel produced by `parse_kind`/`row_to_event` when the stored
     /// `kind` text does not match any known variant. The kernel never writes
     /// `Unknown` — observing it at read time indicates either external

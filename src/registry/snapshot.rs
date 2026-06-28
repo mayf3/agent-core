@@ -20,6 +20,7 @@ pub enum Risk {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BindingKind {
     Builtin,
+    ExternalHarness,
 }
 
 /// A known operation — runtime-owned (no `&'static str`). The `parameters`

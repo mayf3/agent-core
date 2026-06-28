@@ -49,6 +49,7 @@ pub struct KernelConfig {
     /// names.
     /// Configured via AGENT_CORE_PRIMARY_TOOL_NAME_INDEXED (default: false).
     pub primary_tool_name_indexed: bool,
+    pub harness_admin_token: String,
 }
 
 impl KernelConfig {
@@ -122,6 +123,7 @@ impl KernelConfig {
             write_approval_ttl_secs: env_u64("AGENT_CORE_WRITE_APPROVAL_TTL_SECS", 0),
             fallback_tool_name_indexed: env_bool("AGENT_CORE_FALLBACK_TOOL_NAME_INDEXED", false),
             primary_tool_name_indexed: env_bool("AGENT_CORE_PRIMARY_TOOL_NAME_INDEXED", false),
+            harness_admin_token: env_string("AGENT_CORE_HARNESS_ADMIN_TOKEN", ""),
         }
     }
 }
