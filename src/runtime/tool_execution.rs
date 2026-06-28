@@ -241,7 +241,8 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
                 )
             }
         };
-        if let Err(rejection) = validate_model_arguments(&intent.operation, &intent.arguments) {
+        if let Err(rejection) = validate_model_arguments(&intent.operation, &intent.arguments, spec)
+        {
             return self.record_rejection(
                 journal,
                 run,

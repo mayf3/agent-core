@@ -53,7 +53,7 @@ pub fn handle_register_bundle(journal: &JournalStore, body: &Value) -> Result<Va
     {
         if existing_hash != bundle_hash {
             bail!(
-                "conflict: bundle_id={} bundle_version={} already exists with different content",
+                "bundle_conflict: bundle_id={} bundle_version={} already exists with different content",
                 manifest.bundle_id,
                 manifest.bundle_version
             );
@@ -137,7 +137,10 @@ pub fn handle_compose_snapshot(
         let manifest = load_bundle_manifest(journal, bh)?;
         for op in &manifest.operations {
             if !seen_names.insert(op.name.clone()) {
-                bail!("operation name conflict: '{}' in bundle {bh}", op.name);
+                bail!(
+                    "bundle_conflict: operation name collides in bundle {bh}: '{}'",
+                    op.name
+                );
             }
             let prepared = manifest::prepare_operation(op, bh);
             all_ops.push(prepared.spec);
@@ -345,3 +348,7 @@ fn load_bundle_manifest(
     let manifest: HarnessBundleManifest = serde_json::from_str(&json_str)?;
     Ok(manifest)
 }
+
+#[cfg(test)]
+#[path = "admin_tests.rs"]
+mod admin_tests;
