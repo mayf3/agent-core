@@ -46,6 +46,10 @@ fn rejected_result(rejection: ToolRejection) -> ToolCallOutcome {
 /// Produce a Failed Receipt for a binding that cannot execute (e.g.
 /// ExternalHarness in PR 2A). Returns a ToolCallOutcome with the bounded
 /// error category so the Journal receives a proper ReceiptReceived.
+///
+/// **Receipt must be durable**: if the Journal write fails the function
+/// returns a fatal outcome rather than silently pretending the failed
+/// receipt was recorded (Blocker requirement).
 fn execute_and_record_failed_receipt(
     journal: &JournalStore,
     run: &Run,
@@ -56,17 +60,20 @@ fn execute_and_record_failed_receipt(
 ) -> ToolCallOutcome {
     let output = json!({"error_category": error_category});
     let text = format!("status: execution_failed\nerror_category: {error_category}");
-    let _ = journal.append_event(
+    if let Some(fatal) = append_or_fatal(
+        journal,
         JournalEventKind::ReceiptReceived,
-        Some(&run.id),
-        Some(&session.id),
+        run,
+        session,
         Some(correlation_id),
         json!({
             "invocation_id": approved.intent().invocation_id,
             "status": "Failed",
             "output": output,
         }),
-    );
+    ) {
+        return fatal;
+    }
     ToolCallOutcome::ToolResult { text }
 }
 

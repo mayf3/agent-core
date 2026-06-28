@@ -156,7 +156,7 @@ fn activate_snapshot_switches_current() {
     let base = journal.current_registry_snapshot_id().unwrap();
     let composed = handle_compose_snapshot(&journal, &base, &[hash]).unwrap();
     let snap_id = composed["snapshot_id"].as_str().unwrap();
-    handle_activate_snapshot(&journal, snap_id, None).unwrap();
+    handle_activate_snapshot(&journal, snap_id).unwrap();
     let current = journal.current_registry_snapshot_id().unwrap();
     assert_eq!(current, snap_id);
 }
@@ -167,17 +167,17 @@ fn rollback_restores_historical_snapshot() {
     let base = journal.current_registry_snapshot_id().unwrap();
     let composed = handle_compose_snapshot(&journal, &base, &[hash]).unwrap();
     let snap_id = composed["snapshot_id"].as_str().unwrap();
-    handle_activate_snapshot(&journal, snap_id, None).unwrap();
+    handle_activate_snapshot(&journal, snap_id).unwrap();
     assert_eq!(journal.current_registry_snapshot_id().unwrap(), snap_id);
     // Rollback to base.
-    handle_activate_snapshot(&journal, &base, None).unwrap();
+    handle_activate_snapshot(&journal, &base).unwrap();
     assert_eq!(journal.current_registry_snapshot_id().unwrap(), base);
 }
 
 #[test]
 fn activate_nonexistent_snapshot_fails() {
     let journal = JournalStore::in_memory().expect("in-memory");
-    let err = handle_activate_snapshot(&journal, "snap_nonexistent", None).unwrap_err();
+    let err = handle_activate_snapshot(&journal, "snap_nonexistent").unwrap_err();
     let msg = err.to_string();
     assert!(
         msg.contains("not_found")

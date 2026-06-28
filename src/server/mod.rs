@@ -83,11 +83,16 @@ pub fn serve(config: KernelConfig) -> Result<()> {
                     Arc::clone(&gateway),
                     Arc::clone(&dispatcher_metrics),
                 ) {
-                    let _ = write_json(
-                        &mut stream,
-                        500,
-                        json!({ "ok": false, "error": error.to_string() }),
-                    );
+                    let msg = error.to_string();
+                    // Safe error categories — never leak internal details.
+                    let category = if msg.contains("unauthorized") {
+                        "unauthorized"
+                    } else if msg.contains("not_found") {
+                        "not_found"
+                    } else {
+                        "internal_error"
+                    };
+                    let _ = write_json(&mut stream, 500, json!({ "ok": false, "error": category }));
                 }
             }
             Err(error) if error.kind() == ErrorKind::WouldBlock => {
@@ -188,12 +193,8 @@ fn handle_ingress(
         Err(error) if error.to_string().starts_with("skip:") => {
             return write_json(stream, 200, json!({ "ok": true, "status": "skipped" }));
         }
-        Err(error) => {
-            return write_json(
-                stream,
-                400,
-                json!({ "ok": false, "error": error.to_string() }),
-            )
+        Err(_error) => {
+            return write_json(stream, 400, json!({ "ok": false, "error": "bad_request" }))
         }
     };
     let kernel_event_id = validated.event_id.0.clone();

@@ -18,6 +18,13 @@ pub const MAX_DESCRIPTION_LEN: usize = 1000;
 pub const MAX_PARAMETERS_BYTES: usize = 64 * 1024; // 64 KB
 
 /// Allowed JSON Schema keys in the parameters for v1 external harness.
+/// PR #160 only supports this strict recursive subset:
+/// - `type`: object, string, number, integer, boolean, array
+/// - `properties` (object): maps name → schema
+/// - `required` (object): array of required property names
+/// - `additionalProperties` (object): boolean only (not schema object)
+/// - `items` (array): single schema object
+/// - `description`: informational, not validated at runtime
 const ALLOWED_SCHEMA_KEYS: &[&str] = &[
     "type",
     "properties",
@@ -25,11 +32,6 @@ const ALLOWED_SCHEMA_KEYS: &[&str] = &[
     "items",
     "additionalProperties",
     "description",
-    "minimum",
-    "maximum",
-    "minLength",
-    "maxLength",
-    "enum",
 ];
 
 /// Supported parameter types for argument validation.
@@ -186,69 +188,156 @@ fn validate_parameters(params: &serde_json::Value, index: usize) -> Result<()> {
             index
         );
     }
-    let obj = params.as_object().ok_or_else(|| {
-        anyhow!(
-            "manifest_invalid: operation[{}] parameters must be a JSON object",
-            index
-        )
-    })?;
+    // Recursive subset validation: check this level and all nested schemas.
+    validate_schema_node(params, index)?;
+    Ok(())
+}
+
+/// Recursively validate a JSON Schema node against the allowed PR #160
+/// subset. Rejects unsupported types, unsupported keywords, and invalid
+/// `additionalProperties` / `items` values at every nesting level.
+fn validate_schema_node(node: &serde_json::Value, index: usize) -> Result<()> {
+    let obj = match node.as_object() {
+        Some(o) => o,
+        None => {
+            return Err(anyhow!(
+            "manifest_invalid: operation[{index}] parameters: schema node must be a JSON object"
+        ))
+        }
+    };
+
+    // Check type if present.
+    if let Some(type_val) = obj.get("type") {
+        let type_str = type_val.as_str().ok_or_else(|| {
+            anyhow!("manifest_invalid: operation[{index}] parameters: 'type' must be a string")
+        })?;
+        match type_str {
+            "object" | "string" | "number" | "integer" | "boolean" | "array" => {}
+            other => {
+                bail!("manifest_invalid: operation[{index}] parameters: unsupported type '{other}'")
+            }
+        }
+    }
+
+    // Reject unknown keys.
     for key in obj.keys() {
         if !ALLOWED_SCHEMA_KEYS.contains(&key.as_str()) {
             bail!(
-                "manifest_invalid: operation[{}] unsupported schema key '{key}' (allowed: {:?})",
-                index,
-                ALLOWED_SCHEMA_KEYS
+                "manifest_invalid: operation[{index}] parameters: unsupported schema keyword '{key}'"
             );
         }
     }
+
+    // Check required fields exist in properties.
+    if let Some(required) = obj.get("required").and_then(|v| v.as_array()) {
+        let props = obj.get("properties").and_then(|v| v.as_object());
+        for req in required {
+            let name = req.as_str().ok_or_else(|| anyhow!(
+                "manifest_invalid: operation[{index}] parameters: 'required' entries must be strings"
+            ))?;
+            if props.map_or(true, |p| !p.contains_key(name)) {
+                bail!(
+                    "manifest_invalid: operation[{index}] parameters: required field '{name}' not found in properties"
+                );
+            }
+        }
+    }
+
+    // Check additionalProperties is boolean only.
+    if let Some(ap) = obj.get("additionalProperties") {
+        if !ap.is_boolean() {
+            bail!(
+                "manifest_invalid: operation[{index}] parameters: 'additionalProperties' must be boolean"
+            );
+        }
+    }
+
+    // Recursively validate properties.
+    if let Some(props) = obj.get("properties").and_then(|v| v.as_object()) {
+        for prop_schema in props.values() {
+            validate_schema_node(prop_schema, index)?;
+        }
+    }
+
+    // Recursively validate items (must be a single schema object).
+    if let Some(items) = obj.get("items") {
+        if !items.is_object() {
+            bail!(
+                "manifest_invalid: operation[{index}] parameters: 'items' must be a JSON object schema"
+            );
+        }
+        validate_schema_node(items, index)?;
+    }
+
     Ok(())
+}
+
+// ---- Canonical Manifest ----
+
+/// Produce a deterministic canonical Value from a validated manifest.
+/// The result has:
+/// - Operations sorted by name
+/// - Parameters are re-serialized for canonical key ordering
+/// - No `bundle_hash` or other runtime fields
+///
+/// This single value feeds into both `compute_bundle_hash` and
+/// `manifest_json` storage, guaranteeing byte-level consistency.
+pub fn canonical_manifest_value(manifest: &HarnessBundleManifest) -> serde_json::Value {
+    let mut ops = Vec::with_capacity(manifest.operations.len());
+    let mut sorted = manifest.operations.clone();
+    sorted.sort_by(|a, b| a.name.cmp(&b.name));
+    for op in &sorted {
+        // Re-serialize parameters to get canonical key ordering.
+        let canonical_params =
+            canonicalize_json(&op.parameters).unwrap_or_else(|_| op.parameters.clone());
+        let map = serde_json::json!({
+            "name": op.name,
+            "description": op.description,
+            "parameters": canonical_params,
+            "risk": op.risk,
+            "idempotent": op.idempotent,
+        });
+        ops.push(map);
+    }
+    serde_json::json!({
+        "manifest_version": manifest.manifest_version,
+        "protocol_version": manifest.protocol_version,
+        "bundle_id": manifest.bundle_id,
+        "bundle_version": manifest.bundle_version,
+        "operations": ops,
+    })
+}
+
+/// Canonicalize a JSON value by recursively sorting object keys.
+fn canonicalize_json(value: &serde_json::Value) -> Result<serde_json::Value> {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut sorted = serde_json::Map::new();
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            for key in keys {
+                sorted.insert(key.clone(), canonicalize_json(&map[key])?);
+            }
+            Ok(serde_json::Value::Object(sorted))
+        }
+        serde_json::Value::Array(arr) => {
+            let vec: Result<Vec<_>> = arr.iter().map(canonicalize_json).collect();
+            Ok(serde_json::Value::Array(vec?))
+        }
+        other => Ok(other.clone()),
+    }
 }
 
 // ---- Bundle Hash ----
 
-/// Compute the deterministic bundle hash.
+/// Compute the deterministic bundle hash from the canonical manifest value.
+/// The hash is always over the same canonical JSON that is persisted as
+/// `manifest_json`, ensuring byte-level consistency.
 pub fn compute_bundle_hash(manifest: &HarnessBundleManifest) -> String {
-    let mut sorted = manifest.operations.clone();
-    sorted.sort_by(|a, b| a.name.cmp(&b.name));
-
-    let mut map = serde_json::Map::new();
-    map.insert(
-        "manifest_version".to_string(),
-        serde_json::json!(manifest.manifest_version),
-    );
-    map.insert(
-        "protocol_version".to_string(),
-        serde_json::json!(manifest.protocol_version),
-    );
-    map.insert(
-        "bundle_id".to_string(),
-        serde_json::json!(manifest.bundle_id),
-    );
-    map.insert(
-        "bundle_version".to_string(),
-        serde_json::json!(manifest.bundle_version),
-    );
-
-    let ops: Vec<serde_json::Value> = sorted
-        .iter()
-        .map(|op| {
-            let mut om = serde_json::Map::new();
-            om.insert("name".to_string(), serde_json::json!(op.name));
-            om.insert("description".to_string(), serde_json::json!(op.description));
-            om.insert(
-                "parameters".to_string(),
-                canonicalize_json(&op.parameters).unwrap_or(op.parameters.clone()),
-            );
-            om.insert("risk".to_string(), serde_json::json!(op.risk));
-            om.insert("idempotent".to_string(), serde_json::json!(op.idempotent));
-            serde_json::Value::Object(om)
-        })
-        .collect();
-    map.insert("operations".to_string(), serde_json::json!(ops));
-
-    let canonical = serde_json::to_string(&serde_json::Value::Object(map)).unwrap();
+    let canonical = canonical_manifest_value(manifest);
+    let json = serde_json::to_string(&canonical).unwrap();
     let mut hasher = Sha256::new();
-    hasher.update(canonical.as_bytes());
+    hasher.update(json.as_bytes());
     format!("sha256:{}", hex::encode(hasher.finalize()))
 }
 
@@ -270,11 +359,6 @@ pub fn prepare_operation(op: &HarnessManifestOperation, bundle_hash: &str) -> Pr
 
 // ---- Helpers ----
 
-fn canonicalize_json(value: &serde_json::Value) -> Result<serde_json::Value> {
-    let serialized = serde_json::to_string(value)?;
-    Ok(serde_json::from_str(&serialized)?)
-}
-
 fn is_valid_name(name: &str) -> bool {
     if name.is_empty() {
         return false;
@@ -284,204 +368,5 @@ fn is_valid_name(name: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn valid_manifest() -> serde_json::Value {
-        serde_json::json!({
-            "manifest_version": "v1",
-            "protocol_version": "v1",
-            "bundle_id": "my_harness",
-            "bundle_version": "1.0.0",
-            "operations": [{
-                "name": "my_op",
-                "description": "my harness operation",
-                "parameters": {"type": "object", "properties": {}, "required": [], "additionalProperties": false},
-                "risk": "ReadOnly",
-                "idempotent": true
-            }]
-        })
-    }
-
-    #[test]
-    fn valid_manifest_passes_validation() {
-        let result = validate_manifest(&valid_manifest(), None);
-        assert!(result.is_ok(), "valid manifest: {:?}", result.err());
-    }
-
-    #[test]
-    fn declared_hash_matches() {
-        let manifest = validate_manifest(&valid_manifest(), None).unwrap();
-        let hash = compute_bundle_hash(&manifest);
-        let result = validate_manifest(&valid_manifest(), Some(&hash));
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn declared_hash_mismatch_rejected() {
-        let result = validate_manifest(&valid_manifest(), Some("sha256:badhash"));
-        assert!(result.is_err());
-        let err = result.err().unwrap().to_string();
-        assert!(err.contains("declared bundle hash") || err.contains("does not match"));
-    }
-
-    #[test]
-    fn manifest_version_must_be_v1() {
-        let mut m = valid_manifest();
-        m["manifest_version"] = serde_json::json!("v2");
-        assert!(validate_manifest(&m, None).is_err());
-    }
-
-    #[test]
-    fn protocol_version_must_be_v1() {
-        let mut m = valid_manifest();
-        m["protocol_version"] = serde_json::json!("v2");
-        assert!(validate_manifest(&m, None).is_err());
-    }
-
-    #[test]
-    fn operations_must_not_be_empty() {
-        let mut m = valid_manifest();
-        m["operations"] = serde_json::json!([]);
-        assert!(validate_manifest(&m, None).is_err());
-    }
-
-    #[test]
-    fn duplicate_operation_names_rejected() {
-        let mut m = valid_manifest();
-        m["operations"] = serde_json::json!([
-            {"name": "my_op", "description": "first", "parameters": {"type": "object"}, "risk": "ReadOnly", "idempotent": true},
-            {"name": "my_op", "description": "second", "parameters": {"type": "object"}, "risk": "ReadOnly", "idempotent": true},
-        ]);
-        assert!(validate_manifest(&m, None).is_err());
-    }
-
-    #[test]
-    fn risk_must_be_readonly() {
-        let mut m = valid_manifest();
-        m["operations"][0]["risk"] = serde_json::json!("Write");
-        assert!(validate_manifest(&m, None).is_err());
-    }
-
-    #[test]
-    fn idempotent_must_be_true() {
-        let mut m = valid_manifest();
-        m["operations"][0]["idempotent"] = serde_json::json!(false);
-        assert!(validate_manifest(&m, None).is_err());
-    }
-
-    #[test]
-    fn operation_name_illegal_chars_rejected() {
-        let mut m = valid_manifest();
-        m["operations"][0]["name"] = serde_json::json!("illegal space");
-        assert!(validate_manifest(&m, None).is_err());
-    }
-
-    #[test]
-    fn bundle_id_must_be_valid() {
-        let mut m = valid_manifest();
-        m["bundle_id"] = serde_json::json!("");
-        assert!(validate_manifest(&m, None).is_err());
-    }
-
-    #[test]
-    fn bundle_version_must_not_be_empty() {
-        let mut m = valid_manifest();
-        m["bundle_version"] = serde_json::json!("");
-        assert!(validate_manifest(&m, None).is_err());
-    }
-
-    #[test]
-    fn unsupported_schema_keyword_rejected() {
-        let mut m = valid_manifest();
-        m["operations"][0]["parameters"] =
-            serde_json::json!({"type": "object", "$ref": "#/definitions/X"});
-        assert!(validate_manifest(&m, None).is_err());
-    }
-
-    #[test]
-    fn canonicalization_normalizes_json_order() {
-        let m1 = serde_json::json!({
-            "manifest_version": "v1",
-            "protocol_version": "v1",
-            "bundle_id": "harness",
-            "bundle_version": "1.0",
-            "operations": [{"name": "op_a", "description": "a", "parameters": {"type": "object"}, "risk": "ReadOnly", "idempotent": true}]
-        });
-        let m2 = serde_json::json!({
-            "protocol_version": "v1",
-            "bundle_id": "harness",
-            "bundle_version": "1.0",
-            "manifest_version": "v1",
-            "operations": [{"name": "op_a", "description": "a", "parameters": {"type": "object"}, "risk": "ReadOnly", "idempotent": true}]
-        });
-        let manifest1 = validate_manifest(&m1, None).unwrap();
-        let manifest2 = validate_manifest(&m2, None).unwrap();
-        let hash1 = compute_bundle_hash(&manifest1);
-        let hash2 = compute_bundle_hash(&manifest2);
-        assert_eq!(hash1, hash2, "different key order must produce same hash");
-    }
-
-    #[test]
-    fn operations_order_does_not_affect_hash() {
-        let m1 = serde_json::json!({
-            "manifest_version": "v1",
-            "protocol_version": "v1",
-            "bundle_id": "harness",
-            "bundle_version": "1.0",
-            "operations": [
-                {"name": "op_a", "description": "a", "parameters": {"type": "object"}, "risk": "ReadOnly", "idempotent": true},
-                {"name": "op_b", "description": "b", "parameters": {"type": "object"}, "risk": "ReadOnly", "idempotent": true}
-            ]
-        });
-        let m2 = serde_json::json!({
-            "manifest_version": "v1",
-            "protocol_version": "v1",
-            "bundle_id": "harness",
-            "bundle_version": "1.0",
-            "operations": [
-                {"name": "op_b", "description": "b", "parameters": {"type": "object"}, "risk": "ReadOnly", "idempotent": true},
-                {"name": "op_a", "description": "a", "parameters": {"type": "object"}, "risk": "ReadOnly", "idempotent": true}
-            ]
-        });
-        let manifest1 = validate_manifest(&m1, None).unwrap();
-        let manifest2 = validate_manifest(&m2, None).unwrap();
-        let hash1 = compute_bundle_hash(&manifest1);
-        let hash2 = compute_bundle_hash(&manifest2);
-        assert_eq!(
-            hash1, hash2,
-            "different operation order must produce same hash"
-        );
-    }
-
-    #[test]
-    fn hash_is_deterministic() {
-        let manifest = validate_manifest(&valid_manifest(), None).unwrap();
-        let h1 = compute_bundle_hash(&manifest);
-        let h2 = compute_bundle_hash(&manifest);
-        assert_eq!(h1, h2);
-    }
-
-    #[test]
-    fn prepare_operation_sets_external_harness_binding() {
-        let manifest = validate_manifest(&valid_manifest(), None).unwrap();
-        let hash = compute_bundle_hash(&manifest);
-        let prepared = prepare_operation(&manifest.operations[0], &hash);
-        assert_eq!(prepared.spec.binding_kind, BindingKind::ExternalHarness);
-        assert!(prepared.spec.binding_key.starts_with("harness:"));
-        assert!(prepared.spec.binding_key.contains(&hash));
-    }
-
-    #[test]
-    fn declared_hash_stripped_by_canonicalization() {
-        // declared_hash is consumed by validation, not stored in manifest
-        let manifest = validate_manifest(&valid_manifest(), None).unwrap();
-        assert!(serde_json::to_string(&manifest).unwrap().contains("my_op"));
-        // The canonical manifest should not contain 'bundle_hash' field
-        let canonical = serde_json::to_string(&manifest).unwrap();
-        assert!(
-            !canonical.contains("bundle_hash"),
-            "bundle_hash should not be in canonical manifest"
-        );
-    }
-}
+#[path = "manifest_tests.rs"]
+mod manifest_tests;

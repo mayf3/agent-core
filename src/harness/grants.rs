@@ -35,7 +35,7 @@ pub fn grant_operation(
     )?;
     drop(conn);
 
-    let _ = journal.append_event(
+    journal.append_event(
         JournalEventKind::OperationGrantChanged,
         None,
         None,
@@ -45,7 +45,7 @@ pub fn grant_operation(
             "operation_name": operation_name,
             "action": "granted",
         }),
-    );
+    )?;
 
     Ok(OperationGrant {
         channel: channel.to_string(),
@@ -71,7 +71,7 @@ pub fn revoke_operation(
     )?;
     drop(conn);
 
-    let _ = journal.append_event(
+    journal.append_event(
         JournalEventKind::OperationGrantChanged,
         None,
         None,
@@ -81,7 +81,7 @@ pub fn revoke_operation(
             "operation_name": operation_name,
             "action": "revoked",
         }),
-    );
+    )?;
 
     Ok(())
 }
