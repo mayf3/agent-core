@@ -26,6 +26,10 @@ mod registry_snapshot_provider_context;
 mod registry_snapshot_recovery_failure;
 
 #[cfg(test)]
+#[path = "tests/registry_snapshot_failure.rs"]
+mod registry_snapshot_failure;
+
+#[cfg(test)]
 #[path = "tests/registry_snapshot_gateway.rs"]
 mod registry_snapshot_gateway;
 

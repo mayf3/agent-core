@@ -2,9 +2,9 @@ use crate::config::KernelConfig;
 use crate::domain::*;
 use crate::gateway::Gateway;
 use crate::journal::JournalStore;
-use crate::llm::{ToolCall, ToolCallResult};
+use crate::llm::ToolCall;
 use crate::runtime::tool_rejection::sanitize_operation_for_audit;
-use crate::runtime::{Runtime, ToolRejection};
+use crate::runtime::Runtime;
 use serde_json::json;
 use std::path::PathBuf;
 
