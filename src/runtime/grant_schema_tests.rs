@@ -456,12 +456,18 @@ fn granted_time_now_completes_real_http_tool_loop() {
         .pointer("/messages/0/content")
         .and_then(Value::as_str)
         .unwrap();
-    assert!(!system2.contains("tool: time.now"), "ToolResult must NOT be in system context");
+    assert!(
+        !system2.contains("tool: time.now"),
+        "ToolResult must NOT be in system context"
+    );
     let tool_msg = requests[1]
         .pointer("/messages/3/content")
         .and_then(Value::as_str)
         .unwrap();
-    assert!(tool_msg.contains("status: succeeded"), "ToolResult must be in role=tool message");
+    assert!(
+        tool_msg.contains("status: succeeded"),
+        "ToolResult must be in role=tool message"
+    );
     // §5: round-2 tools set == round-1; ToolCatalog consistent across rounds.
     let names2: Vec<&str> = requests[1]["tools"]
         .as_array()
