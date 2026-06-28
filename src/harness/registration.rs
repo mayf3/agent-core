@@ -61,7 +61,10 @@ pub fn register_runtime(
     });
     journal.append_event(
         JournalEventKind::HarnessRuntimeRegistered,
-        None, None, None, payload,
+        None,
+        None,
+        None,
+        payload,
     )?;
 
     Ok(RuntimeRegistration {
@@ -87,7 +90,9 @@ pub fn validate_endpoint(endpoint: &str) -> Result<()> {
     if port_str.contains('/') || port_str.contains('?') || port_str.contains('#') {
         bail!("port must not contain path, query, or fragment");
     }
-    let port: u16 = port_str.parse().map_err(|_| anyhow::anyhow!("invalid port: {port_str}"))?;
+    let port: u16 = port_str
+        .parse()
+        .map_err(|_| anyhow::anyhow!("invalid port: {port_str}"))?;
     if port == 0 {
         bail!("port must not be 0");
     }
@@ -96,7 +101,10 @@ pub fn validate_endpoint(endpoint: &str) -> Result<()> {
 
 /// List all runtime registrations.
 pub fn list_registrations(journal: &JournalStore) -> Result<Vec<RuntimeRegistration>> {
-    let conn = journal.conn.lock().map_err(|_| anyhow::anyhow!("journal mutex poisoned"))?;
+    let conn = journal
+        .conn
+        .lock()
+        .map_err(|_| anyhow::anyhow!("journal mutex poisoned"))?;
     let mut stmt = conn.prepare(
         "SELECT registration_id, bundle_hash, endpoint, transport, enabled, registered_at, updated_at
          FROM harness_runtime_registrations ORDER BY registered_at"
@@ -112,13 +120,17 @@ pub fn list_registrations(journal: &JournalStore) -> Result<Vec<RuntimeRegistrat
             updated_at: row.get(6)?,
         })
     })?;
-    rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
 }
 
 // ---- Private DB helpers ----
 
 fn bundle_exists(journal: &JournalStore, bundle_hash: &str) -> Result<bool> {
-    let conn = journal.conn.lock().map_err(|_| anyhow::anyhow!("journal mutex poisoned"))?;
+    let conn = journal
+        .conn
+        .lock()
+        .map_err(|_| anyhow::anyhow!("journal mutex poisoned"))?;
     let count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM harness_bundles WHERE bundle_hash = ?1",
         rusqlite::params![bundle_hash],
@@ -127,8 +139,14 @@ fn bundle_exists(journal: &JournalStore, bundle_hash: &str) -> Result<bool> {
     Ok(count > 0)
 }
 
-fn find_by_bundle_hash(journal: &JournalStore, bundle_hash: &str) -> Result<Option<RuntimeRegistration>> {
-    let conn = journal.conn.lock().map_err(|_| anyhow::anyhow!("journal mutex poisoned"))?;
+fn find_by_bundle_hash(
+    journal: &JournalStore,
+    bundle_hash: &str,
+) -> Result<Option<RuntimeRegistration>> {
+    let conn = journal
+        .conn
+        .lock()
+        .map_err(|_| anyhow::anyhow!("journal mutex poisoned"))?;
     let result = conn.query_row(
         "SELECT registration_id, bundle_hash, endpoint, transport, enabled, registered_at, updated_at
          FROM harness_runtime_registrations WHERE bundle_hash = ?1",
@@ -160,7 +178,10 @@ fn insert_registration(
     transport: &str,
     now: &str,
 ) -> Result<()> {
-    let conn = journal.conn.lock().map_err(|_| anyhow::anyhow!("journal mutex poisoned"))?;
+    let conn = journal
+        .conn
+        .lock()
+        .map_err(|_| anyhow::anyhow!("journal mutex poisoned"))?;
     conn.execute(
         "INSERT INTO harness_runtime_registrations (registration_id, bundle_hash, endpoint, transport, enabled, registered_at, updated_at)
          VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6)",
@@ -169,8 +190,16 @@ fn insert_registration(
     Ok(())
 }
 
-fn update_registration(journal: &JournalStore, reg_id: &str, endpoint: &str, now: &str) -> Result<()> {
-    let conn = journal.conn.lock().map_err(|_| anyhow::anyhow!("journal mutex poisoned"))?;
+fn update_registration(
+    journal: &JournalStore,
+    reg_id: &str,
+    endpoint: &str,
+    now: &str,
+) -> Result<()> {
+    let conn = journal
+        .conn
+        .lock()
+        .map_err(|_| anyhow::anyhow!("journal mutex poisoned"))?;
     conn.execute(
         "UPDATE harness_runtime_registrations SET endpoint = ?1, updated_at = ?2 WHERE registration_id = ?3",
         rusqlite::params![endpoint, now, reg_id],

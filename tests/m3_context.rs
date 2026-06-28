@@ -195,7 +195,7 @@ fn test_config(root_dir: PathBuf) -> KernelConfig {
         write_approval_ttl_secs: 0,
         fallback_tool_name_indexed: false,
         primary_tool_name_indexed: false,
-    harness_admin_token: String::new(),
+        harness_admin_token: String::new(),
     }
 }
 
