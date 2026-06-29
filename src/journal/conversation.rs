@@ -82,14 +82,15 @@ impl super::JournalStore {
             if p_session_id != &session_id.0 {
                 continue; // Identity mismatch — ignore.
             }
-            // Verify payload run_id matches event run_id (if event has one).
+            // Verify payload run_id matches event run_id — both must be present.
+            let Some(ev_run_id) = e.run_id.as_ref() else {
+                continue;
+            };
             let Some(p_run_id) = e.payload.get("run_id").and_then(Value::as_str) else {
                 continue;
             };
-            if let Some(ev_run_id) = e.run_id.as_ref() {
-                if p_run_id != ev_run_id.0.as_str() {
-                    continue; // Identity mismatch — ignore.
-                }
+            if p_run_id != ev_run_id.0.as_str() {
+                continue; // Identity mismatch — ignore.
             }
             // Verify invocation_id is non-empty.
             let Some(inv_id) = e.payload.get("invocation_id").and_then(Value::as_str) else {
