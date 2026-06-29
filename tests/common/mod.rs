@@ -4,8 +4,141 @@ use agent_core_kernel::config::KernelConfig;
 use agent_core_kernel::domain::*;
 use agent_core_kernel::gateway::Gateway;
 use chrono::Utc;
-use serde_json::json;
+use serde_json::{json, Value};
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+
+// ============================================================
+// CaptureServer — local HTTP mock that returns preset responses
+// in order and captures each request body.
+// ============================================================
+
+pub struct CaptureServer {
+    pub port: u16,
+    captured: Arc<Mutex<Vec<Value>>>,
+    shutdown: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl CaptureServer {
+    pub fn start(responses: Vec<Value>) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let captured_thread = Arc::clone(&captured);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown_thread = Arc::clone(&shutdown);
+        let handle = std::thread::spawn(move || {
+            for response in responses {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                if shutdown_thread.load(Ordering::Relaxed) {
+                    break;
+                }
+                if let Some(body) = read_request_json(&mut stream) {
+                    captured_thread.lock().unwrap().push(body);
+                }
+                let body = response.to_string();
+                let reply = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(reply.as_bytes());
+            }
+        });
+        Self {
+            port,
+            captured,
+            shutdown,
+            handle: Some(handle),
+        }
+    }
+
+    pub fn base_url(&self) -> String {
+        format!("http://127.0.0.1:{}/v1", self.port)
+    }
+
+    pub fn requests(&self) -> Vec<Value> {
+        self.captured.lock().unwrap().clone()
+    }
+}
+
+impl Drop for CaptureServer {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+        let _ = TcpStream::connect(("127.0.0.1", self.port));
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+fn read_request_json(stream: &mut TcpStream) -> Option<Value> {
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+        .ok()?;
+    let mut raw = Vec::new();
+    let mut chunk = [0u8; 4096];
+    let header_end = loop {
+        let read = stream.read(&mut chunk).ok()?;
+        if read == 0 {
+            return None;
+        }
+        raw.extend_from_slice(&chunk[..read]);
+        if let Some(index) = raw.windows(4).position(|window| window == b"\r\n\r\n") {
+            break index;
+        }
+    };
+    let headers = std::str::from_utf8(&raw[..header_end]).ok()?;
+    let content_length = headers.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        if name.trim().eq_ignore_ascii_case("content-length") {
+            value.trim().parse::<usize>().ok()
+        } else {
+            None
+        }
+    })?;
+    let body_start = header_end + 4;
+    while raw.len() < body_start + content_length {
+        let read = stream.read(&mut chunk).ok()?;
+        if read == 0 {
+            break;
+        }
+        raw.extend_from_slice(&chunk[..read]);
+    }
+    let body_bytes = &raw[body_start..body_start + content_length.min(raw.len() - body_start)];
+    serde_json::from_slice(body_bytes).ok()
+}
+
+/// A successful text-only OpenAI-compatible response.
+pub fn text_response(text: &str) -> Value {
+    json!({
+        "model": "local-stub",
+        "choices": [{ "message": { "content": text } }]
+    })
+}
+
+/// An OpenAI-compatible response with a single tool call.
+pub fn tool_call_response(call_id: &str, fn_name: &str, arguments: &str) -> Value {
+    json!({
+        "model": "local-stub",
+        "choices": [{
+            "message": {
+                "content": "",
+                "tool_calls": [{
+                    "id": call_id,
+                    "type": "function",
+                    "function": { "name": fn_name, "arguments": arguments }
+                }]
+            }
+        }]
+    })
+}
 
 pub fn test_config() -> KernelConfig {
     KernelConfig {
