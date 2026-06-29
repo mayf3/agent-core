@@ -77,6 +77,7 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
                                 &provider_tools,
                                 &follow_ups,
                             )?;
+                            pending_turn = llm.provider_turn.take();
                             if llm.tool_call.is_absent() {
                                 return Ok(llm);
                             }

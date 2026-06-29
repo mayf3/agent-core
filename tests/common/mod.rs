@@ -39,7 +39,7 @@ impl CaptureServer {
                 if shutdown_thread.load(Ordering::Relaxed) {
                     break;
                 }
-                if let Some(body) = read_request_json(&mut stream) {
+                if let Ok(body) = read_request_json(&mut stream) {
                     captured_thread.lock().unwrap().push(body);
                 }
                 let body = response.to_string();
@@ -78,41 +78,49 @@ impl Drop for CaptureServer {
     }
 }
 
-fn read_request_json(stream: &mut TcpStream) -> Option<Value> {
+fn read_request_json(stream: &mut TcpStream) -> std::result::Result<Value, String> {
     stream
         .set_read_timeout(Some(std::time::Duration::from_secs(2)))
-        .ok()?;
+        .map_err(|e| format!("set_read_timeout failed: {e}"))?;
     let mut raw = Vec::new();
     let mut chunk = [0u8; 4096];
     let header_end = loop {
-        let read = stream.read(&mut chunk).ok()?;
+        let read = stream
+            .read(&mut chunk)
+            .map_err(|e| format!("read failed: {e}"))?;
         if read == 0 {
-            return None;
+            return Err("connection closed before headers".to_string());
         }
         raw.extend_from_slice(&chunk[..read]);
         if let Some(index) = raw.windows(4).position(|window| window == b"\r\n\r\n") {
             break index;
         }
     };
-    let headers = std::str::from_utf8(&raw[..header_end]).ok()?;
-    let content_length = headers.lines().find_map(|line| {
-        let (name, value) = line.split_once(':')?;
-        if name.trim().eq_ignore_ascii_case("content-length") {
-            value.trim().parse::<usize>().ok()
-        } else {
-            None
-        }
-    })?;
+    let headers = std::str::from_utf8(&raw[..header_end])
+        .map_err(|e| format!("invalid UTF-8 in headers: {e}"))?;
+    let content_length = headers
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            if name.trim().eq_ignore_ascii_case("content-length") {
+                value.trim().parse::<usize>().ok()
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| "missing content-length header".to_string())?;
     let body_start = header_end + 4;
     while raw.len() < body_start + content_length {
-        let read = stream.read(&mut chunk).ok()?;
+        let read = stream
+            .read(&mut chunk)
+            .map_err(|e| format!("read body failed: {e}"))?;
         if read == 0 {
             break;
         }
         raw.extend_from_slice(&chunk[..read]);
     }
     let body_bytes = &raw[body_start..body_start + content_length.min(raw.len() - body_start)];
-    serde_json::from_slice(body_bytes).ok()
+    serde_json::from_slice(body_bytes).map_err(|e| format!("JSON parse error: {e}"))
 }
 
 /// A successful text-only OpenAI-compatible response.
