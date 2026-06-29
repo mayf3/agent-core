@@ -15,15 +15,6 @@ use std::net::TcpStream;
 
 mod common;
 
-fn rcp(inv: &str) -> Receipt {
-    Receipt {
-        invocation_id: InvocationId(inv.into()),
-        status: ReceiptStatus::Succeeded,
-        output: json!({"status":"sent"}),
-        external_ref: None,
-        occurred_at: Utc::now(),
-    }
-}
 fn apv(j: &JournalStore, g: &Gateway, rid: &RunId, sid: &SessionId) -> Result<ApprovedInvocation> {
     let snap = test_snapshot();
     let run = common::runtime_run(rid, sid);
@@ -48,7 +39,15 @@ fn apv(j: &JournalStore, g: &Gateway, rid: &RunId, sid: &SessionId) -> Result<Ap
     j.queue_outbox_dispatch(&ap, Some(sid))?;
     Ok(ap)
 }
-
+fn rcp(inv: &str) -> Receipt {
+    Receipt {
+        invocation_id: InvocationId(inv.into()),
+        status: ReceiptStatus::Succeeded,
+        output: json!({"status":"sent"}),
+        external_ref: None,
+        occurred_at: Utc::now(),
+    }
+}
 #[test]
 fn stdout_dispatch_success_records_assistant_reply_delivered() -> Result<()> {
     let j = JournalStore::in_memory()?;

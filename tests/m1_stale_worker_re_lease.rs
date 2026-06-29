@@ -418,10 +418,9 @@ fn conversation_turn_limit_zero_returns_empty() -> Result<()> {
     let s = common::test_session(&common::test_config()).id;
     lt(&j, &s, "e1", "u1", "r1", "r1")?;
     lt(&j, &s, "e2", "u2", "r2", "r2")?;
-    let turns = j.recent_conversation_turns(&s, 0, None)?;
     assert!(
-        turns.is_empty(),
-        "limit=0 must return empty even with history"
+        j.recent_conversation_turns(&s, 0, None)?.is_empty(),
+        "limit=0 must return empty"
     );
     Ok(())
 }
@@ -433,11 +432,9 @@ fn conversation_turn_limit_two_preserves_order() -> Result<()> {
     lt(&j, &s, "e1", "user A", "r1", "reply A")?;
     lt(&j, &s, "e2", "user B", "r2", "reply B")?;
     lt(&j, &s, "e3", "user C", "r3", "reply C")?;
-    let turns = j.recent_conversation_turns(&s, 2, None)?;
-    assert_eq!(turns.len(), 2, "limit=2 returns exactly 2");
-    assert_eq!(turns[0].0, "user B", "first is B");
-    assert_eq!(turns[0].1, "reply B", "B reply correct");
-    assert_eq!(turns[1].0, "user C", "second is C");
-    assert_eq!(turns[1].1, "reply C", "C reply correct");
+    let t = j.recent_conversation_turns(&s, 2, None)?;
+    assert_eq!(t.len(), 2, "limit=2 returns exactly 2");
+    assert_eq!(t[0].0, "user B");
+    assert_eq!(t[1].0, "user C");
     Ok(())
 }
