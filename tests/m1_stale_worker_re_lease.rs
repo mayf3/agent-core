@@ -374,3 +374,111 @@ fn ordinary_tool_receipt_does_not_record_assistant_reply_delivered() -> Result<(
     );
     Ok(())
 }
+
+// ===== Provider continuity and tool transcript E2E tests =====
+use agent_core_kernel::llm::OpenAiCompatibleLlm;
+use agent_core_kernel::runtime::Runtime;
+use common::{text_response, tool_call_response, CaptureServer};
+
+#[test]
+fn assistant_reply_delivered_via_succeed_dispatch() -> Result<()> {
+    let j = JournalStore::in_memory()?;
+    let sid = SessionId("local".into());
+    let rid = RunId("e2e_r".into());
+    link_turn(
+        &j,
+        &sid,
+        "e1",
+        "帮我准备候选Harness",
+        &rid.0,
+        "候选Harness已启动，endpoint=http://127.0.0.1:7101。是否启用？",
+    )?;
+    let t = j.recent_conversation_turns(&sid, 10, None)?;
+    assert_eq!(t.len(), 1);
+    assert!(t[0].0.contains("帮我准备候选Harness"));
+    assert!(t[0].1.contains("候选Harness已启动"));
+    Ok(())
+}
+
+#[test]
+fn e2e_multi_round_tool_loop_preserves_complete_http_transcript() -> Result<()> {
+    let mut c = common::test_config();
+    c.extra_allowed_operations = vec!["time.now".into()];
+    let sv = CaptureServer::start(vec![
+        tool_call_response("cA", "time.now", "{}"),
+        tool_call_response("cB", "time.now", "{}"),
+        text_response("done"),
+    ]);
+    c.openai_base_url = sv.base_url();
+    c.openai_api_key = "t".into();
+    c.model = "local-stub".into();
+    let j = JournalStore::in_memory()?;
+    let g = Gateway::new(c.clone());
+    let l = OpenAiCompatibleLlm::new(
+        c.openai_base_url.clone(),
+        c.openai_api_key.clone(),
+        c.model.clone(),
+        3000,
+    );
+    let rt = Runtime::new(c, l);
+    let ev = g.validate_ingress(&j, g.cli_ingress("test".into())?)?;
+    rt.deliver(&j, &g, ev)?;
+    let rq = sv.requests();
+    assert_eq!(rq.len(), 3, "3 provider requests");
+    let r1 = rq[0]["messages"].as_array().unwrap();
+    let r2 = rq[1]["messages"].as_array().unwrap();
+    let r3 = rq[2]["messages"].as_array().unwrap();
+    assert_eq!(r1.len(), 2);
+    assert_eq!(r2.len(), 4);
+    assert_eq!(r3.len(), 6);
+    assert_eq!(r2[2]["role"], "assistant");
+    assert_eq!(r2[3]["role"], "tool");
+    assert_eq!(r3[4]["role"], "assistant");
+    assert_eq!(r3[5]["role"], "tool");
+    let aid = r3[2]["tool_calls"][0]["id"].as_str().unwrap();
+    let bid = r3[4]["tool_calls"][0]["id"].as_str().unwrap();
+    assert_eq!(r3[3]["tool_call_id"].as_str(), Some(aid));
+    assert_eq!(r3[5]["tool_call_id"].as_str(), Some(bid));
+    let s1 = r1[0]["content"].as_str().unwrap();
+    let s2 = r2[0]["content"].as_str().unwrap();
+    let s3 = r3[0]["content"].as_str().unwrap();
+    assert_eq!(s1, s2, "R1==R2");
+    assert_eq!(s2, s3, "R2==R3");
+    assert_eq!(r1.iter().filter(|m| m["role"] == "tool").count(), 0);
+    assert_eq!(r2.iter().filter(|m| m["role"] == "tool").count(), 1);
+    assert_eq!(r3.iter().filter(|m| m["role"] == "tool").count(), 2);
+    assert!(!s1.contains("status: succeeded"));
+    Ok(())
+}
+
+#[test]
+fn e2e_tool_results_appear_once_and_system_stays_byte_identical() -> Result<()> {
+    let mut c = common::test_config();
+    c.extra_allowed_operations = vec!["time.now".into()];
+    let sv = CaptureServer::start(vec![
+        tool_call_response("cx", "time.now", "{}"),
+        text_response("done"),
+    ]);
+    c.openai_base_url = sv.base_url();
+    c.openai_api_key = "t".into();
+    c.model = "local-stub".into();
+    let j = JournalStore::in_memory()?;
+    let g = Gateway::new(c.clone());
+    let l = OpenAiCompatibleLlm::new(
+        c.openai_base_url.clone(),
+        c.openai_api_key.clone(),
+        c.model.clone(),
+        3000,
+    );
+    let rt = Runtime::new(c, l);
+    let ev = g.validate_ingress(&j, g.cli_ingress("test".into())?)?;
+    rt.deliver(&j, &g, ev)?;
+    let rq = sv.requests();
+    assert_eq!(rq.len(), 2);
+    let s1 = rq[0]["messages"][0]["content"].as_str().unwrap();
+    let s2 = rq[1]["messages"][0]["content"].as_str().unwrap();
+    assert_eq!(s1, s2);
+    assert_eq!(rq[1].to_string().matches("status: succeeded").count(), 1);
+    assert!(!s2.contains("status: succeeded"));
+    Ok(())
+}
