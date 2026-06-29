@@ -10,7 +10,7 @@ mod registry_ops;
 mod sqlite;
 mod sqlite_read;
 #[cfg(any(test, feature = "test-helpers"))]
-mod test_helpers;
+pub mod test_helpers;
 mod unknown;
 mod worker;
 

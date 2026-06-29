@@ -289,4 +289,15 @@ impl JournalStore {
             registry_snapshot_id: registry_snapshot_id.unwrap_or_default(),
         }))
     }
+
+    /// Execute a raw SQL batch (e.g. CREATE TRIGGER) for test-only fault
+    /// injection. Not available in production builds.
+    pub fn execute_sql_for_test(&self, sql: &str) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow!("journal mutex poisoned"))?;
+        conn.execute_batch(sql)?;
+        Ok(())
+    }
 }
