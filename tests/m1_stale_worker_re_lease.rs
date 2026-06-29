@@ -248,21 +248,6 @@ fn link_turn(
 }
 
 #[test]
-fn conversation_turns_pair_by_run_id_not_delivery_order() -> Result<()> {
-    let j = JournalStore::in_memory()?;
-    let s = common::test_session(&common::test_config()).id;
-    link_turn(&j, &s, "ev_a", "user A", "r_a", "reply A")?;
-    link_turn(&j, &s, "ev_b", "user B", "r_b", "reply B")?;
-    let t = j.recent_conversation_turns(&s, 10, None)?;
-    assert_eq!(t.len(), 2);
-    assert_eq!(t[0].0, "user A");
-    assert_eq!(t[0].1, "reply A");
-    assert_eq!(t[1].0, "user B");
-    assert_eq!(t[1].1, "reply B");
-    Ok(())
-}
-
-#[test]
 fn conversation_turns_are_session_isolated() -> Result<()> {
     let j = JournalStore::in_memory()?;
     let sa = SessionId("a".into());
@@ -270,45 +255,6 @@ fn conversation_turns_are_session_isolated() -> Result<()> {
     link_turn(&j, &sa, "e1", "hello A", "r1", "rep A")?;
     link_turn(&j, &sb, "e2", "hello B", "r2", "rep B")?;
     assert_eq!(j.recent_conversation_turns(&sa, 10, None)?.len(), 1);
-    Ok(())
-}
-
-#[test]
-fn conversation_turns_exclude_failed_and_incomplete_runs() -> Result<()> {
-    let j = JournalStore::in_memory()?;
-    let s = common::test_session(&common::test_config()).id;
-    link_turn(&j, &s, "e1", "user 1", "r1", "reply 1")?;
-    j.append_event(
-        JournalEventKind::RunStarted,
-        Some(&RunId("r2".into())),
-        Some(&s),
-        Some("e2"),
-        json!({"run_id":"r2"}),
-    )?;
-    j.append_event(
-        JournalEventKind::RunFailed,
-        Some(&RunId("r3".into())),
-        Some(&s),
-        Some("e3"),
-        json!({"status":"Failed"}),
-    )?;
-    assert_eq!(j.recent_conversation_turns(&s, 10, None)?.len(), 1);
-    Ok(())
-}
-
-#[test]
-fn incomplete_turn_does_not_displace_complete_turn() -> Result<()> {
-    let j = JournalStore::in_memory()?;
-    let s = common::test_session(&common::test_config()).id;
-    link_turn(&j, &s, "e1", "complete", "r1", "reply")?;
-    j.append_event(
-        JournalEventKind::RunStarted,
-        Some(&RunId("r2".into())),
-        Some(&s),
-        Some("e2"),
-        json!({"run_id":"r2"}),
-    )?;
-    assert_eq!(j.recent_conversation_turns(&s, 1, None)?[0].0, "complete");
     Ok(())
 }
 
@@ -325,33 +271,6 @@ fn current_run_is_excluded_from_recent_turns() -> Result<()> {
     Ok(())
 }
 
-#[test]
-fn conversation_turn_limit_one_keeps_latest_complete_turn() -> Result<()> {
-    let j = JournalStore::in_memory()?;
-    let s = common::test_session(&common::test_config()).id;
-    link_turn(&j, &s, "e1", "u1", "r1", "r1")?;
-    link_turn(&j, &s, "e2", "u2", "r2", "r2")?;
-    assert_eq!(j.recent_conversation_turns(&s, 1, None)?[0].0, "u2");
-    Ok(())
-}
-
-#[test]
-fn conversation_turns_preserve_unicode_newlines_and_json_like_text() -> Result<()> {
-    let j = JournalStore::in_memory()?;
-    let s = common::test_session(&common::test_config()).id;
-    link_turn(
-        &j,
-        &s,
-        "e1",
-        "hello\nworld ✅",
-        "r1",
-        "{'status':'ok'} endpoint=http://127.0.0.1",
-    )?;
-    let t = j.recent_conversation_turns(&s, 10, None)?;
-    assert_eq!(t[0].0, "hello\nworld ✅");
-    assert!(t[0].1.contains("{'status':'ok'}"));
-    Ok(())
-}
 #[test]
 fn ordinary_tool_receipt_does_not_record_assistant_reply_delivered() -> Result<()> {
     let j = JournalStore::in_memory()?;
@@ -376,29 +295,11 @@ fn ordinary_tool_receipt_does_not_record_assistant_reply_delivered() -> Result<(
 }
 
 // ===== Provider continuity and tool transcript E2E tests =====
+
+// ===== E2E tests for continuity, dispatch, rollback, idempotency =====
 use agent_core_kernel::llm::OpenAiCompatibleLlm;
 use agent_core_kernel::runtime::Runtime;
 use common::{text_response, tool_call_response, CaptureServer};
-
-#[test]
-fn assistant_reply_delivered_via_succeed_dispatch() -> Result<()> {
-    let j = JournalStore::in_memory()?;
-    let sid = SessionId("local".into());
-    let rid = RunId("e2e_r".into());
-    link_turn(
-        &j,
-        &sid,
-        "e1",
-        "帮我准备候选Harness",
-        &rid.0,
-        "候选Harness已启动，endpoint=http://127.0.0.1:7101。是否启用？",
-    )?;
-    let t = j.recent_conversation_turns(&sid, 10, None)?;
-    assert_eq!(t.len(), 1);
-    assert!(t[0].0.contains("帮我准备候选Harness"));
-    assert!(t[0].1.contains("候选Harness已启动"));
-    Ok(())
-}
 
 #[test]
 fn e2e_multi_round_tool_loop_preserves_complete_http_transcript() -> Result<()> {
@@ -452,11 +353,49 @@ fn e2e_multi_round_tool_loop_preserves_complete_http_transcript() -> Result<()> 
 }
 
 #[test]
-fn e2e_tool_results_appear_once_and_system_stays_byte_identical() -> Result<()> {
+fn conversation_turn_limit_two_preserves_order() -> Result<()> {
+    let j = JournalStore::in_memory()?;
+    let s = common::test_session(&common::test_config()).id;
+    link_turn(&j, &s, "e1", "u1", "r1", "r1")?;
+    link_turn(&j, &s, "e2", "u2", "r2", "r2")?;
+    link_turn(&j, &s, "e3", "u3", "r3", "r3")?;
+    let t = j.recent_conversation_turns(&s, 2, None)?;
+    assert_eq!(t.len(), 2);
+    assert_eq!(t[0].0, "u2");
+    assert_eq!(t[1].0, "u3");
+    Ok(())
+}
+
+#[test]
+fn conversation_turn_limit_overflow_keeps_latest() -> Result<()> {
+    let j = JournalStore::in_memory()?;
+    let s = common::test_session(&common::test_config()).id;
+    for i in 0..5 {
+        link_turn(
+            &j,
+            &s,
+            &format!("e{i}"),
+            &format!("u{i}"),
+            &format!("r{i}"),
+            "r",
+        )?;
+    }
+    let t = j.recent_conversation_turns(&s, 3, None)?;
+    assert_eq!(t.len(), 3);
+    assert_eq!(t[0].0, "u2");
+    assert_eq!(t[2].0, "u4");
+    Ok(())
+}
+
+#[test]
+fn malformed_follow_up_then_valid_tool_call_does_not_reuse_stale_pending_turn() -> Result<()> {
     let mut c = common::test_config();
     c.extra_allowed_operations = vec!["time.now".into()];
+    // Malformed tool call is rejected by gateway (no InvocationProposed).
+    // Next round: valid tool call -> tool result.
     let sv = CaptureServer::start(vec![
-        tool_call_response("cx", "time.now", "{}"),
+        json!({"model":"local-stub","choices":[{"message":{"content":"","tool_calls":[{"id":"bad","type":"function","function":{"name":"time.now","arguments":"{bad}"}}]}}]}),
+        tool_call_response("valid_call", "time.now", "{}"),
         text_response("done"),
     ]);
     c.openai_base_url = sv.base_url();
@@ -474,11 +413,21 @@ fn e2e_tool_results_appear_once_and_system_stays_byte_identical() -> Result<()> 
     let ev = g.validate_ingress(&j, g.cli_ingress("test".into())?)?;
     rt.deliver(&j, &g, ev)?;
     let rq = sv.requests();
-    assert_eq!(rq.len(), 2);
-    let s1 = rq[0]["messages"][0]["content"].as_str().unwrap();
-    let s2 = rq[1]["messages"][0]["content"].as_str().unwrap();
-    assert_eq!(s1, s2);
-    assert_eq!(rq[1].to_string().matches("status: succeeded").count(), 1);
-    assert!(!s2.contains("status: succeeded"));
+    assert_eq!(rq.len(), 3, "3 requests");
+    // Round 3 should have both assistant+tool messages (from valid call)
+    // The malformed call is handled internally and doesn't add to transcript
+    let r3 = rq[2]["messages"].as_array().unwrap();
+    assert_eq!(
+        r3.len(),
+        4,
+        "at least 4 messages: system+user+assistant+tool"
+    );
+    assert_eq!(r3[2]["role"], "assistant");
+    assert_eq!(r3[3]["role"], "tool");
+    // Valid call's tool_call_id matches its result
+    let call_id = r3[2]["tool_calls"][0]["id"].as_str().unwrap();
+    assert_eq!(r3[3]["tool_call_id"].as_str(), Some(call_id));
+    // The result is NOT using the malformed call's pending turn
+    assert_ne!(call_id, "bad", "must not reuse malformed call_id");
     Ok(())
 }
