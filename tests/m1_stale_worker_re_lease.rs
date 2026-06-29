@@ -223,6 +223,7 @@ fn conversation_turns_reject_mismatched_assistant_event_identity() -> Result<()>
     j.append_event(JournalEventKind::AssistantReplyDelivered,Some(&r5),Some(&s),Some("wrong_corr"),json!({"session_id":s.0,"run_id":"r5","invocation_id":"reply:r5","channel":"cli","text":"bad4"}))?;
     let t = j.recent_conversation_turns(&s, 10, None)?;
     assert_eq!(t.len(), 1);
+    assert_eq!(t[0].0, "user");
     assert_eq!(t[0].1, "valid");
     Ok(())
 }
@@ -317,7 +318,29 @@ fn connector_unknown_fields_are_not_persisted_in_journal() -> Result<()> {
     let j = JournalStore::in_memory()?;
     let g = Gateway::new(common::test_config());
     let sid = SessionId("sx".into());
-    apv(&j, &g, &RunId("rx".into()), &sid)?;
+    let rid = RunId("rx".into());
+    j.append_event(
+        JournalEventKind::IngressAccepted,
+        None,
+        None,
+        Some("ev_sx"),
+        json!({"source":"feishu","event_id":"ev_sx","text":"安全测试用户消息"}),
+    )?;
+    j.append_event(
+        JournalEventKind::SessionReady,
+        None,
+        Some(&sid),
+        Some("ev_sx"),
+        json!({"session_id":sid.0}),
+    )?;
+    j.append_event(
+        JournalEventKind::RunStarted,
+        Some(&rid),
+        Some(&sid),
+        Some("ev_sx"),
+        json!({"run_id":rid.0}),
+    )?;
+    apv(&j, &g, &rid, &sid)?;
     assert!(
         dispatch_once(
             &j,
@@ -346,6 +369,10 @@ fn connector_unknown_fields_are_not_persisted_in_journal() -> Result<()> {
             .count(),
         1
     );
+    assert_eq!(
+        j.outbox_dispatch_status(&InvocationId("reply:rx".into()))?,
+        Some(OutboxDispatchStatus::Succeeded)
+    );
     let body = serde_json::to_string(&ev).unwrap_or_default();
     for m in &[
         "SECRET_TOKEN_MARKER",
@@ -355,16 +382,17 @@ fn connector_unknown_fields_are_not_persisted_in_journal() -> Result<()> {
     ] {
         assert!(!body.contains(m), "leaked {m}");
     }
-    // Also verify RecentMessages projection is clean
     let turns = j.recent_conversation_turns(&sid, 10, None)?;
-    let turns_text = format!("{:?}", turns);
+    assert_eq!(turns.len(), 1, "must have 1 complete turn");
+    assert_eq!(turns[0].0, "安全测试用户消息", "user text");
+    assert_eq!(turns[0].1, "hello", "assistant from args");
     for m in &[
         "SECRET_TOKEN_MARKER",
         "/private/internal/path",
         "NESTED_SECRET_MARKER",
         "LARGE_UNKNOWN_MARKER",
     ] {
-        assert!(!turns_text.contains(m), "leaked in turns: {m}");
+        assert!(!format!("{:?}", turns).contains(m), "leaked in turns");
     }
     Ok(())
 }
@@ -435,6 +463,8 @@ fn conversation_turn_limit_two_preserves_order() -> Result<()> {
     let t = j.recent_conversation_turns(&s, 2, None)?;
     assert_eq!(t.len(), 2, "limit=2 returns exactly 2");
     assert_eq!(t[0].0, "user B");
+    assert_eq!(t[0].1, "reply B");
     assert_eq!(t[1].0, "user C");
+    assert_eq!(t[1].1, "reply C");
     Ok(())
 }
