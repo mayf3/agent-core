@@ -78,6 +78,7 @@ fn stale_running_worker_job_is_re_leased_on_next_poll() -> Result<()> {
 
 use agent_core_kernel::registry::snapshot::test_snapshot;
 use agent_core_kernel::runtime::outbox_dispatcher::dispatch_once;
+use agent_core_kernel::context::ContextAssembler;
 use common::FakeReplyAdapter;
 
 fn lt(j: &JournalStore, sid: &SessionId, ev: &str, ut: &str, rid: &str, rt: &str) -> Result<()> {
@@ -220,8 +221,20 @@ fn conversation_turns_reject_mismatched_assistant_event_identity() -> Result<()>
     )?;
     lu(&j, &s, "e5", "u5", "r5")?;
     let r5 = RunId("r5".into());
-    j.append_event(JournalEventKind::AssistantReplyDelivered,Some(&r5),Some(&s),Some("wrong_corr"),json!({"session_id":s.0,"run_id":"r5","invocation_id":"reply:r5","channel":"cli","text":"bad4"}))?;
-    let t = j.recent_conversation_turns(&s, 10, None)?;
+	j.append_event(JournalEventKind::AssistantReplyDelivered,Some(&r5),Some(&s),Some("wrong_corr"),json!({"session_id":s.0,"run_id":"r5","invocation_id":"reply:r5","channel":"cli","text":"bad4"}))?;
+	// event.session_id缺失
+	lu(&j, &s, "e6", "u6", "r6")?;
+	let r6 = RunId("r6".into());
+	j.append_event(JournalEventKind::AssistantReplyDelivered,Some(&r6),None,Some("reply:r6"),json!({"session_id":s.0,"run_id":"r6","invocation_id":"reply:r6","channel":"cli","text":"bad5"}))?;
+	// event.run_id与payload.run_id不一致
+	lu(&j, &s, "e7", "u7", "r7")?;
+	let r7 = RunId("r7".into());
+	j.append_event(JournalEventKind::AssistantReplyDelivered,Some(&r7),Some(&s),Some("reply:r7"),json!({"session_id":s.0,"run_id":"r7_wrong","invocation_id":"reply:r7","channel":"cli","text":"bad6"}))?;
+	// event.correlation_id缺失
+	lu(&j, &s, "e8", "u8", "r8")?;
+	let r8 = RunId("r8".into());
+	j.append_event(JournalEventKind::AssistantReplyDelivered,Some(&r8),Some(&s),None,json!({"session_id":s.0,"run_id":"r8","invocation_id":"reply:r8","channel":"cli","text":"bad7"}))?;
+	let t = j.recent_conversation_turns(&s, 10, None)?;
     assert_eq!(t.len(), 1);
     assert_eq!(t[0].0, "user");
     assert_eq!(t[0].1, "valid");
@@ -392,9 +405,67 @@ fn connector_unknown_fields_are_not_persisted_in_journal() -> Result<()> {
         "NESTED_SECRET_MARKER",
         "LARGE_UNKNOWN_MARKER",
     ] {
-        assert!(!format!("{:?}", turns).contains(m), "leaked in turns");
-    }
-    Ok(())
+	assert!(!format!("{:?}", turns).contains(m), "leaked in turns");
+	}
+	// ── ContextAssembler real proof ──
+	let config = common::test_config();
+	let ca = ContextAssembler::from_config(&config);
+	let sess = Session {
+	    id: sid.clone(),
+	    agent_id: config.agent_id.clone(),
+	    channel: ChannelKind::Feishu,
+	    conversation_key: "local".to_string(),
+	    summary: None,
+	    summarized_until_event_id: None,
+	    last_active_at: Utc::now(),
+	    status: SessionStatus::Active,
+	    version: 1,
+	};
+	let ingress_event = ValidatedEvent {
+	    event_id: EventId("__none__".into()),
+	    source: EventSource::Feishu,
+	    principal: common::cli_principal(),
+	    session_target: SessionTarget {
+		agent_id: config.agent_id.clone(),
+		channel: ChannelKind::Feishu,
+		conversation_key: "local".to_string(),
+	    },
+	    payload: RuntimeEventPayload::UserMessage {
+		text: "安全测试用户消息".into(),
+		message_id: None,
+		chat_id: None,
+	    },
+	    dedupe_key: "__none__".into(),
+	    occurred_at: Utc::now(),
+	};
+	let granted_ops: Vec<String> = common::cli_principal()
+	    .grants
+	    .iter()
+	    .map(|g| g.operation.clone())
+	    .collect();
+	let snap = test_snapshot();
+	let blocks = ca.build(&j, &sess, &ingress_event, "安全测试用户消息", &granted_ops, &snap)?;
+	let recent = blocks
+	    .iter()
+		.find(|b| matches!(b.kind, ContextBlockKind::RecentMessages))
+	    .expect("must have RecentMessages ContextBlock");
+	assert!(
+	    recent.content.contains("User: 安全测试用户消息"),
+	    "user text in RecentMessages"
+	);
+	assert!(
+	    recent.content.contains("Assistant: hello"),
+	    "assistant text in RecentMessages"
+	);
+	for m in &[
+	    "SECRET_TOKEN_MARKER",
+	    "/private/internal/path",
+	    "NESTED_SECRET_MARKER",
+	    "LARGE_UNKNOWN_MARKER",
+	] {
+	    assert!(!recent.content.contains(m), "leaked {m} in ContextBlock");
+	}
+	Ok(())
 }
 #[test]
 fn assistant_reply_delivered_transaction_failure_rolls_back_all() -> Result<()> {
@@ -435,9 +506,12 @@ fn assistant_reply_delivered_transaction_failure_rolls_back_all() -> Result<()> 
     assert_eq!(
         j.outbox_dispatch_status(&InvocationId("reply:rt".into()))?,
         Some(OutboxDispatchStatus::Dispatching)
-    );
+	    );
+	
+	let run = j.run(&RunId("rt".into()))?.expect("run must exist");
+	assert!(matches!(run.status, RunStatus::Running));
 
-    Ok(())
+	Ok(())
 }
 
 #[test]
