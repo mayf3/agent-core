@@ -20,6 +20,8 @@ pub struct CaptureServer {
     pub port: u16,
     captured: Arc<Mutex<Vec<Value>>>,
     parse_error: Arc<Mutex<Option<String>>>,
+    error_tx: std::sync::mpsc::Sender<String>,
+    error_rx: std::sync::mpsc::Receiver<String>,
     shutdown: Arc<AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
 }
@@ -32,6 +34,8 @@ impl CaptureServer {
         let captured_thread = Arc::clone(&captured);
         let parse_error = Arc::new(Mutex::new(None::<String>));
         let parse_error_thread = Arc::clone(&parse_error);
+        let (error_tx, error_rx) = std::sync::mpsc::channel::<String>();
+        let error_tx_thread = error_tx.clone();
         let shutdown = Arc::new(AtomicBool::new(false));
         let shutdown_thread = Arc::clone(&shutdown);
         let handle = std::thread::spawn(move || {
@@ -47,7 +51,8 @@ impl CaptureServer {
                         captured_thread.lock().unwrap().push(body);
                     }
                     Err(error) => {
-                        *parse_error_thread.lock().unwrap() = Some(error);
+                        *parse_error_thread.lock().unwrap() = Some(error.clone());
+                        let _ = error_tx_thread.send(error);
                         break;
                     }
                 }
@@ -64,9 +69,16 @@ impl CaptureServer {
             port,
             captured,
             parse_error,
+            error_tx,
+            error_rx,
             shutdown,
             handle: Some(handle),
         }
+    }
+
+    /// Wait for a parse error with a timeout (no fixed sleep).
+    pub fn recv_error_timeout(&self, timeout: std::time::Duration) -> Option<String> {
+        self.error_rx.recv_timeout(timeout).ok()
     }
 
     /// Panic if a parse error was recorded. Call before `requests()` in tests.

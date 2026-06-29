@@ -165,13 +165,29 @@ fn duplicate_success_dispatch_records_one_assistant_reply_delivered() -> Result<
         j.outbox_dispatch_status(&InvocationId("reply:r2".into()))?,
         Some(OutboxDispatchStatus::Succeeded)
     );
-    assert!(j.lease_next_outbox_dispatch()?.is_none());
+    // Second attempt: terminal transition must fail
+    let dup = j.succeed_outbox_dispatch(&rcp("reply:r2"), &RunId("r2".into()), Some(&sid));
+    assert!(
+        dup.is_err(),
+        "duplicate succeed must fail (terminal transition guard)"
+    );
+    // Counts unchanged after duplicate
+    let ev2 = j.events()?;
     assert_eq!(
-        j.events()?
-            .iter()
+        ev2.iter()
             .filter(|e| e.kind == JournalEventKind::AssistantReplyDelivered)
             .count(),
         1
+    );
+    assert_eq!(
+        ev2.iter()
+            .filter(|e| e.kind == JournalEventKind::ReceiptReceived)
+            .count(),
+        1
+    );
+    assert_eq!(
+        j.outbox_dispatch_status(&InvocationId("reply:r2".into()))?,
+        Some(OutboxDispatchStatus::Succeeded)
     );
     Ok(())
 }
@@ -406,14 +422,12 @@ fn capture_server_reports_malformed_http_request() -> Result<()> {
     let mut s = TcpStream::connect(("127.0.0.1", sv.port))?;
     s.write_all(b"POST /api HTTP/1.1\r\nContent-Length: 7\r\n\r\n{invalid}")?;
     s.flush()?;
-    std::thread::sleep(std::time::Duration::from_millis(800));
-    let err = sv.parse_error();
-    assert!(err.is_some(), "must have parse error: {:?}", sv.requests());
-    if let Some(msg) = err {
-        assert!(
-            msg.contains("JSON") || msg.contains("parse") || msg.contains("expected"),
-            "error: {msg}"
-        );
-    }
+    let err = sv
+        .recv_error_timeout(std::time::Duration::from_secs(2))
+        .expect("CaptureServer did not report malformed request");
+    assert!(
+        err.contains("JSON") || err.contains("parse") || err.contains("expected"),
+        "error should mention JSON/parse: {err}"
+    );
     Ok(())
 }
