@@ -355,6 +355,17 @@ fn connector_unknown_fields_are_not_persisted_in_journal() -> Result<()> {
     ] {
         assert!(!body.contains(m), "leaked {m}");
     }
+    // Also verify RecentMessages projection is clean
+    let turns = j.recent_conversation_turns(&sid, 10, None)?;
+    let turns_text = format!("{:?}", turns);
+    for m in &[
+        "SECRET_TOKEN_MARKER",
+        "/private/internal/path",
+        "NESTED_SECRET_MARKER",
+        "LARGE_UNKNOWN_MARKER",
+    ] {
+        assert!(!turns_text.contains(m), "leaked in turns: {m}");
+    }
     Ok(())
 }
 #[test]
@@ -398,5 +409,35 @@ fn assistant_reply_delivered_transaction_failure_rolls_back_all() -> Result<()> 
         Some(OutboxDispatchStatus::Dispatching)
     );
 
+    Ok(())
+}
+
+#[test]
+fn conversation_turn_limit_zero_returns_empty() -> Result<()> {
+    let j = JournalStore::in_memory()?;
+    let s = common::test_session(&common::test_config()).id;
+    lt(&j, &s, "e1", "u1", "r1", "r1")?;
+    lt(&j, &s, "e2", "u2", "r2", "r2")?;
+    let turns = j.recent_conversation_turns(&s, 0, None)?;
+    assert!(
+        turns.is_empty(),
+        "limit=0 must return empty even with history"
+    );
+    Ok(())
+}
+
+#[test]
+fn conversation_turn_limit_two_preserves_order() -> Result<()> {
+    let j = JournalStore::in_memory()?;
+    let s = common::test_session(&common::test_config()).id;
+    lt(&j, &s, "e1", "user A", "r1", "reply A")?;
+    lt(&j, &s, "e2", "user B", "r2", "reply B")?;
+    lt(&j, &s, "e3", "user C", "r3", "reply C")?;
+    let turns = j.recent_conversation_turns(&s, 2, None)?;
+    assert_eq!(turns.len(), 2, "limit=2 returns exactly 2");
+    assert_eq!(turns[0].0, "user B", "first is B");
+    assert_eq!(turns[0].1, "reply B", "B reply correct");
+    assert_eq!(turns[1].0, "user C", "second is C");
+    assert_eq!(turns[1].1, "reply C", "C reply correct");
     Ok(())
 }

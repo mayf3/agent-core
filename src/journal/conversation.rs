@@ -99,12 +99,12 @@ impl super::JournalStore {
             if inv_id.is_empty() {
                 continue;
             }
-            // Verify correlation_id matches payload invocation_id (production
-            // contract: event.correlation_id == payload.invocation_id).
-            if let Some(corr) = e.correlation_id.as_ref() {
-                if corr.as_str() != inv_id {
-                    continue; // Identity mismatch — ignore.
-                }
+            // Verify correlation_id is present and matches invocation_id.
+            let Some(corr) = e.correlation_id.as_ref() else {
+                continue; // Missing correlation_id — reject.
+            };
+            if corr.as_str() != inv_id {
+                continue; // Identity mismatch — ignore.
             }
             let Some(text) = e.payload.get("text").and_then(Value::as_str) else {
                 continue;
