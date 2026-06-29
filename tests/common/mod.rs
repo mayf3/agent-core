@@ -19,6 +19,7 @@ use std::sync::{Arc, Mutex};
 pub struct CaptureServer {
     pub port: u16,
     captured: Arc<Mutex<Vec<Value>>>,
+    parse_error: Arc<Mutex<Option<String>>>,
     shutdown: Arc<AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
 }
@@ -29,6 +30,8 @@ impl CaptureServer {
         let port = listener.local_addr().unwrap().port();
         let captured = Arc::new(Mutex::new(Vec::new()));
         let captured_thread = Arc::clone(&captured);
+        let parse_error = Arc::new(Mutex::new(None::<String>));
+        let parse_error_thread = Arc::clone(&parse_error);
         let shutdown = Arc::new(AtomicBool::new(false));
         let shutdown_thread = Arc::clone(&shutdown);
         let handle = std::thread::spawn(move || {
@@ -39,8 +42,14 @@ impl CaptureServer {
                 if shutdown_thread.load(Ordering::Relaxed) {
                     break;
                 }
-                if let Ok(body) = read_request_json(&mut stream) {
-                    captured_thread.lock().unwrap().push(body);
+                match read_request_json(&mut stream) {
+                    Ok(body) => {
+                        captured_thread.lock().unwrap().push(body);
+                    }
+                    Err(error) => {
+                        *parse_error_thread.lock().unwrap() = Some(error);
+                        break;
+                    }
                 }
                 let body = response.to_string();
                 let reply = format!(
@@ -54,9 +63,22 @@ impl CaptureServer {
         Self {
             port,
             captured,
+            parse_error,
             shutdown,
             handle: Some(handle),
         }
+    }
+
+    /// Panic if a parse error was recorded. Call before `requests()` in tests.
+    pub fn assert_no_error(&self) {
+        let err = self.parse_error.lock().unwrap().take();
+        if let Some(msg) = err {
+            panic!("CaptureServer parse error: {msg}");
+        }
+    }
+
+    pub fn parse_error(&self) -> Option<String> {
+        self.parse_error.lock().unwrap().clone()
     }
 
     pub fn base_url(&self) -> String {
