@@ -148,6 +148,29 @@ pub fn tool_call_response(call_id: &str, fn_name: &str, arguments: &str) -> Valu
     })
 }
 
+/// Fake adapter that returns the configured receipt for any invocation.
+pub struct FakeReplyAdapter {
+    pub receipt: agent_core_kernel::domain::Receipt,
+}
+
+impl agent_core_kernel::adapters::InvocationAdapter for FakeReplyAdapter {
+    fn execute(
+        &self,
+        _invocation: &agent_core_kernel::domain::ApprovedInvocation,
+    ) -> anyhow::Result<agent_core_kernel::domain::Receipt> {
+        anyhow::Ok(self.receipt.clone())
+    }
+}
+
+/// Drain all pending outbox dispatches using the given adapter.
+pub fn dispatch_all(
+    journal: &agent_core_kernel::journal::JournalStore,
+    adapter: &impl agent_core_kernel::adapters::InvocationAdapter,
+) -> anyhow::Result<()> {
+    while agent_core_kernel::runtime::outbox_dispatcher::dispatch_once(journal, adapter)? {}
+    Ok(())
+}
+
 pub fn test_config() -> KernelConfig {
     KernelConfig {
         db_path: PathBuf::from(":memory:"),

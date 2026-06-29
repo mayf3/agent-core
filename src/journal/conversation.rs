@@ -67,6 +67,7 @@ impl super::JournalStore {
         }
 
         // 3. Collect AssistantReplyDelivered in this session, keyed by run_id.
+        //    Identity verification: payload fields must match event envelope.
         let mut reply_by_run: HashMap<String, (i64, String)> = HashMap::new();
         for e in &events {
             if e.kind != JournalEventKind::AssistantReplyDelivered
@@ -74,16 +75,43 @@ impl super::JournalStore {
             {
                 continue;
             }
-            let Some(run_id) = e.payload.get("run_id").and_then(Value::as_str) else {
+            // Verify payload session_id matches event session_id.
+            let Some(p_session_id) = e.payload.get("session_id").and_then(Value::as_str) else {
                 continue;
             };
+            if p_session_id != &session_id.0 {
+                continue; // Identity mismatch — ignore.
+            }
+            // Verify payload run_id matches event run_id (if event has one).
+            let Some(p_run_id) = e.payload.get("run_id").and_then(Value::as_str) else {
+                continue;
+            };
+            if let Some(ev_run_id) = e.run_id.as_ref() {
+                if p_run_id != ev_run_id.0.as_str() {
+                    continue; // Identity mismatch — ignore.
+                }
+            }
+            // Verify invocation_id is non-empty.
+            let Some(inv_id) = e.payload.get("invocation_id").and_then(Value::as_str) else {
+                continue;
+            };
+            if inv_id.is_empty() {
+                continue;
+            }
+            // Verify correlation_id matches payload invocation_id (production
+            // contract: event.correlation_id == payload.invocation_id).
+            if let Some(corr) = e.correlation_id.as_ref() {
+                if corr.as_str() != inv_id {
+                    continue; // Identity mismatch — ignore.
+                }
+            }
             let Some(text) = e.payload.get("text").and_then(Value::as_str) else {
                 continue;
             };
             // Only keep the first (earliest) delivery per run to handle
             // idempotent retry.
             reply_by_run
-                .entry(run_id.to_string())
+                .entry(p_run_id.to_string())
                 .or_insert((e.sequence, text.to_string()));
         }
 
