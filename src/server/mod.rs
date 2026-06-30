@@ -4,6 +4,7 @@ use crate::gateway::Gateway;
 use crate::journal::JournalStore;
 mod delivery;
 mod dispatcher_metrics;
+pub mod harness_routes;
 
 #[cfg(test)]
 pub(crate) use delivery::build_llm_from_config;
@@ -167,6 +168,21 @@ fn handle_connection(
         "/v1/ingress" => handle_ingress(stream, &gateway, &journal, &request),
         "/v1/approve" => handle_approval_decision(stream, &gateway, &journal, &request, true),
         "/v1/deny" => handle_approval_decision(stream, &gateway, &journal, &request, false),
+        "/v1/harness/register" => {
+            let body: Value = serde_json::from_slice(&request.body)?;
+            let result = harness_routes::handle_register(&gateway, &journal, &body)?;
+            write_json(stream, 200, serde_json::from_str(&result)?)
+        }
+        "/v1/harness/enable" => {
+            let body: Value = serde_json::from_slice(&request.body)?;
+            let result = harness_routes::handle_enable(&gateway, &journal, &body)?;
+            write_json(stream, 200, serde_json::from_str(&result)?)
+        }
+        "/v1/harness/disable" => {
+            let body: Value = serde_json::from_slice(&request.body)?;
+            let result = harness_routes::handle_disable(&gateway, &journal, &body)?;
+            write_json(stream, 200, serde_json::from_str(&result)?)
+        }
         _ => write_json(stream, 404, json!({ "ok": false, "error": "not_found" })),
     }
 }

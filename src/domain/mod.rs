@@ -437,6 +437,14 @@ pub enum JournalEventKind {
     // elapsed (operator never decided). Terminal — the run fails. See
     // docs/decisions/m2d-durable-approval.md.
     ApprovalExpired,
+    /// External harness manifest was registered (immutable content recorded).
+    /// payload: `manifest_id`, `harness_id`, `artifact_digest`, `operation_name`, `protocol_version`
+    /// correlation_id: manifest_id
+    HarnessManifestRegistered,
+    /// Registry snapshot was activated (enable/disable took effect).
+    /// payload: `action`, `manifest_id`, `operation_name`, `previous_snapshot_id`, `new_snapshot_id`, `decision_id`
+    /// correlation_id: decision_id
+    RegistrySnapshotActivated,
     /// Sentinel produced by `parse_kind`/`row_to_event` when the stored
     /// `kind` text does not match any known variant. The kernel never writes
     /// `Unknown` — observing it at read time indicates either external

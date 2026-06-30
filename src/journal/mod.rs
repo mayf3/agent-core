@@ -1,5 +1,6 @@
 mod approval;
 mod conversation;
+pub mod harness_ops;
 mod hash_chain;
 mod outbox;
 mod outbox_queue;
