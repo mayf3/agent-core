@@ -88,6 +88,29 @@ impl Gateway {
         ))
     }
 
+    /// Approve a harness change (enable/disable) requested by the operator
+    /// via authenticated IPC. This is a narrow, authenticated operation — not
+    /// a general-purpose control surface.
+    pub fn approve_harness_change(
+        &self,
+        intent: crate::harness::control::HarnessChangeIntent,
+    ) -> Result<crate::harness::control::ApprovedHarnessChange> {
+        use crate::harness::control::HarnessChangeAction;
+
+        // Only ipc_operator is allowed.
+        if intent.requested_by != "ipc_operator" {
+            bail!("unauthorized: only ipc_operator may request harness changes");
+        }
+        // Action must be valid.
+        match intent.action {
+            HarnessChangeAction::Enable | HarnessChangeAction::Disable => {}
+        }
+        Ok(crate::harness::control::ApprovedHarnessChange {
+            intent,
+            decision_id: format!("decision_{}", Uuid::new_v4().simple()),
+        })
+    }
+
     pub fn recover_validated_event(&self, event: &JournalEvent) -> Result<ValidatedEvent> {
         let source = string_arg(&event.payload, "source")?;
         let event_id = EventId(string_arg(&event.payload, "event_id")?);

@@ -79,10 +79,39 @@ pub(crate) fn dispatch_builtin_binding(
                 .to_string();
             (output, text)
         }),
-        _ => Err(anyhow::anyhow!(
-            "registry_binding_invalid: {}",
-            spec.binding_key
-        )),
+        _ => {
+            // Check if this is an external harness binding.
+            if spec.binding_kind == crate::registry::snapshot::BindingKind::External {
+                let manifest_id = &spec.binding_key;
+                match journal.load_harness_manifest(manifest_id) {
+                    Ok(Some(manifest)) => {
+                        crate::adapters::external_harness::execute_external_harness(
+                            &manifest, approved,
+                        )
+                        .map(|receipt| {
+                            let text = receipt
+                                .output
+                                .get("iso")
+                                .and_then(|value| value.as_str())
+                                .map(|s| format!("ok, time: {s}"))
+                                .unwrap_or_else(|| format!("ok: {:?}", receipt.output));
+                            (receipt.output, text)
+                        })
+                    }
+                    Ok(None) => Err(anyhow::anyhow!(
+                        "external_harness_manifest_not_found: {manifest_id}"
+                    )),
+                    Err(e) => Err(anyhow::anyhow!(
+                        "external_harness_manifest_load_failed: {e}"
+                    )),
+                }
+            } else {
+                Err(anyhow::anyhow!(
+                    "registry_binding_invalid: {}",
+                    spec.binding_key
+                ))
+            }
+        }
     };
     let (status, output, text) = match exec_result {
         Ok((output, text)) => (
