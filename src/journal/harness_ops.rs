@@ -18,6 +18,9 @@ impl super::JournalStore {
     ///
     /// Validates that manifest.manifest_id matches the computed digest.
     pub fn register_harness_manifest(&self, manifest: &HarnessManifest) -> Result<String> {
+        // Run all validations before any database access.
+        manifest.validate_all()?;
+
         // Verify manifest_id matches computed digest.
         let computed_id = manifest.compute_manifest_id()?;
         if manifest.manifest_id != computed_id {

@@ -46,7 +46,8 @@ fn register_time_manifest(j: &JournalStore) -> Result<String> {
     let mut m = HarnessManifest {
         manifest_id: String::new(),
         harness_id: "time-harness-v1".into(),
-        artifact_digest: "sha256:abc123".into(),
+        artifact_digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            .into(),
         protocol_version: "external-harness-v1".into(),
         endpoint: "http://127.0.0.1:7101/execute".into(),
         operation_name: "external.time_now".into(),
