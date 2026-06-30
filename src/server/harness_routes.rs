@@ -13,6 +13,62 @@ use chrono::Utc;
 use serde::Deserialize;
 use serde_json::json;
 
+/// Narrow, typed error classification for harness route handlers.
+/// Each variant maps to a single stable HTTP status and a bounded
+/// safe error string; no raw validation text, schema, endpoint,
+/// token, or anyhow backtrace leaks into the HTTP response.
+#[derive(Debug, Clone)]
+pub enum HarnessRouteError {
+    InvalidManifest(String),
+    InvalidRequest(String),
+    Unauthorized,
+    ManifestNotFound,
+    SnapshotConflict,
+    Internal(String),
+}
+
+impl HarnessRouteError {
+    pub fn http_status(&self) -> u16 {
+        match self {
+            Self::InvalidManifest(_) => 400,
+            Self::InvalidRequest(_) => 400,
+            Self::Unauthorized => 401,
+            Self::ManifestNotFound => 404,
+            Self::SnapshotConflict => 409,
+            Self::Internal(_) => 500,
+        }
+    }
+
+    pub fn safe_error(&self) -> &'static str {
+        match self {
+            Self::InvalidManifest(_) | Self::InvalidRequest(_) => "invalid_request",
+            Self::Unauthorized => "unauthorized",
+            Self::ManifestNotFound => "not_found",
+            Self::SnapshotConflict => "conflict",
+            Self::Internal(_) => "internal_error",
+        }
+    }
+}
+
+impl std::fmt::Display for HarnessRouteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let tag = match self {
+            Self::InvalidManifest(_) => "invalid_manifest",
+            Self::InvalidRequest(_) => "invalid_request",
+            Self::Unauthorized => "unauthorized",
+            Self::ManifestNotFound => "manifest_not_found",
+            Self::SnapshotConflict => "snapshot_conflict",
+            Self::Internal(_) => "internal_error",
+        };
+        write!(f, "{tag}")
+    }
+}
+
+impl std::error::Error for HarnessRouteError {}
+
+// HarnessRouteError: Send + Sync + 'static so anyhow's blanket impl
+// auto-converts it via `?` and `anyhow::Error::from`.
+
 #[derive(Deserialize)]
 struct RegisterBody {
     harness_id: String,
@@ -38,7 +94,7 @@ pub fn handle_register(
     body: &serde_json::Value,
 ) -> Result<String> {
     let reg: RegisterBody = serde_json::from_value(body.clone())
-        .map_err(|e| anyhow::anyhow!("invalid_manifest: {e}"))?;
+        .map_err(|e| HarnessRouteError::InvalidRequest(format!("{e}")))?;
 
     // Validate fields.
     let manifest = HarnessManifest {
@@ -55,14 +111,16 @@ pub fn handle_register(
         created_at: Utc::now(),
     };
 
-    // Validate all fields.
-    manifest.validate_all()?;
+    // Validate all fields through the typed error path.
+    manifest
+        .validate_all()
+        .map_err(|e| HarnessRouteError::InvalidManifest(format!("{e}")))?;
 
     // Validate schemas can be parsed by strict validator.
     crate::registry::schema::validate_schema_structure(&manifest.input_schema)
-        .map_err(|e| anyhow::anyhow!("invalid input_schema: {e}"))?;
+        .map_err(|e| HarnessRouteError::InvalidManifest(format!("invalid input_schema: {e}")))?;
     crate::registry::schema::validate_schema_structure(&manifest.output_schema)
-        .map_err(|e| anyhow::anyhow!("invalid output_schema: {e}"))?;
+        .map_err(|e| HarnessRouteError::InvalidManifest(format!("invalid output_schema: {e}")))?;
 
     // Compute manifest_id.
     let mut manifest_with_id = manifest;
@@ -70,7 +128,9 @@ pub fn handle_register(
     manifest_with_id.manifest_id = manifest_id.clone();
 
     // Register.
-    let result = journal.register_harness_manifest(&manifest_with_id)?;
+    let result = journal
+        .register_harness_manifest(&manifest_with_id)
+        .map_err(|e| HarnessRouteError::Internal(format!("{e}")))?;
 
     Ok(serde_json::to_string(&json!({
         "ok": true,
@@ -84,11 +144,11 @@ pub fn handle_enable(
     body: &serde_json::Value,
 ) -> Result<String> {
     let eb: EnableDisableBody = serde_json::from_value(body.clone())
-        .map_err(|e| anyhow::anyhow!("invalid_request: {e}"))?;
+        .map_err(|e| HarnessRouteError::InvalidRequest(format!("{e}")))?;
 
     // Verify manifest exists.
     if journal.load_harness_manifest(&eb.manifest_id)?.is_none() {
-        bail!("manifest_not_found");
+        return Err(HarnessRouteError::ManifestNotFound.into());
     }
 
     let intent = HarnessChangeIntent {
@@ -99,7 +159,14 @@ pub fn handle_enable(
     };
 
     let approved = gateway.approve_harness_change(intent)?;
-    let result = journal.enable_harness(&approved)?;
+    let result = journal.enable_harness(&approved).map_err(|e| {
+        let msg = e.to_string();
+        if msg.starts_with("snapshot_conflict") {
+            HarnessRouteError::SnapshotConflict
+        } else {
+            HarnessRouteError::Internal(format!("{e}"))
+        }
+    })?;
 
     Ok(serde_json::to_string(&json!({
         "ok": true,
@@ -115,11 +182,11 @@ pub fn handle_disable(
     body: &serde_json::Value,
 ) -> Result<String> {
     let eb: EnableDisableBody = serde_json::from_value(body.clone())
-        .map_err(|e| anyhow::anyhow!("invalid_request: {e}"))?;
+        .map_err(|e| HarnessRouteError::InvalidRequest(format!("{e}")))?;
 
     // Verify manifest exists.
     if journal.load_harness_manifest(&eb.manifest_id)?.is_none() {
-        bail!("manifest_not_found");
+        return Err(HarnessRouteError::ManifestNotFound.into());
     }
 
     let intent = HarnessChangeIntent {
@@ -130,7 +197,14 @@ pub fn handle_disable(
     };
 
     let approved = gateway.approve_harness_change(intent)?;
-    let result = journal.disable_harness(&approved)?;
+    let result = journal.disable_harness(&approved).map_err(|e| {
+        let msg = e.to_string();
+        if msg.starts_with("snapshot_conflict") {
+            HarnessRouteError::SnapshotConflict
+        } else {
+            HarnessRouteError::Internal(format!("{e}"))
+        }
+    })?;
 
     Ok(serde_json::to_string(&json!({
         "ok": true,

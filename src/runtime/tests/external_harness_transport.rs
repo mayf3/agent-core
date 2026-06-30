@@ -5,9 +5,9 @@
 use anyhow::Result;
 use serde_json::json;
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpListener;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -78,6 +78,92 @@ impl crate::llm::LlmClient for OneToolLlm {
             })
         }
     }
+}
+
+// CaptureToolsLlm for non-2xx round-2 assertions
+
+struct CaptureLlm {
+    captured: Arc<Mutex<Vec<serde_json::Value>>>,
+    first: AtomicBool,
+}
+impl crate::llm::LlmClient for CaptureLlm {
+    fn complete(&self, input: crate::llm::LlmInput) -> anyhow::Result<crate::llm::LlmOutput> {
+        self.captured.lock().unwrap().push(json!({
+            "provider_tools": input.provider_tools,
+            "follow_up_count": input.follow_ups.len(),
+            "follow_ups": captured_follow_ups(&input),
+        }));
+        if self.first.swap(false, Ordering::SeqCst) {
+            Ok(crate::llm::LlmOutput {
+                provider: "t".into(),
+                model: "t".into(),
+                content: String::new(),
+                journal_payload: json!({"s":"ok"}),
+                tool_call: crate::llm::ToolCallResult::Valid(crate::llm::ToolCall {
+                    id: "c".into(),
+                    operation: "external.time_now".into(),
+                    arguments: json!({}),
+                }),
+                provider_turn: Some(crate::llm::ProviderToolTurn {
+                    endpoint: crate::llm::EndpointChoice::Primary,
+                    provider_tool_call_id: "cr".into(),
+                    wire_name: "external.time_now".into(),
+                    canonical_operation: "external.time_now".into(),
+                    arguments_json: "{}".into(),
+                }),
+            })
+        } else {
+            Ok(crate::llm::LlmOutput {
+                provider: "t".into(),
+                model: "t".into(),
+                content: "done".into(),
+                journal_payload: json!({"s":"ok"}),
+                tool_call: crate::llm::ToolCallResult::Absent,
+                provider_turn: None,
+            })
+        }
+    }
+}
+
+/// Run a harness tool call through Runtime::deliver with captured
+/// LlmInput rounds so the caller can inspect round-2 ToolResult.
+fn run_with_capture(
+    j: &crate::journal::JournalStore,
+    g: &crate::gateway::Gateway,
+) -> (super::RuntimeOutcome, Arc<Mutex<Vec<serde_json::Value>>>) {
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let c2 = captured.clone();
+    let rt = super::Runtime::new(
+        config(),
+        CaptureLlm {
+            captured: c2,
+            first: AtomicBool::new(true),
+        },
+    );
+    let ev = g
+        .validate_ingress(j, g.cli_ingress("t?".into()).unwrap())
+        .unwrap();
+    (rt.deliver(j, g, ev).unwrap(), captured)
+}
+
+fn captured_follow_ups(input: &crate::llm::LlmInput) -> serde_json::Value {
+    let arr: Vec<serde_json::Value> = input
+        .follow_ups
+        .iter()
+        .map(|fu| {
+            let turn = &fu.provider_turn;
+            json!({
+                "provider_turn": {
+                    "endpoint": format!("{:?}", turn.endpoint),
+                    "provider_tool_call_id": turn.provider_tool_call_id,
+                    "wire_name": turn.wire_name,
+                    "canonical_operation": turn.canonical_operation,
+                },
+                "result_content": fu.result_content,
+            })
+        })
+        .collect();
+    serde_json::Value::Array(arr)
 }
 
 fn start_responder(response: &str) -> Result<(String, Arc<AtomicBool>)> {
@@ -220,7 +306,7 @@ fn http_500_is_http_error() -> Result<()> {
     let j = crate::journal::JournalStore::in_memory()?;
     let g = crate::gateway::Gateway::new(config());
     reg_enable(&j, &g, &ep)?;
-    run_with_tool(&j, &g);
+    let (_o, captured) = run_with_capture(&j, &g);
     let ev = j.events()?;
     let r: Vec<_> = ev
         .iter()
@@ -230,6 +316,16 @@ fn http_500_is_http_error() -> Result<()> {
     assert_eq!(r[0].payload["status"], "Failed");
     assert_eq!(r[0].payload["output"]["error_category"], "http_error");
     assert_eq!(r[0].payload["output"]["http_code"], 500);
+    // Round-2 failed ToolResult assertion
+    let caps = captured.lock().unwrap();
+    assert_eq!(caps.len(), 2, "LLM called twice");
+    assert_eq!(caps[1]["follow_up_count"].as_u64().unwrap_or(0), 1);
+    let fu = &caps[1]["follow_ups"][0];
+    let rc = fu["result_content"].as_str().unwrap_or("");
+    assert!(
+        rc.contains("execution_failed"),
+        "non-2xx ToolResult must contain execution_failed"
+    );
     Ok(())
 }
 

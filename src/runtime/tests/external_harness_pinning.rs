@@ -17,156 +17,6 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
 
-fn fast_cfg() -> crate::config::KernelConfig {
-    let mut c = config();
-    c.harness_read_timeout_ms = 1000;
-    c
-}
-
-const SM: &[&str] = &[
-    "SECRET_TOKEN_MARKER",
-    "/private/internal/path",
-    "fake_receipt",
-    "fake_journal_event",
-    "fake_status",
-    "fake_decision_id",
-    "fake_occurred_at",
-];
-
-// ═══ Malformed JSON through Runtime ═══
-
-#[test]
-fn external_harness_malformed_json_through_runtime_records_failed() -> Result<()> {
-    let (ep, _) = start_responder(&harness_200("{not valid json"))?;
-    let j = crate::journal::JournalStore::in_memory()?;
-    let g = crate::gateway::Gateway::new(config());
-    register_and_enable(&j, &g, &ep)?;
-    let cap = Arc::new(Mutex::new(Vec::new()));
-    super::Runtime::new(
-        config(),
-        CaptureToolsLlm {
-            captured: cap.clone(),
-            first: AtomicBool::new(true),
-        },
-    )
-    .deliver(&j, &g, g.validate_ingress(&j, g.cli_ingress("t?".into())?)?)?;
-    let ev = j.events()?;
-    let r: Vec<_> = ev
-        .iter()
-        .filter(|e| e.kind == crate::domain::JournalEventKind::ReceiptReceived)
-        .collect();
-    assert_eq!(r.len(), 1);
-    assert_eq!(r[0].payload["status"], "Failed");
-    assert_eq!(
-        r[0].payload["output"]["error_category"],
-        "malformed_response"
-    );
-    assert_eq!(
-        ev.iter()
-            .filter(
-                |e| e.kind == crate::domain::JournalEventKind::ReceiptReceived
-                    && e.payload["status"] == "Succeeded"
-            )
-            .count(),
-        0
-    );
-    assert!(cap.lock().unwrap().iter().any(|c| c["follow_ups"]
-        .as_array()
-        .map(|a| a.iter().any(|fu| fu["result_content"]
-            .as_str()
-            .map(|s| s.contains("execution_failed"))
-            .unwrap_or(false)))
-        .unwrap_or(false)));
-    let jt = serde_json::to_string(&ev).unwrap_or_default();
-    assert!(!jt.contains("{not valid json}"));
-    assert!(!jt.contains("{not valid"));
-    Ok(())
-}
-
-// ═══ Fast timeout (short harness_read_timeout_ms) ═══
-
-#[test]
-fn harness_fast_timeout_through_runtime_records_failed() -> Result<()> {
-    let l = TcpListener::bind("127.0.0.1:0")?;
-    let p = l.local_addr()?.port();
-    let ep = format!("http://127.0.0.1:{p}/execute");
-    thread::spawn(move || {
-        if let Ok((s, _)) = l.accept() {
-            let _h = s;
-            thread::sleep(Duration::from_secs(10));
-        }
-    });
-    thread::sleep(Duration::from_millis(50));
-    let j = crate::journal::JournalStore::in_memory()?;
-    let g = crate::gateway::Gateway::new(fast_cfg());
-    register_and_enable(&j, &g, &ep)?;
-    let cap = Arc::new(Mutex::new(Vec::new()));
-    super::Runtime::new(
-        fast_cfg(),
-        CaptureToolsLlm {
-            captured: cap.clone(),
-            first: AtomicBool::new(true),
-        },
-    )
-    .deliver(&j, &g, g.validate_ingress(&j, g.cli_ingress("t?".into())?)?)?;
-    let r: Vec<_> = j
-        .events()?
-        .into_iter()
-        .filter(|e| e.kind == crate::domain::JournalEventKind::ReceiptReceived)
-        .collect();
-    assert_eq!(r.len(), 1);
-    assert_eq!(r[0].payload["status"], "Failed");
-    assert_eq!(r[0].payload["output"]["error_category"], "timeout");
-    Ok(())
-}
-
-// ═══ 5-layer secret/unknown-field scan ═══
-
-#[test]
-fn harness_secret_fields_five_layer_scan() -> Result<()> {
-    let body = json!({"protocol_version":"external-harness-v1","ok":true,"result":{"iso":"x","epoch_ms":1},
-        "SECRET_TOKEN_MARKER":"x","/private/internal/path":"x","fake_receipt":{"s":"ok"},
-        "fake_journal_event":{"kind":"RC"},"fake_status":"ok","fake_decision_id":"d","fake_occurred_at":"2026-06-30T00:00:00Z"});
-    let (ep, _) = start_responder(&harness_200(&body.to_string()))?;
-    let j = crate::journal::JournalStore::in_memory()?;
-    let g = crate::gateway::Gateway::new(config());
-    register_and_enable(&j, &g, &ep)?;
-    let cap = Arc::new(Mutex::new(Vec::new()));
-    let o = super::Runtime::new(
-        config(),
-        CaptureToolsLlm {
-            captured: cap.clone(),
-            first: AtomicBool::new(true),
-        },
-    )
-    .deliver(&j, &g, g.validate_ingress(&j, g.cli_ingress("t?".into())?)?)?;
-    let ev = j.events()?;
-    let jt = serde_json::to_string(&ev).unwrap_or_default();
-    for &m in SM {
-        assert!(!jt.contains(m), "journal leaked {m}");
-    }
-    let caps = cap.lock().unwrap();
-    for c in caps.iter() {
-        if let Some(fus) = c["follow_ups"].as_array() {
-            for fu in fus {
-                if let Some(rc) = fu["result_content"].as_str() {
-                    for &m in SM {
-                        assert!(!rc.contains(m), "ToolResult leaked {m}");
-                    }
-                }
-            }
-        }
-    }
-    for c in caps.iter() {
-        let s = serde_json::to_string(c).unwrap_or_default();
-        for &m in SM {
-            assert!(!s.contains(m), "LlmInput leaked {m}");
-        }
-    }
-    assert!(!o.output.contains("SECRET_TOKEN_MARKER"));
-    Ok(())
-}
-
 // ═══ Enable: Run A/S1 → enable → Run B/S2 (Condvar barrier) ═══
 
 struct BlockerLlm {
@@ -385,13 +235,14 @@ fn external_harness_disable_pins_only_future_runs() -> Result<()> {
     assert_ne!(s1, s2);
     // Run B pinned to S2, calls external.time_now → harness blocks.
     let cap_b = Arc::new(Mutex::new(Vec::new()));
+    let cap_b_early = cap_b.clone();
     let j_b = j.clone();
     let g_b = g.clone();
     let h_b = thread::spawn(move || -> Result<_> {
         super::Runtime::new(
             config(),
             CaptureToolsLlm {
-                captured: cap_b.clone(),
+                captured: cap_b_early.clone(),
                 first: AtomicBool::new(true),
             },
         )
@@ -407,7 +258,45 @@ fn external_harness_disable_pins_only_future_runs() -> Result<()> {
     while !*rg {
         rg = bp.1.wait(rg).unwrap();
     }
-    // Disable harness → S3 while Run B is running.
+    drop(rg);
+    // ── Pre-disable snapshot: lock Run B's registry_snapshot_id ──
+    let run_b = {
+        let ev = j.events()?;
+        let r = ev
+            .iter()
+            .find(|e| e.kind == crate::domain::JournalEventKind::RunStarted)
+            .expect("Run B RunStarted");
+        j.run(&crate::domain::RunId(
+            r.payload["run_id"].as_str().unwrap_or("").to_string(),
+        ))?
+        .unwrap()
+    };
+    let run_b_id = run_b.id.clone();
+    assert!(
+        run_b
+            .principal
+            .grants
+            .iter()
+            .any(|g| g.operation == "external.time_now"),
+        "pre-disable: Run B must have external.time_now grant"
+    );
+    assert_eq!(
+        run_b.registry_snapshot_id, s2,
+        "pre-disable: Run B pinned to S2"
+    );
+    // Run B's provider_tools captured in first LLM round must include external.time_now.
+    let caps = cap_b.lock().unwrap();
+    assert!(
+        caps.iter().any(|c| c["provider_tools"]
+            .as_array()
+            .map(|a| a
+                .iter()
+                .any(|t| t["function"]["name"] == "external.time_now"))
+            .unwrap_or(false)),
+        "pre-disable: Run B provider_tools must contain external.time_now"
+    );
+    drop(caps);
+    // ── Disable harness → S3 while Run B is running ──
     let cur = j.current_registry_snapshot_id()?;
     let rd = j.disable_harness(&g.approve_harness_change(HarnessChangeIntent {
         action: HarnessChangeAction::Disable,
@@ -418,11 +307,43 @@ fn external_harness_disable_pins_only_future_runs() -> Result<()> {
     let s3 = rd.active_snapshot_id;
     assert!(rd.changed);
     assert_ne!(s2, s3, "S2 != S3");
-    // S3 may equal S1 if both are the harness-less baseline (deterministic hash).
+    assert_eq!(
+        j.current_registry_snapshot_id()?,
+        s3,
+        "active snapshot == S3 after disable"
+    );
+    // ── Post-disable, pre-release: Run B must still have S2 ──
+    let run_b_after = j.run(&run_b_id)?.unwrap();
+    assert_eq!(
+        run_b_after.registry_snapshot_id, s2,
+        "post-disable: Run B still pinned to S2"
+    );
+    assert!(
+        run_b_after
+            .principal
+            .grants
+            .iter()
+            .any(|g| g.operation == "external.time_now"),
+        "post-disable: Run B grants unchanged"
+    );
+    // ── Release the responder (Run B completes) ──
     bq.store(true, Ordering::SeqCst);
     bp.1.notify_one();
     let ob = h_b.join().unwrap()?;
     assert!(!ob.output.trim().is_empty());
+    // Run B completed with S2 (still has the harness op): Receipt Succeeded.
+    let ev_b = j.events()?;
+    let r_b: Vec<_> = ev_b
+        .iter()
+        .filter(|e| e.kind == crate::domain::JournalEventKind::ReceiptReceived)
+        .collect();
+    assert_eq!(
+        r_b.iter()
+            .filter(|e| e.payload["status"] == "Succeeded")
+            .count(),
+        1,
+        "Run B must have one Succeeded Receipt"
+    );
     // Run C (same Session) → S3, no external.time_now.
     let cap_c = Arc::new(Mutex::new(Vec::new()));
     let oc = super::Runtime::new(

@@ -167,7 +167,7 @@ fn harness_route_register_enable_disable() {
     assert_eq!(resp["ok"], true);
     let mid = resp["manifest_id"].as_str().unwrap().to_string();
 
-    // Enable
+    // Enable → S2
     let s1 = j.current_registry_snapshot_id().unwrap();
     let eb = json!({"manifest_id": mid, "expected_snapshot_id": s1}).to_string();
     let req = make_request("POST", "/v1/harness/enable", &eb, Some("test-token"));
@@ -175,14 +175,54 @@ fn harness_route_register_enable_disable() {
     assert_eq!(status, 200);
     let resp: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
     assert_eq!(resp["ok"], true);
+    let s2 = resp["active_snapshot_id"].as_str().unwrap().to_string();
+    assert_ne!(s1, s2);
+
+    // Disable → S3
+    let eb = json!({"manifest_id": mid, "expected_snapshot_id": s2}).to_string();
+    let req = make_request("POST", "/v1/harness/disable", &eb, Some("test-token"));
+    let (status, body) = handle_one(&cfg, &j, &g, &m, req);
+    assert_eq!(status, 200, "disable must return 200");
+    let resp: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+    assert_eq!(resp["ok"], true);
+    let s3 = resp["active_snapshot_id"].as_str().unwrap().to_string();
+    assert_ne!(s2, s3, "S2 != S3 after disable");
 
     // Stale expected_snapshot_id → 409
     let req = make_request("POST", "/v1/harness/enable", &eb, Some("test-token"));
     let (status, _body) = handle_one(&cfg, &j, &g, &m, req);
     assert_eq!(status, 409);
+}
 
-    // Invalid request (serde parse error caught by handle_connection) → error
-    // This errors before writing a response; the outer serve loop would return 500.
+#[test]
+fn harness_route_invalid_manifest_returns_400() {
+    let (cfg, j, g, m) = setup();
+    // Bad artifact_digest → validate_all fails.
+    let bad_body = json!({
+        "harness_id": "test-harness",
+        "artifact_digest": "not-a-valid-digest",
+        "protocol_version": "external-harness-v1",
+        "endpoint": "http://127.0.0.1:9999/execute",
+        "operation_name": "external.test_bad",
+        "description": "bad",
+        "input_schema": {"type": "object", "properties": {}, "required": [], "additionalProperties": false},
+        "output_schema": {"type": "object", "properties": {"s": {"type": "string"}}, "required": ["s"], "additionalProperties": false},
+        "idempotent": true
+    }).to_string();
+    let req = make_request(
+        "POST",
+        "/v1/harness/register",
+        &bad_body,
+        Some("test-token"),
+    );
+    let (status, body) = handle_one(&cfg, &j, &g, &m, req);
+    assert_eq!(
+        status, 400,
+        "invalid manifest must return 400; got {status} body={body}"
+    );
+    let resp: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+    assert_eq!(resp["ok"], false);
+    assert_eq!(resp["error"], "invalid_request");
 }
 
 #[test]
