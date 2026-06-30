@@ -11,7 +11,7 @@ const CLI = join(process.cwd(), "tools", "evolution-harness", "cli.ts");
 // --- exported safety helpers ---
 
 test("isForbiddenPath rejects .env / .openduck / .openclaw / logs / .agent-core", () => {
-  for (const p of ["/home/u/.env", "/home/u/.openduck/x", "/home/u/.openclaw/y", "/var/logs/z", "/home/u/.agent-core/journal.db"]) {
+  for (const p of ["{test-home}/.env", "{test-home}/.openduck/x", "{test-home}/.openclaw/y", "/var/logs/z", "{test-home}/.agent-core/journal.db"]) {
     assert.equal(isForbiddenPath(p), true, `${p} should be forbidden`);
   }
   assert.equal(isForbiddenPath("/tmp/safe/goal.md"), false);
@@ -135,7 +135,7 @@ test("CLI refuses a forbidden --audit-db (.agent-core production journal)", () =
   const goalPath = join(dir, "goal.md");
   writeFileSync(goalPath, "# Goal\n");
   try {
-    assert.match(runCli(["--goal", goalPath, "--candidate", "main", "--audit-db", "/home/u/.agent-core/journal.db"], true), /forbidden path/);
+    assert.match(runCli(["--goal", goalPath, "--candidate", "main", "--audit-db", "{test-home}/.agent-core/journal.db"], true), /forbidden path/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
