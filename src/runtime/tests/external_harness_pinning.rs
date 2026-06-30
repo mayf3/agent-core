@@ -365,6 +365,27 @@ fn external_harness_disable_pins_only_future_runs() -> Result<()> {
         .grants
         .iter()
         .any(|g| g.operation == "external.time_now"));
+    // Direct assertion: every captured provider request from Run C
+    // must lack external.time_now (not just the principal/snapshot).
+    let caps_c = cap_c.lock().unwrap();
+    assert!(
+        !caps_c.is_empty(),
+        "Run C must make at least one provider request"
+    );
+    for (round, input) in caps_c.iter().enumerate() {
+        let has_external_time = input["provider_tools"]
+            .as_array()
+            .map(|tools| {
+                tools
+                    .iter()
+                    .any(|tool| tool["function"]["name"].as_str() == Some("external.time_now"))
+            })
+            .unwrap_or(false);
+        assert!(
+            !has_external_time,
+            "Run C round {round} must not expose external.time_now"
+        );
+    }
     assert_ne!(s1, s2, "S1 != S2");
     assert_ne!(s2, s3, "S2 != S3");
     assert!(j
