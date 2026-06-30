@@ -170,18 +170,24 @@ fn handle_connection(
         "/v1/deny" => handle_approval_decision(stream, &gateway, &journal, &request, false),
         "/v1/harness/register" => {
             let body: Value = serde_json::from_slice(&request.body)?;
-            let result = harness_routes::handle_register(&gateway, &journal, &body)?;
-            write_json(stream, 200, serde_json::from_str(&result)?)
+            handle_harness_result(
+                stream,
+                harness_routes::handle_register(&gateway, &journal, &body),
+            )
         }
         "/v1/harness/enable" => {
             let body: Value = serde_json::from_slice(&request.body)?;
-            let result = harness_routes::handle_enable(&gateway, &journal, &body)?;
-            write_json(stream, 200, serde_json::from_str(&result)?)
+            handle_harness_result(
+                stream,
+                harness_routes::handle_enable(&gateway, &journal, &body),
+            )
         }
         "/v1/harness/disable" => {
             let body: Value = serde_json::from_slice(&request.body)?;
-            let result = harness_routes::handle_disable(&gateway, &journal, &body)?;
-            write_json(stream, 200, serde_json::from_str(&result)?)
+            handle_harness_result(
+                stream,
+                harness_routes::handle_disable(&gateway, &journal, &body),
+            )
         }
         _ => write_json(stream, 404, json!({ "ok": false, "error": "not_found" })),
     }
@@ -263,6 +269,41 @@ fn handle_approval_decision(
             "decision": if approved { "approved" } else { "denied" },
         }),
     )
+}
+
+/// Map harness route errors to appropriate HTTP status codes.
+/// Never leaks database errors, paths, or tokens in the response.
+fn handle_harness_result(stream: &mut TcpStream, result: Result<String>) -> Result<()> {
+    match result {
+        Ok(body) => write_json(stream, 200, serde_json::from_str(&body)?),
+        Err(e) => {
+            let msg = e.to_string();
+            let status = if msg.starts_with("invalid_manifest")
+                || msg.starts_with("invalid_request")
+            {
+                400
+            } else if msg.starts_with("unauthorized") {
+                401
+            } else if msg.starts_with("manifest_not_found") {
+                404
+            } else if msg.starts_with("snapshot_conflict") || msg.starts_with("operation_conflict")
+            {
+                409
+            } else if msg.starts_with("invalid_") {
+                400
+            } else {
+                500
+            };
+            let safe_msg = match status {
+                400 => "invalid_request",
+                401 => "unauthorized",
+                404 => "not_found",
+                409 => "conflict",
+                _ => "internal_error",
+            };
+            write_json(stream, status, json!({ "ok": false, "error": safe_msg }))
+        }
+    }
 }
 
 pub fn health_snapshot(
@@ -445,3 +486,7 @@ fn content_length(head: &str) -> usize {
 #[cfg(test)]
 #[path = "approval_endpoint_tests.rs"]
 mod approval_endpoint_tests;
+
+#[cfg(test)]
+#[path = "harness_endpoint_tests.rs"]
+mod harness_endpoint_tests;
