@@ -136,7 +136,7 @@ fn recall_query_failure_closes_receipt_and_run_without_leaks() {
     assert_eq!(receipts[0].payload["status"], "Failed");
     assert_eq!(
         receipts[0].payload["output"]["error_category"],
-        "capability_execution_failed"
+        "harness_failed"
     );
     assert!(receipts[0].payload["output"].get("messages").is_none());
     let audit = serde_json::to_string(&events).unwrap();

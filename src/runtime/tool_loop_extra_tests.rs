@@ -1,26 +1,51 @@
+use crate::registry::snapshot::{BindingKind, OperationSpec, Risk};
 use serde_json::json;
+
+fn builtin_spec(name: &str, risk: Risk) -> OperationSpec {
+    OperationSpec {
+        name: name.into(),
+        risk,
+        description: "test".into(),
+        parameters: json!({"type": "object"}),
+        idempotent: false,
+        binding_kind: BindingKind::Builtin,
+        binding_key: format!("builtin.{name}"),
+    }
+}
 
 #[test]
 fn validate_model_arguments_returns_typed_rejections() {
     use crate::gateway::ToolRejection;
     use crate::runtime::validate_model_arguments;
+    let spec_sys = builtin_spec("system.status", Risk::ReadOnly);
+    let spec_session = builtin_spec("session.recall_recent", Risk::ReadOnly);
+    let spec_time = builtin_spec("time.now", Risk::ReadOnly);
     assert_eq!(
-        validate_model_arguments("system.status", &json!({"x": 1})),
+        validate_model_arguments(&spec_sys, &json!({"x": 1})),
         Err(ToolRejection::InvalidArguments)
     );
     assert_eq!(
-        validate_model_arguments("session.recall_recent", &json!({"limit": 0})),
+        validate_model_arguments(&spec_session, &json!({"limit": 0})),
         Err(ToolRejection::InvalidArguments)
     );
     assert_eq!(
-        validate_model_arguments("time.now", &json!("nope")),
+        validate_model_arguments(&spec_time, &json!("nope")),
         Err(ToolRejection::MalformedArguments)
     );
+    let spec_unknown = OperationSpec {
+        name: "shell.exec".into(),
+        risk: Risk::Write,
+        description: "test".into(),
+        parameters: json!({"type": "object"}),
+        idempotent: false,
+        binding_kind: BindingKind::Builtin,
+        binding_key: "builtin.shell_exec".into(),
+    };
     assert_eq!(
-        validate_model_arguments("shell.exec", &json!({})),
+        validate_model_arguments(&spec_unknown, &json!({})),
         Err(ToolRejection::UnknownOperation)
     );
-    assert!(validate_model_arguments("time.now", &json!({})).is_ok());
+    assert!(validate_model_arguments(&spec_time, &json!({})).is_ok());
 }
 
 #[test]

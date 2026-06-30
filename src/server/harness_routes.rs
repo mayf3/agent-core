@@ -55,10 +55,14 @@ pub fn handle_register(
         created_at: Utc::now(),
     };
 
-    // Validate.
-    manifest.validate_endpoint()?;
-    manifest.validate_operation_name()?;
-    manifest.validate_artifact_digest()?;
+    // Validate all fields.
+    manifest.validate_all()?;
+
+    // Validate schemas can be parsed by strict validator.
+    crate::registry::schema::validate_schema_structure(&manifest.input_schema)
+        .map_err(|e| anyhow::anyhow!("invalid input_schema: {e}"))?;
+    crate::registry::schema::validate_schema_structure(&manifest.output_schema)
+        .map_err(|e| anyhow::anyhow!("invalid output_schema: {e}"))?;
 
     // Compute manifest_id.
     let mut manifest_with_id = manifest;
