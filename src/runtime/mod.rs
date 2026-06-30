@@ -49,6 +49,10 @@ mod external_harness_runtime;
 #[path = "tests/external_harness_pinning.rs"]
 mod external_harness_pinning;
 
+#[cfg(test)]
+#[path = "tests/external_harness_failures.rs"]
+mod external_harness_failures;
+
 pub struct Runtime<L> {
     config: KernelConfig,
     llm: L,

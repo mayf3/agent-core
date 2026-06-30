@@ -277,30 +277,30 @@ fn handle_harness_result(stream: &mut TcpStream, result: Result<String>) -> Resu
     match result {
         Ok(body) => write_json(stream, 200, serde_json::from_str(&body)?),
         Err(e) => {
-            let msg = e.to_string();
-            let status = if msg.starts_with("invalid_manifest")
-                || msg.starts_with("invalid_request")
-            {
-                400
-            } else if msg.starts_with("unauthorized") {
-                401
-            } else if msg.starts_with("manifest_not_found") {
-                404
-            } else if msg.starts_with("snapshot_conflict") || msg.starts_with("operation_conflict")
-            {
-                409
-            } else if msg.starts_with("invalid_") {
-                400
-            } else {
-                500
-            };
-            let safe_msg = match status {
-                400 => "invalid_request",
-                401 => "unauthorized",
-                404 => "not_found",
-                409 => "conflict",
-                _ => "internal_error",
-            };
+            // Prefer typed HarnessRouteError via downcast, fall back to
+            // stable string matching for errors that still carry the old
+            // prefix convention (e.g. manifest compute_manifest_id).
+            let (status, safe_msg) =
+                if let Some(hr_err) = e.downcast_ref::<harness_routes::HarnessRouteError>() {
+                    (hr_err.http_status(), hr_err.safe_error())
+                } else {
+                    let msg = e.to_string();
+                    if msg.starts_with("invalid_manifest") || msg.starts_with("invalid_request") {
+                        (400, "invalid_request")
+                    } else if msg.starts_with("unauthorized") {
+                        (401, "unauthorized")
+                    } else if msg.starts_with("manifest_not_found") {
+                        (404, "not_found")
+                    } else if msg.starts_with("snapshot_conflict")
+                        || msg.starts_with("operation_conflict")
+                    {
+                        (409, "conflict")
+                    } else if msg.starts_with("invalid_") {
+                        (400, "invalid_request")
+                    } else {
+                        (500, "internal_error")
+                    }
+                };
             write_json(stream, status, json!({ "ok": false, "error": safe_msg }))
         }
     }
