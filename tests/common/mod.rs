@@ -3,9 +3,210 @@
 use agent_core_kernel::config::KernelConfig;
 use agent_core_kernel::domain::*;
 use agent_core_kernel::gateway::Gateway;
+use agent_core_kernel::journal::JournalStore;
+use agent_core_kernel::registry::snapshot::test_snapshot;
+use anyhow::Result;
 use chrono::Utc;
-use serde_json::json;
+use serde_json::{json, Value};
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+
+// ============================================================
+// CaptureServer — local HTTP mock that returns preset responses
+// in order and captures each request body.
+// ============================================================
+
+pub struct CaptureServer {
+    pub port: u16,
+    captured: Arc<Mutex<Vec<Value>>>,
+    parse_error: Arc<Mutex<Option<String>>>,
+    error_tx: std::sync::mpsc::Sender<String>,
+    error_rx: std::sync::mpsc::Receiver<String>,
+    shutdown: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl CaptureServer {
+    pub fn start(responses: Vec<Value>) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let captured_thread = Arc::clone(&captured);
+        let parse_error = Arc::new(Mutex::new(None::<String>));
+        let parse_error_thread = Arc::clone(&parse_error);
+        let (error_tx, error_rx) = std::sync::mpsc::channel::<String>();
+        let error_tx_thread = error_tx.clone();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown_thread = Arc::clone(&shutdown);
+        let handle = std::thread::spawn(move || {
+            for response in responses {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                if shutdown_thread.load(Ordering::Relaxed) {
+                    break;
+                }
+                match read_request_json(&mut stream) {
+                    Ok(body) => {
+                        captured_thread.lock().unwrap().push(body);
+                    }
+                    Err(error) => {
+                        *parse_error_thread.lock().unwrap() = Some(error.clone());
+                        let _ = error_tx_thread.send(error);
+                        break;
+                    }
+                }
+                let body = response.to_string();
+                let reply = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(reply.as_bytes());
+            }
+        });
+        Self {
+            port,
+            captured,
+            parse_error,
+            error_tx,
+            error_rx,
+            shutdown,
+            handle: Some(handle),
+        }
+    }
+
+    /// Wait for a parse error with a timeout (no fixed sleep).
+    pub fn recv_error_timeout(&self, timeout: std::time::Duration) -> Option<String> {
+        self.error_rx.recv_timeout(timeout).ok()
+    }
+
+    /// Panic if a parse error was recorded. Call before `requests()` in tests.
+    pub fn assert_no_error(&self) {
+        let err = self.parse_error.lock().unwrap().take();
+        if let Some(msg) = err {
+            panic!("CaptureServer parse error: {msg}");
+        }
+    }
+
+    pub fn parse_error(&self) -> Option<String> {
+        self.parse_error.lock().unwrap().clone()
+    }
+
+    pub fn base_url(&self) -> String {
+        format!("http://127.0.0.1:{}/v1", self.port)
+    }
+
+    pub fn requests(&self) -> Vec<Value> {
+        self.captured.lock().unwrap().clone()
+    }
+}
+
+impl Drop for CaptureServer {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+        let _ = TcpStream::connect(("127.0.0.1", self.port));
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+fn read_request_json(stream: &mut TcpStream) -> std::result::Result<Value, String> {
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+        .map_err(|e| format!("set_read_timeout failed: {e}"))?;
+    let mut raw = Vec::new();
+    let mut chunk = [0u8; 4096];
+    let header_end = loop {
+        let read = stream
+            .read(&mut chunk)
+            .map_err(|e| format!("read failed: {e}"))?;
+        if read == 0 {
+            return Err("connection closed before headers".to_string());
+        }
+        raw.extend_from_slice(&chunk[..read]);
+        if let Some(index) = raw.windows(4).position(|window| window == b"\r\n\r\n") {
+            break index;
+        }
+    };
+    let headers = std::str::from_utf8(&raw[..header_end])
+        .map_err(|e| format!("invalid UTF-8 in headers: {e}"))?;
+    let content_length = headers
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            if name.trim().eq_ignore_ascii_case("content-length") {
+                value.trim().parse::<usize>().ok()
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| "missing content-length header".to_string())?;
+    let body_start = header_end + 4;
+    while raw.len() < body_start + content_length {
+        let read = stream
+            .read(&mut chunk)
+            .map_err(|e| format!("read body failed: {e}"))?;
+        if read == 0 {
+            break;
+        }
+        raw.extend_from_slice(&chunk[..read]);
+    }
+    let body_bytes = &raw[body_start..body_start + content_length.min(raw.len() - body_start)];
+    serde_json::from_slice(body_bytes).map_err(|e| format!("JSON parse error: {e}"))
+}
+
+/// A successful text-only OpenAI-compatible response.
+pub fn text_response(text: &str) -> Value {
+    json!({
+        "model": "local-stub",
+        "choices": [{ "message": { "content": text } }]
+    })
+}
+
+/// An OpenAI-compatible response with a single tool call.
+pub fn tool_call_response(call_id: &str, fn_name: &str, arguments: &str) -> Value {
+    json!({
+        "model": "local-stub",
+        "choices": [{
+            "message": {
+                "content": "",
+                "tool_calls": [{
+                    "id": call_id,
+                    "type": "function",
+                    "function": { "name": fn_name, "arguments": arguments }
+                }]
+            }
+        }]
+    })
+}
+
+/// Fake adapter that returns the configured receipt for any invocation.
+pub struct FakeReplyAdapter {
+    pub receipt: agent_core_kernel::domain::Receipt,
+}
+
+impl agent_core_kernel::adapters::InvocationAdapter for FakeReplyAdapter {
+    fn execute(
+        &self,
+        _invocation: &agent_core_kernel::domain::ApprovedInvocation,
+    ) -> anyhow::Result<agent_core_kernel::domain::Receipt> {
+        anyhow::Ok(self.receipt.clone())
+    }
+}
+
+/// Drain all pending outbox dispatches using the given adapter.
+pub fn dispatch_all(
+    journal: &agent_core_kernel::journal::JournalStore,
+    adapter: &impl agent_core_kernel::adapters::InvocationAdapter,
+) -> anyhow::Result<()> {
+    while agent_core_kernel::runtime::outbox_dispatcher::dispatch_once(journal, adapter)? {}
+    Ok(())
+}
 
 pub fn test_config() -> KernelConfig {
     KernelConfig {
@@ -121,5 +322,138 @@ pub fn runtime_run(run_id: &RunId, session_id: &SessionId) -> Run {
         created_at: Utc::now(),
         updated_at: Utc::now(),
         registry_snapshot_id: String::new(),
+    }
+}
+
+pub fn lt(
+    j: &JournalStore,
+    sid: &SessionId,
+    ev: &str,
+    ut: &str,
+    rid: &str,
+    rt: &str,
+) -> Result<()> {
+    j.append_event(
+        JournalEventKind::IngressAccepted,
+        None,
+        None,
+        Some(ev),
+        json!({"source":"feishu","event_id":ev,"text":ut}),
+    )?;
+    j.append_event(
+        JournalEventKind::SessionReady,
+        None,
+        Some(sid),
+        Some(ev),
+        json!({"session_id":sid.0}),
+    )?;
+    let r = RunId(rid.into());
+    let c = format!("reply:{rid}");
+    j.append_event(
+        JournalEventKind::RunStarted,
+        Some(&r),
+        Some(sid),
+        Some(ev),
+        json!({"run_id":rid}),
+    )?;
+    j.append_event(
+        JournalEventKind::AssistantReplyDelivered,
+        Some(&r),
+        Some(sid),
+        Some(&c),
+        json!({"session_id":sid.0,"run_id":rid,"invocation_id":c,"channel":"cli","text":rt}),
+    )?;
+    Ok(())
+}
+
+pub fn lu(j: &JournalStore, sid: &SessionId, ev: &str, ut: &str, rid: &str) -> Result<()> {
+    j.append_event(
+        JournalEventKind::IngressAccepted,
+        None,
+        None,
+        Some(ev),
+        json!({"source":"feishu","event_id":ev,"text":ut}),
+    )?;
+    j.append_event(
+        JournalEventKind::SessionReady,
+        None,
+        Some(sid),
+        Some(ev),
+        json!({"session_id":sid.0}),
+    )?;
+    let r = RunId(rid.into());
+    j.append_event(
+        JournalEventKind::RunStarted,
+        Some(&r),
+        Some(sid),
+        Some(ev),
+        json!({"run_id":rid}),
+    )?;
+    Ok(())
+}
+
+pub fn lr(j: &JournalStore, sid: &SessionId, rid: &str, rt: &str) -> Result<()> {
+    let r = RunId(rid.into());
+    let c = format!("reply:{rid}");
+    j.append_event(
+        JournalEventKind::AssistantReplyDelivered,
+        Some(&r),
+        Some(sid),
+        Some(&c),
+        json!({"session_id":sid.0,"run_id":rid,"invocation_id":c,"channel":"cli","text":rt}),
+    )?;
+    Ok(())
+}
+
+pub fn lrp(j: &JournalStore, sid: &SessionId, rid: &str, pv: Value) -> Result<()> {
+    let r = RunId(rid.into());
+    let c = format!("reply:{rid}");
+    j.append_event(
+        JournalEventKind::AssistantReplyDelivered,
+        Some(&r),
+        Some(sid),
+        Some(&c),
+        pv,
+    )?;
+    Ok(())
+}
+
+pub fn apv(
+    j: &JournalStore,
+    g: &Gateway,
+    rid: &RunId,
+    sid: &SessionId,
+) -> Result<ApprovedInvocation> {
+    let snap = test_snapshot();
+    let run = runtime_run(rid, sid);
+    j.insert_run(&run)?;
+    let sess = Session {
+        id: sid.clone(),
+        channel: ChannelKind::Cli,
+        ..test_session(&test_config())
+    };
+    let ap = g.approve_invocation(
+        InvocationIntent {
+            invocation_id: InvocationId(format!("reply:{}", rid.0)),
+            run_id: rid.clone(),
+            operation: "stdout.send_text".into(),
+            arguments: json!({"text":"hello","session_id":sid.0}),
+            idempotency_key: None,
+        },
+        &run,
+        &sess,
+        &snap,
+    )?;
+    j.queue_outbox_dispatch(&ap, Some(sid))?;
+    Ok(ap)
+}
+
+pub fn rcp(inv: &str) -> Receipt {
+    Receipt {
+        invocation_id: InvocationId(inv.into()),
+        status: ReceiptStatus::Succeeded,
+        output: json!({"status":"sent"}),
+        external_ref: None,
+        occurred_at: Utc::now(),
     }
 }

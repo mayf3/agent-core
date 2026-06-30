@@ -411,6 +411,20 @@ pub enum JournalEventKind {
     OutboxDispatchDead,
     DispatchStarted,
     ReceiptReceived,
+    /// Explicitly recorded when a reply invocation was successfully delivered
+    /// to the user (stdout/feishu). The payload carries the final user-visible
+    /// text so conversation history can be reconstructed without guessing from
+    /// arbitrary connector output. Written atomically with the successful outbox
+    /// dispatch transaction. Only operations in the reply white-list
+    /// (stdout.send_text, feishu.send_message) produce this event.
+    ///
+    /// Payload fields:
+    /// - session_id: &str
+    /// - run_id: &str
+    /// - invocation_id: &str (the reply invocation, "reply:<run_id>")
+    /// - channel: "cli" | "feishu"
+    /// - text: "final delivered text"
+    AssistantReplyDelivered,
     WorkerJobDead,
     RunCompleted,
     RunFailed,

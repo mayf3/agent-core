@@ -5,7 +5,6 @@ use anyhow::{anyhow, bail, Result};
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
-use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -290,76 +289,6 @@ impl JournalStore {
             .map_err(|_| anyhow!("journal mutex poisoned"))?;
         conn.query_row("SELECT COUNT(*) FROM journal_events", [], |row| row.get(0))
             .map_err(Into::into)
-    }
-
-    pub fn recent_user_messages(
-        &self,
-        session_id: &SessionId,
-        limit: usize,
-    ) -> Result<Vec<(String, String)>> {
-        if limit == 0 {
-            return Ok(vec![]);
-        }
-        self.recent_user_messages_inner(session_id, limit)
-    }
-
-    /// Capability-boundary recall: identical to [`recent_user_messages`] but honors the test-only deterministic fault flag. Used only by the
-    /// `session.recall_recent` capability (`execute_session_recall`), NOT by the context assembler's RecentMessages block — so a fault can be injected precisely at the capability boundary while context building and every other Journal operation keep working.
-    #[doc(hidden)]
-    pub(crate) fn recent_user_messages_for_capability(
-        &self,
-        session_id: &SessionId,
-        limit: usize,
-    ) -> Result<Vec<(String, String)>> {
-        if limit == 0 {
-            return Ok(vec![]);
-        }
-        #[cfg(any(test, feature = "test-helpers"))]
-        if self
-            .recall_failure_for_test
-            .load(std::sync::atomic::Ordering::Relaxed)
-        {
-            return Err(anyhow!("recall_query_failed"));
-        }
-        self.recent_user_messages_inner(session_id, limit)
-    }
-
-    fn recent_user_messages_inner(
-        &self,
-        session_id: &SessionId,
-        limit: usize,
-    ) -> Result<Vec<(String, String)>> {
-        let events = self.events()?;
-        let mut ingress_text_by_event = HashMap::new();
-        for event in &events {
-            if event.kind != JournalEventKind::IngressAccepted {
-                continue;
-            }
-            let Some(event_id) = event.payload.get("event_id").and_then(Value::as_str) else {
-                continue;
-            };
-            let Some(text) = event.payload.get("text").and_then(Value::as_str) else {
-                continue;
-            };
-            ingress_text_by_event.insert(event_id.to_string(), text.to_string());
-        }
-        let mut messages = vec![];
-        for event in events {
-            if event.kind != JournalEventKind::SessionReady
-                || event.session_id.as_ref() != Some(session_id)
-            {
-                continue;
-            }
-            let Some(event_id) = event.correlation_id else {
-                continue;
-            };
-            let Some(text) = ingress_text_by_event.get(&event_id) else {
-                continue;
-            };
-            messages.push((event_id, text.clone()));
-        }
-        let start = messages.len().saturating_sub(limit);
-        Ok(messages[start..].to_vec())
     }
 
     pub fn verify_hash_chain(&self) -> Result<bool> {

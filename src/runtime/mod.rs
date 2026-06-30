@@ -191,7 +191,7 @@ where
             user_text: text.clone(),
             granted_operations: granted_operations.clone(),
             provider_tools: provider_tools.clone(),
-            follow_up: None,
+            follow_ups: vec![],
         })?;
         journal.append_event(
             JournalEventKind::LlmCompleted,

@@ -211,7 +211,7 @@ mod tool_name_mode_tests {
             user_text: "x".into(),
             granted_operations: vec!["time.now".to_string()],
             provider_tools,
-            follow_up: None,
+            follow_ups: vec![],
         })?;
         let reqs = fb.requests();
         let ns: Vec<&str> = reqs[0]["tools"]
@@ -242,7 +242,7 @@ mod tool_name_mode_tests {
             user_text: "x".into(),
             granted_operations: vec!["time.now".to_string()],
             provider_tools,
-            follow_up: None,
+            follow_ups: vec![],
         })?;
         let reqs = fb.requests();
         assert!(!reqs.is_empty(), "request captured");
