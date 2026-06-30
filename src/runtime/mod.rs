@@ -33,6 +33,10 @@ mod registry_snapshot_failure;
 #[path = "tests/registry_snapshot_gateway.rs"]
 mod registry_snapshot_gateway;
 
+#[cfg(test)]
+#[path = "tests/external_harness_hotload.rs"]
+mod external_harness_hotload;
+
 pub struct Runtime<L> {
     config: KernelConfig,
     llm: L,
