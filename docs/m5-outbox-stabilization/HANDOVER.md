@@ -8,7 +8,7 @@ the forbidden scope will undo the guarantees the current branch is built on.
 
 ## 0. Repo facts
 
-- Workspace: `/Users/yanfenma/workspace/project/agent-core`
+- Workspace: `{home}/workspace/project/agent-core`
 - Repo: `https://github.com/mayf3/agent-core.git`
 - Default branch: `main` (HEAD `ed97f74` = merge of PR #38 feat/outbox-dispatch-once)
 - Working branch pushed by previous agent: `feat/m5-outbox-stabilization`
