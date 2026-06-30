@@ -3,6 +3,9 @@
 use agent_core_kernel::config::KernelConfig;
 use agent_core_kernel::domain::*;
 use agent_core_kernel::gateway::Gateway;
+use agent_core_kernel::journal::JournalStore;
+use agent_core_kernel::registry::snapshot::test_snapshot;
+use anyhow::Result;
 use chrono::Utc;
 use serde_json::{json, Value};
 use std::io::{Read, Write};
@@ -319,5 +322,138 @@ pub fn runtime_run(run_id: &RunId, session_id: &SessionId) -> Run {
         created_at: Utc::now(),
         updated_at: Utc::now(),
         registry_snapshot_id: String::new(),
+    }
+}
+
+pub fn lt(
+    j: &JournalStore,
+    sid: &SessionId,
+    ev: &str,
+    ut: &str,
+    rid: &str,
+    rt: &str,
+) -> Result<()> {
+    j.append_event(
+        JournalEventKind::IngressAccepted,
+        None,
+        None,
+        Some(ev),
+        json!({"source":"feishu","event_id":ev,"text":ut}),
+    )?;
+    j.append_event(
+        JournalEventKind::SessionReady,
+        None,
+        Some(sid),
+        Some(ev),
+        json!({"session_id":sid.0}),
+    )?;
+    let r = RunId(rid.into());
+    let c = format!("reply:{rid}");
+    j.append_event(
+        JournalEventKind::RunStarted,
+        Some(&r),
+        Some(sid),
+        Some(ev),
+        json!({"run_id":rid}),
+    )?;
+    j.append_event(
+        JournalEventKind::AssistantReplyDelivered,
+        Some(&r),
+        Some(sid),
+        Some(&c),
+        json!({"session_id":sid.0,"run_id":rid,"invocation_id":c,"channel":"cli","text":rt}),
+    )?;
+    Ok(())
+}
+
+pub fn lu(j: &JournalStore, sid: &SessionId, ev: &str, ut: &str, rid: &str) -> Result<()> {
+    j.append_event(
+        JournalEventKind::IngressAccepted,
+        None,
+        None,
+        Some(ev),
+        json!({"source":"feishu","event_id":ev,"text":ut}),
+    )?;
+    j.append_event(
+        JournalEventKind::SessionReady,
+        None,
+        Some(sid),
+        Some(ev),
+        json!({"session_id":sid.0}),
+    )?;
+    let r = RunId(rid.into());
+    j.append_event(
+        JournalEventKind::RunStarted,
+        Some(&r),
+        Some(sid),
+        Some(ev),
+        json!({"run_id":rid}),
+    )?;
+    Ok(())
+}
+
+pub fn lr(j: &JournalStore, sid: &SessionId, rid: &str, rt: &str) -> Result<()> {
+    let r = RunId(rid.into());
+    let c = format!("reply:{rid}");
+    j.append_event(
+        JournalEventKind::AssistantReplyDelivered,
+        Some(&r),
+        Some(sid),
+        Some(&c),
+        json!({"session_id":sid.0,"run_id":rid,"invocation_id":c,"channel":"cli","text":rt}),
+    )?;
+    Ok(())
+}
+
+pub fn lrp(j: &JournalStore, sid: &SessionId, rid: &str, pv: Value) -> Result<()> {
+    let r = RunId(rid.into());
+    let c = format!("reply:{rid}");
+    j.append_event(
+        JournalEventKind::AssistantReplyDelivered,
+        Some(&r),
+        Some(sid),
+        Some(&c),
+        pv,
+    )?;
+    Ok(())
+}
+
+pub fn apv(
+    j: &JournalStore,
+    g: &Gateway,
+    rid: &RunId,
+    sid: &SessionId,
+) -> Result<ApprovedInvocation> {
+    let snap = test_snapshot();
+    let run = runtime_run(rid, sid);
+    j.insert_run(&run)?;
+    let sess = Session {
+        id: sid.clone(),
+        channel: ChannelKind::Cli,
+        ..test_session(&test_config())
+    };
+    let ap = g.approve_invocation(
+        InvocationIntent {
+            invocation_id: InvocationId(format!("reply:{}", rid.0)),
+            run_id: rid.clone(),
+            operation: "stdout.send_text".into(),
+            arguments: json!({"text":"hello","session_id":sid.0}),
+            idempotency_key: None,
+        },
+        &run,
+        &sess,
+        &snap,
+    )?;
+    j.queue_outbox_dispatch(&ap, Some(sid))?;
+    Ok(ap)
+}
+
+pub fn rcp(inv: &str) -> Receipt {
+    Receipt {
+        invocation_id: InvocationId(inv.into()),
+        status: ReceiptStatus::Succeeded,
+        output: json!({"status":"sent"}),
+        external_ref: None,
+        occurred_at: Utc::now(),
     }
 }
