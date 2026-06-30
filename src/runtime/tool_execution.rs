@@ -7,7 +7,7 @@ use crate::domain::*;
 use crate::gateway::{Gateway, ToolRejection};
 use crate::journal::JournalStore;
 use crate::llm::{LlmClient, ToolCall};
-use crate::registry::snapshot::{BindingKind, RegistrySnapshot};
+use crate::registry::snapshot::RegistrySnapshot;
 use anyhow::Result;
 use serde_json::json;
 

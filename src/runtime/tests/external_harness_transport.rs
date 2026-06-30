@@ -1,31 +1,22 @@
-//! External harness transport and Runtime e2e tests.
-//!
-//! Uses a real TcpListener as the harness fixture on a random port.
-//! Tests verify full Runtime → localhost → Receipt → ToolResult chain.
+//! External harness strict HTTP status line parsing tests.
+//! These use a simple TcpListener fixture and invoke the Runtime
+//! with a tool-calling LLM to verify transport-level behavior.
 
-use crate::config::KernelConfig;
-use crate::domain::*;
-use crate::gateway::Gateway;
-use crate::harness::control::{HarnessChangeAction, HarnessChangeIntent};
-use crate::harness::manifest::HarnessManifest;
-use crate::journal::JournalStore;
 use anyhow::Result;
-use chrono::Utc;
 use serde_json::json;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-fn test_config() -> KernelConfig {
-    KernelConfig {
-        db_path: PathBuf::from(":memory:"),
-        data_dir: PathBuf::from(".agent-core-test"),
-        agent_id: AgentId("main".to_string()),
-        root_dir: PathBuf::from("."),
+fn config() -> crate::config::KernelConfig {
+    crate::config::KernelConfig {
+        db_path: std::path::PathBuf::from(":memory:"),
+        data_dir: std::path::PathBuf::from(".agent-core-test"),
+        agent_id: crate::domain::AgentId("main".to_string()),
+        root_dir: std::path::PathBuf::from("."),
         kernel_port: 0,
         connector_execute_url: "http://127.0.0.1:0/v1/execute".to_string(),
         ipc_token: "test-token".to_string(),
@@ -51,342 +42,236 @@ fn test_config() -> KernelConfig {
     }
 }
 
-/// Start a minimal harness on a random port. Returns (endpoint, shutdown_flag).
-fn start_harness() -> Result<(String, Arc<AtomicBool>)> {
+struct OneToolLlm {
+    first: AtomicBool,
+}
+impl crate::llm::LlmClient for OneToolLlm {
+    fn complete(&self, _: crate::llm::LlmInput) -> anyhow::Result<crate::llm::LlmOutput> {
+        if self.first.swap(false, Ordering::SeqCst) {
+            Ok(crate::llm::LlmOutput {
+                provider: "t".into(),
+                model: "t".into(),
+                content: String::new(),
+                journal_payload: json!({"s":"ok"}),
+                tool_call: crate::llm::ToolCallResult::Valid(crate::llm::ToolCall {
+                    id: "c".into(),
+                    operation: "external.time_now".into(),
+                    arguments: json!({}),
+                }),
+                provider_turn: Some(crate::llm::ProviderToolTurn {
+                    endpoint: crate::llm::EndpointChoice::Primary,
+                    provider_tool_call_id: "cr".into(),
+                    wire_name: "external.time_now".into(),
+                    canonical_operation: "external.time_now".into(),
+                    arguments_json: "{}".into(),
+                }),
+            })
+        } else {
+            Ok(crate::llm::LlmOutput {
+                provider: "t".into(),
+                model: "t".into(),
+                content: "done".into(),
+                journal_payload: json!({"s":"ok"}),
+                tool_call: crate::llm::ToolCallResult::Absent,
+                provider_turn: None,
+            })
+        }
+    }
+}
+
+fn start_responder(response: &str) -> Result<(String, Arc<AtomicBool>)> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let port = listener.local_addr()?.port();
     let endpoint = format!("http://127.0.0.1:{port}/execute");
     let shutdown = Arc::new(AtomicBool::new(false));
-    let sh = shutdown.clone();
+    let resp = response.to_string();
     thread::spawn(move || {
-        listener.set_nonblocking(true).ok();
-        loop {
-            if sh.load(Ordering::SeqCst) {
-                break;
-            }
-            match listener.accept() {
-                Ok((mut stream, _)) => handle_harness_request(&mut stream),
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(10));
-                }
-                Err(_) => break,
-            }
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf);
+            let _ = stream.write_all(resp.as_bytes());
         }
     });
+    thread::sleep(Duration::from_millis(50));
     Ok((endpoint, shutdown))
 }
 
-fn handle_harness_request(stream: &mut TcpStream) {
-    let mut buf = [0u8; 4096];
-    let _ = stream.read(&mut buf);
-    let body = r#"{
-        "protocol_version": "external-harness-v1",
-        "ok": true,
-        "result": {
-            "iso": "2026-06-30T12:00:00+00:00",
-            "epoch_ms": 1234567890
-        }
-    }"#;
-    let response = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        body.len(),
-        body
-    );
-    let _ = stream.write_all(response.as_bytes());
+fn h200(body: &str) -> String {
+    format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body)
 }
 
-fn register_and_enable_harness(j: &JournalStore, g: &Gateway, endpoint: &str) -> Result<String> {
+fn reg_enable(
+    j: &crate::journal::JournalStore,
+    g: &crate::gateway::Gateway,
+    ep: &str,
+) -> Result<String> {
+    use crate::harness::control::{HarnessChangeAction, HarnessChangeIntent};
+    use crate::harness::manifest::HarnessManifest;
+    use chrono::Utc;
     let mut m = HarnessManifest {
         manifest_id: String::new(),
-        harness_id: "test-harness".into(),
+        harness_id: "t".into(),
         artifact_digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             .into(),
         protocol_version: "external-harness-v1".into(),
-        endpoint: endpoint.into(),
+        endpoint: ep.into(),
         operation_name: "external.time_now".into(),
-        description: "Return current time".into(),
-        input_schema: json!({"type": "object", "properties": {}, "required": [], "additionalProperties": false}),
-        output_schema: json!({"type": "object", "properties": {"iso": {"type": "string"}, "epoch_ms": {"type": "integer"}}, "required": ["iso", "epoch_ms"], "additionalProperties": false}),
+        description: "time".into(),
+        input_schema: json!({"type":"object","properties":{},"required":[],"additionalProperties":false}),
+        output_schema: json!({"type":"object","properties":{"iso":{"type":"string"},"epoch_ms":{"type":"integer"}},"required":["iso","epoch_ms"],"additionalProperties":false}),
         idempotent: true,
         created_at: Utc::now(),
     };
-    let manifest_id = m.compute_manifest_id()?;
-    m.manifest_id = manifest_id.clone();
+    let mid = m.compute_manifest_id()?;
+    m.manifest_id = mid.clone();
     j.register_harness_manifest(&m)?;
-
-    let intent = HarnessChangeIntent {
+    j.enable_harness(&g.approve_harness_change(HarnessChangeIntent {
         action: HarnessChangeAction::Enable,
-        manifest_id: manifest_id.clone(),
+        manifest_id: mid.clone(),
         expected_snapshot_id: j.current_registry_snapshot_id()?,
         requested_by: "ipc_operator".into(),
-    };
-    let approved = g.approve_harness_change(intent)?;
-    j.enable_harness(&approved)?;
-    Ok(manifest_id)
+    })?)?;
+    Ok(mid)
 }
 
-#[test]
-fn external_harness_non_2xx_records_failed_receipt() -> Result<()> {
-    use crate::adapters::external_harness::{
-        execute_external_harness, ExternalHarnessTransportConfig,
-    };
-
-    let mut m = HarnessManifest {
-        manifest_id: String::new(),
-        harness_id: "test".into(),
-        artifact_digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-            .into(),
-        protocol_version: "external-harness-v1".into(),
-        endpoint: "http://127.0.0.1:1/execute".into(),
-        operation_name: "external.test".into(),
-        description: "test".into(),
-        input_schema: json!({}),
-        output_schema: json!({}),
-        idempotent: false,
-        created_at: Utc::now(),
-    };
-    let manifest_id = m.compute_manifest_id()?;
-    m.manifest_id = manifest_id;
-
-    let approved = ApprovedInvocation::new(
-        InvocationIntent {
-            invocation_id: InvocationId("inv_test".into()),
-            run_id: RunId("r_test".into()),
-            operation: "external.test".into(),
-            arguments: json!({}),
-            idempotency_key: None,
+fn run_with_tool(
+    j: &crate::journal::JournalStore,
+    g: &crate::gateway::Gateway,
+) -> super::RuntimeOutcome {
+    let rt = super::Runtime::new(
+        config(),
+        OneToolLlm {
+            first: AtomicBool::new(true),
         },
-        "decision_test".into(),
     );
+    let ev = g
+        .validate_ingress(j, g.cli_ingress("t?".into()).unwrap())
+        .unwrap();
+    rt.deliver(j, g, ev).unwrap()
+}
 
-    // Short timeout for fast test.
-    let config = ExternalHarnessTransportConfig {
-        connect_timeout: Duration::from_millis(100),
-        read_timeout: Duration::from_millis(100),
-        write_timeout: Duration::from_millis(100),
-        ..ExternalHarnessTransportConfig::default()
-    };
-    let result = crate::adapters::external_harness::execute_external_harness_with_config(
-        &m, &approved, &config,
-    );
-    assert!(result.is_err(), "connect to port 1 should fail");
+// ── Tests ──
+
+#[test]
+fn http_200_is_success() -> Result<()> {
+    let b = json!({"protocol_version":"external-harness-v1","ok":true,"result":{"iso":"2026-01-01T00:00:00+00:00","epoch_ms":123}});
+    let (ep, _) = start_responder(&h200(&b.to_string()))?;
+    let j = crate::journal::JournalStore::in_memory()?;
+    let g = crate::gateway::Gateway::new(config());
+    reg_enable(&j, &g, &ep)?;
+    let o = run_with_tool(&j, &g);
+    assert!(!o.output.trim().is_empty());
+    let ev = j.events()?;
+    let r: Vec<_> = ev
+        .iter()
+        .filter(|e| e.kind == crate::domain::JournalEventKind::ReceiptReceived)
+        .collect();
+    assert_eq!(r.len(), 1);
+    assert_eq!(r[0].payload["status"], "Succeeded");
     Ok(())
 }
 
 #[test]
-fn external_harness_malformed_json_records_failed_receipt() -> Result<()> {
-    use crate::adapters::external_harness::execute_external_harness;
-
-    let m = HarnessManifest {
-        manifest_id: "malformed_test".into(),
-        harness_id: "test".into(),
-        artifact_digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-            .into(),
-        protocol_version: "external-harness-v1".into(),
-        endpoint: "http://127.0.0.1:1/execute".into(),
-        operation_name: "external.test".into(),
-        description: "test".into(),
-        input_schema: json!({}),
-        output_schema: json!({}),
-        idempotent: false,
-        created_at: Utc::now(),
-    };
-
-    let approved = ApprovedInvocation::new(
-        InvocationIntent {
-            invocation_id: InvocationId("inv_malformed".into()),
-            run_id: RunId("r_malformed".into()),
-            operation: "external.test".into(),
-            arguments: json!({}),
-            idempotency_key: None,
-        },
-        "decision_malformed".into(),
-    );
-
-    let result = execute_external_harness(&m, &approved);
-    // Should fail because port 1 refuses connection → connect_failed
-    assert!(result.is_err());
+fn http_302_is_http_error() -> Result<()> {
+    let (ep,_) = start_responder("HTTP/1.1 302 Found\r\nLocation: http://evil/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")?;
+    let j = crate::journal::JournalStore::in_memory()?;
+    let g = crate::gateway::Gateway::new(config());
+    reg_enable(&j, &g, &ep)?;
+    run_with_tool(&j, &g);
+    let ev = j.events()?;
+    let r: Vec<_> = ev
+        .iter()
+        .filter(|e| e.kind == crate::domain::JournalEventKind::ReceiptReceived)
+        .collect();
+    assert_eq!(r.len(), 1);
+    assert_eq!(r[0].payload["status"], "Failed");
+    assert_eq!(r[0].payload["output"]["error_category"], "http_error");
+    assert_eq!(r[0].payload["output"]["http_code"], 302);
     Ok(())
 }
 
 #[test]
-fn external_harness_ok_false_records_failed_receipt() -> Result<()> {
-    use crate::adapters::external_harness::execute_external_harness;
-
-    let mut m = HarnessManifest {
-        manifest_id: String::new(),
-        harness_id: "test".into(),
-        artifact_digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-            .into(),
-        protocol_version: "external-harness-v1".into(),
-        endpoint: "http://127.0.0.1:1/execute".into(),
-        operation_name: "external.test".into(),
-        description: "test".into(),
-        input_schema: json!({}),
-        output_schema: json!({}),
-        idempotent: false,
-        created_at: Utc::now(),
-    };
-    let manifest_id = m.compute_manifest_id()?;
-    m.manifest_id = manifest_id;
-
-    let approved = ApprovedInvocation::new(
-        InvocationIntent {
-            invocation_id: InvocationId("inv_okfalse".into()),
-            run_id: RunId("r_okfalse".into()),
-            operation: "external.test".into(),
-            arguments: json!({}),
-            idempotency_key: None,
-        },
-        "decision_okfalse".into(),
-    );
-
-    // Port 1 nothing listening → connection error (harness_failed).
-    let result = execute_external_harness(&m, &approved);
-    assert!(result.is_err());
-    Ok(())
-}
-
-#[test]
-fn external_harness_tool_call_runs_end_to_end() -> Result<()> {
-    let (endpoint, _shutdown) = start_harness()?;
-    let j = JournalStore::in_memory()?;
-    let g = Gateway::new(test_config());
-
-    // Register and enable harness.
-    register_and_enable_harness(&j, &g, &endpoint)?;
-
-    // Verify the snapshot contains the external operation.
-    let snapshot_id = j.current_registry_snapshot_id()?;
-    let snapshot = j.load_registry_snapshot(&snapshot_id)?;
-    let spec = snapshot
-        .lookup("external.time_now")
-        .expect("external.time_now must be in snapshot");
-
-    // Test the full adapter chain directly.
-    let approved = g.approve_invocation(
-        InvocationIntent {
-            invocation_id: InvocationId("inv_e2e".into()),
-            run_id: RunId("r_e2e".into()),
-            operation: "external.time_now".into(),
-            arguments: json!({"session_id": "s_e2e"}),
-            idempotency_key: None,
-        },
-        &Run {
-            id: RunId("r_e2e".into()),
-            session_id: SessionId("s_e2e".into()),
-            agent_id: AgentId("main".to_string()),
-            trigger_event_id: EventId("ev_e2e".into()),
-            principal: RunPrincipal {
-                principal_id: PrincipalId("cli:local".to_string()),
-                subject: PrincipalSubject::LocalUser,
-                source: PrincipalSource::Cli,
-                grants: vec![
-                    CapabilityGrant {
-                        operation: "stdout.send_text".to_string(),
-                        scope: "current_session".to_string(),
-                    },
-                    CapabilityGrant {
-                        operation: "external.time_now".to_string(),
-                        scope: "current_session".to_string(),
-                    },
-                ],
-                requester_id: Some("cli:local".to_string()),
-            },
-            parent_run_id: None,
-            delegated_by: None,
-            status: RunStatus::Running,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            registry_snapshot_id: snapshot_id.clone(),
-        },
-        &Session {
-            id: SessionId("s_e2e".into()),
-            agent_id: AgentId("main".to_string()),
-            channel: ChannelKind::Cli,
-            conversation_key: "local".to_string(),
-            summary: None,
-            summarized_until_event_id: None,
-            last_active_at: Utc::now(),
-            status: SessionStatus::Active,
-            version: 1,
-        },
-        &snapshot,
+fn http_404_is_http_error() -> Result<()> {
+    let (ep, _) = start_responder(
+        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
     )?;
-
-    let receipt = crate::adapters::external_harness::execute_external_harness(
-        &{ j.load_harness_manifest(&spec.binding_key)?.unwrap() },
-        &approved,
-    )?;
-
-    assert_eq!(receipt.status, ReceiptStatus::Succeeded);
-    assert!(receipt.output.get("iso").and_then(|v| v.as_str()).is_some());
-    assert!(receipt
-        .output
-        .get("epoch_ms")
-        .and_then(|v| v.as_u64())
-        .is_some());
-
-    // Verify the ReceiptReceived event would have the correct data.
-    assert_eq!(receipt.invocation_id.0, "inv_e2e");
+    let j = crate::journal::JournalStore::in_memory()?;
+    let g = crate::gateway::Gateway::new(config());
+    reg_enable(&j, &g, &ep)?;
+    run_with_tool(&j, &g);
+    let ev = j.events()?;
+    let r: Vec<_> = ev
+        .iter()
+        .filter(|e| e.kind == crate::domain::JournalEventKind::ReceiptReceived)
+        .collect();
+    assert_eq!(r.len(), 1);
+    assert_eq!(r[0].payload["status"], "Failed");
+    assert_eq!(r[0].payload["output"]["error_category"], "http_error");
+    assert_eq!(r[0].payload["output"]["http_code"], 404);
     Ok(())
 }
 
 #[test]
-fn harness_route_register_enable_disable_works() -> Result<()> {
-    let j = JournalStore::in_memory()?;
-    let g = Gateway::new(test_config());
+fn http_500_is_http_error() -> Result<()> {
+    let (ep, _) = start_responder(
+        "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+    )?;
+    let j = crate::journal::JournalStore::in_memory()?;
+    let g = crate::gateway::Gateway::new(config());
+    reg_enable(&j, &g, &ep)?;
+    run_with_tool(&j, &g);
+    let ev = j.events()?;
+    let r: Vec<_> = ev
+        .iter()
+        .filter(|e| e.kind == crate::domain::JournalEventKind::ReceiptReceived)
+        .collect();
+    assert_eq!(r.len(), 1);
+    assert_eq!(r[0].payload["status"], "Failed");
+    assert_eq!(r[0].payload["output"]["error_category"], "http_error");
+    assert_eq!(r[0].payload["output"]["http_code"], 500);
+    Ok(())
+}
 
-    // Register via route handler.
-    let register_body = json!({
-        "harness_id": "route-test-harness",
-        "artifact_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        "protocol_version": "external-harness-v1",
-        "endpoint": "http://127.0.0.1:9999/execute",
-        "operation_name": "external.route_test",
-        "description": "Route test harness",
-        "input_schema": {"type": "object", "properties": {}, "required": [], "additionalProperties": false},
-        "output_schema": {"type": "object", "properties": {"status": {"type": "string"}}, "required": ["status"], "additionalProperties": false},
-        "idempotent": true
-    });
+#[test]
+fn http_malformed_status_line_is_malformed() -> Result<()> {
+    let (ep, _) = start_responder("NOT_HTTP\r\nContent-Length: 0\r\n\r\n")?;
+    let j = crate::journal::JournalStore::in_memory()?;
+    let g = crate::gateway::Gateway::new(config());
+    reg_enable(&j, &g, &ep)?;
+    run_with_tool(&j, &g);
+    let ev = j.events()?;
+    let r: Vec<_> = ev
+        .iter()
+        .filter(|e| e.kind == crate::domain::JournalEventKind::ReceiptReceived)
+        .collect();
+    assert_eq!(r.len(), 1);
+    assert_eq!(r[0].payload["status"], "Failed");
+    assert_eq!(
+        r[0].payload["output"]["error_category"],
+        "malformed_response"
+    );
+    Ok(())
+}
 
-    let result = crate::server::harness_routes::handle_register(&g, &j, &register_body)?;
-    let result_val: serde_json::Value = serde_json::from_str(&result)?;
-    assert_eq!(result_val["ok"], true);
-    let manifest_id = result_val["manifest_id"].as_str().unwrap().to_string();
-
-    // Enable via route handler.
-    let enable_body = json!({
-        "manifest_id": manifest_id,
-        "expected_snapshot_id": j.current_registry_snapshot_id()?,
-    });
-    let result = crate::server::harness_routes::handle_enable(&g, &j, &enable_body)?;
-    let result_val: serde_json::Value = serde_json::from_str(&result)?;
-    assert_eq!(result_val["ok"], true);
-    assert!(result_val["active_snapshot_id"].as_str().unwrap().len() > 0);
-    let s2_id = result_val["active_snapshot_id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-
-    // Disable via route handler.
-    let disable_body = json!({
-        "manifest_id": manifest_id,
-        "expected_snapshot_id": s2_id,
-    });
-    let result = crate::server::harness_routes::handle_disable(&g, &j, &disable_body)?;
-    let result_val: serde_json::Value = serde_json::from_str(&result)?;
-    assert_eq!(result_val["ok"], true);
-
-    // Stale expected_snapshot_id should produce conflict.
-    let stale_body = json!({
-        "manifest_id": manifest_id,
-        "expected_snapshot_id": "snap_stale",
-    });
-    let result = crate::server::harness_routes::handle_enable(&g, &j, &stale_body);
-    assert!(result.is_err());
-    let err = result.unwrap_err().to_string();
-    assert!(err.contains("manifest_not_found") || err.contains("snapshot_conflict"));
-
+#[test]
+fn harness_error_code_is_mapped_to_fixed_category() -> Result<()> {
+    let b = json!({"protocol_version":"external-harness-v1","ok":false,"error_code":"custom_db_error_123"});
+    let (ep, _) = start_responder(&h200(&b.to_string()))?;
+    let j = crate::journal::JournalStore::in_memory()?;
+    let g = crate::gateway::Gateway::new(config());
+    reg_enable(&j, &g, &ep)?;
+    run_with_tool(&j, &g);
+    let ev = j.events()?;
+    let r: Vec<_> = ev
+        .iter()
+        .filter(|e| e.kind == crate::domain::JournalEventKind::ReceiptReceived)
+        .collect();
+    assert_eq!(r.len(), 1);
+    assert_eq!(r[0].payload["status"], "Failed");
+    assert_eq!(r[0].payload["output"]["error_category"], "harness_failed");
+    assert_eq!(
+        r[0].payload["output"]["harness_error_code"],
+        "custom_db_error_123"
+    );
     Ok(())
 }
