@@ -10,6 +10,7 @@ use crate::llm::{LlmClient, ToolCall};
 use crate::registry::snapshot::RegistrySnapshot;
 use anyhow::Result;
 use serde_json::json;
+use std::time::Duration;
 
 fn append_or_fatal(
     journal: &JournalStore,
@@ -49,7 +50,10 @@ fn rejected_result(rejection: ToolRejection) -> ToolCallOutcome {
 /// verify dispatch from a restored Run snapshot.
 ///
 /// External binding dispatch preserves the adapter's actual receipt status
-/// instead of rewriting everything to Succeeded.
+/// instead of rewriting everything to Succeeded. `harness_read_timeout` is
+/// the per-response read timeout for the external harness transport; it is
+/// derived from the Runtime's config so a slow/unresponsive harness yields
+/// `error_category: timeout` instead of an unbounded hang.
 pub(crate) fn dispatch_builtin_binding(
     spec: &crate::registry::snapshot::OperationSpec,
     approved: &ApprovedInvocation,
@@ -57,6 +61,7 @@ pub(crate) fn dispatch_builtin_binding(
     run: &Run,
     session: &Session,
     correlation_id: &str,
+    harness_read_timeout: Duration,
 ) -> ToolCallOutcome {
     let receipt_result: Result<Receipt> = match spec.binding_key.as_str() {
         "builtin.time_now" => crate::adapters::TimeAdapter.execute(approved),
@@ -83,8 +88,15 @@ pub(crate) fn dispatch_builtin_binding(
                 let manifest_id = &spec.binding_key;
                 match journal.load_harness_manifest(manifest_id) {
                     Ok(Some(manifest)) => {
-                        crate::adapters::external_harness::execute_external_harness(
-                            &manifest, approved,
+                        let transport_config =
+                            crate::adapters::external_harness::ExternalHarnessTransportConfig {
+                                read_timeout: harness_read_timeout,
+                                ..Default::default()
+                            };
+                        crate::adapters::external_harness::execute_external_harness_with_config(
+                            &manifest,
+                            approved,
+                            &transport_config,
                         )
                     }
                     Ok(None) => Err(anyhow::anyhow!(
@@ -331,6 +343,7 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
             run,
             session,
             &correlation_id,
+            Duration::from_millis(self.config.harness_read_timeout_ms),
         ));
     }
 
