@@ -125,7 +125,10 @@ pub fn execute_external_harness_with_config(
                     bail!("response exceeds {} byte limit", config.max_response_bytes);
                 }
             }
-            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+            Err(e)
+                if e.kind() == std::io::ErrorKind::TimedOut
+                    || e.kind() == std::io::ErrorKind::WouldBlock =>
+            {
                 bail!("external harness request timed out");
             }
             Err(e) => {

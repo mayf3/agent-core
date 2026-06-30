@@ -49,6 +49,13 @@ pub struct KernelConfig {
     /// names.
     /// Configured via AGENT_CORE_PRIMARY_TOOL_NAME_INDEXED (default: false).
     pub primary_tool_name_indexed: bool,
+    /// Maximum time to wait for a single external-harness HTTP response,
+    /// in milliseconds. Default 10_000 (10s). A Run pinned to a snapshot
+    /// containing an external operation uses this read timeout for the
+    /// loopback harness transport; reaching it yields error_category
+    /// `timeout` (never an unbounded hang). Configured via
+    /// AGENT_CORE_HARNESS_READ_TIMEOUT_MS.
+    pub harness_read_timeout_ms: u64,
 }
 
 impl KernelConfig {
@@ -122,6 +129,7 @@ impl KernelConfig {
             write_approval_ttl_secs: env_u64("AGENT_CORE_WRITE_APPROVAL_TTL_SECS", 0),
             fallback_tool_name_indexed: env_bool("AGENT_CORE_FALLBACK_TOOL_NAME_INDEXED", false),
             primary_tool_name_indexed: env_bool("AGENT_CORE_PRIMARY_TOOL_NAME_INDEXED", false),
+            harness_read_timeout_ms: env_u64("AGENT_CORE_HARNESS_READ_TIMEOUT_MS", 10_000),
         }
     }
 }
