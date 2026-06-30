@@ -192,7 +192,7 @@ fn request_includes_time_now_when_granted() -> Result<()> {
         user_text: "x".into(),
         granted_operations: vec!["time.now".to_string(), "system.status".to_string()],
         provider_tools,
-        follow_up: None,
+        follow_ups: vec![],
     })?;
     let requests = server.requests();
     let body = requests.first().expect("request captured");
@@ -246,7 +246,7 @@ fn request_omits_time_now_when_not_granted() -> Result<()> {
         user_text: "x".into(),
         granted_operations: vec!["session.recall_recent".to_string()],
         provider_tools,
-        follow_up: None,
+        follow_ups: vec![],
     })?;
     let requests = server.requests();
     let body = requests.first().expect("request captured");
@@ -284,7 +284,7 @@ fn misconfigured_write_grant_not_in_tools() -> Result<()> {
         user_text: "x".into(),
         granted_operations: vec!["feishu.send_message".to_string()],
         provider_tools,
-        follow_up: None,
+        follow_ups: vec![],
     })?;
     let requests = server.requests();
     let body = requests.first().expect("request captured");
@@ -450,12 +450,24 @@ fn granted_time_now_completes_real_http_tool_loop() {
         .filter_map(|tool| tool.pointer("/function/name").and_then(Value::as_str))
         .collect();
     assert_eq!(names, vec!["session.recall_recent", "time.now"]);
-    let followup_context = requests[1]
+    // The ToolResult is NOT duplicated in the system context — it is
+    // delivered exclusively via the role=tool follow-up message.
+    let system2 = requests[1]
         .pointer("/messages/0/content")
         .and_then(Value::as_str)
         .unwrap();
-    assert!(followup_context.contains("tool: time.now"));
-    assert!(followup_context.contains("status: succeeded"));
+    assert!(
+        !system2.contains("tool: time.now"),
+        "ToolResult must NOT be in system context"
+    );
+    let tool_msg = requests[1]
+        .pointer("/messages/3/content")
+        .and_then(Value::as_str)
+        .unwrap();
+    assert!(
+        tool_msg.contains("status: succeeded"),
+        "ToolResult must be in role=tool message"
+    );
     // §5: round-2 tools set == round-1; ToolCatalog consistent across rounds.
     let names2: Vec<&str> = requests[1]["tools"]
         .as_array()

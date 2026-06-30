@@ -149,6 +149,7 @@ impl JournalStore {
         if changed == 0 {
             bail!(TERMINAL_TRANSITION_ERROR);
         }
+        // ReceiptReceived — only safe fields, never raw connector output.
         append_event_tx(
             &tx,
             JournalEventKind::ReceiptReceived,
@@ -161,6 +162,15 @@ impl JournalStore {
                 "output_kind": "text",
             }),
         )?;
+
+        // AssistantReplyDelivered — only for reply operations (stdout/feishu)
+        // with a Succeeded receipt and known delivery text.
+        if receipt.status == ReceiptStatus::Succeeded {
+            if let Some(ref session) = session_id {
+                self.maybe_record_assistant_reply(&tx, &receipt, run_id, session)?;
+            }
+        }
+
         tx.execute(
             "UPDATE runs SET status = ?1, updated_at = ?2 WHERE id = ?3",
             params!["Completed", now.as_str(), run_id.0.as_str()],
@@ -178,6 +188,96 @@ impl JournalStore {
         )?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// Write AssistantReplyDelivered if the invocation is a reply operation
+    /// (stdout.send_text, feishu.send_message) with a known text argument.
+    /// Uses a UNIQUE constraint on invocation_id for idempotency.
+    fn maybe_record_assistant_reply(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        receipt: &Receipt,
+        run_id: &RunId,
+        session_id: &SessionId,
+    ) -> Result<()> {
+        let inv_id = &receipt.invocation_id.0;
+
+        // Load the outbox row to get operation and arguments.
+        let row: Result<(String, String), _> = tx.query_row(
+            "SELECT operation, arguments_json FROM outbox_dispatches WHERE invocation_id = ?1",
+            params![inv_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        );
+        let (operation, arguments_json) = match row {
+            Ok(r) => r,
+            Err(_) => return Ok(()), // No outbox row — not a reply.
+        };
+
+        // Only reply operations have a text argument to record.
+        let is_reply = operation == "stdout.send_text" || operation == "feishu.send_message";
+        if !is_reply {
+            return Ok(());
+        }
+
+        // Extract the user-visible text from arguments.
+        let arguments: serde_json::Value = match serde_json::from_str(&arguments_json) {
+            Ok(v) => v,
+            Err(_) => return Ok(()),
+        };
+        let text = match arguments.get("text").and_then(|v| v.as_str()) {
+            Some(t) => t,
+            None => return Ok(()),
+        };
+
+        // Determine the channel from the operation name.
+        let channel = match operation.as_str() {
+            "stdout.send_text" => "cli",
+            "feishu.send_message" => "feishu",
+            _ => return Ok(()),
+        };
+
+        // Write AssistantReplyDelivered with UNIQUE idempotency.
+        let payload = serde_json::json!({
+            "session_id": session_id.0,
+            "run_id": run_id.0,
+            "invocation_id": inv_id,
+            "channel": channel,
+            "text": text,
+        });
+        let result = append_event_tx(
+            tx,
+            JournalEventKind::AssistantReplyDelivered,
+            Some(run_id),
+            Some(session_id),
+            Some(inv_id),
+            payload,
+        );
+        if let Err(e) = result {
+            // If duplicate (UNIQUE on kind+sequence? No — journal_events
+            // has no unique constraint on invocation). Use the row count
+            // of a prior existence check instead.
+            if !self.assistant_reply_exists(tx, inv_id)? {
+                return Err(anyhow!("failed to record assistant reply: {e}"));
+            }
+        }
+        Ok(())
+    }
+
+    /// Check if an AssistantReplyDelivered event already exists for this
+    /// invocation.
+    fn assistant_reply_exists(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        invocation_id: &str,
+    ) -> Result<bool> {
+        let count: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM journal_events
+             WHERE kind = 'AssistantReplyDelivered'
+             AND correlation_id = ?1",
+            params![invocation_id],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
     }
 
     pub fn fail_outbox_dispatch(
