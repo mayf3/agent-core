@@ -11,20 +11,45 @@ use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
-const READ_TIMEOUT: Duration = Duration::from_secs(10);
-const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
-const MAX_RESPONSE_BYTES: usize = 64 * 1024; // 64 KiB
+/// Transport configuration for external harness execution.
+/// Defaults are safe for production; tests can reduce timeouts.
+pub struct ExternalHarnessTransportConfig {
+    pub connect_timeout: Duration,
+    pub read_timeout: Duration,
+    pub write_timeout: Duration,
+    pub max_response_bytes: usize,
+}
 
-/// Execute an external harness operation over strict localhost HTTP.
-/// The adapter is stateless: all configuration comes from the manifest.
+impl Default for ExternalHarnessTransportConfig {
+    fn default() -> Self {
+        Self {
+            connect_timeout: Duration::from_secs(3),
+            read_timeout: Duration::from_secs(10),
+            write_timeout: Duration::from_secs(5),
+            max_response_bytes: 64 * 1024,
+        }
+    }
+}
+
 pub fn execute_external_harness(
     manifest: &HarnessManifest,
     invocation: &ApprovedInvocation,
 ) -> Result<Receipt> {
+    execute_external_harness_with_config(
+        manifest,
+        invocation,
+        &ExternalHarnessTransportConfig::default(),
+    )
+}
+
+/// Execute an external harness operation with configurable transport.
+pub fn execute_external_harness_with_config(
+    manifest: &HarnessManifest,
+    invocation: &ApprovedInvocation,
+    config: &ExternalHarnessTransportConfig,
+) -> Result<Receipt> {
     let invocation_id = invocation.intent().invocation_id.clone();
 
-    // Build request body.
     let request_body = serde_json::json!({
         "protocol_version": manifest.protocol_version,
         "invocation_id": invocation_id.0,
@@ -33,35 +58,63 @@ pub fn execute_external_harness(
     });
     let request_bytes = serde_json::to_vec(&request_body)?;
 
-    // Resolve endpoint (loopback-only, validated at registration time).
-    let addr = manifest
-        .endpoint
+    // Strip internal-only fields from arguments before building request body.
+    // session_id was injected for policy validation and must not reach the harness.
+    let mut clean_args = invocation.intent().arguments.clone();
+    if let Some(obj) = clean_args.as_object_mut() {
+        obj.remove("session_id");
+    }
+
+    // Build request body WITHOUT internal fields.
+    let request_body = serde_json::json!({
+        "protocol_version": manifest.protocol_version,
+        "invocation_id": invocation_id.0,
+        "operation": manifest.operation_name,
+        "arguments": clean_args,
+    });
+    let request_bytes = serde_json::to_vec(&request_body)?;
+
+    // Parse endpoint.
+    let parsed = manifest.parse_endpoint()?;
+    let addr_str = format!("{}:{}", parsed.host, parsed.port);
+
+    // Resolve and verify all addresses are loopback.
+    let addrs: Vec<_> = addr_str
         .to_socket_addrs()
         .map_err(|e| anyhow::anyhow!("endpoint resolution failed: {e}"))?
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("endpoint resolved to no addresses"))?;
+        .collect();
+    if addrs.is_empty() {
+        bail!("endpoint resolved to no addresses");
+    }
+    // Verify each resolved address is loopback.
+    for addr in &addrs {
+        if !addr.ip().is_loopback() {
+            bail!("resolved address {addr} is not a loopback address");
+        }
+    }
 
     // Connect with timeout.
-    let stream = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT)
+    let stream = TcpStream::connect_timeout(&addrs[0], config.connect_timeout)
         .map_err(|e| anyhow::anyhow!("connect failed: {e}"))?;
     stream
-        .set_read_timeout(Some(READ_TIMEOUT))
+        .set_read_timeout(Some(config.read_timeout))
         .map_err(|e| anyhow::anyhow!("set_read_timeout failed: {e}"))?;
     stream
-        .set_write_timeout(Some(WRITE_TIMEOUT))
+        .set_write_timeout(Some(config.write_timeout))
         .map_err(|e| anyhow::anyhow!("set_write_timeout failed: {e}"))?;
-    let mut stream = stream; // owned for IO
+    let mut stream = stream;
 
-    // Send HTTP POST request.
+    // Send HTTP POST request using the manifest's path.
     let request = format!(
-        "POST /execute HTTP/1.1\r\n\
+        "POST {} HTTP/1.1\r\n\
          Host: {}\r\n\
          Content-Type: application/json\r\n\
          Content-Length: {}\r\n\
          Connection: close\r\n\
          \r\n\
          {}",
-        addr,
+        parsed.path,
+        addr_str,
         request_bytes.len(),
         String::from_utf8_lossy(&request_bytes),
     );
@@ -77,8 +130,8 @@ pub fn execute_external_harness(
             Ok(0) => break,
             Ok(n) => {
                 raw.extend_from_slice(&chunk[..n]);
-                if raw.len() > MAX_RESPONSE_BYTES {
-                    bail!("response exceeds 64 KiB limit");
+                if raw.len() > config.max_response_bytes {
+                    bail!("response exceeds {} byte limit", config.max_response_bytes);
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
@@ -90,9 +143,23 @@ pub fn execute_external_harness(
         }
     }
 
-    // Parse HTTP response.
     let response_str =
         String::from_utf8(raw).map_err(|_| anyhow::anyhow!("non-UTF-8 response from harness"))?;
+
+    // Parse HTTP status line.
+    let status_line = response_str.lines().next().unwrap_or("");
+    let http_ok = status_line.contains("200") || status_line.contains("2");
+    if !http_ok {
+        let code = status_line.split_whitespace().nth(1).unwrap_or("unknown");
+        // Non-2xx → Failed receipt (safe error category only).
+        return Ok(Receipt {
+            invocation_id,
+            status: ReceiptStatus::Failed,
+            output: serde_json::json!({"error_category": "http_error", "http_code": code}),
+            external_ref: None,
+            occurred_at: Utc::now(),
+        });
+    }
 
     // Extract body (after \r\n\r\n).
     let body = response_str
@@ -109,10 +176,13 @@ pub fn execute_external_harness(
         .and_then(Value::as_str)
         .unwrap_or("");
     if resp_protocol != manifest.protocol_version {
-        bail!(
-            "protocol version mismatch: got {resp_protocol:?}, expected {:?}",
-            manifest.protocol_version
-        );
+        return Ok(Receipt {
+            invocation_id,
+            status: ReceiptStatus::Failed,
+            output: serde_json::json!({"error_category": "protocol_mismatch"}),
+            external_ref: None,
+            occurred_at: Utc::now(),
+        });
     }
 
     // Check ok status.
@@ -127,8 +197,17 @@ pub fn execute_external_harness(
             .ok_or_else(|| anyhow::anyhow!("harness returned ok=true but no result"))?;
 
         // Validate against output schema.
-        crate::registry::schema::validate_against_schema(&manifest.output_schema, result)
-            .map_err(|e| anyhow::anyhow!("output schema violation: {e}"))?;
+        if crate::registry::schema::validate_against_schema(&manifest.output_schema, result)
+            .is_err()
+        {
+            return Ok(Receipt {
+                invocation_id,
+                status: ReceiptStatus::Failed,
+                output: serde_json::json!({"error_category": "output_schema_violation"}),
+                external_ref: None,
+                occurred_at: Utc::now(),
+            });
+        }
 
         Ok(Receipt {
             invocation_id,
@@ -138,14 +217,25 @@ pub fn execute_external_harness(
             occurred_at: Utc::now(),
         })
     } else {
-        let error_code = harness_response
+        // Limit and sanitize error_code from harness.
+        let raw_code = harness_response
             .get("error_code")
             .and_then(Value::as_str)
             .unwrap_or("unknown_error");
+        let bounded: String = raw_code
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+            .take(64)
+            .collect();
+        let error_code: &str = if bounded.is_empty() {
+            "harness_failed"
+        } else {
+            &bounded
+        };
         Ok(Receipt {
             invocation_id,
             status: ReceiptStatus::Failed,
-            output: serde_json::json!({"error": error_code}),
+            output: serde_json::json!({"error_category": error_code}),
             external_ref: None,
             occurred_at: Utc::now(),
         })

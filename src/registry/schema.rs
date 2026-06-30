@@ -10,6 +10,36 @@
 use anyhow::{bail, Result};
 use serde_json::Value;
 
+/// Validate that a schema value itself is structurally valid.
+/// This is a sanity check for manifest registration. It checks that
+/// the schema uses only allowed keywords and has a valid top-level type.
+pub fn validate_schema_structure(schema: &Value) -> Result<()> {
+    let schema_obj = schema
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("schema must be a JSON object"))?;
+    for key in schema_obj.keys() {
+        match key.as_str() {
+            "type"
+            | "properties"
+            | "required"
+            | "additionalProperties"
+            | "items"
+            | "minimum"
+            | "maximum"
+            | "description" => {}
+            _ => bail!("unknown schema keyword: {key}"),
+        }
+    }
+    let schema_type = schema_obj
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("object");
+    if schema_type != "object" {
+        bail!("top-level schema type must be 'object', got {schema_type:?}");
+    }
+    Ok(())
+}
+
 /// Validate `arguments` against the given JSON schema. Returns Ok(()) if the
 /// arguments conform, or an error describing the first violation.
 pub fn validate_against_schema(schema: &Value, arguments: &Value) -> Result<()> {

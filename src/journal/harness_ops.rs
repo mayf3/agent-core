@@ -15,7 +15,18 @@ impl super::JournalStore {
     /// Register a new harness manifest. Idempotent: same content produces the
     /// same manifest_id and returns the existing row. Different content for the
     /// same manifest_id returns an error.
+    ///
+    /// Validates that manifest.manifest_id matches the computed digest.
     pub fn register_harness_manifest(&self, manifest: &HarnessManifest) -> Result<String> {
+        // Verify manifest_id matches computed digest.
+        let computed_id = manifest.compute_manifest_id()?;
+        if manifest.manifest_id != computed_id {
+            bail!(
+                "manifest_id mismatch: got {}, computed {}",
+                manifest.manifest_id,
+                computed_id
+            );
+        }
         let conn = self
             .conn
             .lock()
@@ -146,26 +157,40 @@ impl super::JournalStore {
 
         match row {
             Some((mid, hid, ad, pv, ep, on, desc, is_json, os_json, idemp, ca_str)) => {
-                let input_schema: serde_json::Value =
-                    serde_json::from_str(&is_json).unwrap_or_default();
-                let output_schema: serde_json::Value =
-                    serde_json::from_str(&os_json).unwrap_or_default();
+                let input_schema: serde_json::Value = serde_json::from_str(&is_json)
+                    .map_err(|e| anyhow!("invalid input_schema_json for {mid}: {e}"))?;
+                let output_schema: serde_json::Value = serde_json::from_str(&os_json)
+                    .map_err(|e| anyhow!("invalid output_schema_json for {mid}: {e}"))?;
                 let created_at = chrono::DateTime::parse_from_rfc3339(&ca_str)
-                    .map(|t| t.with_timezone(&chrono::Utc))
-                    .unwrap_or_else(|_| Utc::now());
-                Ok(Some(HarnessManifest {
-                    manifest_id: mid,
+                    .map_err(|e| anyhow!("invalid created_at for {mid}: {e}"))?
+                    .with_timezone(&chrono::Utc);
+
+                // Verify protocol_version.
+                if pv != "external-harness-v1" {
+                    return Err(anyhow!("invalid protocol_version for {mid}: {pv:?}"));
+                }
+
+                // Verify manifest_id matches recomputed digest.
+                let check = HarnessManifest {
+                    manifest_id: mid.clone(),
                     harness_id: hid,
                     artifact_digest: ad,
                     protocol_version: pv,
                     endpoint: ep,
                     operation_name: on,
                     description: desc,
-                    input_schema,
-                    output_schema,
+                    input_schema: input_schema.clone(),
+                    output_schema: output_schema.clone(),
                     idempotent: idemp,
                     created_at,
-                }))
+                };
+                let recomputed = check.compute_manifest_id()?;
+                if check.manifest_id != recomputed {
+                    return Err(anyhow!(
+                        "manifest {mid}: stored manifest_id does not match recomputed digest"
+                    ));
+                }
+                Ok(Some(check))
             }
             None => Ok(None),
         }

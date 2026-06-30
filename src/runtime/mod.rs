@@ -37,6 +37,10 @@ mod registry_snapshot_gateway;
 #[path = "tests/external_harness_hotload.rs"]
 mod external_harness_hotload;
 
+#[cfg(test)]
+#[path = "tests/external_harness_transport.rs"]
+mod external_harness_transport;
+
 pub struct Runtime<L> {
     config: KernelConfig,
     llm: L,
