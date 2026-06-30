@@ -6,7 +6,7 @@ use crate::domain::*;
 use crate::harness::manifest::HarnessManifest;
 use anyhow::{bail, Result};
 use chrono::Utc;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
@@ -50,14 +50,6 @@ pub fn execute_external_harness_with_config(
 ) -> Result<Receipt> {
     let invocation_id = invocation.intent().invocation_id.clone();
 
-    let request_body = serde_json::json!({
-        "protocol_version": manifest.protocol_version,
-        "invocation_id": invocation_id.0,
-        "operation": manifest.operation_name,
-        "arguments": invocation.intent().arguments,
-    });
-    let request_bytes = serde_json::to_vec(&request_body)?;
-
     // Strip internal-only fields from arguments before building request body.
     // session_id was injected for policy validation and must not reach the harness.
     let mut clean_args = invocation.intent().arguments.clone();
@@ -86,7 +78,6 @@ pub fn execute_external_harness_with_config(
     if addrs.is_empty() {
         bail!("endpoint resolved to no addresses");
     }
-    // Verify each resolved address is loopback.
     for addr in &addrs {
         if !addr.ip().is_loopback() {
             bail!("resolved address {addr} is not a loopback address");
@@ -146,16 +137,25 @@ pub fn execute_external_harness_with_config(
     let response_str =
         String::from_utf8(raw).map_err(|_| anyhow::anyhow!("non-UTF-8 response from harness"))?;
 
-    // Parse HTTP status line.
+    // Parse HTTP status line with strict numeric parsing.
     let status_line = response_str.lines().next().unwrap_or("");
-    let http_ok = status_line.contains("200") || status_line.contains("2");
-    if !http_ok {
-        let code = status_line.split_whitespace().nth(1).unwrap_or("unknown");
-        // Non-2xx → Failed receipt (safe error category only).
+    let parts: Vec<&str> = status_line.split_whitespace().collect();
+    let status_code: u16 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+    if status_code == 0 {
+        // Illegal status line → malformed_response.
         return Ok(Receipt {
             invocation_id,
             status: ReceiptStatus::Failed,
-            output: serde_json::json!({"error_category": "http_error", "http_code": code}),
+            output: serde_json::json!({"error_category": "malformed_response"}),
+            external_ref: None,
+            occurred_at: Utc::now(),
+        });
+    }
+    if !(200..300).contains(&status_code) {
+        return Ok(Receipt {
+            invocation_id,
+            status: ReceiptStatus::Failed,
+            output: serde_json::json!({"error_category": "http_error", "http_code": status_code}),
             external_ref: None,
             occurred_at: Utc::now(),
         });
@@ -166,6 +166,17 @@ pub fn execute_external_harness_with_config(
         .find("\r\n\r\n")
         .map(|idx| &response_str[idx + 4..])
         .ok_or_else(|| anyhow::anyhow!("missing HTTP header terminator in harness response"))?;
+
+    // Empty body with 2xx is malformed.
+    if body.is_empty() {
+        return Ok(Receipt {
+            invocation_id,
+            status: ReceiptStatus::Failed,
+            output: serde_json::json!({"error_category": "malformed_response"}),
+            external_ref: None,
+            occurred_at: Utc::now(),
+        });
+    }
 
     let harness_response: Value = serde_json::from_str(body)
         .map_err(|e| anyhow::anyhow!("invalid JSON from harness: {e}"))?;
@@ -217,25 +228,25 @@ pub fn execute_external_harness_with_config(
             occurred_at: Utc::now(),
         })
     } else {
-        // Limit and sanitize error_code from harness.
+        // Harness returned ok=false. Always use fixed error_category.
+        // Optionally include a bounded harness error_code in a non-authoritative field.
         let raw_code = harness_response
             .get("error_code")
             .and_then(Value::as_str)
-            .unwrap_or("unknown_error");
+            .unwrap_or("");
         let bounded: String = raw_code
             .chars()
             .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
             .take(64)
             .collect();
-        let error_code: &str = if bounded.is_empty() {
-            "harness_failed"
-        } else {
-            &bounded
-        };
+        let mut output = serde_json::json!({"error_category": "harness_failed"});
+        if !bounded.is_empty() {
+            output["harness_error_code"] = json!(bounded);
+        }
         Ok(Receipt {
             invocation_id,
             status: ReceiptStatus::Failed,
-            output: serde_json::json!({"error_category": error_code}),
+            output,
             external_ref: None,
             occurred_at: Utc::now(),
         })
