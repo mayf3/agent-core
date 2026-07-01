@@ -50,16 +50,31 @@ impl super::JournalStore {
             *self.current_snapshot_id.lock().unwrap() = Some(state_snapshot_id.clone());
 
             // Check for legacy builtin time.now to retire.
-            if self.retire_legacy_builtin_time_if_present(&snap)? {
-                // Retirement was performed; the cached ID is now updated
-                // by retire_legacy_builtin_time_if_present. No need to re-init.
-                // Return the NEW active snapshot ID.
-                return self
-                    .current_snapshot_id
-                    .lock()
-                    .unwrap()
-                    .clone()
-                    .ok_or_else(|| anyhow!("registry_id_missing_after_retirement"));
+            match self.retire_legacy_builtin_time_if_present(&snap) {
+                Ok(true) => {
+                    // Retirement was performed; the cached ID is now updated
+                    // by retire_legacy_builtin_time_if_present. No need to re-init.
+                    // Return the NEW active snapshot ID.
+                    return self
+                        .current_snapshot_id
+                        .lock()
+                        .unwrap()
+                        .clone()
+                        .ok_or_else(|| anyhow!("registry_id_missing_after_retirement"));
+                }
+                Ok(false) => {
+                    // No legacy time.now found — return the original.
+                }
+                Err(e) => {
+                    // CAS conflict or other failure: refresh cache from DB
+                    // so the cached ID matches the true active snapshot.
+                    if let Ok(db_id) = self.load_active_snapshot_from_state() {
+                        if let Some(ref db_sid) = db_id {
+                            *self.current_snapshot_id.lock().unwrap() = Some(db_sid.clone());
+                        }
+                    }
+                    return Err(e);
+                }
             }
 
             return Ok(state_snapshot_id);
