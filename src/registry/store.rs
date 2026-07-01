@@ -41,15 +41,6 @@ pub fn builtin_specs() -> Vec<OperationSpec> {
             binding_key: "builtin.feishu_send_message".into(),
         },
         OperationSpec {
-            name: "time.now".into(),
-            risk: Risk::ReadOnly,
-            description: "Return the current kernel wall-clock time (ISO-8601 + epoch ms).".into(),
-            parameters: json!({"type": "object", "properties": {}, "required": [], "additionalProperties": false}),
-            idempotent: true,
-            binding_kind: BindingKind::Builtin,
-            binding_key: "builtin.time_now".into(),
-        },
-        OperationSpec {
             name: "session.recall_recent".into(),
             risk: Risk::ReadOnly,
             description:

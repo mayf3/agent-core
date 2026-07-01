@@ -86,33 +86,6 @@ impl InvocationAdapter for StdoutAdapter {
     }
 }
 
-/// Read-only local adapter for the `time.now` operation (Phase 2 M2e — the
-/// first `Risk::ReadOnly` operation). It returns the kernel's current
-/// wall-clock time. It performs no I/O and produces no side effect, so it is
-/// safe to execute inline without approval.
-///
-/// The receipt carries the time as both an ISO-8601 string and epoch
-/// milliseconds; `epoch_ms` is a number so callers can compare/order without
-/// re-parsing. Any arguments are ignored — the operation takes none.
-pub struct TimeAdapter;
-
-impl InvocationAdapter for TimeAdapter {
-    fn execute(&self, invocation: &ApprovedInvocation) -> Result<Receipt> {
-        let now = Utc::now();
-        let output = json!({
-            "iso": now.to_rfc3339(),
-            "epoch_ms": now.timestamp_millis(),
-        });
-        Ok(Receipt {
-            invocation_id: invocation.intent().invocation_id.clone(),
-            status: ReceiptStatus::Succeeded,
-            external_ref: None,
-            output,
-            occurred_at: now,
-        })
-    }
-}
-
 fn string_arg(value: &Value, key: &str) -> Result<String, AdapterError> {
     value
         .get(key)
@@ -352,37 +325,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn time_adapter_returns_succeeded_receipt_with_iso_and_epoch() {
-        // M2e: TimeAdapter is the first read-only adapter. It succeeds and
-        // surfaces the time as both an ISO-8601 string and epoch millis.
-        let adapter = TimeAdapter;
-        let invocation = ApprovedInvocation::new(
-            crate::domain::InvocationIntent {
-                invocation_id: crate::domain::InvocationId("test:time".to_string()),
-                run_id: crate::domain::RunId::new(),
-                operation: crate::domain::operation::TIME_NOW.to_string(),
-                arguments: json!({}),
-                idempotency_key: Some("test:time".to_string()),
-            },
-            "decision:time".to_string(),
-        );
-        let receipt = adapter.execute(&invocation).expect("time.now succeeds");
-        assert_eq!(receipt.status, ReceiptStatus::Succeeded);
-        assert!(receipt.external_ref.is_none());
-        let iso = receipt
-            .output
-            .get("iso")
-            .and_then(Value::as_str)
-            .expect("iso present");
-        let epoch_ms = receipt
-            .output
-            .get("epoch_ms")
-            .and_then(Value::as_i64)
-            .expect("epoch_ms present");
-        // epoch_ms must be a plausible recent timestamp (> year 2020) and
-        // parseable back from the ISO string.
-        assert!(epoch_ms > 1_577_836_800_000, "epoch_ms is post-2020");
-        chrono::DateTime::parse_from_rfc3339(iso).expect("iso is valid RFC3339");
-    }
 }
