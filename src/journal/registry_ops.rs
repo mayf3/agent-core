@@ -7,9 +7,16 @@ use crate::registry::snapshot::{
     compute_snapshot_id, BindingKind, OperationSpec, RegistrySnapshot, Risk,
 };
 use crate::registry::store::builtin_specs;
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
+use chrono::Utc;
 use rusqlite::params;
 use std::sync::Arc;
+
+/// Narrow legacy constant to identify the retired builtin time.now operation.
+/// This is only used in the upgrade migration path — it does NOT add time.now
+/// to the catalog, provider tools, grants, or dispatch.
+const LEGACY_BUILTIN_TIME_OPERATION: &str = "time.now";
+const LEGACY_BUILTIN_TIME_BINDING: &str = "builtin.time_now";
 
 impl super::JournalStore {
     /// Initialize the registry at Kernel boot: ensure the baseline snapshot
@@ -20,6 +27,11 @@ impl super::JournalStore {
     ///
     /// Idempotent: if the baseline snapshot already exists (same canonical ID),
     /// it is reused; if `current_snapshot_id` is already set, it is preserved.
+    ///
+    /// If a legacy active snapshot contains the retired builtin time.now
+    /// operation, it is automatically removed and a new snapshot is activated.
+    /// The old snapshot remains immutable; the retired operation is never
+    /// forwarded to an external harness, and no receipt is fabricated.
     pub fn initialize_registry(&self) -> Result<String> {
         // Check if we already have a cached current_snapshot_id (idempotent).
         if self.current_snapshot_id.lock().unwrap().is_some() {
@@ -34,8 +46,22 @@ impl super::JournalStore {
         // Check if registry_state already exists (restart path).
         if let Some(state_snapshot_id) = self.load_active_snapshot_from_state()? {
             // Verify the snapshot exists in the DB.
-            let _ = self.load_registry_snapshot(&state_snapshot_id)?;
+            let snap = self.load_registry_snapshot(&state_snapshot_id)?;
             *self.current_snapshot_id.lock().unwrap() = Some(state_snapshot_id.clone());
+
+            // Check for legacy builtin time.now to retire.
+            if self.retire_legacy_builtin_time_if_present(&snap)? {
+                // Retirement was performed; the cached ID is now updated
+                // by retire_legacy_builtin_time_if_present. No need to re-init.
+                // Return the NEW active snapshot ID.
+                return self
+                    .current_snapshot_id
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .ok_or_else(|| anyhow!("registry_id_missing_after_retirement"));
+            }
+
             return Ok(state_snapshot_id);
         }
 
@@ -47,6 +73,165 @@ impl super::JournalStore {
         // Backfill old Runs with NULL snapshot ID.
         let _ = self.backfill_null_registry_snapshot(&snapshot_id);
         Ok(snapshot_id)
+    }
+
+    /// Check if the active snapshot contains the legacy builtin time.now
+    /// operation. If so, create a new snapshot without it and atomically
+    /// activate the new one via CAS + journal event. Returns true if
+    /// retirement was performed.
+    fn retire_legacy_builtin_time_if_present(
+        &self,
+        current_snap: &Arc<RegistrySnapshot>,
+    ) -> Result<bool> {
+        // Check if the active snapshot has legacy builtin time.now.
+        let has_legacy = current_snap.operations.iter().any(|op| {
+            op.name == LEGACY_BUILTIN_TIME_OPERATION
+                && op.binding_kind == BindingKind::Builtin
+                && op.binding_key == LEGACY_BUILTIN_TIME_BINDING
+        });
+
+        if !has_legacy {
+            return Ok(false);
+        }
+
+        // Build a new spec list WITHOUT the legacy time.now.
+        let new_specs: Vec<OperationSpec> = current_snap
+            .operations
+            .iter()
+            .filter(|op| {
+                !(op.name == LEGACY_BUILTIN_TIME_OPERATION
+                    && op.binding_kind == BindingKind::Builtin
+                    && op.binding_key == LEGACY_BUILTIN_TIME_BINDING)
+            })
+            .cloned()
+            .collect();
+
+        // Verify the new snapshot is different.
+        if new_specs.len() == current_snap.operations.len() {
+            // Should not happen since we checked has_legacy above, but guard.
+            return Ok(false);
+        }
+
+        let new_snapshot = self.create_registry_snapshot(new_specs)?;
+        let new_snapshot_id = new_snapshot.snapshot_id.clone();
+
+        // Activate atomically with CAS + journal event.
+        let old_id = &current_snap.snapshot_id;
+        let decision_id = format!("retire_builtin_time:{}", old_id);
+
+        // Use the same atomic activation path as enable_harness/disable_harness.
+        self.retire_builtin_time_atomic(&new_snapshot_id, old_id, &decision_id)?;
+
+        eprintln!(
+            "retired legacy builtin time.now: {} -> {}",
+            old_id, new_snapshot_id
+        );
+
+        Ok(true)
+    }
+
+    /// Atomically activate a new snapshot after retiring builtin time.now,
+    /// recording a RegistrySnapshotActivated journal event.
+    fn retire_builtin_time_atomic(
+        &self,
+        new_snapshot_id: &str,
+        expected_snapshot_id: &str,
+        decision_id: &str,
+    ) -> Result<()> {
+        use crate::domain::EventId;
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow!("journal mutex poisoned"))?;
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|_| anyhow!("cannot begin transaction"))?;
+
+        // CAS: read current registry_state and verify.
+        let (db_snapshot_id, db_version): (String, i64) = tx
+            .query_row(
+                "SELECT active_snapshot_id, version FROM registry_state WHERE singleton_id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|_| anyhow!("registry_state not initialized"))?;
+
+        if db_snapshot_id != expected_snapshot_id {
+            bail!("snapshot_conflict: registry_state has {db_snapshot_id}, expected {expected_snapshot_id}");
+        }
+
+        let new_version = db_version + 1;
+
+        let changed = tx.execute(
+            "UPDATE registry_state SET active_snapshot_id = ?1, version = ?2, updated_at = ?3
+             WHERE singleton_id = 1 AND version = ?4",
+            params![
+                new_snapshot_id,
+                new_version,
+                Utc::now().to_rfc3339(),
+                db_version,
+            ],
+        )?;
+        if changed == 0 {
+            bail!("snapshot_conflict: version CAS failed");
+        }
+
+        // Record journal event.
+        let payload = serde_json::json!({
+            "action": "retire_builtin_time",
+            "previous_snapshot_id": expected_snapshot_id,
+            "new_snapshot_id": new_snapshot_id,
+            "decision_id": decision_id,
+        });
+        let kind_text = "RegistrySnapshotActivated";
+        let event_id = EventId::new();
+        let created_at = Utc::now();
+        let payload_json = serde_json::to_string(&payload)?;
+
+        // Get previous hash for chain.
+        let previous: Option<(i64, String)> = tx
+            .query_row(
+                "SELECT sequence, hash FROM journal_events ORDER BY sequence DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .ok();
+        let sequence = previous.as_ref().map(|(seq, _)| seq + 1).unwrap_or(1);
+        let previous_hash = previous.map(|(_, hash)| hash);
+        let hash = crate::journal::hash_chain::event_hash(
+            previous_hash.as_deref(),
+            sequence,
+            kind_text,
+            &payload_json,
+        );
+
+        tx.execute(
+            "INSERT INTO journal_events
+             (sequence, event_id, run_id, session_id, correlation_id, kind, payload_json, previous_hash, hash, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                sequence,
+                event_id.0,
+                Option::<String>::None,
+                Option::<String>::None,
+                decision_id,
+                kind_text,
+                payload_json,
+                previous_hash,
+                hash,
+                created_at.to_rfc3339(),
+            ],
+        )?;
+
+        tx.commit()?;
+
+        // Release DB lock before updating memory cache.
+        drop(conn);
+
+        // Update memory cache AFTER successful commit.
+        *self.current_snapshot_id.lock().unwrap() = Some(new_snapshot_id.to_string());
+
+        Ok(())
     }
 
     /// Read-only getter for the currently active registry snapshot ID.
