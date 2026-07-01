@@ -218,18 +218,18 @@ mod tests {
             snapshot_id: "snap_test".into(),
             created_at: Utc::now(),
             operations: vec![
-                spec("time.now", Risk::ReadOnly),
+                spec("system.status", Risk::ReadOnly),
                 spec("feishu.send_message", Risk::Write),
             ],
         };
         let tools = snap.provider_tools_for_grants(&[
-            "time.now".to_string(),
+            "system.status".to_string(),
             "feishu.send_message".to_string(),
         ]);
         assert_eq!(tools.len(), 1);
         assert_eq!(
             tools[0].pointer("/function/name").and_then(|v| v.as_str()),
-            Some("time.now")
+            Some("system.status")
         );
     }
 
@@ -238,10 +238,10 @@ mod tests {
         let snap = RegistrySnapshot {
             snapshot_id: "snap_test".into(),
             created_at: Utc::now(),
-            operations: vec![spec("time.now", Risk::ReadOnly)],
+            operations: vec![spec("system.status", Risk::ReadOnly)],
         };
-        let text = snap.catalog_for_context_grants(&["time.now".to_string()]);
-        assert!(text.contains("time.now"));
+        let text = snap.catalog_for_context_grants(&["system.status".to_string()]);
+        assert!(text.contains("system.status"));
         let empty = snap.catalog_for_context_grants(&[]);
         assert!(empty.contains("No tools"));
     }

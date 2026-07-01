@@ -221,7 +221,6 @@ mod tests {
 
     #[test]
     fn sanitize_keeps_catalog_operation_canonical() {
-        assert_eq!(sanitize_operation_for_audit("time.now"), "time.now");
         assert_eq!(
             sanitize_operation_for_audit("session.recall_recent"),
             "session.recall_recent"

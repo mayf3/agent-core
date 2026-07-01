@@ -45,7 +45,7 @@ fn test_config() -> KernelConfig {
         context_max_block_chars: 4000,
         outbox_dispatcher_enabled: false,
         outbox_dispatcher_poll_interval_ms: 10,
-        extra_allowed_operations: vec!["time.now".to_string()],
+        extra_allowed_operations: vec!["system.status".to_string()],
         require_write_approval: false,
         write_approval_ttl_secs: 0,
         fallback_tool_name_indexed: false,
@@ -66,13 +66,13 @@ fn v1_specs() -> Vec<OperationSpec> {
             binding_key: "builtin.stdout_send_text".into(),
         },
         OperationSpec {
-            name: "time.now".into(),
+            name: "system.status".into(),
             risk: Risk::ReadOnly,
             description: "v1 description".into(),
             parameters: json!({"type": "object", "v1_marker": true, "additionalProperties": false}),
             idempotent: true,
             binding_kind: BindingKind::Builtin,
-            binding_key: "builtin.time_now".into(),
+            binding_key: "builtin.system_status".into(),
         },
     ]
 }
@@ -89,13 +89,13 @@ fn v2_specs() -> Vec<OperationSpec> {
             binding_key: "builtin.stdout_send_text".into(),
         },
         OperationSpec {
-            name: "time.now".into(),
+            name: "system.status".into(),
             risk: Risk::ReadOnly,
             description: "v2 description".into(),
             parameters: json!({"type": "object", "v2_marker": true, "additionalProperties": false}),
             idempotent: true,
             binding_kind: BindingKind::Builtin,
-            binding_key: "builtin.time_now".into(),
+            binding_key: "builtin.system_status".into(),
         },
     ]
 }
@@ -162,14 +162,14 @@ impl LlmClient for CaptureLlm {
                 journal_payload: json!({"status": "ok"}),
                 tool_call: ToolCallResult::Valid(ToolCall {
                     id: "call_test".into(),
-                    operation: "time.now".into(),
+                    operation: "system.status".into(),
                     arguments: json!({}),
                 }),
                 provider_turn: Some(ProviderToolTurn {
                     endpoint: EndpointChoice::Primary,
                     provider_tool_call_id: "call_test_raw".into(),
-                    wire_name: "time.now".into(),
-                    canonical_operation: "time.now".into(),
+                    wire_name: "system.status".into(),
+                    canonical_operation: "system.status".into(),
                     arguments_json: "{}".into(),
                 }),
             })
@@ -218,7 +218,7 @@ fn a_provider_tools_pinned_to_run_snapshot() -> Result<()> {
     for i in 0..t.len() {
         let desc = t[i]
             .iter()
-            .find(|tool| tool.pointer("/function/name").and_then(Value::as_str) == Some("time.now"))
+            .find(|tool| tool.pointer("/function/name").and_then(Value::as_str) == Some("system.status"))
             .and_then(|tool| {
                 tool.pointer("/function/description")
                     .and_then(Value::as_str)
@@ -275,7 +275,7 @@ fn a_provider_tools_pinned_to_run_snapshot() -> Result<()> {
     assert!(t2.len() >= 1, "Run B should have >=1 round");
     let b_desc = t2[0]
         .iter()
-        .find(|tool| tool.pointer("/function/name").and_then(Value::as_str) == Some("time.now"))
+        .find(|tool| tool.pointer("/function/name").and_then(Value::as_str) == Some("system.status"))
         .and_then(|tool| {
             tool.pointer("/function/description")
                 .and_then(Value::as_str)

@@ -193,10 +193,10 @@ fn duplicate_success_dispatch_records_one_assistant_reply_delivered() -> Result<
 #[test]
 fn e2e_multi_round_tool_loop_preserves_complete_http_transcript() -> Result<()> {
     let mut c = common::test_config();
-    c.extra_allowed_operations = vec!["time.now".into()];
+    c.extra_allowed_operations = vec!["system.status".into()];
     let sv = CaptureServer::start(vec![
-        tool_call_response("cA", "time.now", "{}"),
-        tool_call_response("cB", "time.now", "{}"),
+        tool_call_response("cA", "system.status", "{}"),
+        tool_call_response("cB", "system.status", "{}"),
         text_response("done"),
     ]);
     c.openai_base_url = sv.base_url();
@@ -238,9 +238,9 @@ fn e2e_multi_round_tool_loop_preserves_complete_http_transcript() -> Result<()> 
 #[test]
 fn e2e_tool_results_appear_once_and_system_stays_byte_identical() -> Result<()> {
     let mut c = common::test_config();
-    c.extra_allowed_operations = vec!["time.now".into()];
+    c.extra_allowed_operations = vec!["system.status".into()];
     let sv = CaptureServer::start(vec![
-        tool_call_response("cx", "time.now", "{}"),
+        tool_call_response("cx", "system.status", "{}"),
         text_response("done"),
     ]);
     c.openai_base_url = sv.base_url();
@@ -269,10 +269,10 @@ fn e2e_tool_results_appear_once_and_system_stays_byte_identical() -> Result<()> 
 #[test]
 fn malformed_follow_up_then_valid_tool_call_does_not_reuse_stale_pending_turn() -> Result<()> {
     let mut c = common::test_config();
-    c.extra_allowed_operations = vec!["time.now".into()];
+    c.extra_allowed_operations = vec!["system.status".into()];
     let sv = CaptureServer::start(vec![
-        json!({"model":"local-stub","choices":[{"message":{"content":"","tool_calls":[{"id":"bad","type":"function","function":{"name":"time.now","arguments":"{bad}"}}]}}]}),
-        tool_call_response("vcall", "time.now", "{}"),
+        json!({"model":"local-stub","choices":[{"message":{"content":"","tool_calls":[{"id":"bad","type":"function","function":{"name":"system.status","arguments":"{bad}"}}]}}]}),
+        tool_call_response("vcall", "system.status", "{}"),
         text_response("done"),
     ]);
     c.openai_base_url = sv.base_url();

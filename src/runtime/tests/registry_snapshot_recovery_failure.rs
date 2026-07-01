@@ -41,7 +41,7 @@ fn test_config() -> KernelConfig {
         context_max_block_chars: 4000,
         outbox_dispatcher_enabled: false,
         outbox_dispatcher_poll_interval_ms: 10,
-        extra_allowed_operations: vec!["time.now".to_string()],
+        extra_allowed_operations: vec!["system.status".to_string()],
         require_write_approval: false,
         write_approval_ttl_secs: 0,
         fallback_tool_name_indexed: false,
@@ -62,13 +62,13 @@ fn v1_specs() -> Vec<OperationSpec> {
             binding_key: "builtin.stdout_send_text".into(),
         },
         OperationSpec {
-            name: "time.now".into(),
+            name: "system.status".into(),
             risk: Risk::ReadOnly,
             description: "v1 description".into(),
             parameters: json!({"type": "object", "v1_marker": true, "additionalProperties": false}),
             idempotent: true,
             binding_kind: BindingKind::Builtin,
-            binding_key: "builtin.time_now".into(),
+            binding_key: "builtin.system_status".into(),
         },
     ]
 }
@@ -128,7 +128,7 @@ fn f_restart_recovery_preserves_snapshot_binding() -> Result<()> {
         let tools = snap.provider_tools_for_grants(&granted);
         let desc = tools
             .iter()
-            .find(|t| t.pointer("/function/name").and_then(Value::as_str) == Some("time.now"))
+            .find(|t| t.pointer("/function/name").and_then(Value::as_str) == Some("system.status"))
             .and_then(|t| t.pointer("/function/description").and_then(Value::as_str))
             .unwrap_or("");
         assert_eq!(
@@ -175,14 +175,14 @@ fn f_restart_recovery_preserves_snapshot_binding() -> Result<()> {
         assert!(!cat.contains("v2 description"), "Context must NOT be v2");
 
         // Verify Gateway lookup uses v1.
-        let spec = snap.lookup("time.now").unwrap();
+        let spec = snap.lookup("system.status").unwrap();
         assert_eq!(
             spec.risk,
             Risk::ReadOnly,
             "Gateway must read ReadOnly from v1 snapshot"
         );
         assert_eq!(
-            spec.binding_key, "builtin.time_now",
+            spec.binding_key, "builtin.system_status",
             "binding_key must come from v1 snapshot"
         );
 
@@ -199,13 +199,13 @@ fn f_restart_recovery_preserves_snapshot_binding() -> Result<()> {
                 binding_key: "builtin.stdout_send_text".into(),
             },
             OperationSpec {
-                name: "time.now".into(),
+                name: "system.status".into(),
                 risk: Risk::ReadOnly,
                 description: "v2 description".into(),
                 parameters: json!({"type": "object", "v2_marker": true, "additionalProperties": false}),
                 idempotent: true,
                 binding_kind: BindingKind::Builtin,
-                binding_key: "builtin.time_now".into(),
+                binding_key: "builtin.system_status".into(),
             },
         ];
         let snap_v2 = journal.create_registry_snapshot(v2_specs)?;
@@ -234,7 +234,7 @@ fn f_restart_recovery_preserves_snapshot_binding() -> Result<()> {
         // Verify v2 content is different from v1.
         let current_snap = journal.load_registry_snapshot(&v2_snapshot_id)?;
         assert_eq!(
-            current_snap.lookup("time.now").unwrap().description,
+            current_snap.lookup("system.status").unwrap().description,
             "v2 description",
             "current (v2) snapshot must have v2 description"
         );
@@ -242,7 +242,7 @@ fn f_restart_recovery_preserves_snapshot_binding() -> Result<()> {
         // Verify restored Run still loads v1 content.
         let restored_snap = journal.load_registry_snapshot(&run.registry_snapshot_id)?;
         assert_eq!(
-            restored_snap.lookup("time.now").unwrap().description,
+            restored_snap.lookup("system.status").unwrap().description,
             "v1 description",
             "restored Run's snapshot must have v1 description"
         );
@@ -257,16 +257,16 @@ fn f_restart_recovery_preserves_snapshot_binding() -> Result<()> {
         let hashed_id = tool_call_id_hash("call_restored_time");
         let tool_call = crate::llm::ToolCall {
             id: hashed_id,
-            operation: "time.now".into(),
+            operation: "system.status".into(),
             arguments: json!({}),
         };
 
         // 1. validate_tool_call — uses loaded snapshot for existence + risk.
         let intent = validate_tool_call(&tool_call, &run.id, 0, 0, &snap)
-            .expect("time.now must validate against restored v1 snapshot");
+            .expect("system.status must validate against restored v1 snapshot");
         assert_eq!(
-            intent.operation, "time.now",
-            "Approved operation must be time.now"
+            intent.operation, "system.status",
+            "Approved operation must be system.status"
         );
 
         // 2. Gateway::approve_invocation — uses restored Run grants + snapshot.
@@ -289,8 +289,8 @@ fn f_restart_recovery_preserves_snapshot_binding() -> Result<()> {
         )?;
         assert_eq!(
             approved.intent().operation,
-            "time.now",
-            "Approved operation must be time.now"
+            "system.status",
+            "Approved operation must be system.status"
         );
 
         // 3+4. Production inline dispatch via dispatch_builtin_binding.
@@ -348,18 +348,18 @@ fn f_restart_recovery_preserves_snapshot_binding() -> Result<()> {
         assert!(
             receipt
                 .payload
-                .pointer("/output/iso")
+                .pointer("/output/status")
                 .and_then(Value::as_str)
                 .is_some(),
-            "output must contain 'iso' (time.now handler)"
+            "output must contain 'status' (via system.status handler binding)"
         );
         assert!(
             receipt
                 .payload
-                .pointer("/output/epoch_ms")
+                .pointer("/output/event_count")
                 .and_then(Value::as_number)
                 .is_some(),
-            "output must contain 'epoch_ms' (time.now handler)"
+            "output must contain 'event_count' (via system.status handler binding)"
         );
     }
 
