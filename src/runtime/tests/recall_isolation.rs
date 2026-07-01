@@ -9,7 +9,6 @@ use crate::runtime::Runtime;
 use anyhow::Result;
 use serde_json::json;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 // =========================================================================
 // AssertRecallLlm — asserts specific condition, used in audit test

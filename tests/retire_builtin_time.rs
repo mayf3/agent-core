@@ -1,7 +1,6 @@
 //! Retirement integration tests.
 #![allow(unused_variables)]
 //! Retirement integration tests.
-use std::path::Path;
 use agent_core_kernel::domain::operation::{is_allowed, lookup, CATALOG};
 use agent_core_kernel::journal::JournalStore;
 use agent_core_kernel::registry::snapshot::{BindingKind, OperationSpec, Risk};
@@ -9,6 +8,7 @@ use agent_core_kernel::registry::store::builtin_specs;
 use chrono::Utc;
 use rusqlite::Connection;
 use serde_json::json;
+use std::path::Path;
 // =========================================================================
 // Helper: build a legacy DB with old builtin time.now snapshot
 // =========================================================================
