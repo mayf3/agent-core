@@ -18,9 +18,10 @@ pub struct JournalStore {
     pub(crate) recall_failure_for_test: std::sync::atomic::AtomicBool,
 }
 
-/// The schema `PRAGMA user_version` this kernel writes and understands. Bumped only when `migrations/` gains a new applied migration. The startup
+/// The schema `PRAGMA user_version` this kernel writes and understands. Bumped
+/// only when `migrations/` gains a new applied migration. The startup
 /// `migrate()` refuses to run against a DB whose version is newer than this.
-const CURRENT_SCHEMA_VERSION: i64 = 2;
+const CURRENT_SCHEMA_VERSION: i64 = 3;
 
 impl JournalStore {
     pub fn open(path: &Path) -> Result<Self> {
@@ -331,6 +332,9 @@ impl JournalStore {
             // Fresh database: run all migrations and stamp the version.
             conn.execute_batch(include_str!("../../migrations/0001_init.sql"))?;
             conn.execute_batch(include_str!("../../migrations/0002_registry_snapshots.sql"))?;
+            conn.execute_batch(include_str!(
+                "../../migrations/0003_external_harness_hotload.sql"
+            ))?;
             super::queue::migrate(&conn)?;
             backfill_feishu_message_dedup(&conn)?;
             conn.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
@@ -339,6 +343,13 @@ impl JournalStore {
             conn.execute_batch(include_str!("../../migrations/0002_registry_snapshots.sql"))?;
             super::queue::migrate(&conn)?;
             backfill_feishu_message_dedup(&conn)?;
+            conn.pragma_update(None, "user_version", 2)?;
+            // Continue to v2 → v3 below.
+        } else if applied == 2 {
+            // v2 → v3: add external harness tables + registry_state.
+            conn.execute_batch(include_str!(
+                "../../migrations/0003_external_harness_hotload.sql"
+            ))?;
             conn.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
         } else {
             // Existing database at a known version: the base schema migration

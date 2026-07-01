@@ -1,6 +1,6 @@
 use super::tool_loop::ToolCallOutcome;
 use super::tool_rejection::{
-    internal_tool_call_id, sanitize_operation_for_audit, validate_model_arguments,
+    internal_tool_call_id, sanitize_operation_for_audit_with_snapshot, validate_model_arguments,
 };
 use crate::adapters::InvocationAdapter;
 use crate::domain::*;
@@ -10,6 +10,7 @@ use crate::llm::{LlmClient, ToolCall};
 use crate::registry::snapshot::RegistrySnapshot;
 use anyhow::Result;
 use serde_json::json;
+use std::time::Duration;
 
 fn append_or_fatal(
     journal: &JournalStore,
@@ -47,6 +48,12 @@ fn rejected_result(rejection: ToolRejection) -> ToolCallOutcome {
 /// This is the single authoritative binding_key → handler match used by
 /// both `handle_inline_tool_call` (the tool loop) and tests that need to
 /// verify dispatch from a restored Run snapshot.
+///
+/// External binding dispatch preserves the adapter's actual receipt status
+/// instead of rewriting everything to Succeeded. `harness_read_timeout` is
+/// the per-response read timeout for the external harness transport; it is
+/// derived from the Runtime's config so a slow/unresponsive harness yields
+/// `error_category: timeout` instead of an unbounded hang.
 pub(crate) fn dispatch_builtin_binding(
     spec: &crate::registry::snapshot::OperationSpec,
     approved: &ApprovedInvocation,
@@ -54,47 +61,110 @@ pub(crate) fn dispatch_builtin_binding(
     run: &Run,
     session: &Session,
     correlation_id: &str,
+    harness_read_timeout: Duration,
 ) -> ToolCallOutcome {
-    let exec_result: Result<(serde_json::Value, String)> = match spec.binding_key.as_str() {
-        "builtin.time_now" => crate::adapters::TimeAdapter
-            .execute(approved)
-            .map(|receipt| {
-                let text = receipt
-                    .output
-                    .get("iso")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("ok")
-                    .to_string();
-                (receipt.output, text)
-            }),
+    let receipt_result: Result<Receipt> = match spec.binding_key.as_str() {
+        "builtin.time_now" => crate::adapters::TimeAdapter.execute(approved),
         "builtin.session_recall_recent" => {
-            crate::runtime::tool_rejection::execute_session_recall(journal, &session.id, approved)
-                .map(|(_, output, text)| (output, text))
+            super::tool_rejection::execute_session_recall(journal, &session.id, approved).map(
+                |(status, output, _text)| Receipt {
+                    invocation_id: approved.intent().invocation_id.clone(),
+                    status,
+                    output,
+                    external_ref: None,
+                    occurred_at: chrono::Utc::now(),
+                },
+            )
         }
-        "builtin.system_status" => crate::capabilities::execute(journal).map(|output| {
-            let text = output
-                .get("summary")
-                .and_then(|value| value.as_str())
-                .unwrap_or("ok")
-                .to_string();
-            (output, text)
-        }),
-        _ => Err(anyhow::anyhow!(
-            "registry_binding_invalid: {}",
-            spec.binding_key
-        )),
-    };
-    let (status, output, text) = match exec_result {
-        Ok((output, text)) => (
-            ReceiptStatus::Succeeded,
+        "builtin.system_status" => crate::capabilities::execute(journal).map(|output| Receipt {
+            invocation_id: approved.intent().invocation_id.clone(),
+            status: ReceiptStatus::Succeeded,
             output,
-            format!("status: succeeded\noutput: {text}"),
-        ),
-        Err(_) => (
-            ReceiptStatus::Failed,
-            json!({"error_category": "capability_execution_failed"}),
-            "status: execution_failed\nerror_category: capability_execution_failed".to_string(),
-        ),
+            external_ref: None,
+            occurred_at: chrono::Utc::now(),
+        }),
+        _ => {
+            if spec.binding_kind == crate::registry::snapshot::BindingKind::External {
+                let manifest_id = &spec.binding_key;
+                match journal.load_harness_manifest(manifest_id) {
+                    Ok(Some(manifest)) => {
+                        let transport_config =
+                            crate::adapters::external_harness::ExternalHarnessTransportConfig {
+                                read_timeout: harness_read_timeout,
+                                ..Default::default()
+                            };
+                        crate::adapters::external_harness::execute_external_harness_with_config(
+                            &manifest,
+                            approved,
+                            &transport_config,
+                        )
+                    }
+                    Ok(None) => Err(anyhow::anyhow!(
+                        "external_harness_manifest_not_found: {manifest_id}"
+                    )),
+                    Err(e) => Err(anyhow::anyhow!(
+                        "external_harness_manifest_load_failed: {e}"
+                    )),
+                }
+            } else {
+                Err(anyhow::anyhow!(
+                    "registry_binding_invalid: {}",
+                    spec.binding_key
+                ))
+            }
+        }
+    };
+    let (status, output, text) = match receipt_result {
+        Ok(receipt) => {
+            let text = match receipt.status {
+                ReceiptStatus::Succeeded => {
+                    format!("status: succeeded\noutput: {:?}", receipt.output)
+                }
+                ReceiptStatus::Failed => {
+                    let cat = receipt
+                        .output
+                        .get("error_category")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("harness_failed");
+                    format!("status: execution_failed\nerror_category: {cat}")
+                }
+                ReceiptStatus::Unknown => {
+                    "status: execution_failed\nerror_category: unknown_outcome".to_string()
+                }
+            };
+            (receipt.status, receipt.output, text)
+        }
+        Err(e) => {
+            let cat = if e.to_string().contains("timed out") || e.to_string().contains("timeout") {
+                "timeout"
+            } else if e.to_string().contains("connect failed") {
+                "connect_failed"
+            } else if e.to_string().contains("protocol version mismatch")
+                || e.to_string().contains("protocol")
+            {
+                "protocol_mismatch"
+            } else if e.to_string().contains("non-2xx") || e.to_string().contains("HTTP") {
+                "http_error"
+            } else if e.to_string().contains("schema violation")
+                || e.to_string().contains("output schema")
+            {
+                "output_schema_violation"
+            } else if e.to_string().contains("exceeds 64 KiB") {
+                "response_too_large"
+            } else if e.to_string().contains("malformed")
+                || e.to_string().contains("invalid JSON")
+                || e.to_string().contains("UTF-8")
+            {
+                "malformed_response"
+            } else {
+                "harness_failed"
+            };
+            (
+                ReceiptStatus::Failed,
+                json!({"error_category": cat}),
+                format!("status: execution_failed\nerror_category: {cat}"),
+            )
+        }
     };
     if let Some(fatal) = append_or_fatal(
         journal,
@@ -154,7 +224,7 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
         tool_index: usize,
         snapshot: &RegistrySnapshot,
     ) -> Result<ToolCallOutcome> {
-        let audited_op = sanitize_operation_for_audit(&tool_call.operation);
+        let audited_op = sanitize_operation_for_audit_with_snapshot(&tool_call.operation, snapshot);
 
         // Always write ToolCallIssued first (audit trail), even for operations
         // that will be rejected by the snapshot pre-check below.
@@ -201,7 +271,7 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
                 )
             }
         };
-        if let Err(rejection) = validate_model_arguments(&intent.operation, &intent.arguments) {
+        if let Err(rejection) = validate_model_arguments(spec, &intent.arguments) {
             return self.record_rejection(
                 journal,
                 run,
@@ -211,6 +281,8 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
                 rejection,
             );
         }
+        // Inject session_id for policy session-scope check. External harness
+        // dispatch strips it before sending to the harness.
         if let Some(arguments) = intent.arguments.as_object_mut() {
             arguments.insert("session_id".to_string(), json!(session.id.0));
         }
@@ -271,6 +343,7 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
             run,
             session,
             &correlation_id,
+            Duration::from_millis(self.config.harness_read_timeout_ms),
         ));
     }
 

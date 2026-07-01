@@ -10,13 +10,15 @@ use crate::domain::operation;
 use crate::domain::{ApprovedInvocation, ReceiptStatus, SessionId};
 use crate::gateway::ToolRejection;
 use crate::journal::JournalStore;
+use crate::registry::snapshot::{BindingKind, OperationSpec, RegistrySnapshot};
 use anyhow::Result;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
-/// Sanitize an untrusted operation name for Journal audit. Catalogued
-/// operations record their canonical (bounded) name; anything else collapses to
-/// the fixed `"unknown_operation"` plus a fixed-length correlation digest.
+/// Sanitize an untrusted operation name for Journal audit. Known operations
+/// (from the static catalog OR from a pinned RegistrySnapshot) record their
+/// canonical name; anything else collapses to the fixed `"unknown_operation"`
+/// plus a fixed-length correlation digest.
 ///
 /// The raw operation string is NEVER written to the Journal — it may be
 /// arbitrarily long, contain unicode/control/path characters, or resemble a
@@ -26,6 +28,23 @@ use sha2::{Digest, Sha256};
 pub(crate) fn sanitize_operation_for_audit(op: &str) -> String {
     if let Some(spec) = operation::lookup(op) {
         return spec.name.to_string();
+    }
+    let digest = operation_digest(op);
+    format!("unknown_operation_{digest}")
+}
+
+/// Snapshot-aware variant: checks the static catalog AND the pinned snapshot.
+pub(crate) fn sanitize_operation_for_audit_with_snapshot(
+    op: &str,
+    snapshot: &RegistrySnapshot,
+) -> String {
+    // Known from static catalog.
+    if let Some(spec) = operation::lookup(op) {
+        return spec.name.to_string();
+    }
+    // Known from pinned snapshot.
+    if snapshot.lookup(op).is_some() {
+        return op.to_string();
     }
     let digest = operation_digest(op);
     format!("unknown_operation_{digest}")
@@ -114,9 +133,24 @@ pub(crate) fn execute_session_recall(
     Ok((ReceiptStatus::Succeeded, output, text))
 }
 
-/// Schema validation of model arguments for catalogued operations. Returns a
-/// typed [`ToolRejection`] on failure — never a raw string.
+/// Schema validation of model arguments against an OperationSpec.
+/// Builtin operations use the existing hardcoded rules; External operations
+/// use the spec's JSON Schema parameters.
 pub fn validate_model_arguments(
+    spec: &OperationSpec,
+    arguments: &serde_json::Value,
+) -> Result<(), ToolRejection> {
+    match spec.binding_kind {
+        BindingKind::Builtin => validate_builtin_arguments(spec.name.as_str(), arguments),
+        BindingKind::External => {
+            crate::registry::schema::validate_against_schema(&spec.parameters, arguments)
+                .map_err(|_| ToolRejection::InvalidArguments)
+        }
+    }
+}
+
+/// Builtin-specific argument validation (same rules as before).
+fn validate_builtin_arguments(
     operation: &str,
     arguments: &serde_json::Value,
 ) -> Result<(), ToolRejection> {
