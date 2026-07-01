@@ -72,7 +72,7 @@ impl super::JournalStore {
                     // CAS conflict or other failure: refresh cache from DB.
                     // refresh_cache_from_db clears cache first, then reads DB.
                     // If it fails, cache stays None (safe).
-                    let _ = self.refresh_cache_from_db();
+                    self.refresh_cache_from_db()?;
                     return Err(e);
                 }
             }
