@@ -2,7 +2,6 @@ use super::tool_loop::ToolCallOutcome;
 use super::tool_rejection::{
     internal_tool_call_id, sanitize_operation_for_audit_with_snapshot, validate_model_arguments,
 };
-use crate::adapters::InvocationAdapter;
 use crate::domain::*;
 use crate::gateway::{Gateway, ToolRejection};
 use crate::journal::JournalStore;
@@ -64,7 +63,6 @@ pub(crate) fn dispatch_builtin_binding(
     harness_read_timeout: Duration,
 ) -> ToolCallOutcome {
     let receipt_result: Result<Receipt> = match spec.binding_key.as_str() {
-        "builtin.time_now" => crate::adapters::TimeAdapter.execute(approved),
         "builtin.session_recall_recent" => {
             super::tool_rejection::execute_session_recall(journal, &session.id, approved).map(
                 |(status, output, _text)| Receipt {
@@ -83,6 +81,16 @@ pub(crate) fn dispatch_builtin_binding(
             external_ref: None,
             occurred_at: chrono::Utc::now(),
         }),
+        _ if spec.binding_key == "builtin.time_now" => {
+            // Retired builtin operation — no longer has a runtime handler.
+            // Historical Runs that still reference this binding will receive
+            // a fail-closed error rather than silently succeeding or being
+            // rerouted to an external harness.
+            Err(anyhow::anyhow!(
+                "retired_builtin_operation: {}",
+                spec.binding_key
+            ))
+        }
         _ => {
             if spec.binding_kind == crate::registry::snapshot::BindingKind::External {
                 let manifest_id = &spec.binding_key;

@@ -158,7 +158,7 @@ fn validate_builtin_arguments(
         return Err(ToolRejection::MalformedArguments);
     };
     match operation {
-        operation::TIME_NOW | operation::SYSTEM_STATUS => {
+        operation::SYSTEM_STATUS => {
             if !map.is_empty() {
                 return Err(ToolRejection::InvalidArguments);
             }
