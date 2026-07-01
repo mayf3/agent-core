@@ -134,7 +134,7 @@ to pre-M2d behavior (every operation inline-approves and dispatches).
 Set `AGENT_CORE_REQUIRE_WRITE_APPROVAL=true`. A `risk: Write` operation (today:
 `stdout.send_text`, `feishu.send_message`) then pauses the run in the
 `AwaitingApproval` status with a durable `ApprovalRequested` Journal fact,
-instead of dispatching immediately. Read-only operations (`time.now`) always
+instead of dispatching immediately. Read-only operations (e.g., external.time_now harness) always
 execute inline.
 
 A paused run is observable via `/health` → `awaiting_approval_count`. Note this

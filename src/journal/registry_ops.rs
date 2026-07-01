@@ -199,7 +199,12 @@ impl super::JournalStore {
         let changed = tx.execute(
             "UPDATE registry_state SET active_snapshot_id = ?1, version = ?2, updated_at = ?3
              WHERE singleton_id = 1 AND version = ?4",
-            params![new_snapshot_id, new_version, Utc::now().to_rfc3339(), db_version],
+            params![
+                new_snapshot_id,
+                new_version,
+                Utc::now().to_rfc3339(),
+                db_version
+            ],
         )?;
         if changed == 0 {
             bail!("snapshot_conflict: version CAS failed");
