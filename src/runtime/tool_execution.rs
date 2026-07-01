@@ -10,7 +10,6 @@ use crate::registry::snapshot::RegistrySnapshot;
 use anyhow::Result;
 use serde_json::json;
 use std::time::Duration;
-
 fn append_or_fatal(
     journal: &JournalStore,
     kind: JournalEventKind,
@@ -32,7 +31,6 @@ fn append_or_fatal(
             category: "journal_unwritable",
         })
 }
-
 fn rejected_result(rejection: ToolRejection) -> ToolCallOutcome {
     ToolCallOutcome::ToolResult {
         text: format!(
@@ -42,18 +40,12 @@ fn rejected_result(rejection: ToolRejection) -> ToolCallOutcome {
         ),
     }
 }
-
-/// Typed error enumeration for tool dispatch failures.
-/// Each variant maps to a fixed `error_category` string, eliminating
-/// brittle string-matching in error classification.
+/// Typed dispatch error — maps to fixed error_category, no string matching.
 #[derive(Debug, Clone)]
 pub(crate) enum ToolDispatchError {
-    /// The operation was retired (e.g. builtin time.now) and has no handler.
     RetiredBuiltinOperation(String),
-    /// Unknown or invalid builtin binding key.
     UnknownBuiltinBinding(String),
 }
-
 impl ToolDispatchError {
     pub fn error_category(&self) -> &'static str {
         match self {
@@ -62,32 +54,17 @@ impl ToolDispatchError {
         }
     }
 }
-
 impl std::fmt::Display for ToolDispatchError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::RetiredBuiltinOperation(key) => {
-                write!(f, "retired_builtin_operation: {key}")
-            }
-            Self::UnknownBuiltinBinding(key) => {
-                write!(f, "registry_binding_invalid: {key}")
-            }
+            Self::RetiredBuiltinOperation(key) => write!(f, "retired_builtin_operation: {key}"),
+            Self::UnknownBuiltinBinding(key) => write!(f, "registry_binding_invalid: {key}"),
         }
     }
 }
-
 impl std::error::Error for ToolDispatchError {}
-
-/// Production inline binding dispatch + receipt recording.
-/// This is the single authoritative binding_key → handler match used by
-/// both `handle_inline_tool_call` (the tool loop) and tests that need to
-/// verify dispatch from a restored Run snapshot.
-///
-/// External binding dispatch preserves the adapter's actual receipt status
-/// instead of rewriting everything to Succeeded. `harness_read_timeout` is
-/// the per-response read timeout for the external harness transport; it is
-/// derived from the Runtime's config so a slow/unresponsive harness yields
-/// `error_category: timeout` instead of an unbounded hang.
+/// Authoritative binding_key → handler dispatch. External dispatch preserves
+/// the adapter's actual receipt status.
 pub(crate) fn dispatch_builtin_binding(
     spec: &crate::registry::snapshot::OperationSpec,
     approved: &ApprovedInvocation,
@@ -225,7 +202,6 @@ pub(crate) fn dispatch_builtin_binding(
     }
     ToolCallOutcome::ToolResult { text }
 }
-
 impl<L: LlmClient + 'static> super::Runtime<L> {
     pub(crate) fn handle_malformed_tool_call(
         &self,
@@ -255,7 +231,6 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
         }
         Ok(rejected_result(ToolRejection::MalformedToolCall))
     }
-
     pub(crate) fn handle_inline_tool_call(
         &self,
         journal: &JournalStore,
@@ -268,7 +243,6 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
         snapshot: &RegistrySnapshot,
     ) -> Result<ToolCallOutcome> {
         let audited_op = sanitize_operation_for_audit_with_snapshot(&tool_call.operation, snapshot);
-
         // Always write ToolCallIssued first (audit trail), even for operations
         // that will be rejected by the snapshot pre-check below.
         if let Some(fatal) = append_or_fatal(
@@ -281,7 +255,6 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
         ) {
             return Ok(fatal);
         }
-
         // Look up the operation in the Run's pinned RegistrySnapshot.
         // This is the single authoritative source — Gateway and dispatch both
         // use the resolved operation definition, never the static catalog.
@@ -298,7 +271,6 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
                 );
             }
         };
-
         let mut intent = match crate::gateway::validate_tool_call(
             tool_call, &run.id, turn_index, tool_index, snapshot,
         ) {
@@ -344,7 +316,6 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
         ) {
             return Ok(fatal);
         }
-
         let approved = match gateway.approve_invocation(intent, run, session, snapshot) {
             Ok(approved) => approved,
             Err(_) => {
@@ -378,7 +349,6 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
         ) {
             return Ok(fatal);
         }
-
         return Ok(dispatch_builtin_binding(
             spec,
             &approved,
@@ -389,7 +359,6 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
             Duration::from_millis(self.config.harness_read_timeout_ms),
         ));
     }
-
     fn record_rejection(
         &self,
         journal: &JournalStore,
@@ -436,10 +405,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let db_path = dir.join("kernel.sqlite");
-
         let journal = Arc::new(JournalStore::open(&db_path).expect("open"));
         let _ = journal.initialize_registry().expect("init");
-
         let spec = OperationSpec {
             name: "time.now".into(),
             risk: Risk::ReadOnly,
@@ -449,7 +416,6 @@ mod tests {
             binding_kind: BindingKind::Builtin,
             binding_key: "builtin.time_now".into(),
         };
-
         let run = Run {
             id: RunId::new(),
             session_id: SessionId::new(),
@@ -472,7 +438,6 @@ mod tests {
             updated_at: Utc::now(),
             registry_snapshot_id: "snap_legacy".into(),
         };
-
         let session = Session {
             id: SessionId::new(),
             agent_id: AgentId("test".into()),
@@ -484,7 +449,6 @@ mod tests {
             status: SessionStatus::Active,
             version: 1,
         };
-
         let approved = ApprovedInvocation::new(
             InvocationIntent {
                 invocation_id: InvocationId("test:retired:time".into()),
@@ -495,7 +459,6 @@ mod tests {
             },
             "decision:retired".into(),
         );
-
         let outcome = dispatch_builtin_binding(
             &spec,
             &approved,
@@ -505,7 +468,6 @@ mod tests {
             "test:retired:time",
             std::time::Duration::from_secs(1),
         );
-
         match outcome {
             ToolCallOutcome::ToolResult { text } => {
                 assert!(
@@ -526,7 +488,7 @@ mod tests {
                 panic!("Expected ToolCallOutcome::ToolResult, got a different variant");
             }
         }
-
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+

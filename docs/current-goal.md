@@ -130,11 +130,11 @@ High-signal state:
 - Phase 2 is complete enough for a first safe tool loop: operation catalog,
   run-principal grants, fixed policy pipeline, typed adapter errors, opt-in
   write approval, approval endpoints, expiry sweep, ToolCatalog context, and
-  `time.now` read-only adapter are merged.
+  `time.now (retired in PR #165; use external.time_now harness)` read-only adapter are merged.
 - External harness work has started outside the Kernel: `tools/audit-report`
   exists as a read-only audit report MVP (PR #114), and
   `docs/replay-eval-harness.md` defines the replay/eval harness design (PR #116).
-- Model-emitted `time.now` execution MVP is merged (PR #118), and PR #121 fixed
+- Model-emitted `time.now (retired in PR #165; use external.time_now harness)` execution MVP is merged (PR #118), and PR #121 fixed
   the inline execution regression: a single inline tool call executes exactly
   once, and the Runtime pins the target `session_id` before policy evaluation.
 
@@ -154,7 +154,7 @@ On `main` at `8bd2356`. PR #155 is merged and closes the tool-recall loop state 
 - **Real provider test**: `stub_http_provider_completes_tool_loop` covers the full OpenAI-compatible protocol and repeats one provider ID across two tool rounds, proving distinct run/turn/index-scoped idempotency keys. Parser tests cover malformed arguments and missing or wrongly typed fields; Runtime tests separately prove the malformed issued/rejected path.
 
 Phase 0/1 ordinary Feishu delivery is dogfood-ready on `main`. Phase 2's tool
-loop mechanism is merged, but real Feishu `time.now` remains **pending dogfood
+loop mechanism is merged, but real Feishu `time.now (retired in PR #165; use external.time_now harness)` remains **pending dogfood
 acceptance**: the old generated bootstrap Prompt ("Keep Phase 0 chat-only" /
 "answers user messages without tools") discouraged all tool use, and Provider
 schemas were hardcoded to expose every ReadOnly catalog operation regardless of
@@ -178,7 +178,7 @@ boundaries plus exact legacy-template migration:
   so the operation set the model sees in the prompt equals the set in the
   provider `tools` schema (consistent across round 1 and round 2). The Gateway
   remains the final boundary; a malicious provider fabricating an un-granted
-  `time.now` call is rejected with `ToolCallRejected(policy_denied)`. See
+  `time.now (retired in PR #165; use external.time_now harness)` call is rejected with `ToolCallRejected(policy_denied)`. See
   `examples/grant-time-now.md`.
 
 > Note: `AGENT_CORE_EXTRA_ALLOWED_OPERATIONS` is only the **current single-agent
@@ -188,9 +188,9 @@ boundaries plus exact legacy-template migration:
 > production source of truth.
 
 This candidate must NOT be recorded as accepted until the user explicitly grants
-`time.now` externally (`AGENT_CORE_EXTRA_ALLOWED_OPERATIONS=time.now`) and
+`time.now (retired in PR #165; use external.time_now harness)` externally (`AGENT_CORE_EXTRA_ALLOWED_OPERATIONS=time.now (retired in PR #165; use external.time_now harness)`) and
 verifies the real Feishu Journal chain (ToolCallIssued →
-InvocationProposed(time.now) → InvocationApproved → ReceiptReceived Succeeded).
+InvocationProposed(time.now (retired in PR #165; use external.time_now harness)) → InvocationApproved → ReceiptReceived Succeeded).
 The local StubProvider tests prove the mechanism; they are NOT real dogfood
 success.
 
@@ -229,7 +229,7 @@ connector 45/45, structure + secret-scan + diff --check clean.
 
 - PR #114: external audit report harness MVP under `tools/audit-report`, outside `src/`.
 - PR #116: replay/eval harness design document.
-- PR #118: inline `time.now` model tool-call execution MVP.
+- PR #118: inline `time.now (retired in PR #165; use external.time_now harness)` model tool-call execution MVP.
 - PR #121: inline tool-call regression fix.
 - PR #125: replay/eval harness MVP (`tools/replay-eval`).
 - PR #128: replay-eval minimal-env hardening (no `process.env` secret leak).
@@ -262,7 +262,7 @@ connector 45/45, structure + secret-scan + diff --check clean.
    real Feishu dogfood acceptance remains pending.
    - Current candidate removes contradictory bootstrap text, migrates only exact
      generated defaults, and derives Provider tools from explicit Agent grants.
-   - The operator must explicitly grant `time.now` through external config
+   - The operator must explicitly grant `time.now (retired in PR #165; use external.time_now harness)` through external config
      before the final Feishu test; it is not a channel baseline grant.
    - More tools require strict schemas, session scoping, audit facts, and
      approval for write/external effects.
@@ -280,7 +280,7 @@ Already good enough:
 - Operation catalog, policy pipeline, read-only adapter proof.
 - Durable approval state and approval endpoints.
 - ToolCatalog visible to the model.
-- One model-emitted read-only tool (`time.now`).
+- One model-emitted read-only tool (`time.now (retired in PR #165; use external.time_now harness)`).
 - Read-only audit report (hardened) outside `src/`.
 - Replay/eval harness MVP + fixtures + scorer hardening outside `src/`.
 
@@ -296,7 +296,7 @@ Rough estimates, assuming one focused coding agent and quick decisions:
 |---|---:|---|
 | Stable personal dogfooding chat/runtime | Done | Current main is already here. |
 | Tool catalog visible to model | Done | PR #99. |
-| One safe model-emitted tool | Done | `time.now`, no arbitrary tools; PR #121 hardens execution. |
+| One safe model-emitted tool | Done | `time.now (retired in PR #165; use external.time_now harness)`, no arbitrary tools; PR #121 hardens execution. |
 | Audit report harness MVP | Done, hardening remains | PR #114. |
 | Replay/eval harness MVP | 1-2 weeks | External harness, selected fixtures. |
 | Feishu connector ready to extract | 1 week | Execute idempotency + extraction checklist. |
