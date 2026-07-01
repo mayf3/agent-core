@@ -324,5 +324,4 @@ mod tests {
             DispatchErrorCategory::UnknownTransportError
         );
     }
-
 }

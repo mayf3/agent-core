@@ -169,7 +169,10 @@ mod tool_name_mode_tests {
             total_op(JournalEventKind::InvocationApproved, "system.status"),
             0
         );
-        assert_eq!(total_op(JournalEventKind::ReceiptReceived, "system.status"), 0);
+        assert_eq!(
+            total_op(JournalEventKind::ReceiptReceived, "system.status"),
+            0
+        );
         // No Approved/Receipt under the system.status tool path (capability never
         // executes). The stdout.send_text reply may itself be Proposed/Approved
         // by Gateway — that is the normal reply path, not the forged tool.
@@ -316,7 +319,8 @@ mod tool_name_mode_tests {
             ev.iter()
                 .filter(|e| {
                     e.kind == k
-                        && e.payload.get("operation").and_then(Value::as_str) == Some("system.status")
+                        && e.payload.get("operation").and_then(Value::as_str)
+                            == Some("system.status")
                 })
                 .count()
         };

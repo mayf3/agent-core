@@ -47,10 +47,7 @@ fn multiple_readonly_grants_expose_all_in_catalog_order() {
         .iter()
         .filter_map(|t| t.pointer("/function/name").and_then(Value::as_str))
         .collect();
-    assert_eq!(
-        names,
-        vec!["session.recall_recent", "system.status"]
-    );
+    assert_eq!(names, vec!["session.recall_recent", "system.status"]);
 }
 
 #[test]
@@ -184,12 +181,17 @@ fn request_includes_time_now_when_granted() -> Result<()> {
         3000,
     );
     let snap = crate::registry::snapshot::test_snapshot();
-    let provider_tools =
-        snap.provider_tools_for_grants(&["system.status".to_string(), "session.recall_recent".to_string()]);
+    let provider_tools = snap.provider_tools_for_grants(&[
+        "system.status".to_string(),
+        "session.recall_recent".to_string(),
+    ]);
     let _ = llm.complete(LlmInput {
         blocks: vec![],
         user_text: "x".into(),
-        granted_operations: vec!["system.status".to_string(), "session.recall_recent".to_string()],
+        granted_operations: vec![
+            "system.status".to_string(),
+            "session.recall_recent".to_string(),
+        ],
         provider_tools,
         follow_ups: vec![],
     })?;
@@ -423,7 +425,8 @@ fn granted_time_now_completes_real_http_tool_loop() {
             .iter()
             .filter(|event| {
                 event.kind == kind
-                    && event.payload.get("operation").and_then(Value::as_str) == Some("system.status")
+                    && event.payload.get("operation").and_then(Value::as_str)
+                        == Some("system.status")
             })
             .count()
     };
