@@ -8,7 +8,7 @@ use crate::harness::control::HarnessChangeAction;
 use crate::harness::control::HarnessChangeIntent;
 use crate::harness::manifest::HarnessManifest;
 use crate::journal::JournalStore;
-use anyhow::{bail, Result};
+use anyhow::Result;
 use chrono::Utc;
 use serde::Deserialize;
 use serde_json::json;
