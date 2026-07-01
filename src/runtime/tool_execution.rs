@@ -43,6 +43,41 @@ fn rejected_result(rejection: ToolRejection) -> ToolCallOutcome {
     }
 }
 
+/// Typed error enumeration for tool dispatch failures.
+/// Each variant maps to a fixed `error_category` string, eliminating
+/// brittle string-matching in error classification.
+#[derive(Debug, Clone)]
+pub(crate) enum ToolDispatchError {
+    /// The operation was retired (e.g. builtin time.now) and has no handler.
+    RetiredBuiltinOperation(String),
+    /// Unknown or invalid builtin binding key.
+    UnknownBuiltinBinding(String),
+}
+
+impl ToolDispatchError {
+    pub fn error_category(&self) -> &'static str {
+        match self {
+            Self::RetiredBuiltinOperation(_) => "retired_builtin_operation",
+            Self::UnknownBuiltinBinding(_) => "registry_binding_invalid",
+        }
+    }
+}
+
+impl std::fmt::Display for ToolDispatchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RetiredBuiltinOperation(key) => {
+                write!(f, "retired_builtin_operation: {key}")
+            }
+            Self::UnknownBuiltinBinding(key) => {
+                write!(f, "registry_binding_invalid: {key}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ToolDispatchError {}
+
 /// Production inline binding dispatch + receipt recording.
 /// This is the single authoritative binding_key → handler match used by
 /// both `handle_inline_tool_call` (the tool loop) and tests that need to
@@ -83,12 +118,9 @@ pub(crate) fn dispatch_builtin_binding(
         }),
         _ if spec.binding_key == "builtin.time_now" => {
             // Retired builtin operation — no longer has a runtime handler.
-            // Historical Runs that still reference this binding will receive
-            // a fail-closed error rather than silently succeeding or being
-            // rerouted to an external harness.
-            Err(anyhow::anyhow!(
-                "retired_builtin_operation: {}",
-                spec.binding_key
+            // Historical Runs referencing this binding get fail-closed.
+            Err(anyhow::Error::from(
+                ToolDispatchError::RetiredBuiltinOperation(spec.binding_key.clone()),
             ))
         }
         _ => {
@@ -115,9 +147,8 @@ pub(crate) fn dispatch_builtin_binding(
                     )),
                 }
             } else {
-                Err(anyhow::anyhow!(
-                    "registry_binding_invalid: {}",
-                    spec.binding_key
+                Err(anyhow::Error::from(
+                    ToolDispatchError::UnknownBuiltinBinding(spec.binding_key.clone()),
                 ))
             }
         }
@@ -129,10 +160,10 @@ pub(crate) fn dispatch_builtin_binding(
                     format!("status: succeeded\noutput: {:?}", receipt.output)
                 }
                 ReceiptStatus::Failed => {
-                    let cat = receipt
+                    let cat: &str = receipt
                         .output
                         .get("error_category")
-                        .and_then(|v| v.as_str())
+                        .and_then(|v: &serde_json::Value| v.as_str())
                         .unwrap_or("harness_failed");
                     format!("status: execution_failed\nerror_category: {cat}")
                 }
@@ -143,7 +174,11 @@ pub(crate) fn dispatch_builtin_binding(
             (receipt.status, receipt.output, text)
         }
         Err(e) => {
-            let cat = if e.to_string().contains("timed out") || e.to_string().contains("timeout") {
+            // First try typed ToolDispatchError downcast for precise category.
+            // Fall back to string-based categorization for external harness errors.
+            let cat = if let Some(de) = e.downcast_ref::<ToolDispatchError>() {
+                de.error_category()
+            } else if e.to_string().contains("timed out") || e.to_string().contains("timeout") {
                 "timeout"
             } else if e.to_string().contains("connect failed") {
                 "connect_failed"
@@ -159,8 +194,6 @@ pub(crate) fn dispatch_builtin_binding(
                 "output_schema_violation"
             } else if e.to_string().contains("exceeds 64 KiB") {
                 "response_too_large"
-            } else if e.to_string().contains("retired_builtin_operation") {
-                "retired_builtin_operation"
             } else if e.to_string().contains("malformed")
                 || e.to_string().contains("invalid JSON")
                 || e.to_string().contains("UTF-8")
