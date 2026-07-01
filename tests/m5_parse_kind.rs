@@ -114,7 +114,7 @@ fn tool_call_kinds_survive_close_reopen_with_intact_hash_chain() -> Result<()> {
             Some(&run),
             Some(&session),
             None,
-            json!({ "operation": "time.now", "tool_call_id": "hashed_id_1" }),
+            json!({ "operation": "system.status", "tool_call_id": "hashed_id_1" }),
         )?;
         journal.append_event(
             JournalEventKind::ToolCallRejected,
@@ -144,7 +144,7 @@ fn tool_call_kinds_survive_close_reopen_with_intact_hash_chain() -> Result<()> {
         // Payloads preserved.
         assert_eq!(
             events[1].payload.get("operation").and_then(|v| v.as_str()),
-            Some("time.now")
+            Some("system.status")
         );
         assert_eq!(
             events[2]

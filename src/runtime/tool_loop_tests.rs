@@ -41,7 +41,7 @@ pub(super) fn test_config() -> KernelConfig {
 }
 
 /// One-call fixture: (journal, gateway, runtime, session, run) with a
-/// principal granted `time.now` + `session.recall_recent`.
+/// principal granted `system.status` + `session.recall_recent`.
 fn fixture() -> (
     JournalStore,
     Gateway,
@@ -76,7 +76,7 @@ fn fixture() -> (
             source: PrincipalSource::Cli,
             grants: vec![
                 CapabilityGrant {
-                    operation: "time.now".into(),
+                    operation: "system.status".into(),
                     scope: "current_session".into(),
                 },
                 CapabilityGrant {
@@ -156,7 +156,7 @@ fn successful_tool_call_writes_proposed_approved_succeeded_receipt() {
     let (journal, gateway, runtime, session, run) = fixture();
     let tc = ToolCall {
         id: "tc1".into(),
-        operation: "time.now".into(),
+        operation: "system.status".into(),
         arguments: json!({}),
     };
     assert!(runtime
@@ -379,7 +379,7 @@ fn untrusted_operation_never_leaks_raw_into_journal() {
 
 #[test]
 fn sanitize_operation_keeps_catalog_and_collapses_unknown() {
-    assert_eq!(sanitize_operation_for_audit("time.now"), "time.now");
+    assert_eq!(sanitize_operation_for_audit("system.status"), "system.status");
     let s = sanitize_operation_for_audit("shell.exec");
     assert!(s.starts_with("unknown_operation_"));
     assert_eq!(
@@ -403,32 +403,32 @@ fn idempotency_key_is_run_turn_index_scoped() {
     };
     let run = RunId::new();
     let snap = test_snapshot();
-    let k1 = validate_tool_call(&mk("time.now"), &run, 0, 0, &snap).unwrap();
-    let k2 = validate_tool_call(&mk("time.now"), &run, 0, 0, &snap).unwrap();
+    let k1 = validate_tool_call(&mk("system.status"), &run, 0, 0, &snap).unwrap();
+    let k2 = validate_tool_call(&mk("system.status"), &run, 0, 0, &snap).unwrap();
     assert_eq!(k1.idempotency_key, k2.idempotency_key, "stable");
     assert_ne!(
-        validate_tool_call(&mk("time.now"), &run, 1, 0, &snap)
+        validate_tool_call(&mk("system.status"), &run, 1, 0, &snap)
             .unwrap()
             .idempotency_key,
-        validate_tool_call(&mk("time.now"), &run, 0, 0, &snap)
+        validate_tool_call(&mk("system.status"), &run, 0, 0, &snap)
             .unwrap()
             .idempotency_key,
         "turn"
     );
     assert_ne!(
-        validate_tool_call(&mk("time.now"), &run, 0, 0, &snap)
+        validate_tool_call(&mk("system.status"), &run, 0, 0, &snap)
             .unwrap()
             .idempotency_key,
-        validate_tool_call(&mk("time.now"), &run, 0, 1, &snap)
+        validate_tool_call(&mk("system.status"), &run, 0, 1, &snap)
             .unwrap()
             .idempotency_key,
         "index"
     );
     assert_ne!(
-        validate_tool_call(&mk("time.now"), &run, 0, 0, &snap)
+        validate_tool_call(&mk("system.status"), &run, 0, 0, &snap)
             .unwrap()
             .idempotency_key,
-        validate_tool_call(&mk("time.now"), &RunId::new(), 0, 0, &snap)
+        validate_tool_call(&mk("system.status"), &RunId::new(), 0, 0, &snap)
             .unwrap()
             .idempotency_key,
         "run"
@@ -447,7 +447,7 @@ fn policy_denial_writes_rejected_with_correlation() {
     run.principal.grants.clear();
     let tc = ToolCall {
         id: "no_grant".into(),
-        operation: "time.now".into(),
+        operation: "system.status".into(),
         arguments: json!({}),
     };
     let _ = runtime.handle_inline_tool_call(

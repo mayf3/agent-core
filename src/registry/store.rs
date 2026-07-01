@@ -304,8 +304,8 @@ mod tests {
         let id = reg.current_snapshot_id().unwrap();
         assert!(id.starts_with("snap_"));
         let snap = reg.load_snapshot(&id).unwrap();
-        assert_eq!(snap.operations.len(), 5);
-        assert!(snap.lookup("time.now").is_some());
+        assert_eq!(snap.operations.len(), 4);
+        assert!(snap.lookup("system.status").is_some());
     }
 
     #[test]
@@ -330,9 +330,9 @@ mod tests {
             let conn = Connection::open(&db_path).unwrap();
             let reg = Registry::new(conn).unwrap();
             let recovered = reg.load_snapshot(&snap_id).unwrap();
-            assert_eq!(recovered.operations.len(), 5);
+            assert_eq!(recovered.operations.len(), 4);
             assert_eq!(recovered.snapshot_id, snap_id);
-            let t = recovered.lookup("time.now").unwrap();
+            let t = recovered.lookup("system.status").unwrap();
             assert_eq!(t.risk, Risk::ReadOnly);
         }
         let _ = std::fs::remove_dir_all(&dir);

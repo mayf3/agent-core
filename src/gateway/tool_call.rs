@@ -131,8 +131,8 @@ mod tests {
     #[test]
     fn accepts_valid_readonly_operation() {
         let run_id = RunId::new();
-        let intent = validate_tool_call(&call("time.now"), &run_id, 0, 0, &snap()).unwrap();
-        assert_eq!(intent.operation, "time.now");
+        let intent = validate_tool_call(&call("system.status"), &run_id, 0, 0, &snap()).unwrap();
+        assert_eq!(intent.operation, "system.status");
         // Key composition: tool:{run_id}:{turn}:{index}:{provider_digest}
         let expected_key = format!("tool:{}:{}:{}:{}", run_id.0, 0, 0, "hashed_call_1");
         assert_eq!(
@@ -143,7 +143,7 @@ mod tests {
 
     #[test]
     fn same_provider_id_different_run_produces_different_keys() {
-        let c = call("time.now");
+        let c = call("system.status");
         let snap = crate::registry::snapshot::test_snapshot();
         let intent_a = validate_tool_call(&c, &RunId::new(), 0, 0, &snap).unwrap();
         let intent_b = validate_tool_call(&c, &RunId::new(), 0, 0, &snap).unwrap();
@@ -155,7 +155,7 @@ mod tests {
 
     #[test]
     fn same_run_same_turn_same_index_is_stable() {
-        let c = call("time.now");
+        let c = call("system.status");
         let run = RunId::new();
         let s = snap();
         let intent_1 = validate_tool_call(&c, &run, 0, 0, &s).unwrap();
@@ -169,7 +169,7 @@ mod tests {
     #[test]
     fn same_run_different_turn_produces_different_keys() {
         // Provider reusing the same tool_call.id across turns must NOT collide.
-        let c = call("time.now");
+        let c = call("system.status");
         let run = RunId::new();
         let s = snap();
         let turn_0 = validate_tool_call(&c, &run, 0, 0, &s).unwrap();
@@ -183,7 +183,7 @@ mod tests {
     #[test]
     fn same_run_same_turn_different_index_produces_different_keys() {
         // Multiple tool calls in the same turn must NOT collide.
-        let c = call("time.now");
+        let c = call("system.status");
         let run = RunId::new();
         let s = snap();
         let idx_0 = validate_tool_call(&c, &run, 0, 0, &s).unwrap();
@@ -202,7 +202,7 @@ mod tests {
         let hashed = crate::llm::tool_call_id_hash(raw_id);
         let c = ToolCall {
             id: hashed.clone(),
-            operation: "time.now".to_string(),
+            operation: "system.status".to_string(),
             arguments: json!({}),
         };
         let s = snap();
@@ -237,7 +237,7 @@ mod tests {
 
     #[test]
     fn rejects_non_object_arguments_typed() {
-        let mut c = call("time.now");
+        let mut c = call("system.status");
         c.arguments = json!("not-an-object");
         let err = validate_tool_call(&c, &RunId::new(), 0, 0, &snap()).unwrap_err();
         assert_eq!(err, ToolRejection::MalformedArguments);

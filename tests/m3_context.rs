@@ -243,7 +243,7 @@ impl agent_core_kernel::llm::LlmClient for ToolCallLlm {
             tool_call: if round == 0 {
                 agent_core_kernel::llm::ToolCallResult::Valid(agent_core_kernel::llm::ToolCall {
                     id: agent_core_kernel::llm::tool_call_id_hash("call_time_once"),
-                    operation: "time.now".to_string(),
+                    operation: "system.status".to_string(),
                     arguments: json!({}),
                 })
             } else {
@@ -255,9 +255,9 @@ impl agent_core_kernel::llm::LlmClient for ToolCallLlm {
 }
 
 #[test]
-fn time_now_tool_call_executes_once_inline() -> Result<()> {
+fn system_status_tool_call_executes_once_inline() -> Result<()> {
     let mut config = common::test_config();
-    config.extra_allowed_operations = vec!["time.now".to_string()];
+    config.extra_allowed_operations = vec!["system.status".to_string()];
     let journal = JournalStore::in_memory()?;
     let gateway = Gateway::new(config.clone());
     let runtime = Runtime::new(config, ToolCallLlm(std::sync::Mutex::new(0)));
@@ -266,7 +266,7 @@ fn time_now_tool_call_executes_once_inline() -> Result<()> {
     let outcome = runtime.deliver(&journal, &gateway, event)?;
     let events = journal.events()?;
 
-    let time_now_proposed = events
+    let system_status_proposed = events
         .iter()
         .filter(|event| {
             event.run_id.as_ref() == Some(&outcome.run_id)
@@ -275,10 +275,10 @@ fn time_now_tool_call_executes_once_inline() -> Result<()> {
                     .payload
                     .get("operation")
                     .and_then(|value| value.as_str())
-                    == Some("time.now")
+                    == Some("system.status")
         })
         .count();
-    let time_now_approved = events
+    let system_status_approved = events
         .iter()
         .filter(|event| {
             event.run_id.as_ref() == Some(&outcome.run_id)
@@ -287,21 +287,21 @@ fn time_now_tool_call_executes_once_inline() -> Result<()> {
                     .payload
                     .get("operation")
                     .and_then(|value| value.as_str())
-                    == Some("time.now")
+                    == Some("system.status")
         })
         .count();
 
-    assert_eq!(time_now_proposed, 1, "time.now must be proposed once");
-    assert_eq!(time_now_approved, 1, "time.now must be approved once");
+    assert_eq!(system_status_proposed, 1, "system.status must be proposed once");
+    assert_eq!(system_status_approved, 1, "system.status must be approved once");
     assert_eq!(
         count_kind(&journal, &outcome.run_id, JournalEventKind::ReceiptReceived),
         1,
-        "inline time.now must write one receipt"
+        "inline system.status must write one receipt"
     );
     assert_eq!(
         count_kind(&journal, &outcome.run_id, JournalEventKind::DispatchStarted),
         0,
-        "inline time.now must not enter the outbox dispatcher"
+        "inline system.status must not enter the outbox dispatcher"
     );
     assert_eq!(
         count_kind(&journal, &outcome.run_id, JournalEventKind::OutboxQueued),

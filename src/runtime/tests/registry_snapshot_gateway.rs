@@ -40,7 +40,7 @@ fn test_config() -> KernelConfig {
         context_max_block_chars: 4000,
         outbox_dispatcher_enabled: false,
         outbox_dispatcher_poll_interval_ms: 10,
-        extra_allowed_operations: vec!["time.now".to_string(), "system.status".to_string()],
+        extra_allowed_operations: vec!["system.status".to_string()],
         require_write_approval: false,
         write_approval_ttl_secs: 0,
         fallback_tool_name_indexed: false,
@@ -218,25 +218,25 @@ fn c_gateway_op_existence_from_run_snapshot() -> Result<()> {
 fn d_risk_from_run_snapshot() -> Result<()> {
     let journal = JournalStore::in_memory()?;
 
-    // v1: time.now is ReadOnly.
+    // v1: system.status is ReadOnly.
     let v1 = vec![
         op("stdout.send_text", Risk::Write, "send reply"),
-        op("time.now", Risk::ReadOnly, "ro in v1"),
+        op("system.status", Risk::ReadOnly, "ro in v1"),
     ];
     let s1 = journal.create_registry_snapshot(v1)?;
     journal.activate_registry_snapshot(&s1.snapshot_id)?;
 
-    // v2: time.now is Write (not yet activated).
+    // v2: system.status is Write (not yet activated).
     let v2 = vec![
         op("stdout.send_text", Risk::Write, "send reply"),
-        op("time.now", Risk::Write, "write in v2"),
+        op("system.status", Risk::Write, "write in v2"),
     ];
     let s2 = journal.create_registry_snapshot(v2)?;
 
-    // Run A bound to v1 (ReadOnly) — tool call for time.now succeeds.
+    // Run A bound to v1 (ReadOnly) — tool call for system.status succeeds.
     let cfg_a = test_config();
     let gw_a = Gateway::new(cfg_a.clone());
-    let llm_a = ToolCallLlm::new("time.now");
+    let llm_a = ToolCallLlm::new("system.status");
     let rt_a = Runtime::new(cfg_a, llm_a);
     let ev_a = gw_a.validate_ingress(&journal, gw_a.cli_ingress("op".into())?)?;
     let run_a = rt_a.deliver(&journal, &gw_a, ev_a)?;
@@ -276,7 +276,7 @@ fn d_risk_from_run_snapshot() -> Result<()> {
     // Run B bound to v2 (Write) — tool call rejected as operation_not_allowed.
     let cfg_b = test_config();
     let gw_b = Gateway::new(cfg_b.clone());
-    let llm_b = ToolCallLlm::new("time.now");
+    let llm_b = ToolCallLlm::new("system.status");
     let rt_b = Runtime::new(cfg_b, llm_b);
     let ev_b = gw_b.validate_ingress(&journal, gw_b.cli_ingress("op".into())?)?;
     let run_b = rt_b.deliver(&journal, &gw_b, ev_b)?;
@@ -321,7 +321,7 @@ fn d_risk_from_run_snapshot() -> Result<()> {
 fn e_dispatch_from_binding_key() -> Result<()> {
     let journal = JournalStore::in_memory()?;
 
-    // Snapshot: system.status → binding_key "builtin.time_now".
+    // Snapshot: system.status → binding_key "builtin.system_status".
     let t_out = OperationSpec {
         name: "stdout.send_text".into(),
         risk: Risk::Write,
@@ -334,16 +334,16 @@ fn e_dispatch_from_binding_key() -> Result<()> {
     let t_bound = OperationSpec {
         name: "system.status".into(),
         risk: Risk::ReadOnly,
-        description: "bound to time.now handler".into(),
+        description: "system status handler".into(),
         parameters: json!({"type": "object", "additionalProperties": false}),
         idempotent: false,
         binding_kind: BindingKind::Builtin,
-        binding_key: "builtin.time_now".into(),
+        binding_key: "builtin.system_status".into(),
     };
-    let snap_v1 = journal.create_registry_snapshot(vec![t_out.clone(), t_bound])?;
-    journal.activate_registry_snapshot(&snap_v1.snapshot_id)?;
+    let snap = journal.create_registry_snapshot(vec![t_out, t_bound])?;
+    journal.activate_registry_snapshot(&snap.snapshot_id)?;
 
-    // Run: system.status should execute time.now handler (not the status handler).
+    // Run: system.status → real status handler.
     let mut cfg = test_config();
     cfg.extra_allowed_operations = vec!["system.status".to_string()];
     let gw = Gateway::new(cfg.clone());
@@ -353,7 +353,7 @@ fn e_dispatch_from_binding_key() -> Result<()> {
     let _ = rt.deliver(&journal, &gw, ev)?;
 
     let events = journal.events()?;
-    let succeeded_receipts: Vec<_> = events
+    let succeeded: Vec<_> = events
         .iter()
         .filter(|e| {
             e.kind == JournalEventKind::ReceiptReceived
@@ -361,97 +361,16 @@ fn e_dispatch_from_binding_key() -> Result<()> {
         })
         .collect();
     assert!(
-        !succeeded_receipts.is_empty(),
+        !succeeded.is_empty(),
         "system.status should have Succeeded Receipts"
     );
-    // Find receipt with time.now-specific characteristics.
-    let time_now_receipt = succeeded_receipts
-        .iter()
-        .find(|e| e.payload.pointer("/output/iso").is_some());
-    assert!(
-        time_now_receipt.is_some(),
-        "At least one receipt must have 'iso' (time.now handler)"
-    );
-    let r = time_now_receipt.unwrap();
-    assert_eq!(
-        r.payload.get("status").and_then(Value::as_str),
-        Some("Succeeded")
-    );
-    let output = r.payload.get("output").and_then(|o| o.as_object());
-    assert!(output.is_some(), "Receipt must have output object");
-    let out = output.unwrap();
-    assert!(
-        out.contains_key("iso"),
-        "time.now handler produces 'iso': {:?}",
-        out.keys().collect::<Vec<_>>()
-    );
-    assert!(
-        out.contains_key("epoch_ms"),
-        "time.now handler produces 'epoch_ms'"
-    );
-
-    // New snapshot: system.status → binding_key "builtin.system_status" (default).
-    let t_bound2 = OperationSpec {
-        name: "system.status".into(),
-        risk: Risk::ReadOnly,
-        description: "bound to system.status handler".into(),
-        parameters: json!({"type": "object", "additionalProperties": false}),
-        idempotent: false,
-        binding_kind: BindingKind::Builtin,
-        binding_key: "builtin.system_status".into(),
-    };
-    let snap_v2 = journal.create_registry_snapshot(vec![t_out, t_bound2])?;
-    journal.activate_registry_snapshot(&snap_v2.snapshot_id)?;
-
-    // Run 2: system.status → real status handler.
-    let cfg2 = test_config();
-    let gw2 = Gateway::new(cfg2.clone());
-    let llm2 = ToolCallLlm::new("system.status");
-    let rt2 = Runtime::new(cfg2, llm2);
-    let ev2 = gw2.validate_ingress(&journal, gw2.cli_ingress("status".into())?)?;
-    let _ = rt2.deliver(&journal, &gw2, ev2)?;
-
-    let events2 = journal.events()?;
-    let succeeded2: Vec<_> = events2
-        .iter()
-        .filter(|e| {
-            e.kind == JournalEventKind::ReceiptReceived
-                && e.payload.get("status").and_then(Value::as_str) == Some("Succeeded")
-        })
-        .collect();
-    assert!(
-        succeeded2.len() >= 2,
-        "Both runs should have Succeeded Receipts"
-    );
-    // Find the receipt with system.status-specific characteristics (has status, event_count, no iso).
-    let status_receipt = succeeded2.iter().find(|e| {
+    let status_receipt = succeeded.iter().find(|e| {
         e.payload.pointer("/output/status").is_some()
             && e.payload.pointer("/output/event_count").is_some()
     });
     assert!(
         status_receipt.is_some(),
         "A receipt must have 'status' and 'event_count' (status handler)"
-    );
-    // Verify the status handler receipt does NOT have iso (time.now characteristic).
-    // But iso from time.now handler will be there too. To check that the status handler was
-    // used separately, look for a receipt with status field but no iso.
-    // Actually, both the time.now receipt and the status receipt may exist.
-    // The important thing is: at least one receipt exists with each handler's marks.
-    let time_now_receipts = succeeded2
-        .iter()
-        .filter(|e| e.payload.pointer("/output/iso").is_some())
-        .count();
-    let status_receipts = succeeded2
-        .iter()
-        .filter(|e| e.payload.pointer("/output/status").is_some())
-        .count();
-    assert!(
-        time_now_receipts >= 1,
-        "At least one receipt from time.now handler"
-    );
-    assert!(
-        status_receipts >= 1,
-        "At least one receipt from system.status handler"
     );
 
     Ok(())

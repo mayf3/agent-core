@@ -108,9 +108,9 @@ mod transcript_isolation_tests {
         }
     }
 
-    fn time_now_provider_tools() -> Vec<serde_json::Value> {
+    fn system_status_provider_tools() -> Vec<serde_json::Value> {
         crate::registry::snapshot::test_snapshot()
-            .provider_tools_for_grants(&["time.now".to_string()])
+            .provider_tools_for_grants(&["system.status".to_string()])
     }
 
     fn time_tool_call(raw_id: &str) -> Value {
@@ -124,13 +124,13 @@ mod transcript_isolation_tests {
         let srv = Capture::new(vec![
             json!({"model":"s","choices":[{"message":{"content":"hello"}}]}),
         ]);
-        let provider_tools = time_now_provider_tools();
+        let provider_tools = system_status_provider_tools();
         let llm = OpenAiCompatibleLlm::new(srv.url(), "t".into(), "p".into(), 5000)
             .with_indexed_primary();
         let _ = llm.complete(LlmInput {
             blocks: vec![],
             user_text: "hi".into(),
-            granted_operations: vec!["time.now".into()],
+            granted_operations: vec!["system.status".into()],
             provider_tools,
             follow_ups: vec![],
         })?;
@@ -159,7 +159,7 @@ mod transcript_isolation_tests {
     #[test]
     fn primary_tool_call_followup_stays_on_primary() -> Result<()> {
         let mut c = cfg();
-        c.extra_allowed_operations = vec!["time.now".into()];
+        c.extra_allowed_operations = vec!["system.status".into()];
         c.openai_base_url = String::new(); // primary not configured → skip primary
         c.openai_api_key = String::new();
         // Use primary as the main, fallback as the other endpoint.
@@ -236,7 +236,7 @@ mod transcript_isolation_tests {
                         endpoint: crate::llm::EndpointChoice::Primary,
                         provider_tool_call_id: "call_A".into(),
                         wire_name: "fn_0".into(),
-                        canonical_operation: "time.now".into(),
+                        canonical_operation: "system.status".into(),
                         arguments_json: "{}".into(),
                     },
                     result_content: "status: succeeded\noutput: result_A".into(),
@@ -359,7 +359,7 @@ mod transcript_isolation_tests {
                         endpoint: crate::llm::EndpointChoice::Primary,
                         provider_tool_call_id: "call_same".into(),
                         wire_name: "fn_0".into(),
-                        canonical_operation: "time.now".into(),
+                        canonical_operation: "system.status".into(),
                         arguments_json: "{}".into(),
                     },
                     result_content: "result_A".into(),

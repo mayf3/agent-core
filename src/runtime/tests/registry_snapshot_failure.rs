@@ -36,7 +36,7 @@ fn test_config() -> KernelConfig {
         context_max_block_chars: 4000,
         outbox_dispatcher_enabled: false,
         outbox_dispatcher_poll_interval_ms: 10,
-        extra_allowed_operations: vec!["time.now".to_string()],
+        extra_allowed_operations: vec![],
         require_write_approval: false,
         write_approval_ttl_secs: 0,
         fallback_tool_name_indexed: false,
