@@ -53,6 +53,10 @@ mod external_harness_pinning;
 #[path = "tests/external_harness_failures.rs"]
 mod external_harness_failures;
 
+#[cfg(test)]
+#[path = "tests/recall_security.rs"]
+mod recall_security;
+
 pub struct Runtime<L> {
     config: KernelConfig,
     llm: L,

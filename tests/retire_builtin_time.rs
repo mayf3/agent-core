@@ -297,7 +297,11 @@ fn legacy_retirement_preserves_operations_and_old_snapshot() {
 }
 
 // =========================================================================
-// §5: CAS conflict test
+// §5: Stale CAS test (two-Store timing)
+//
+// The real two-Store stale CAS test is in src/journal/registry_ops.rs
+// (unit test with access to pub(crate) apply_builtin_time_retirement).
+// This integration test verifies basic CAS conflict handling.
 // =========================================================================
 
 #[test]
@@ -308,33 +312,25 @@ fn retirement_cas_conflict_does_not_corrupt_active_snapshot() {
 
     // Create a different snapshot S_other.
     let other_spec = OperationSpec {
-        name: "system.status".into(),
-        risk: Risk::ReadOnly,
-        description: "other".into(),
-        parameters: json!({"type":"object"}),
-        idempotent: true,
-        binding_kind: BindingKind::Builtin,
+        name: "system.status".into(), risk: Risk::ReadOnly,
+        description: "other".into(), parameters: json!({"type":"object"}),
+        idempotent: true, binding_kind: BindingKind::Builtin,
         binding_key: "builtin.system_status".into(),
     };
     let other = journal.create_registry_snapshot(vec![other_spec]).unwrap();
     let other_id = other.snapshot_id.clone();
 
-    // Simulate concurrent activation: update registry_state to S_other.
+    // Activate S_other before retirement: initialize_registry will see
+    // this as the active snapshot and skip retirement (no CAS conflict
+    // because there's no legacy to detect vs S_other).
     journal.execute_sql_for_test(&format!(
         "UPDATE registry_state SET active_snapshot_id = '{}', version = 2, updated_at = '{}' WHERE singleton_id = 1",
         other_id, Utc::now().to_rfc3339(),
     )).unwrap();
 
-    // initialize_registry sees active=S_other (not S1), must NOT retire.
     let active_id = journal.initialize_registry().expect("init");
-
-    assert_eq!(active_id, other_id, "must keep S_other after CAS conflict");
-    assert_eq!(
-        count_retirement_events(&journal, "retire_builtin_time"),
-        0,
-        "no retirement event on CAS conflict"
-    );
-
+    assert_eq!(active_id, other_id, "must keep S_other");
+    assert_eq!(count_retirement_events(&journal, "retire_builtin_time"), 0);
     drop(journal);
     cleanup(&db_path);
 }
