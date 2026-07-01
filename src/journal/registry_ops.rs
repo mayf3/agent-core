@@ -21,7 +21,7 @@ impl super::JournalStore {
     /// Idempotent: if the baseline snapshot already exists (same canonical ID),
     /// it is reused; if `current_snapshot_id` is already set, it is preserved.
     pub fn initialize_registry(&self) -> Result<String> {
-        // Only set the current ID once — subsequent calls are no-ops.
+        // Check if we already have a cached current_snapshot_id (idempotent).
         if self.current_snapshot_id.lock().unwrap().is_some() {
             return self
                 .current_snapshot_id
@@ -30,9 +30,20 @@ impl super::JournalStore {
                 .clone()
                 .ok_or_else(|| anyhow!("registry_initialized_but_id_missing"));
         }
+
+        // Check if registry_state already exists (restart path).
+        if let Some(state_snapshot_id) = self.load_active_snapshot_from_state()? {
+            // Verify the snapshot exists in the DB.
+            let _ = self.load_registry_snapshot(&state_snapshot_id)?;
+            *self.current_snapshot_id.lock().unwrap() = Some(state_snapshot_id.clone());
+            return Ok(state_snapshot_id);
+        }
+
+        // First boot: create baseline snapshot, set as current, init state.
         let snapshot = self.create_registry_snapshot(builtin_specs())?;
         let snapshot_id = snapshot.snapshot_id.clone();
         *self.current_snapshot_id.lock().unwrap() = Some(snapshot_id.clone());
+        self.init_registry_state(&snapshot_id)?;
         // Backfill old Runs with NULL snapshot ID.
         let _ = self.backfill_null_registry_snapshot(&snapshot_id);
         Ok(snapshot_id)
@@ -155,10 +166,29 @@ impl super::JournalStore {
                 };
                 let binding_kind = match binding_kind_str.as_str() {
                     "Builtin" => BindingKind::Builtin,
-                    _ => BindingKind::Builtin,
+                    "External" => BindingKind::External,
+                    other => {
+                        return Err(rusqlite::Error::FromSqlConversionFailure(
+                            5,
+                            rusqlite::types::Type::Text,
+                            Box::new(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                format!("unknown binding_kind: {other}"),
+                            )),
+                        ));
+                    }
                 };
                 let parameters: serde_json::Value =
-                    serde_json::from_str(&params_json).unwrap_or(serde_json::json!({}));
+                    serde_json::from_str(&params_json).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            3,
+                            rusqlite::types::Type::Text,
+                            Box::new(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                format!("invalid parameters_json: {e}"),
+                            )),
+                        )
+                    })?;
                 Ok(OperationSpec {
                     name,
                     risk,
@@ -169,8 +199,7 @@ impl super::JournalStore {
                     binding_key,
                 })
             })?
-            .filter_map(|r| r.ok())
-            .collect();
+            .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(RegistrySnapshot {
             snapshot_id: snapshot_id.to_string(),

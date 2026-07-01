@@ -72,6 +72,8 @@ pub(crate) fn parse_kind(value: &str) -> JournalEventKind {
         "ApprovalGranted" => JournalEventKind::ApprovalGranted,
         "ApprovalDenied" => JournalEventKind::ApprovalDenied,
         "ApprovalExpired" => JournalEventKind::ApprovalExpired,
+        "HarnessManifestRegistered" => JournalEventKind::HarnessManifestRegistered,
+        "RegistrySnapshotActivated" => JournalEventKind::RegistrySnapshotActivated,
         _ => JournalEventKind::Unknown,
     }
 }

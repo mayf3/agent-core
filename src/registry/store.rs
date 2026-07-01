@@ -228,10 +228,29 @@ impl Registry {
                 };
                 let binding_kind = match binding_kind_str.as_str() {
                     "Builtin" => BindingKind::Builtin,
-                    _ => BindingKind::Builtin,
+                    "External" => BindingKind::External,
+                    other => {
+                        return Err(rusqlite::Error::FromSqlConversionFailure(
+                            5,
+                            rusqlite::types::Type::Text,
+                            Box::new(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                format!("unknown binding_kind: {other}"),
+                            )),
+                        ));
+                    }
                 };
                 let parameters: serde_json::Value =
-                    serde_json::from_str(&params_json).unwrap_or(serde_json::json!({}));
+                    serde_json::from_str(&params_json).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            3,
+                            rusqlite::types::Type::Text,
+                            Box::new(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                format!("invalid parameters_json: {e}"),
+                            )),
+                        )
+                    })?;
                 Ok(OperationSpec {
                     name,
                     risk,
@@ -242,8 +261,7 @@ impl Registry {
                     binding_key,
                 })
             })?
-            .filter_map(|r| r.ok())
-            .collect();
+            .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(RegistrySnapshot {
             snapshot_id: snapshot_id.to_string(),

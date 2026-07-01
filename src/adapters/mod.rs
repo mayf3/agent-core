@@ -6,6 +6,8 @@ use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
+pub mod external_harness;
+
 pub trait InvocationAdapter {
     fn execute(&self, invocation: &ApprovedInvocation) -> Result<Receipt>;
 }

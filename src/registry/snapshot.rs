@@ -13,13 +13,14 @@ pub enum Risk {
     Write,
 }
 
-/// How an operation is implemented. PR 1 supports only `builtin`; future PRs
-/// may add `external` (Harness adapter). This is persisted, so it must remain
+/// How an operation is implemented. PR 1 supports only `builtin`; PR 162 adds
+/// `external` (Harness adapter). This is persisted, so it must remain
 /// stable and cheap to serialize — never store a function pointer, endpoint,
 /// or process handle here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BindingKind {
     Builtin,
+    External,
 }
 
 /// A known operation — runtime-owned (no `&'static str`). The `parameters`

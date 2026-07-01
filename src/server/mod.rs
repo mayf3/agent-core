@@ -4,6 +4,7 @@ use crate::gateway::Gateway;
 use crate::journal::JournalStore;
 mod delivery;
 mod dispatcher_metrics;
+pub mod harness_routes;
 
 #[cfg(test)]
 pub(crate) use delivery::build_llm_from_config;
@@ -167,6 +168,27 @@ fn handle_connection(
         "/v1/ingress" => handle_ingress(stream, &gateway, &journal, &request),
         "/v1/approve" => handle_approval_decision(stream, &gateway, &journal, &request, true),
         "/v1/deny" => handle_approval_decision(stream, &gateway, &journal, &request, false),
+        "/v1/harness/register" => {
+            let body: Value = serde_json::from_slice(&request.body)?;
+            handle_harness_result(
+                stream,
+                harness_routes::handle_register(&gateway, &journal, &body),
+            )
+        }
+        "/v1/harness/enable" => {
+            let body: Value = serde_json::from_slice(&request.body)?;
+            handle_harness_result(
+                stream,
+                harness_routes::handle_enable(&gateway, &journal, &body),
+            )
+        }
+        "/v1/harness/disable" => {
+            let body: Value = serde_json::from_slice(&request.body)?;
+            handle_harness_result(
+                stream,
+                harness_routes::handle_disable(&gateway, &journal, &body),
+            )
+        }
         _ => write_json(stream, 404, json!({ "ok": false, "error": "not_found" })),
     }
 }
@@ -247,6 +269,41 @@ fn handle_approval_decision(
             "decision": if approved { "approved" } else { "denied" },
         }),
     )
+}
+
+/// Map harness route errors to appropriate HTTP status codes.
+/// Never leaks database errors, paths, or tokens in the response.
+fn handle_harness_result(stream: &mut TcpStream, result: Result<String>) -> Result<()> {
+    match result {
+        Ok(body) => write_json(stream, 200, serde_json::from_str(&body)?),
+        Err(e) => {
+            // Prefer typed HarnessRouteError via downcast, fall back to
+            // stable string matching for errors that still carry the old
+            // prefix convention (e.g. manifest compute_manifest_id).
+            let (status, safe_msg) =
+                if let Some(hr_err) = e.downcast_ref::<harness_routes::HarnessRouteError>() {
+                    (hr_err.http_status(), hr_err.safe_error())
+                } else {
+                    let msg = e.to_string();
+                    if msg.starts_with("invalid_manifest") || msg.starts_with("invalid_request") {
+                        (400, "invalid_request")
+                    } else if msg.starts_with("unauthorized") {
+                        (401, "unauthorized")
+                    } else if msg.starts_with("manifest_not_found") {
+                        (404, "not_found")
+                    } else if msg.starts_with("snapshot_conflict")
+                        || msg.starts_with("operation_conflict")
+                    {
+                        (409, "conflict")
+                    } else if msg.starts_with("invalid_") {
+                        (400, "invalid_request")
+                    } else {
+                        (500, "internal_error")
+                    }
+                };
+            write_json(stream, status, json!({ "ok": false, "error": safe_msg }))
+        }
+    }
 }
 
 pub fn health_snapshot(
@@ -429,3 +486,7 @@ fn content_length(head: &str) -> usize {
 #[cfg(test)]
 #[path = "approval_endpoint_tests.rs"]
 mod approval_endpoint_tests;
+
+#[cfg(test)]
+#[path = "harness_endpoint_tests.rs"]
+mod harness_endpoint_tests;

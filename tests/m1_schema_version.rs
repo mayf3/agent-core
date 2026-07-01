@@ -10,7 +10,7 @@ fn fresh_database_is_stamped_with_current_schema_version() -> Result<()> {
     let journal = JournalStore::in_memory()?;
     assert_eq!(
         journal.schema_version()?,
-        2,
+        3,
         "a fresh database must be stamped with the current schema version"
     );
     Ok(())
@@ -29,7 +29,7 @@ fn existing_at_version_database_reopens_cleanly() -> Result<()> {
     }
     // Second open on the same file: must succeed and keep the stamp.
     let journal = JournalStore::open(&db_path)?;
-    assert_eq!(journal.schema_version()?, 2);
+    assert_eq!(journal.schema_version()?, 3);
     std::fs::remove_file(&db_path).ok();
     Ok(())
 }
@@ -42,15 +42,15 @@ fn existing_at_version_database_reopens_cleanly() -> Result<()> {
 fn newer_schema_version_is_rejected_cleanly() -> Result<()> {
     let db_path = unique_temp_path();
 
-    // Pre-stamp the database as version 3 (newer than the kernel's
-    // CURRENT_SCHEMA_VERSION of 2) using a raw connection.
+    // Pre-stamp the database as version 4 (newer than the kernel's
+    // CURRENT_SCHEMA_VERSION of 3) using a raw connection.
     {
         let conn = Connection::open(&db_path)?;
         conn.execute_batch(include_str!("../migrations/0001_init.sql"))?;
-        conn.pragma_update(None, "user_version", 3)?;
+        conn.pragma_update(None, "user_version", 4)?;
     }
 
-    // Opening with the kernel (whose CURRENT_SCHEMA_VERSION is 2) must fail.
+    // Opening with the kernel (whose CURRENT_SCHEMA_VERSION is 3) must fail.
     let message = match JournalStore::open(&db_path) {
         Ok(_) => panic!("a newer-than-supported schema version must be rejected at startup"),
         Err(error) => error.to_string(),

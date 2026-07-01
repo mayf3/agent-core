@@ -46,6 +46,7 @@ fn test_config() -> KernelConfig {
         write_approval_ttl_secs: 0,
         fallback_tool_name_indexed: false,
         primary_tool_name_indexed: false,
+        harness_read_timeout_ms: 10_000,
     }
 }
 
@@ -304,6 +305,7 @@ fn f_restart_recovery_preserves_snapshot_binding() -> Result<()> {
             &run,
             &session,
             &correlation_id,
+            std::time::Duration::from_millis(10_000),
         );
         let out_text = match &outcome {
             crate::runtime::tool_loop::ToolCallOutcome::ToolResult { text } => text.clone(),

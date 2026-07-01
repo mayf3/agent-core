@@ -33,6 +33,26 @@ mod registry_snapshot_failure;
 #[path = "tests/registry_snapshot_gateway.rs"]
 mod registry_snapshot_gateway;
 
+#[cfg(test)]
+#[path = "tests/external_harness_hotload.rs"]
+mod external_harness_hotload;
+
+#[cfg(test)]
+#[path = "tests/external_harness_transport.rs"]
+mod external_harness_transport;
+
+#[cfg(test)]
+#[path = "tests/external_harness_runtime.rs"]
+mod external_harness_runtime;
+
+#[cfg(test)]
+#[path = "tests/external_harness_pinning.rs"]
+mod external_harness_pinning;
+
+#[cfg(test)]
+#[path = "tests/external_harness_failures.rs"]
+mod external_harness_failures;
+
 pub struct Runtime<L> {
     config: KernelConfig,
     llm: L,
@@ -134,7 +154,7 @@ where
         let snapshot = journal
             .load_registry_snapshot(&snapshot_id)
             .map_err(|e| anyhow::anyhow!("registry_snapshot_unavailable: {e}"))?;
-        let run = self.create_run(&session, &event, &snapshot_id);
+        let run = self.create_run(&session, &event, &snapshot_id, &snapshot);
         journal.insert_run(&run)?;
         journal.append_event(
             JournalEventKind::RunStarted,
@@ -293,7 +313,7 @@ where
         let snapshot = journal
             .load_registry_snapshot(&snapshot_id)
             .map_err(|e| anyhow::anyhow!("registry_snapshot_unavailable: {e}"))?;
-        let run = self.create_run(&session, &event, &snapshot_id);
+        let run = self.create_run(&session, &event, &snapshot_id, &snapshot);
         journal.insert_run(&run)?;
         journal.append_event(
             JournalEventKind::RunStarted,
@@ -351,14 +371,36 @@ where
         })
     }
 
-    fn create_run(&self, session: &Session, event: &ValidatedEvent, snapshot_id: &str) -> Run {
+    fn create_run(
+        &self,
+        session: &Session,
+        event: &ValidatedEvent,
+        snapshot_id: &str,
+        snapshot: &RegistrySnapshot,
+    ) -> Run {
         let now = Utc::now();
+        let mut principal = event.principal.clone();
+        // Add external (harness) grants from the pinned snapshot.
+        // These are ReadOnly operations with BindingKind::External in the
+        // snapshot that this Run is pinned to. Existing grants from the
+        // validated ingress event are preserved.
+        for op in &snapshot.operations {
+            if op.risk == crate::registry::snapshot::Risk::ReadOnly
+                && op.binding_kind == crate::registry::snapshot::BindingKind::External
+                && !principal.grants.iter().any(|g| g.operation == op.name)
+            {
+                principal.grants.push(CapabilityGrant {
+                    operation: op.name.clone(),
+                    scope: "current_session".to_string(),
+                });
+            }
+        }
         Run {
             id: RunId::new(),
             session_id: session.id.clone(),
             agent_id: self.config.agent_id.clone(),
             trigger_event_id: event.event_id.clone(),
-            principal: event.principal.clone(),
+            principal,
             parent_run_id: None,
             delegated_by: None,
             status: RunStatus::Running,
