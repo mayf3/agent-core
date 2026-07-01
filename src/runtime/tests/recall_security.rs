@@ -5,7 +5,6 @@
 //! 2. Recall between distinct sessions is isolated
 //! 3. Recall records authoritative Receipt without raw payload
 //! 4. Recall without grant is rejected by the Gateway
-
 use crate::config::KernelConfig;
 use crate::domain::*;
 use crate::gateway::Gateway;
@@ -151,16 +150,28 @@ fn recall_recent_non_empty_output_is_field_whitelisted() -> Result<()> {
         "auth_context": { "authenticated": true, "user_identity": "cli:whitelist" },
     }))?;
     let event2 = gateway.validate_ingress(&journal, envelope2)?;
-    let runtime2 = Runtime::new(config, RecallThenNoopLlm { call_count: Mutex::new(0) });
+    let runtime2 = Runtime::new(
+        config,
+        RecallThenNoopLlm {
+            call_count: Mutex::new(0),
+        },
+    );
     runtime2.deliver(&journal, &gateway, event2)?;
 
     let events = journal.events()?;
-    let receipt = events.iter().find(|e| {
-        e.kind == JournalEventKind::ReceiptReceived
-            && e.payload.get("output").and_then(|o| o.get("messages")).is_some()
-    }).expect("recall receipt");
+    let receipt = events
+        .iter()
+        .find(|e| {
+            e.kind == JournalEventKind::ReceiptReceived
+                && e.payload
+                    .get("output")
+                    .and_then(|o| o.get("messages"))
+                    .is_some()
+        })
+        .expect("recall receipt");
 
-    let messages = receipt.payload["output"]["messages"].as_array()
+    let messages = receipt.payload["output"]["messages"]
+        .as_array()
         .expect("messages array");
     assert!(!messages.is_empty(), "recall must return non-empty history");
 
@@ -172,21 +183,45 @@ fn recall_recent_non_empty_output_is_field_whitelisted() -> Result<()> {
         assert!(msg.get("payload_json").is_none(), "payload_json forbidden");
         assert!(msg.get("message_id").is_none(), "message_id forbidden");
         assert!(msg.get("chat_id").is_none(), "chat_id forbidden");
-        assert!(msg.get(PRIVATE_CONNECTOR_FIELD).is_none(), "PRIVATE_CONNECTOR_FIELD forbidden");
-        assert!(msg.get("authorization").is_none(), "authorization forbidden");
-        assert!(msg.get("correlation_meta").is_none(), "correlation_meta forbidden");
+        assert!(
+            msg.get(PRIVATE_CONNECTOR_FIELD).is_none(),
+            "PRIVATE_CONNECTOR_FIELD forbidden"
+        );
+        assert!(
+            msg.get("authorization").is_none(),
+            "authorization forbidden"
+        );
+        assert!(
+            msg.get("correlation_meta").is_none(),
+            "correlation_meta forbidden"
+        );
         assert!(msg.get(INTERNAL_PATH).is_none(), "internal path forbidden");
 
         let text = msg["text"].as_str().unwrap_or("");
-        assert!(!text.contains(SECRET_MARKER), "secret marker leaked in text");
+        assert!(
+            !text.contains(SECRET_MARKER),
+            "secret marker leaked in text"
+        );
     }
 
     // Scan entire journal for forbidden markers.
     for event in &events {
         let s = serde_json::to_string(&event.payload).unwrap_or_default();
-        assert!(!s.contains(SECRET_MARKER), "SECRET_MARKER in event {}", event.sequence);
-        assert!(!s.contains(PRIVATE_CONNECTOR_FIELD), "PRIVATE_CONNECTOR_FIELD in event {}", event.sequence);
-        assert!(!s.contains(INTERNAL_PATH), "INTERNAL_PATH in event {}", event.sequence);
+        assert!(
+            !s.contains(SECRET_MARKER),
+            "SECRET_MARKER in event {}",
+            event.sequence
+        );
+        assert!(
+            !s.contains(PRIVATE_CONNECTOR_FIELD),
+            "PRIVATE_CONNECTOR_FIELD in event {}",
+            event.sequence
+        );
+        assert!(
+            !s.contains(INTERNAL_PATH),
+            "INTERNAL_PATH in event {}",
+            event.sequence
+        );
     }
 
     Ok(())
@@ -272,24 +307,41 @@ fn recall_recent_isolated_between_distinct_sessions() -> Result<()> {
     });
     let env_recall = serde_json::from_value(feishu_recall)?;
     let event_recall = gateway.validate_ingress(&journal, env_recall)?;
-    let rr = Runtime::new(config, RecallThenNoopLlm { call_count: Mutex::new(0) });
+    let rr = Runtime::new(
+        config,
+        RecallThenNoopLlm {
+            call_count: Mutex::new(0),
+        },
+    );
     rr.deliver(&journal, &gateway, event_recall)?;
 
     let events = journal.events()?;
-    let receipt = events.iter().find(|e| {
-        e.kind == JournalEventKind::ReceiptReceived
-            && e.payload.get("output").and_then(|o| o.get("messages")).is_some()
-    }).expect("recall receipt");
+    let receipt = events
+        .iter()
+        .find(|e| {
+            e.kind == JournalEventKind::ReceiptReceived
+                && e.payload
+                    .get("output")
+                    .and_then(|o| o.get("messages"))
+                    .is_some()
+        })
+        .expect("recall receipt");
 
     let texts: Vec<&str> = receipt.payload["output"]["messages"]
-        .as_array().unwrap().iter()
+        .as_array()
+        .unwrap()
+        .iter()
         .filter_map(|m| m.get("text").and_then(|t| t.as_str()))
         .collect();
 
-    assert!(texts.iter().any(|t| t.contains("B_VISIBLE_HISTORY")),
-        "Session B must see its own history: {texts:?}");
-    assert!(!texts.iter().any(|t| t.contains("A_PRIVATE_HISTORY")),
-        "Session B must NOT see Session A history: {texts:?}");
+    assert!(
+        texts.iter().any(|t| t.contains("B_VISIBLE_HISTORY")),
+        "Session B must see its own history: {texts:?}"
+    );
+    assert!(
+        !texts.iter().any(|t| t.contains("A_PRIVATE_HISTORY")),
+        "Session B must NOT see Session A history: {texts:?}"
+    );
 
     Ok(())
 }
@@ -325,30 +377,47 @@ fn recall_recent_records_authoritative_receipt_without_raw_payload() -> Result<(
         "auth_context": { "authenticated": true, "user_identity": "cli:receipt" },
     }))?;
     let event2 = gateway.validate_ingress(&journal, env2)?;
-    let rr = Runtime::new(config, RecallThenNoopLlm { call_count: Mutex::new(0) });
+    let rr = Runtime::new(
+        config,
+        RecallThenNoopLlm {
+            call_count: Mutex::new(0),
+        },
+    );
     rr.deliver(&journal, &gateway, event2)?;
 
     let events = journal.events()?;
 
-    let proposed = events.iter().filter(|e| {
-        e.kind == JournalEventKind::InvocationProposed
-            && e.payload.get("operation").and_then(|v| v.as_str()) == Some("session.recall_recent")
-    }).count();
+    let proposed = events
+        .iter()
+        .filter(|e| {
+            e.kind == JournalEventKind::InvocationProposed
+                && e.payload.get("operation").and_then(|v| v.as_str())
+                    == Some("session.recall_recent")
+        })
+        .count();
     assert_eq!(proposed, 1, "exactly 1 InvocationProposed");
 
-    let approved = events.iter().filter(|e| {
-        e.kind == JournalEventKind::InvocationApproved
-            && e.payload.get("operation").and_then(|v| v.as_str()) == Some("session.recall_recent")
-    }).count();
+    let approved = events
+        .iter()
+        .filter(|e| {
+            e.kind == JournalEventKind::InvocationApproved
+                && e.payload.get("operation").and_then(|v| v.as_str())
+                    == Some("session.recall_recent")
+        })
+        .count();
     assert_eq!(approved, 1, "exactly 1 InvocationApproved");
 
-    let receipt_count = events.iter().filter(|e| {
-        e.kind == JournalEventKind::ReceiptReceived
-            && e.payload.get("invocation_id").is_some()
-    }).count();
+    let receipt_count = events
+        .iter()
+        .filter(|e| {
+            e.kind == JournalEventKind::ReceiptReceived && e.payload.get("invocation_id").is_some()
+        })
+        .count();
     assert_eq!(receipt_count, 1, "exactly 1 ReceiptReceived");
 
-    let receipt = events.iter().find(|e| e.kind == JournalEventKind::ReceiptReceived)
+    let receipt = events
+        .iter()
+        .find(|e| e.kind == JournalEventKind::ReceiptReceived)
         .expect("receipt exists");
 
     // Receipt.status == Succeeded.
@@ -359,8 +428,14 @@ fn recall_recent_records_authoritative_receipt_without_raw_payload() -> Result<(
 
     // Output does not contain raw payload markers.
     let output_str = serde_json::to_string(&receipt.payload).unwrap_or_default();
-    assert!(!output_str.contains("payload_json"), "payload_json in receipt output");
-    assert!(!output_str.contains(SECRET_MARKER), "SECRET_MARKER in receipt output");
+    assert!(
+        !output_str.contains("payload_json"),
+        "payload_json in receipt output"
+    );
+    assert!(
+        !output_str.contains(SECRET_MARKER),
+        "SECRET_MARKER in receipt output"
+    );
 
     Ok(())
 }
