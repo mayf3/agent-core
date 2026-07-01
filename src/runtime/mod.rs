@@ -57,6 +57,10 @@ mod external_harness_failures;
 #[path = "tests/recall_security.rs"]
 mod recall_security;
 
+#[cfg(test)]
+#[path = "tests/recall_isolation.rs"]
+mod recall_isolation;
+
 pub struct Runtime<L> {
     config: KernelConfig,
     llm: L,
