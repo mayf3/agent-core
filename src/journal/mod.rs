@@ -15,4 +15,8 @@ pub mod test_helpers;
 mod unknown;
 mod worker;
 
+#[cfg(test)]
+#[path = "tests/registry_retirement.rs"]
+mod registry_retirement;
+
 pub use sqlite::JournalStore;

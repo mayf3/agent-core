@@ -202,15 +202,20 @@ fn legacy_active_snapshot_is_retired_on_restart() {
 
     // Event assertions.
     let events = journal.events().unwrap();
-    let retire_events: Vec<_> = events.iter().filter(|e| {
-        use agent_core_kernel::domain::JournalEventKind;
-        e.kind == JournalEventKind::RegistrySnapshotActivated
-            && e.payload.get("action").and_then(|v| v.as_str()) == Some("retire_builtin_time")
-    }).collect();
+    let retire_events: Vec<_> = events
+        .iter()
+        .filter(|e| {
+            use agent_core_kernel::domain::JournalEventKind;
+            e.kind == JournalEventKind::RegistrySnapshotActivated
+                && e.payload.get("action").and_then(|v| v.as_str()) == Some("retire_builtin_time")
+        })
+        .collect();
     assert_eq!(retire_events.len(), 1, "exactly 1 retire event");
     let re = &retire_events[0];
     assert_eq!(
-        re.payload.get("previous_snapshot_id").and_then(|v| v.as_str()),
+        re.payload
+            .get("previous_snapshot_id")
+            .and_then(|v| v.as_str()),
         Some(s1_id.as_str()),
         "event previous_snapshot_id == S1"
     );
@@ -219,20 +224,36 @@ fn legacy_active_snapshot_is_retired_on_restart() {
         Some(active_id.as_str()),
         "event new_snapshot_id == S2"
     );
-    assert!(re.payload.get("decision_id").and_then(|v| v.as_str()).is_some(),
-        "decision_id present");
-    assert!(re.payload.get("decision_id").and_then(|v| v.as_str()).unwrap_or("")
-        .contains("retire_builtin_time:"),
-        "decision_id contains retire_builtin_time prefix");
+    assert!(
+        re.payload
+            .get("decision_id")
+            .and_then(|v| v.as_str())
+            .is_some(),
+        "decision_id present"
+    );
+    assert!(
+        re.payload
+            .get("decision_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .contains("retire_builtin_time:"),
+        "decision_id contains retire_builtin_time prefix"
+    );
 
     // Version check: before=1, after=2 (read via fresh connection).
     let conn = Connection::open(&db_path).unwrap();
-    let ver: i64 = conn.query_row(
-        "SELECT version FROM registry_state WHERE singleton_id=1",
-        [], |row| row.get(0)
-    ).unwrap_or(0);
+    let ver: i64 = conn
+        .query_row(
+            "SELECT version FROM registry_state WHERE singleton_id=1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
     drop(conn);
-    assert_eq!(ver, 2, "registry_state.version must be 2 after retirement (was {ver})");
+    assert_eq!(
+        ver, 2,
+        "registry_state.version must be 2 after retirement (was {ver})"
+    );
 
     cleanup(&db_path);
 }
@@ -312,9 +333,12 @@ fn retirement_cas_conflict_does_not_corrupt_active_snapshot() {
 
     // Create a different snapshot S_other.
     let other_spec = OperationSpec {
-        name: "system.status".into(), risk: Risk::ReadOnly,
-        description: "other".into(), parameters: json!({"type":"object"}),
-        idempotent: true, binding_kind: BindingKind::Builtin,
+        name: "system.status".into(),
+        risk: Risk::ReadOnly,
+        description: "other".into(),
+        parameters: json!({"type":"object"}),
+        idempotent: true,
+        binding_kind: BindingKind::Builtin,
         binding_key: "builtin.system_status".into(),
     };
     let other = journal.create_registry_snapshot(vec![other_spec]).unwrap();
