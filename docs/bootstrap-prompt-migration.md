@@ -5,7 +5,7 @@
 Phase-0 / Phase-1 kernels wrote bootstrap templates that said "Keep Phase 0
 chat-only" and "answers user messages without tools". These prompts conflict
 with the Phase-2 tool loop: a generated agent carrying them refuses to call even
-an authorized `time.now`.
+an authorized external.time_now harness (builtin time.now was retired in PR #165).
 
 The Kernel now ships corrected templates (`src/data_dir.rs`) and a **precise,
 non-destructive migration** that runs on every startup against the configured

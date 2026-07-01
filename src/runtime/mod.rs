@@ -61,6 +61,10 @@ mod recall_security;
 #[path = "tests/recall_isolation.rs"]
 mod recall_isolation;
 
+#[cfg(test)]
+#[path = "tests/tool_execution_dispatch.rs"]
+mod tool_execution_dispatch;
+
 pub struct Runtime<L> {
     config: KernelConfig,
     llm: L,
