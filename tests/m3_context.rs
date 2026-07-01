@@ -291,8 +291,14 @@ fn system_status_tool_call_executes_once_inline() -> Result<()> {
         })
         .count();
 
-    assert_eq!(system_status_proposed, 1, "system.status must be proposed once");
-    assert_eq!(system_status_approved, 1, "system.status must be approved once");
+    assert_eq!(
+        system_status_proposed, 1,
+        "system.status must be proposed once"
+    );
+    assert_eq!(
+        system_status_approved, 1,
+        "system.status must be approved once"
+    );
     assert_eq!(
         count_kind(&journal, &outcome.run_id, JournalEventKind::ReceiptReceived),
         1,

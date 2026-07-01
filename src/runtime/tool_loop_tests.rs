@@ -379,7 +379,10 @@ fn untrusted_operation_never_leaks_raw_into_journal() {
 
 #[test]
 fn sanitize_operation_keeps_catalog_and_collapses_unknown() {
-    assert_eq!(sanitize_operation_for_audit("system.status"), "system.status");
+    assert_eq!(
+        sanitize_operation_for_audit("system.status"),
+        "system.status"
+    );
     let s = sanitize_operation_for_audit("shell.exec");
     assert!(s.starts_with("unknown_operation_"));
     assert_eq!(

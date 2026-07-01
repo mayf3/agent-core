@@ -218,7 +218,9 @@ fn a_provider_tools_pinned_to_run_snapshot() -> Result<()> {
     for i in 0..t.len() {
         let desc = t[i]
             .iter()
-            .find(|tool| tool.pointer("/function/name").and_then(Value::as_str) == Some("system.status"))
+            .find(|tool| {
+                tool.pointer("/function/name").and_then(Value::as_str) == Some("system.status")
+            })
             .and_then(|tool| {
                 tool.pointer("/function/description")
                     .and_then(Value::as_str)
@@ -275,7 +277,9 @@ fn a_provider_tools_pinned_to_run_snapshot() -> Result<()> {
     assert!(t2.len() >= 1, "Run B should have >=1 round");
     let b_desc = t2[0]
         .iter()
-        .find(|tool| tool.pointer("/function/name").and_then(Value::as_str) == Some("system.status"))
+        .find(|tool| {
+            tool.pointer("/function/name").and_then(Value::as_str) == Some("system.status")
+        })
         .and_then(|tool| {
             tool.pointer("/function/description")
                 .and_then(Value::as_str)

@@ -7,9 +7,8 @@
 //! 4. Fresh baseline registry never contains time.now
 
 use agent_core_kernel::domain::operation::{is_allowed, lookup, CATALOG};
+use agent_core_kernel::registry::snapshot::BindingKind;
 use agent_core_kernel::registry::store::builtin_specs;
-use agent_core_kernel::registry::snapshot::{BindingKind, Risk};
-use serde_json::json;
 
 // =========================================================================
 // §1: Fresh baseline never contains builtin time.now
