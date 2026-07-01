@@ -15,6 +15,14 @@ use std::sync::Arc;
 /// to the catalog, provider tools, grants, or dispatch.
 const LEGACY_BUILTIN_TIME_OPERATION: &str = "time.now";
 const LEGACY_BUILTIN_TIME_BINDING: &str = "builtin.time_now";
+
+/// Activation result from retire / enable / disable operations.
+#[allow(dead_code)]
+pub(crate) struct ActivationResult {
+    pub previous_snapshot_id: String,
+    pub active_snapshot_id: String,
+}
+
 impl super::JournalStore {
     /// Initialize the registry at Kernel boot: ensure the baseline snapshot
     /// exists, set it as current, and backfill old Runs. This is the **only**
@@ -61,13 +69,10 @@ impl super::JournalStore {
                     // No legacy time.now found — return the original.
                 }
                 Err(e) => {
-                    // CAS conflict or other failure: refresh cache from DB
-                    // so the cached ID matches the true active snapshot.
-                    if let Ok(db_id) = self.load_active_snapshot_from_state() {
-                        if let Some(ref db_sid) = db_id {
-                            *self.current_snapshot_id.lock().unwrap() = Some(db_sid.clone());
-                        }
-                    }
+                    // CAS conflict or other failure: refresh cache from DB.
+                    // refresh_cache_from_db clears cache first, then reads DB.
+                    // If it fails, cache stays None (safe).
+                    let _ = self.refresh_cache_from_db();
                     return Err(e);
                 }
             }
@@ -142,6 +147,33 @@ impl super::JournalStore {
         expected_snapshot_id: &str,
         decision_id: &str,
     ) -> Result<()> {
+        match self.activate_snapshot_transactional(
+            expected_snapshot_id,
+            new_snapshot_id,
+            decision_id,
+            "retire_builtin_time",
+        ) {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                // On conflict, refresh cache (or clear on failure). Propagate original error.
+                let _ = self.refresh_cache_from_db();
+                Err(e)
+            }
+        }
+    }
+    /// Transactionally activate a new snapshot: CAS-update registry_state,
+    /// write RegistrySnapshotActivated journal event, commit, update cache.
+    ///
+    /// This is the authoritative activation function used by enable/disable
+    /// harness and builtin time retirement. Tests must use this function
+    /// rather than raw SQL to simulate concurrent activation.
+    pub(crate) fn activate_snapshot_transactional(
+        &self,
+        expected_snapshot_id: &str,
+        new_snapshot_id: &str,
+        decision_id: &str,
+        action: &str,
+    ) -> Result<ActivationResult> {
         use crate::domain::EventId;
         let mut conn = self
             .conn
@@ -150,7 +182,7 @@ impl super::JournalStore {
         let tx = conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|_| anyhow!("cannot begin transaction"))?;
-        // CAS: read current registry_state and verify.
+
         let (db_snapshot_id, db_version): (String, i64) = tx
             .query_row(
                 "SELECT active_snapshot_id, version FROM registry_state WHERE singleton_id = 1",
@@ -158,40 +190,27 @@ impl super::JournalStore {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .map_err(|_| anyhow!("registry_state not initialized"))?;
+
         if db_snapshot_id != expected_snapshot_id {
-            // Refresh cache from DB before returning error.
-            drop(tx);
-            drop(conn);
-            self.refresh_cache_from_db();
-            bail!("snapshot_conflict: registry_state has {db_snapshot_id}, expected {expected_snapshot_id}");
+            bail!("snapshot_conflict: has {db_snapshot_id}, expected {expected_snapshot_id}");
         }
+
         let new_version = db_version + 1;
         let changed = tx.execute(
             "UPDATE registry_state SET active_snapshot_id = ?1, version = ?2, updated_at = ?3
              WHERE singleton_id = 1 AND version = ?4",
-            params![
-                new_snapshot_id,
-                new_version,
-                Utc::now().to_rfc3339(),
-                db_version,
-            ],
+            params![new_snapshot_id, new_version, Utc::now().to_rfc3339(), db_version],
         )?;
         if changed == 0 {
-            drop(tx);
-            drop(conn);
-            self.refresh_cache_from_db();
             bail!("snapshot_conflict: version CAS failed");
         }
-        // Record journal event.
+
         let payload = serde_json::json!({
-            "action": "retire_builtin_time",
+            "action": action,
             "previous_snapshot_id": expected_snapshot_id,
             "new_snapshot_id": new_snapshot_id,
             "decision_id": decision_id,
         });
-        let kind_text = "RegistrySnapshotActivated";
-        let event_id = EventId::new();
-        let created_at = Utc::now();
         let payload_json = serde_json::to_string(&payload)?;
         let previous: Option<(i64, String)> = tx
             .query_row(
@@ -201,11 +220,10 @@ impl super::JournalStore {
             )
             .ok();
         let sequence = previous.as_ref().map(|(seq, _)| seq + 1).unwrap_or(1);
-        let previous_hash = previous.map(|(_, hash)| hash);
         let hash = crate::journal::hash_chain::event_hash(
-            previous_hash.as_deref(),
+            previous.as_ref().map(|(_, h)| h.as_str()),
             sequence,
-            kind_text,
+            "RegistrySnapshotActivated",
             &payload_json,
         );
         tx.execute(
@@ -213,22 +231,34 @@ impl super::JournalStore {
              (sequence, event_id, run_id, session_id, correlation_id, kind, payload_json, previous_hash, hash, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
-                sequence, event_id.0,
+                sequence, EventId::new().0,
                 Option::<String>::None, Option::<String>::None,
-                decision_id, kind_text, payload_json,
-                previous_hash, hash, created_at.to_rfc3339(),
+                decision_id, "RegistrySnapshotActivated", payload_json,
+                previous.as_ref().map(|(_, h)| h.as_str()),
+                hash, Utc::now().to_rfc3339(),
             ],
         )?;
         tx.commit()?;
         drop(conn);
         *self.current_snapshot_id.lock().unwrap() = Some(new_snapshot_id.to_string());
-        Ok(())
+        Ok(ActivationResult {
+            previous_snapshot_id: expected_snapshot_id.to_string(),
+            active_snapshot_id: new_snapshot_id.to_string(),
+        })
     }
+
     /// Refresh `current_snapshot_id` cache from DB's `registry_state`.
-    fn refresh_cache_from_db(&self) {
-        if let Ok(Some(db_id)) = self.load_active_snapshot_from_state() {
-            *self.current_snapshot_id.lock().unwrap() = Some(db_id);
-        }
+    /// Returns the authoritative active snapshot ID on success.
+    /// On failure, clears the cache to `None` and propagates the error —
+    /// never leaves a stale legacy snapshot in the cache.
+    fn refresh_cache_from_db(&self) -> Result<String> {
+        // Always clear cache first, so failure doesn't leave stale data.
+        *self.current_snapshot_id.lock().unwrap() = None;
+        let db_id = self
+            .load_active_snapshot_from_state()?
+            .ok_or_else(|| anyhow!("registry_state not initialized"))?;
+        *self.current_snapshot_id.lock().unwrap() = Some(db_id.clone());
+        Ok(db_id)
     }
     /// Read-only getter for the currently active registry snapshot ID.
     /// Returns `registry_snapshot_unavailable` if the registry has not been
