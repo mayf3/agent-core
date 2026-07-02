@@ -228,6 +228,7 @@ fn concurrent_approved_decisions_activate_exactly_once() -> Result<()> {
                 specs,
                 &expected,
                 &format!("activation:{pid_local}"),
+                None,
             );
             match res {
                 Ok(_) => {
@@ -359,6 +360,7 @@ fn approved_and_rejected_decisions_race_exactly_once() -> Result<()> {
                 specs,
                 &expected,
                 &format!("activation:{pid_c}"),
+                None,
             );
             if let Err(e) = res {
                 let msg = e.to_string();
