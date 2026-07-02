@@ -14,7 +14,7 @@ fn passthrough() -> ToolNameMode {
 
 fn indexed() -> ToolNameMode {
     let mut m = ToolNameMap::new();
-    m.insert("fn_0".into(), "time.now".into());
+    m.insert("fn_0".into(), "system.status".into());
     m.insert("fn_1".into(), "session.recall_recent".into());
     ToolNameMode::IndexedMapping(m)
 }
@@ -28,13 +28,13 @@ fn parse(value: &serde_json::Value, mode: &ToolNameMode) -> ToolCallResult {
 #[test]
 fn passthrough_uses_provider_name_as_is() {
     let r = parse(
-        &response(json!({"id": "x", "function": {"name": "time.now", "arguments": "{}"}})),
+        &response(json!({"id": "x", "function": {"name": "system.status", "arguments": "{}"}})),
         &passthrough(),
     );
     let ToolCallResult::Valid(c) = &r else {
         panic!("expected valid")
     };
-    assert_eq!(c.operation, "time.now");
+    assert_eq!(c.operation, "system.status");
 }
 
 #[test]
@@ -60,7 +60,7 @@ fn indexed_encoded_name_is_resolved_via_map() {
     let ToolCallResult::Valid(c) = &r else {
         panic!("expected valid")
     };
-    assert_eq!(c.operation, "time.now");
+    assert_eq!(c.operation, "system.status");
 }
 
 #[test]
@@ -89,7 +89,7 @@ fn indexed_names_dont_collide() {
     let ToolCallResult::Valid(c1) = &r1 else {
         panic!("fn_1")
     };
-    assert_eq!(c0.operation, "time.now");
+    assert_eq!(c0.operation, "system.status");
     assert_eq!(c1.operation, "session.recall_recent");
 }
 
@@ -110,15 +110,15 @@ fn malformed_shapes_rejected_in_passthrough() {
     for case in [
         json!({"id": "x"}),
         json!({"id": "x", "function": null}),
-        json!({"function": {"name": "time.now", "arguments": "{}"}}),
-        json!({"id": "", "function": {"name": "time.now", "arguments": "{}"}}),
-        json!({"id": 7, "function": {"name": "time.now", "arguments": "{}"}}),
+        json!({"function": {"name": "system.status", "arguments": "{}"}}),
+        json!({"id": "", "function": {"name": "system.status", "arguments": "{}"}}),
+        json!({"id": 7, "function": {"name": "system.status", "arguments": "{}"}}),
         json!({"id": "x", "function": {"arguments": "{}"}}),
         json!({"id": "x", "function": {"name": "", "arguments": "{}"}}),
-        json!({"id": "x", "function": {"name": "time.now"}}),
-        json!({"id": "x", "function": {"name": "time.now", "arguments": 7}}),
-        json!({"id": "x", "function": {"name": "time.now", "arguments": "[1]"}}),
-        json!({"id": "x", "function": {"name": "time.now", "arguments": "{"}}),
+        json!({"id": "x", "function": {"name": "system.status"}}),
+        json!({"id": "x", "function": {"name": "system.status", "arguments": 7}}),
+        json!({"id": "x", "function": {"name": "system.status", "arguments": "[1]"}}),
+        json!({"id": "x", "function": {"name": "system.status", "arguments": "{"}}),
     ] {
         let p = parse(&response(case), &passthrough());
         assert!(matches!(p, ToolCallResult::Malformed(_)));
@@ -168,7 +168,7 @@ fn provider_turn_carries_raw_id_wire_name_and_endpoint() {
     assert_eq!(turn.provider_tool_call_id, "call_ds_123");
     assert_eq!(turn.wire_name, "fn_0");
     assert_eq!(turn.arguments_json, r#"{"limit":5}"#);
-    assert_eq!(turn.canonical_operation, "time.now");
+    assert_eq!(turn.canonical_operation, "system.status");
 }
 
 #[test]
@@ -186,7 +186,7 @@ fn provider_turn_absent_when_no_tool_call() {
 fn oversized_provider_id_is_malformed() {
     let huge_id = "x".repeat(300);
     let parsed = parsing::parse_tool_call(
-        &response(json!({"id": huge_id, "function": {"name": "time.now", "arguments": "{}"}})),
+        &response(json!({"id": huge_id, "function": {"name": "system.status", "arguments": "{}"}})),
         &passthrough(),
         EndpointChoice::Primary,
     );

@@ -19,7 +19,7 @@ impl LlmClient for WhitespaceLlm {
         let tool_call = if self.first_tool && call == 0 {
             ToolCallResult::Valid(ToolCall {
                 id: "provider-id-digest".into(),
-                operation: "time.now".into(),
+                operation: "system.status".into(),
                 arguments: json!({}),
             })
         } else {
@@ -38,7 +38,7 @@ impl LlmClient for WhitespaceLlm {
 
 fn assert_whitespace_reply_is_guarded(first_tool: bool) {
     let mut config = test_config();
-    config.extra_allowed_operations = vec!["time.now".into()];
+    config.extra_allowed_operations = vec!["system.status".into()];
     let journal = JournalStore::in_memory().unwrap();
     let gateway = Gateway::new(config.clone());
     let runtime = Runtime::new(
@@ -159,7 +159,7 @@ impl LlmClient for FollowupFailureLlm {
             journal_payload: json!({"round": 0}),
             tool_call: ToolCallResult::Valid(ToolCall {
                 id: "provider-id-digest".into(),
-                operation: "time.now".into(),
+                operation: "system.status".into(),
                 arguments: json!({}),
             }),
             provider_turn: None,
@@ -170,7 +170,7 @@ impl LlmClient for FollowupFailureLlm {
 #[test]
 fn failed_followup_llm_marks_the_accurate_run_failed() {
     let mut config = test_config();
-    config.extra_allowed_operations = vec!["time.now".into()];
+    config.extra_allowed_operations = vec!["system.status".into()];
     let journal = JournalStore::in_memory().unwrap();
     let gateway = Gateway::new(config.clone());
     let runtime = Runtime::new(

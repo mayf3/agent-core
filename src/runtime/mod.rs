@@ -53,6 +53,26 @@ mod external_harness_pinning;
 #[path = "tests/external_harness_failures.rs"]
 mod external_harness_failures;
 
+#[cfg(test)]
+#[path = "tests/recall_security.rs"]
+mod recall_security;
+
+#[cfg(test)]
+#[path = "tests/recall_test_support.rs"]
+mod recall_test_support;
+
+#[cfg(test)]
+#[path = "tests/recall_isolation.rs"]
+mod recall_isolation;
+
+#[cfg(test)]
+#[path = "tests/recall_audit.rs"]
+mod recall_audit;
+
+#[cfg(test)]
+#[path = "tests/tool_execution_dispatch.rs"]
+mod tool_execution_dispatch;
+
 pub struct Runtime<L> {
     config: KernelConfig,
     llm: L,
