@@ -2,9 +2,9 @@
 //! All activation transactions use CAS (compare-and-swap) to prevent races.
 
 use crate::domain::*;
-use crate::harness::control::{ApprovedHarnessChange, RegistryActivationResult};
+
 use crate::harness::manifest::HarnessManifest;
-use crate::registry::snapshot::{BindingKind, OperationSpec, Risk};
+
 use anyhow::{anyhow, bail, Result};
 use chrono::Utc;
 use rusqlite::{params, Transaction};
