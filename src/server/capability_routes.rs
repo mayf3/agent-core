@@ -84,20 +84,12 @@ impl std::fmt::Display for CapabilityRouteError {
 
 impl std::error::Error for CapabilityRouteError {}
 
-/// Sanitise a generic anyhow error into a bounded safe string for HTTP 500
-/// responses. Never leaks SQL, paths, tokens, or backtraces.
-pub fn sanitise_error(err: &anyhow::Error) -> String {
-    let msg = err.to_string();
-    let safe: String = msg
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
-        .take(64)
-        .collect();
-    if safe.is_empty() {
-        "error".into()
-    } else {
-        safe
-    }
+/// Sanitise a generic anyhow error — returns a fixed category string for HTTP
+/// 500 responses. NEVER includes original error text, SQL, paths, or tokens.
+/// The full error is logged server-side; only a stable category reaches the
+/// HTTP body.
+pub fn sanitise_error(_err: &anyhow::Error) -> String {
+    "internal_error".into()
 }
 
 /// Check that `bearer` matches the configured `expected` token. Returns
@@ -122,10 +114,9 @@ pub fn map_capability_result(
                 let body = serde_json::json!({"ok": false, "error": cap_err.safe_error()});
                 Ok((status, body))
             } else {
-                let sanitised = sanitise_error(&e);
                 Ok((
                     500,
-                    serde_json::json!({"ok": false, "error": "internal_error", "error_category": sanitised}),
+                    serde_json::json!({"ok": false, "error": "internal_error"}),
                 ))
             }
         }
@@ -232,8 +223,8 @@ pub fn handle_decision(
     principal: &str,
     config_agent_id: &AgentId,
 ) -> Result<Value> {
-    let input: DecisionBody =
-        serde_json::from_value(body.clone()).map_err(|e| anyhow!("invalid_decision_body: {e}"))?;
+    let input: DecisionBody = serde_json::from_value(body.clone())
+        .map_err(|e| CapabilityRouteError::InvalidRequest(format!("{e}")))?;
     let proposal = journal
         .load_proposal(proposal_id)?
         .ok_or_else(|| CapabilityRouteError::NotFound("proposal_not_found".into()))?;
