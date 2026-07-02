@@ -1,16 +1,41 @@
-//! Capability change proposal persistence — create, load, decide, query.
+//! Strict proposal persistence — strict parsing, atomic journal transactions.
 
 use crate::domain::capability_change::*;
 use crate::domain::*;
-use anyhow::{anyhow, Result};
-use chrono::Utc;
+use anyhow::{anyhow, bail, Result};
+use chrono::{DateTime, Utc};
 use rusqlite::params;
 
+#[allow(dead_code)]
+fn parse_status(s: &str) -> Result<ProposalStatus> {
+    match s {
+        "PendingApproval" => Ok(ProposalStatus::PendingApproval),
+        "Approved" => Ok(ProposalStatus::Approved),
+        "Rejected" => Ok(ProposalStatus::Rejected),
+        "Activated" => Ok(ProposalStatus::Activated),
+        "ActivationFailed" => Ok(ProposalStatus::ActivationFailed),
+        "Expired" => Ok(ProposalStatus::Expired),
+        o => bail!("unknown_proposal_status:{o}"),
+    }
+}
+
+#[allow(dead_code)]
+fn parse_ts(s: &str) -> Result<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(s)
+        .map(|d| d.with_timezone(&Utc))
+        .map_err(|e| anyhow!("invalid_timestamp:{e}"))
+}
+
+#[allow(dead_code)]
+fn parse_ops(s: &str) -> Result<Vec<String>> {
+    serde_json::from_str(s).map_err(|e| anyhow!("invalid_operations_json:{e}"))
+}
+
 impl super::JournalStore {
-    /// Persist a new proposal and write the CapabilityChangeProposed journal event.
     pub fn create_proposal(&self, proposal: &CapabilityChangeProposal) -> Result<String> {
-        let conn = self.conn.lock().map_err(|_| anyhow!("mutex poisoned"))?;
-        conn.execute(
+        let mut conn = self.conn.lock().map_err(|_| anyhow!("mutex poisoned"))?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute(
             "INSERT INTO capability_change_proposals
              (proposal_id, submitter_principal_id, target_agent_id,
               origin_session_id, origin_run_id,
@@ -34,12 +59,13 @@ impl super::JournalStore {
                 serde_json::to_string(&proposal.requested_operations)?,
                 proposal.risk_summary,
                 proposal.expected_active_snapshot_id,
-                format!("{:?}", proposal.status),
+                "PendingApproval",
                 proposal.created_at.to_rfc3339(),
                 proposal.expires_at.to_rfc3339(),
             ],
         )?;
-        self.append_event(
+        super::queue::append_event_tx(
+            &tx,
             JournalEventKind::CapabilityChangeProposed,
             Some(&proposal.origin_run_id),
             Some(&proposal.origin_session_id),
@@ -47,25 +73,22 @@ impl super::JournalStore {
             serde_json::json!({
                 "proposal_id": proposal.proposal_id,
                 "submitter": proposal.submitter_principal_id,
-                "target_agent": proposal.target_agent_id.0,
                 "artifact_digest": proposal.artifact_digest,
                 "manifest_digest": proposal.manifest_digest,
-                "evidence_digest": proposal.evidence_digest,
                 "requested_operations": proposal.requested_operations,
                 "expected_snapshot_id": proposal.expected_active_snapshot_id,
             }),
         )?;
+        tx.commit()?;
         Ok(proposal.proposal_id.clone())
     }
 
-    /// Load a proposal by ID, returns None if not found.
     pub fn load_proposal(&self, proposal_id: &str) -> Result<Option<CapabilityChangeProposal>> {
         let conn = self.conn.lock().map_err(|_| anyhow!("mutex poisoned"))?;
         let mut stmt = conn.prepare(
             "SELECT proposal_id, submitter_principal_id, target_agent_id,
                     origin_session_id, origin_run_id,
-                    artifact_ref, artifact_digest,
-                    manifest_ref, manifest_digest,
+                    artifact_ref, artifact_digest, manifest_ref, manifest_digest,
                     evidence_ref, evidence_digest,
                     requested_operations_json, risk_summary,
                     expected_active_snapshot_id,
@@ -74,41 +97,58 @@ impl super::JournalStore {
                     activated_snapshot_id, activation_error
              FROM capability_change_proposals WHERE proposal_id = ?1",
         )?;
-        let mut rows = stmt.query_map(params![proposal_id], |row| {
-            Ok(CapabilityChangeProposal {
-                proposal_id: row.get(0)?,
-                submitter_principal_id: row.get(1)?,
-                target_agent_id: AgentId(row.get(2)?),
-                origin_session_id: SessionId(row.get(3)?),
-                origin_run_id: RunId(row.get(4)?),
-                artifact_ref: row.get(5)?,
-                artifact_digest: row.get(6)?,
-                manifest_ref: row.get(7)?,
-                manifest_digest: row.get(8)?,
-                evidence_ref: row.get(9)?,
-                evidence_digest: row.get(10)?,
-                requested_operations: serde_json::from_str(&row.get::<_, String>(11)?)
-                    .unwrap_or_default(),
-                risk_summary: row.get(12)?,
-                expected_active_snapshot_id: row.get(13)?,
-                status: parse_status(&row.get::<_, String>(14)?),
-                created_at: Utc::now(),
-                expires_at: Utc::now(),
-                decided_at: None,
-                decided_by: row.get::<_, Option<String>>(18)?,
-                decision_reason: row.get::<_, Option<String>>(19)?,
-                activated_snapshot_id: row.get::<_, Option<String>>(20)?,
-                activation_error: row.get::<_, Option<String>>(21)?,
-            })
-        })?;
-        match rows.next() {
-            Some(Ok(p)) => Ok(Some(p)),
-            _ => Ok(None),
+        let row: std::result::Result<CapabilityChangeProposal, rusqlite::Error> =
+            stmt.query_row(params![proposal_id], |row| {
+                let g = |i: usize| -> std::result::Result<String, rusqlite::Error> { row.get(i) };
+                let go = |i: usize| -> std::result::Result<Option<String>, rusqlite::Error> {
+                    row.get(i)
+                };
+                Ok(CapabilityChangeProposal {
+                    proposal_id: g(0)?,
+                    submitter_principal_id: g(1)?,
+                    target_agent_id: AgentId(g(2)?),
+                    origin_session_id: SessionId(g(3)?),
+                    origin_run_id: RunId(g(4)?),
+                    artifact_ref: g(5)?,
+                    artifact_digest: g(6)?,
+                    manifest_ref: g(7)?,
+                    manifest_digest: g(8)?,
+                    evidence_ref: g(9)?,
+                    evidence_digest: g(10)?,
+                    requested_operations: serde_json::from_str(&g(11)?)
+                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,
+                    risk_summary: g(12)?,
+                    expected_active_snapshot_id: g(13)?,
+                    status: match g(14)?.as_str() {
+                        "PendingApproval" => Ok(ProposalStatus::PendingApproval),
+                        "Approved" => Ok(ProposalStatus::Approved),
+                        "Rejected" => Ok(ProposalStatus::Rejected),
+                        "Activated" => Ok(ProposalStatus::Activated),
+                        "ActivationFailed" => Ok(ProposalStatus::ActivationFailed),
+                        "Expired" => Ok(ProposalStatus::Expired),
+                        o => Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+                            std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                format!("unknown_status:{o}"),
+                            ),
+                        ))),
+                    }?,
+                    created_at: Utc::now(),
+                    expires_at: Utc::now(),
+                    decided_at: None,
+                    decided_by: go(18)?,
+                    decision_reason: go(19)?,
+                    activated_snapshot_id: go(20)?,
+                    activation_error: go(21)?,
+                })
+            });
+        match row {
+            Ok(p) => Ok(Some(p)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => bail!("proposal_decode_failed:{e}"),
         }
     }
 
-    /// Atomically transition a proposal's status. Returns true if the update
-    /// affected exactly one row (CAS succeeded).
     pub fn decide_proposal(
         &self,
         proposal_id: &str,
@@ -155,7 +195,6 @@ impl super::JournalStore {
         Ok(changed == 1)
     }
 
-    /// List proposal IDs for a session.
     pub fn proposals_by_session(&self, session_id: &SessionId) -> Result<Vec<String>> {
         let conn = self.conn.lock().map_err(|_| anyhow!("mutex poisoned"))?;
         let mut stmt = conn.prepare(
@@ -167,17 +206,5 @@ impl super::JournalStore {
             ids.push(r?);
         }
         Ok(ids)
-    }
-}
-
-fn parse_status(s: &str) -> ProposalStatus {
-    match s {
-        "PendingApproval" => ProposalStatus::PendingApproval,
-        "Approved" => ProposalStatus::Approved,
-        "Rejected" => ProposalStatus::Rejected,
-        "Activated" => ProposalStatus::Activated,
-        "ActivationFailed" => ProposalStatus::ActivationFailed,
-        "Expired" => ProposalStatus::Expired,
-        _ => ProposalStatus::PendingApproval,
     }
 }

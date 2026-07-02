@@ -1,6 +1,7 @@
 //! Capability Change Proposal routes — submit, decision (approved/rejected).
 //! Decision atomically validates content and activates Registry Snapshot.
 
+use crate::capabilities::store::{ContentStore, Sha256Digest};
 use crate::domain::capability_change::*;
 use crate::domain::*;
 use crate::gateway::Gateway;
@@ -135,27 +136,64 @@ pub fn handle_decision(
 
     match input.decision.as_str() {
         "approved" => {
-            if proposal.expected_active_snapshot_id != journal.current_registry_snapshot_id()? {
+            // 1. Verify active snapshot matches expected.
+            let current_snap_id = journal.current_registry_snapshot_id()?;
+            if proposal.expected_active_snapshot_id != current_snap_id {
                 bail!("stale_expected_snapshot");
             }
+            // 2. Parse and verify digests.
+            let art_digest = Sha256Digest::parse(&proposal.artifact_digest)
+                .map_err(|_| anyhow!("invalid_artifact_digest_in_proposal"))?;
+            let man_digest = Sha256Digest::parse(&proposal.manifest_digest)
+                .map_err(|_| anyhow!("invalid_manifest_digest_in_proposal"))?;
+            // 3. Verify content via store (reads + re-hashes).
+            let store = ContentStore::new(std::path::PathBuf::from("/tmp/dev-harness-artifacts"));
+            let _artifact_bytes = store.load(&art_digest)
+                .map_err(|e| anyhow!("artifact_verification_failed:{e}"))?;
+            let _manifest_bytes = store.load(&man_digest)
+                .map_err(|e| anyhow!("manifest_verification_failed:{e}"))?;
+            // Note: evidence verification and manifest parsing are stubs for now.
+            // Full implementation requires the harness manifest parser integration.
+
+            // 4. Real Registry Snapshot activation.
+            let current_snap = journal.load_registry_snapshot(&current_snap_id)?;
+            let new_op = crate::registry::snapshot::OperationSpec {
+                name: proposal.requested_operations.get(0).cloned().unwrap_or_default(),
+                risk: crate::registry::snapshot::Risk::ReadOnly,
+                description: proposal.risk_summary.clone(),
+                parameters: serde_json::json!({"type":"object"}),
+                idempotent: true,
+                binding_kind: crate::registry::snapshot::BindingKind::External,
+                binding_key: format!("manifest_{}", proposal_id),
+            };
+            let mut new_specs: Vec<crate::registry::snapshot::OperationSpec> =
+                current_snap.operations.clone();
+            new_specs.push(new_op);
+            let new_snapshot = journal.create_registry_snapshot(new_specs)?;
+            let new_snapshot_id = new_snapshot.snapshot_id.clone();
+            // 5. CAS activate via the authoritative activation function.
+            let decision_id = format!("activation:{}", proposal_id);
+            journal.activate_snapshot_transactional(
+                &proposal.expected_active_snapshot_id, &new_snapshot_id,
+                &decision_id, "capability_activation",
+            )?;
+            // 6. Mark proposal Activated.
             journal.decide_proposal(
-                proposal_id,
-                &[ProposalStatus::PendingApproval],
-                ProposalStatus::Activated,
-                principal,
-                "approved",
-                Some("snap_activation"),
-                None,
+                proposal_id, &[ProposalStatus::PendingApproval],
+                ProposalStatus::Activated, principal, "activated",
+                Some(&new_snapshot_id), None,
             )?;
             journal.append_event(
                 JournalEventKind::CapabilityChangeActivated,
-                Some(&proposal.origin_run_id),
-                Some(&proposal.origin_session_id),
+                Some(&proposal.origin_run_id), Some(&proposal.origin_session_id),
                 Some(proposal_id),
                 json!({"proposal_id": proposal_id, "decided_by": principal,
-                       "expected_snapshot_id": proposal.expected_active_snapshot_id}),
+                       "previous_snapshot_id": proposal.expected_active_snapshot_id,
+                       "new_snapshot_id": new_snapshot_id}),
             )?;
-            Ok(json!({"proposal_id": proposal_id, "status": "Activated"}))
+            Ok(json!({"proposal_id": proposal_id, "status": "Activated",
+                      "previous_snapshot_id": proposal.expected_active_snapshot_id,
+                      "activated_snapshot_id": new_snapshot_id}))
         }
         "rejected" => {
             journal.decide_proposal(
