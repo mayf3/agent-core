@@ -34,6 +34,7 @@ fn rejected_decision_never_activates() -> Result<()> {
         &pid,
         &body,
         "approval_workflow",
+        &crate::domain::AgentId("main".to_string()),
     )?;
     assert_eq!(result["status"], "Rejected");
 
@@ -78,6 +79,7 @@ fn tampered_artifact_blocks_activation() -> Result<()> {
         &pid,
         &body,
         "approval_workflow",
+        &crate::domain::AgentId("main".to_string()),
     )
     .unwrap_err()
     .to_string();
@@ -108,6 +110,7 @@ fn tampered_manifest_blocks_activation() -> Result<()> {
         &pid,
         &body,
         "approval_workflow",
+        &crate::domain::AgentId("main".to_string()),
     )
     .unwrap_err()
     .to_string();
@@ -137,6 +140,7 @@ fn tampered_evidence_blocks_activation() -> Result<()> {
         &pid,
         &body,
         "approval_workflow",
+        &crate::domain::AgentId("main".to_string()),
     )
     .unwrap_err()
     .to_string();
@@ -184,6 +188,7 @@ fn stale_expected_snapshot_blocks_activation() -> Result<()> {
         &pid,
         &body,
         "approval_workflow",
+        &crate::domain::AgentId("main".to_string()),
     )
     .unwrap_err()
     .to_string();
@@ -210,6 +215,7 @@ fn duplicate_decision_is_rejected() -> Result<()> {
         &pid,
         &body,
         "approval_workflow",
+        &crate::domain::AgentId("main".to_string()),
     )?;
     assert_eq!(r1["status"], "Activated");
     let activated = journal
@@ -225,6 +231,7 @@ fn duplicate_decision_is_rejected() -> Result<()> {
         &pid,
         &body,
         "approval_workflow",
+        &crate::domain::AgentId("main".to_string()),
     )
     .unwrap_err()
     .to_string();

@@ -67,14 +67,20 @@ fn submit_probe(journal: &JournalStore, gateway: &Gateway, store: &ContentStore)
     let manifest_digest = store.store(&manifest_bytes)?;
 
     let body = json!({
-        "target_agent_id": "agent_main",
+        "target_agent_id": "main",
         "artifact_ref": "a", "artifact_digest": artifact_digest.as_str(),
         "manifest_ref": "m", "manifest_digest": manifest_digest.as_str(),
         "evidence_ref": "e", "evidence_digest": evidence_digest.as_str(),
         "requested_operations": [PROBE_OP],
         "risk_summary": "snapshot-pin probe",
     });
-    let resp = handle_submit_proposal(journal, gateway, &body, "capability_submitter")?;
+    let resp = handle_submit_proposal(
+        journal,
+        gateway,
+        &body,
+        "capability_submitter",
+        &crate::domain::AgentId("main".to_string()),
+    )?;
     Ok(resp.proposal_id)
 }
 
@@ -141,7 +147,15 @@ fn capability_decision_activation_affects_only_future_runs() -> Result<()> {
         "artifact_digest": proposal.artifact_digest,
         "manifest_digest": proposal.manifest_digest,
     });
-    let result = handle_decision(&journal, &gateway, &store, &pid, &dec, "approval_workflow")?;
+    let result = handle_decision(
+        &journal,
+        &gateway,
+        &store,
+        &pid,
+        &dec,
+        "approval_workflow",
+        &crate::domain::AgentId("main".to_string()),
+    )?;
     assert_eq!(result["status"], "Activated");
     let s1 = result["activated_snapshot_id"]
         .as_str()

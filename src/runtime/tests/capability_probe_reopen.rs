@@ -42,7 +42,15 @@ fn activated_proposal_and_registry_survive_reopen() -> Result<()> {
         "artifact_digest": proposal_before.artifact_digest,
         "manifest_digest": proposal_before.manifest_digest,
     });
-    let result = handle_decision(&j1, &gw, &store, &pid, &dec, "approval_workflow")?;
+    let result = handle_decision(
+        &j1,
+        &gw,
+        &store,
+        &pid,
+        &dec,
+        "approval_workflow",
+        &crate::domain::AgentId("main".to_string()),
+    )?;
     let activated = result["activated_snapshot_id"]
         .as_str()
         .unwrap()

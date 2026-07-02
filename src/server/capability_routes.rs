@@ -130,9 +130,19 @@ pub fn handle_submit_proposal(
     _gateway: &Gateway,
     body: &Value,
     principal: &str,
+    config_agent_id: &AgentId,
 ) -> Result<SubmitProposalResponse> {
     let input: SubmitProposalBody =
         serde_json::from_value(body.clone()).map_err(|e| anyhow!("invalid_proposal_body: {e}"))?;
+
+    // Validate target_agent_id matches the Kernel's configured agent before
+    // persisting the proposal. This is re-checked inside the activation tx.
+    if !AgentId(input.target_agent_id.clone())
+        .0
+        .eq_ignore_ascii_case(&config_agent_id.0)
+    {
+        return Err(CapabilityRouteError::Forbidden("target_agent_mismatch".into()).into());
+    }
     for d in [
         &input.artifact_digest,
         &input.manifest_digest,
@@ -180,6 +190,7 @@ pub fn handle_decision(
     proposal_id: &str,
     body: &Value,
     principal: &str,
+    config_agent_id: &AgentId,
 ) -> Result<Value> {
     let input: DecisionBody =
         serde_json::from_value(body.clone()).map_err(|e| anyhow!("invalid_decision_body: {e}"))?;
@@ -330,6 +341,7 @@ pub fn handle_decision(
                 &proposal.expected_active_snapshot_id,
                 &decision_id,
                 Some(&manifest),
+                config_agent_id,
             )?;
 
             Ok(json!({"proposal_id": proposal_id, "status": "Activated",

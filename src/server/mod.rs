@@ -167,7 +167,13 @@ fn handle_connection(
             Err(_) => return write_json(stream, 400, json!({"error":"invalid_json"})),
         };
         let p = &"capability_submitter";
-        let result = capability_routes::handle_submit_proposal(&journal, &gateway, &body, p);
+        let result = capability_routes::handle_submit_proposal(
+            &journal,
+            &gateway,
+            &body,
+            p,
+            &config.agent_id,
+        );
         let result = result.map(|resp| serde_json::to_value(&resp).unwrap_or_default());
         match map_capability_result(result) {
             Ok((status, body)) => write_json(stream, status, body),
@@ -192,7 +198,15 @@ fn handle_connection(
         };
         let store =
             crate::capabilities::store::ContentStore::new(config.harness_artifact_root.clone());
-        let result = capability_routes::handle_decision(&journal, &gateway, &store, pid, &body, p);
+        let result = capability_routes::handle_decision(
+            &journal,
+            &gateway,
+            &store,
+            pid,
+            &body,
+            p,
+            &config.agent_id,
+        );
         match map_capability_result(result) {
             Ok((status, body)) => write_json(stream, status, body),
             Err(e) => write_json(stream, 500, json!({"ok": false, "error": e.to_string()})),

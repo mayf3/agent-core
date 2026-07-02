@@ -22,10 +22,11 @@ impl super::JournalStore {
     /// journal events) happen inside a single BEGIN IMMEDIATE transaction.
     ///
     /// On success the in-memory registry cache is refreshed. On failure
-    /// (manifest registration fails, proposal not Pending, stale snapshot,
-    /// CAS conflict, event write failure) the ENTIRE transaction rolls back:
-    /// no manifest row persists, no HarnessManifestRegistered event,
-    /// no Registry Snapshot, no status change, no terminal events.
+    /// (manifest registration fails, proposal not Pending, expired at tx time,
+    /// target agent mismatch, stale snapshot, CAS conflict, event write failure)
+    /// the ENTIRE transaction rolls back: no manifest row persists, no
+    /// HarnessManifestRegistered event, no Registry Snapshot, no status change,
+    /// no terminal events.
     pub fn activate_proposal_atomic(
         &self,
         proposal: &CapabilityChangeProposal,
@@ -34,6 +35,7 @@ impl super::JournalStore {
         expected_snapshot_id: &str,
         decision_id: &str,
         manifest: Option<&HarnessManifest>,
+        expected_agent_id: &AgentId,
     ) -> Result<String> {
         let mut conn = self.conn.lock().map_err(|_| anyhow!("mutex poisoned"))?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -44,16 +46,35 @@ impl super::JournalStore {
                 .map_err(|e| anyhow!("manifest_registration_failed:{e}"))?;
         }
 
-        // 1. Verify proposal is still PendingApproval.
-        let cur_status: String = tx
+        // 1. Verify proposal is still PendingApproval and re-read authoritative
+        //    fields from the database (defeats TOCTOU from pre-tx reads).
+        let expiry_and_status: (String, String, String) = tx
             .query_row(
-                "SELECT status FROM capability_change_proposals WHERE proposal_id = ?1",
+                "SELECT status, expires_at, target_agent_id FROM capability_change_proposals WHERE proposal_id = ?1",
                 params![proposal.proposal_id],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .map_err(|_| anyhow!("proposal_not_found"))?;
+        let (cur_status, db_expires_at, db_target_agent_id) = expiry_and_status;
         if cur_status != "PendingApproval" {
             bail!("proposal_not_pending: {cur_status}");
+        }
+
+        // 1a. Check expiry with the transaction's fresh timestamp.
+        let decision_now = Utc::now();
+        let persisted_expiry = chrono::DateTime::parse_from_rfc3339(&db_expires_at)
+            .map_err(|_| anyhow!("invalid_persisted_expires_at"))?
+            .with_timezone(&chrono::Utc);
+        if decision_now >= persisted_expiry {
+            bail!("proposal_expired: stale_expiry_at_tx_time");
+        }
+
+        // 1b. Verify target_agent_id matches the expected configured agent.
+        if db_target_agent_id != expected_agent_id.0 {
+            bail!(
+                "target_agent_mismatch: has {db_target_agent_id} expected {}",
+                expected_agent_id.0
+            );
         }
 
         // 2. Verify active snapshot hasn't changed.

@@ -102,7 +102,7 @@ fn write_blobs(store: &ContentStore) -> Result<(String, String, String, HarnessM
 /// Build a proposal body for the probe op referencing the given digests.
 fn proposal_body(art: &str, man: &str, ev: &str) -> Value {
     json!({
-        "target_agent_id": "agent_main",
+        "target_agent_id": "main",
         "artifact_ref": "a", "artifact_digest": art,
         "manifest_ref": "m", "manifest_digest": man,
         "evidence_ref": "e", "evidence_digest": ev,
@@ -177,6 +177,7 @@ fn concurrent_approved_decisions_activate_exactly_once() -> Result<()> {
         &gw,
         &body,
         "capability_submitter",
+        &crate::domain::AgentId("main".to_string()),
     )?;
     let pid = resp.proposal_id;
     let expected = j_setup.current_registry_snapshot_id()?;
@@ -229,6 +230,7 @@ fn concurrent_approved_decisions_activate_exactly_once() -> Result<()> {
                 &expected,
                 &format!("activation:{pid_local}"),
                 None,
+                &crate::domain::AgentId("main".to_string()),
             );
             match res {
                 Ok(_) => {
@@ -330,6 +332,7 @@ fn approved_and_rejected_decisions_race_exactly_once() -> Result<()> {
         &gw,
         &body,
         "capability_submitter",
+        &crate::domain::AgentId("main".to_string()),
     )?;
     let pid = resp.proposal_id;
     let expected = j_setup.current_registry_snapshot_id()?;
@@ -361,6 +364,7 @@ fn approved_and_rejected_decisions_race_exactly_once() -> Result<()> {
                 &expected,
                 &format!("activation:{pid_c}"),
                 None,
+                &crate::domain::AgentId("main".to_string()),
             );
             if let Err(e) = res {
                 let msg = e.to_string();
