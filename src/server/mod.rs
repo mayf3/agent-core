@@ -276,7 +276,6 @@ fn handle_approval_decision(
         }),
     )
 }
-/// Map harness route errors to HTTP status. Never leaks tokens/paths.
 fn handle_harness_result(stream: &mut TcpStream, result: Result<String>) -> Result<()> {
     match result {
         Ok(body) => write_json(stream, 200, serde_json::from_str(&body)?),

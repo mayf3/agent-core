@@ -124,20 +124,85 @@ impl super::JournalStore {
         let manifest_id = &manifest.manifest_id;
         let content_digest = manifest.compute_manifest_id()?;
 
-        // Check if this manifest_id already exists with the same content.
-        let existing: Option<(String, String)> = tx
+        // Check if this manifest_id already exists. If so, read the full
+        // persisted row and do a strict structural comparison with the new
+        // manifest. Only byte-identical content (same canonical_digest +
+        // all immutable fields) is allowed as an idempotent reuse.
+        let existing_row: Option<(
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            bool,
+            String,
+            String,
+        )> = tx
             .query_row(
-                "SELECT canonical_digest, artifact_digest FROM harness_manifests WHERE manifest_id = ?1",
+                "SELECT harness_id, artifact_digest, protocol_version, endpoint,
+                        operation_name, description, input_schema_json, output_schema_json,
+                        idempotent, created_at, canonical_digest
+                 FROM harness_manifests WHERE manifest_id = ?1",
                 params![manifest_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get::<_, i64>(8)? != 0,
+                        row.get(9)?,
+                        row.get(10)?,
+                    ))
+                },
             )
             .ok();
 
-        if let Some((existing_digest, existing_artifact)) = existing {
-            // Same manifest_id: require byte-identical content (same digest)
-            // AND same artifact_digest. Any difference is a conflict.
-            if existing_digest == content_digest && existing_artifact == manifest.artifact_digest {
-                // Idempotent: same content → reuse existing.
+        if let Some((
+            e_hid,
+            e_art,
+            e_proto,
+            e_ep,
+            e_op,
+            e_desc,
+            e_inp,
+            e_out,
+            e_idem,
+            _e_ts,
+            _e_dig,
+        )) = existing_row
+        {
+            // Reconstruct the persisted manifest for structural comparison.
+            let e_input_schema: serde_json::Value = serde_json::from_str(&e_inp)
+                .map_err(|_| anyhow!("corrupt_persisted_input_schema:{manifest_id}"))?;
+            let e_output_schema: serde_json::Value = serde_json::from_str(&e_out)
+                .map_err(|_| anyhow!("corrupt_persisted_output_schema:{manifest_id}"))?;
+            let existing_manifest = HarnessManifest {
+                manifest_id: manifest_id.clone(),
+                harness_id: e_hid,
+                artifact_digest: e_art,
+                protocol_version: e_proto,
+                endpoint: e_ep,
+                operation_name: e_op,
+                description: e_desc,
+                input_schema: e_input_schema,
+                output_schema: e_output_schema,
+                idempotent: e_idem,
+                created_at: manifest.created_at, // created_at is system-set, skip comparison
+            };
+            // Compute the canonical digest from the persisted data.
+            let existing_digest = existing_manifest.compute_manifest_id()?;
+            if existing_digest == content_digest
+                && existing_manifest.artifact_digest == manifest.artifact_digest
+            {
+                // Full structural match — safe idempotent reuse.
                 return Ok(manifest_id.clone());
             }
             bail!("manifest_identity_conflict: manifest_id {manifest_id} already registered with different content");
