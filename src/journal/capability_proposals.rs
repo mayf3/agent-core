@@ -72,7 +72,7 @@ impl super::JournalStore {
                     status, created_at, expires_at,
                     decided_at, decided_by, decision_reason,
                     activated_snapshot_id, activation_error
-             FROM capability_change_proposals WHERE proposal_id = ?1"
+             FROM capability_change_proposals WHERE proposal_id = ?1",
         )?;
         let mut rows = stmt.query_map(params![proposal_id], |row| {
             Ok(CapabilityChangeProposal {
@@ -87,17 +87,18 @@ impl super::JournalStore {
                 manifest_digest: row.get(8)?,
                 evidence_ref: row.get(9)?,
                 evidence_digest: row.get(10)?,
-                requested_operations: serde_json::from_str(&row.get::<_,String>(11)?).unwrap_or_default(),
+                requested_operations: serde_json::from_str(&row.get::<_, String>(11)?)
+                    .unwrap_or_default(),
                 risk_summary: row.get(12)?,
                 expected_active_snapshot_id: row.get(13)?,
-                status: parse_status(&row.get::<_,String>(14)?),
+                status: parse_status(&row.get::<_, String>(14)?),
                 created_at: Utc::now(),
                 expires_at: Utc::now(),
                 decided_at: None,
-                decided_by: row.get::<_,Option<String>>(18)?,
-                decision_reason: row.get::<_,Option<String>>(19)?,
-                activated_snapshot_id: row.get::<_,Option<String>>(20)?,
-                activation_error: row.get::<_,Option<String>>(21)?,
+                decided_by: row.get::<_, Option<String>>(18)?,
+                decision_reason: row.get::<_, Option<String>>(19)?,
+                activated_snapshot_id: row.get::<_, Option<String>>(20)?,
+                activation_error: row.get::<_, Option<String>>(21)?,
             })
         })?;
         match rows.next() {
@@ -120,12 +121,19 @@ impl super::JournalStore {
     ) -> Result<bool> {
         let conn = self.conn.lock().map_err(|_| anyhow!("mutex poisoned"))?;
         let from_strs: Vec<String> = from_status.iter().map(|s| format!("{:?}", s)).collect();
-        let current: Option<String> = conn.query_row(
-            "SELECT status FROM capability_change_proposals WHERE proposal_id = ?1",
-            params![proposal_id], |row| row.get(0),
-        ).ok();
-        let Some(ref cur) = current else { return Ok(false); };
-        if !from_strs.iter().any(|s| s == cur) { return Ok(false); }
+        let current: Option<String> = conn
+            .query_row(
+                "SELECT status FROM capability_change_proposals WHERE proposal_id = ?1",
+                params![proposal_id],
+                |row| row.get(0),
+            )
+            .ok();
+        let Some(ref cur) = current else {
+            return Ok(false);
+        };
+        if !from_strs.iter().any(|s| s == cur) {
+            return Ok(false);
+        }
         let to = format!("{:?}", to_status);
         let now = Utc::now().to_rfc3339();
         let changed = conn.execute(
@@ -133,7 +141,16 @@ impl super::JournalStore {
              SET status = ?1, decided_at = ?2, decided_by = ?3, decision_reason = ?4,
                  activated_snapshot_id = ?5, activation_error = ?6
              WHERE proposal_id = ?7 AND status = ?8",
-            params![to, now, decided_by, reason, activated_snapshot_id, activation_error, proposal_id, cur],
+            params![
+                to,
+                now,
+                decided_by,
+                reason,
+                activated_snapshot_id,
+                activation_error,
+                proposal_id,
+                cur
+            ],
         )?;
         Ok(changed == 1)
     }
@@ -142,11 +159,13 @@ impl super::JournalStore {
     pub fn proposals_by_session(&self, session_id: &SessionId) -> Result<Vec<String>> {
         let conn = self.conn.lock().map_err(|_| anyhow!("mutex poisoned"))?;
         let mut stmt = conn.prepare(
-            "SELECT proposal_id FROM capability_change_proposals WHERE origin_session_id = ?1"
+            "SELECT proposal_id FROM capability_change_proposals WHERE origin_session_id = ?1",
         )?;
-        let rows = stmt.query_map(params![session_id.0], |row| row.get::<_,String>(0))?;
+        let rows = stmt.query_map(params![session_id.0], |row| row.get::<_, String>(0))?;
         let mut ids = Vec::new();
-        for r in rows { ids.push(r?); }
+        for r in rows {
+            ids.push(r?);
+        }
         Ok(ids)
     }
 }
