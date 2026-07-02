@@ -32,6 +32,7 @@ fn decision_accepts_valid_external_harness_manifest() -> Result<()> {
         &pid,
         &body,
         "approval_workflow",
+        &crate::domain::AgentId("main".to_string()),
     )?;
 
     assert_eq!(result["status"], "Activated");
@@ -85,6 +86,7 @@ fn decision_rejects_manifest_operation_missing() -> Result<()> {
         &pid,
         &body,
         "approval_workflow",
+        &crate::domain::AgentId("main".to_string()),
     )
     .unwrap_err()
     .to_string();
@@ -113,6 +115,7 @@ fn decision_rejects_manifest_operation_extra() -> Result<()> {
         &pid,
         &body,
         "approval_workflow",
+        &crate::domain::AgentId("main".to_string()),
     )
     .unwrap_err()
     .to_string();
@@ -147,6 +150,7 @@ fn decision_rejects_duplicate_manifest_operation() -> Result<()> {
         &pid,
         &body,
         "approval_workflow",
+        &crate::domain::AgentId("main".to_string()),
     )
     .unwrap_err()
     .to_string();
@@ -181,6 +185,7 @@ fn decision_rejects_builtin_namespace() -> Result<()> {
         &pid,
         &body,
         "approval_workflow",
+        &crate::domain::AgentId("main".to_string()),
     )
     .unwrap_err()
     .to_string();
@@ -215,6 +220,7 @@ fn decision_rejects_development_namespace() -> Result<()> {
         &pid,
         &body,
         "approval_workflow",
+        &crate::domain::AgentId("main".to_string()),
     )
     .unwrap_err()
     .to_string();
@@ -267,14 +273,20 @@ fn decision_rejects_manifest_artifact_digest_mismatch() -> Result<()> {
     let evidence_digest = store.store(b"evidence")?;
 
     let body = json!({
-        "target_agent_id": "agent_main",
+        "target_agent_id": "main",
         "artifact_ref": "a", "artifact_digest": artifact_a.as_str(),
         "manifest_ref": "m", "manifest_digest": manifest_digest.as_str(),
         "evidence_ref": "e", "evidence_digest": evidence_digest.as_str(),
         "requested_operations": [PROBE_OP],
         "risk_summary": "mismatch",
     });
-    let resp = handle_submit_proposal(&journal, &gw, &body, "capability_submitter")?;
+    let resp = handle_submit_proposal(
+        &journal,
+        &gw,
+        &body,
+        "capability_submitter",
+        &crate::domain::AgentId("main".to_string()),
+    )?;
     let pid = resp.proposal_id;
     let s0 = journal.current_registry_snapshot_id()?;
 
@@ -283,9 +295,17 @@ fn decision_rejects_manifest_artifact_digest_mismatch() -> Result<()> {
         "artifact_digest": artifact_a.as_str(),
         "manifest_digest": manifest_digest.as_str(),
     });
-    let err = handle_decision(&journal, &gw, &store, &pid, &dec, "approval_workflow")
-        .unwrap_err()
-        .to_string();
+    let err = handle_decision(
+        &journal,
+        &gw,
+        &store,
+        &pid,
+        &dec,
+        "approval_workflow",
+        &crate::domain::AgentId("main".to_string()),
+    )
+    .unwrap_err()
+    .to_string();
     assert!(
         err.contains("manifest_artifact_digest_mismatch"),
         "got: {err}"
@@ -313,6 +333,7 @@ fn decision_rejects_existing_operation_conflict() -> Result<()> {
         &pid1,
         &body1,
         "approval_workflow",
+        &crate::domain::AgentId("main".to_string()),
     )?;
     let s1 = journal.current_registry_snapshot_id()?;
     let v1 = registry_version(&journal);
@@ -348,14 +369,20 @@ fn decision_rejects_existing_operation_conflict() -> Result<()> {
     let manifest_digest = store2.store(&manifest_bytes)?;
 
     let body2 = json!({
-        "target_agent_id": "agent_main",
+        "target_agent_id": "main",
         "artifact_ref": "a", "artifact_digest": artifact_digest.as_str(),
         "manifest_ref": "m", "manifest_digest": manifest_digest.as_str(),
         "evidence_ref": "e", "evidence_digest": evidence_digest.as_str(),
         "requested_operations": [PROBE_OP],
         "risk_summary": "conflicting probe",
     });
-    let resp2 = handle_submit_proposal(&journal, &gw, &body2, "capability_submitter")?;
+    let resp2 = handle_submit_proposal(
+        &journal,
+        &gw,
+        &body2,
+        "capability_submitter",
+        &crate::domain::AgentId("main".to_string()),
+    )?;
     let pid2 = resp2.proposal_id;
 
     let dec2 = json!({
@@ -363,9 +390,17 @@ fn decision_rejects_existing_operation_conflict() -> Result<()> {
         "artifact_digest": artifact_digest.as_str(),
         "manifest_digest": manifest_digest.as_str(),
     });
-    let err = handle_decision(&journal, &gw, &store2, &pid2, &dec2, "approval_workflow")
-        .unwrap_err()
-        .to_string();
+    let err = handle_decision(
+        &journal,
+        &gw,
+        &store2,
+        &pid2,
+        &dec2,
+        "approval_workflow",
+        &crate::domain::AgentId("main".to_string()),
+    )
+    .unwrap_err()
+    .to_string();
     assert!(err.contains("existing_operation_conflict"), "got: {err}");
 
     assert_eq!(journal.current_registry_snapshot_id()?, s1);

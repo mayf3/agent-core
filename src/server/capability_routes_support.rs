@@ -66,7 +66,7 @@ impl ProposalSetup {
 
         let requested = requested_ops.unwrap_or_else(|| vec![op_name.to_string()]);
         let body = json!({
-            "target_agent_id": "agent_main",
+            "target_agent_id": "main",
             "artifact_ref": "artifact.bin",
             "artifact_digest": artifact_digest.as_str(),
             "manifest_ref": "manifest.json",
@@ -88,7 +88,13 @@ impl ProposalSetup {
 
     /// Submit the proposal via the real submit handler and return its id.
     pub(super) fn submit(&self, journal: &JournalStore, gateway: &Gateway) -> Result<String> {
-        let resp = handle_submit_proposal(journal, gateway, &self.body, "capability_submitter")?;
+        let resp = handle_submit_proposal(
+            journal,
+            gateway,
+            &self.body,
+            "capability_submitter",
+            &crate::domain::AgentId("main".to_string()),
+        )?;
         Ok(resp.proposal_id)
     }
 

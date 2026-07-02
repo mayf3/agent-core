@@ -75,14 +75,20 @@ fn rollback_setup(
     let manifest_bytes = serde_json::to_vec(&manifest)?;
     let manifest_digest = _store.store(&manifest_bytes)?;
     let body = json!({
-        "target_agent_id": "agent_main",
+        "target_agent_id": "main",
         "artifact_ref": "a", "artifact_digest": artifact_digest.as_str(),
         "manifest_ref": "m", "manifest_digest": manifest_digest.as_str(),
         "evidence_ref": "e", "evidence_digest": _evidence_digest.as_str(),
         "requested_operations": [PROBE_OP],
         "risk_summary": "rollback probe",
     });
-    let resp = handle_submit_proposal(journal, &gw, &body, "capability_submitter")?;
+    let resp = handle_submit_proposal(
+        journal,
+        &gw,
+        &body,
+        "capability_submitter",
+        &crate::domain::AgentId("main".to_string()),
+    )?;
     let pid = resp.proposal_id;
     let proposal = journal.load_proposal(&pid)?.unwrap();
     let expected = proposal.expected_active_snapshot_id.clone();
@@ -134,6 +140,7 @@ fn registry_activation_event_failure_rolls_back_everything() -> Result<()> {
         &expected,
         &format!("activation:{pid}"),
         None,
+        &crate::domain::AgentId("main".to_string()),
     );
     assert!(res.is_err(), "activation must fail when event write fails");
 
@@ -210,6 +217,7 @@ fn capability_activation_event_failure_rolls_back_everything() -> Result<()> {
         &expected,
         &format!("activation:{pid}"),
         None,
+        &crate::domain::AgentId("main".to_string()),
     );
     assert!(
         res.is_err(),

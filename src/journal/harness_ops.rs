@@ -9,7 +9,7 @@ use crate::harness::manifest::HarnessManifest;
 use crate::registry::snapshot::{BindingKind, OperationSpec, Risk};
 use anyhow::{anyhow, bail, Result};
 use chrono::Utc;
-use rusqlite::{params, Transaction, TransactionBehavior};
+use rusqlite::{params, Transaction};
 
 impl super::JournalStore {
     /// Register a new harness manifest. Idempotent: same content produces the
