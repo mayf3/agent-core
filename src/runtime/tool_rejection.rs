@@ -115,7 +115,6 @@ pub(crate) fn execute_session_recall(
     }
 
     let output = json!({
-        "session_id": session_id.0,
         "count": results.len(),
         "messages": results,
     });
@@ -158,7 +157,7 @@ fn validate_builtin_arguments(
         return Err(ToolRejection::MalformedArguments);
     };
     match operation {
-        operation::TIME_NOW | operation::SYSTEM_STATUS => {
+        operation::SYSTEM_STATUS => {
             if !map.is_empty() {
                 return Err(ToolRejection::InvalidArguments);
             }
@@ -221,7 +220,6 @@ mod tests {
 
     #[test]
     fn sanitize_keeps_catalog_operation_canonical() {
-        assert_eq!(sanitize_operation_for_audit("time.now"), "time.now");
         assert_eq!(
             sanitize_operation_for_audit("session.recall_recent"),
             "session.recall_recent"

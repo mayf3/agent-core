@@ -14,11 +14,11 @@ use std::sync::{
 };
 #[test]
 fn provider_tools_expose_only_granted_readonly_operations() {
-    let tools = provider_tools_for_grants(&["time.now".to_string()]);
+    let tools = provider_tools_for_grants(&["system.status".to_string()]);
     assert_eq!(tools.len(), 1);
     assert_eq!(
         tools[0].pointer("/function/name").and_then(Value::as_str),
-        Some("time.now")
+        Some("system.status")
     );
 }
 
@@ -41,27 +41,23 @@ fn unknown_operations_are_never_in_provider_tools() {
 fn multiple_readonly_grants_expose_all_in_catalog_order() {
     let tools = provider_tools_for_grants(&[
         "system.status".to_string(),
-        "time.now".to_string(),
         "session.recall_recent".to_string(),
     ]);
     let names: Vec<&str> = tools
         .iter()
         .filter_map(|t| t.pointer("/function/name").and_then(Value::as_str))
         .collect();
-    assert_eq!(
-        names,
-        vec!["time.now", "session.recall_recent", "system.status"]
-    );
+    assert_eq!(names, vec!["session.recall_recent", "system.status"]);
 }
 
 #[test]
 fn provider_tool_definition_rejects_write_and_unknown() {
     assert!(provider_tool_definition("feishu.send_message").is_none());
     assert!(provider_tool_definition("shell.exec").is_none());
-    let tn = provider_tool_definition("time.now").unwrap();
+    let tn = provider_tool_definition("system.status").unwrap();
     assert_eq!(
         tn.pointer("/function/name").and_then(Value::as_str),
-        Some("time.now")
+        Some("system.status")
     );
     assert_eq!(
         tn.pointer("/function/parameters/additionalProperties")
@@ -185,12 +181,17 @@ fn request_includes_time_now_when_granted() -> Result<()> {
         3000,
     );
     let snap = crate::registry::snapshot::test_snapshot();
-    let provider_tools =
-        snap.provider_tools_for_grants(&["time.now".to_string(), "system.status".to_string()]);
+    let provider_tools = snap.provider_tools_for_grants(&[
+        "system.status".to_string(),
+        "session.recall_recent".to_string(),
+    ]);
     let _ = llm.complete(LlmInput {
         blocks: vec![],
         user_text: "x".into(),
-        granted_operations: vec!["time.now".to_string(), "system.status".to_string()],
+        granted_operations: vec![
+            "system.status".to_string(),
+            "session.recall_recent".to_string(),
+        ],
         provider_tools,
         follow_ups: vec![],
     })?;
@@ -204,7 +205,7 @@ fn request_includes_time_now_when_granted() -> Result<()> {
     assert_eq!(tools.len(), 2);
     assert_eq!(
         tools[0].pointer("/function/name").and_then(Value::as_str),
-        Some("time.now")
+        Some("session.recall_recent")
     );
     assert_eq!(
         tools[0]
@@ -225,7 +226,7 @@ fn request_includes_time_now_when_granted() -> Result<()> {
         .iter()
         .filter_map(|tool| tool.pointer("/function/name").and_then(Value::as_str))
         .collect();
-    assert_eq!(names, vec!["time.now", "system.status"]);
+    assert_eq!(names, vec!["session.recall_recent", "system.status"]);
     Ok(())
 }
 
@@ -240,7 +241,7 @@ fn request_omits_time_now_when_not_granted() -> Result<()> {
     );
     let snap = crate::registry::snapshot::test_snapshot();
     let provider_tools = snap.provider_tools_for_grants(&["session.recall_recent".to_string()]);
-    // Grant only session.recall_recent — NOT time.now.
+    // Grant only session.recall_recent — NOT system.status.
     let _ = llm.complete(LlmInput {
         blocks: vec![],
         user_text: "x".into(),
@@ -260,8 +261,8 @@ fn request_omits_time_now_when_not_granted() -> Result<()> {
         })
         .unwrap_or_default();
     assert!(
-        !tool_names.contains(&"time.now"),
-        "time.now must NOT be in tools when not granted: {tool_names:?}"
+        !tool_names.contains(&"system.status"),
+        "system.status must NOT be in tools when not granted: {tool_names:?}"
     );
     assert_eq!(tool_names, vec!["session.recall_recent"]);
     Ok(())
@@ -315,7 +316,7 @@ fn ungranted_provider_time_now_is_rejected_by_gateway() {
                 "tool_calls": [{
                     "id": "ungranted-provider-call",
                     "type": "function",
-                    "function": {"name": "time.now", "arguments": "{}"}
+                    "function": {"name": "system.status", "arguments": "{}"}
                 }]
             }}]
         }),
@@ -343,13 +344,13 @@ fn ungranted_provider_time_now_is_rejected_by_gateway() {
     );
     let events = journal.events().unwrap();
     let count = |k: JournalEventKind| events.iter().filter(|e| e.kind == k).count();
-    // count an event kind whose operation == time.now
+    // count an event kind whose operation == system.status
     let count_op = |k: JournalEventKind| {
         events
             .iter()
             .filter(|e| {
                 e.kind == k
-                    && e.payload.get("operation").and_then(Value::as_str) == Some("time.now")
+                    && e.payload.get("operation").and_then(Value::as_str) == Some("system.status")
             })
             .count()
     };
@@ -374,19 +375,19 @@ fn ungranted_provider_time_now_is_rejected_by_gateway() {
         .filter_map(|tool| tool.pointer("/function/name").and_then(Value::as_str))
         .collect();
     assert_eq!(names, vec!["session.recall_recent"]);
-    // §5: time.now is not in provider tools (asserted via names above) and not
+    // §5: system.status is not in provider tools (asserted via names above) and not
     // in the system ToolCatalog block.
     let sys_msg = requests[0]["messages"][0]["content"].as_str().unwrap_or("");
     assert!(
-        !sys_msg.contains("time.now"),
-        "un-granted time.now not in ToolCatalog"
+        !sys_msg.contains("system.status"),
+        "un-granted system.status not in ToolCatalog"
     );
 }
-// ===== §9: full time.now tool loop (granted) =====
+// ===== §9: full system.status tool loop (granted) =====
 #[test]
 fn granted_time_now_completes_real_http_tool_loop() {
     let mut cfg = super::tool_loop_tests::test_config();
-    cfg.extra_allowed_operations = vec!["time.now".to_string()];
+    cfg.extra_allowed_operations = vec!["system.status".to_string()];
     let server = CaptureServer::start(vec![
         json!({
             "model": "local-stub",
@@ -395,7 +396,7 @@ fn granted_time_now_completes_real_http_tool_loop() {
                 "tool_calls": [{
                     "id": "provider-call-1",
                     "type": "function",
-                    "function": {"name": "time.now", "arguments": "{}"}
+                    "function": {"name": "system.status", "arguments": "{}"}
                 }]
             }}]
         }),
@@ -424,7 +425,8 @@ fn granted_time_now_completes_real_http_tool_loop() {
             .iter()
             .filter(|event| {
                 event.kind == kind
-                    && event.payload.get("operation").and_then(Value::as_str) == Some("time.now")
+                    && event.payload.get("operation").and_then(Value::as_str)
+                        == Some("system.status")
             })
             .count()
     };
@@ -449,7 +451,7 @@ fn granted_time_now_completes_real_http_tool_loop() {
         .iter()
         .filter_map(|tool| tool.pointer("/function/name").and_then(Value::as_str))
         .collect();
-    assert_eq!(names, vec!["session.recall_recent", "time.now"]);
+    assert_eq!(names, vec!["session.recall_recent", "system.status"]);
     // The ToolResult is NOT duplicated in the system context — it is
     // delivered exclusively via the role=tool follow-up message.
     let system2 = requests[1]
@@ -457,7 +459,7 @@ fn granted_time_now_completes_real_http_tool_loop() {
         .and_then(Value::as_str)
         .unwrap();
     assert!(
-        !system2.contains("tool: time.now"),
+        !system2.contains("tool: system.status"),
         "ToolResult must NOT be in system context"
     );
     let tool_msg = requests[1]
@@ -479,8 +481,8 @@ fn granted_time_now_completes_real_http_tool_loop() {
     let cat1 = requests[0]["messages"][0]["content"].as_str().unwrap_or("");
     let cat2 = requests[1]["messages"][0]["content"].as_str().unwrap_or("");
     assert_eq!(
-        cat1.contains("time.now"),
-        cat2.contains("time.now"),
+        cat1.contains("system.status"),
+        cat2.contains("system.status"),
         "ToolCatalog consistent across rounds"
     );
     // Run is not left Running.

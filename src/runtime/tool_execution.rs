@@ -2,7 +2,6 @@ use super::tool_loop::ToolCallOutcome;
 use super::tool_rejection::{
     internal_tool_call_id, sanitize_operation_for_audit_with_snapshot, validate_model_arguments,
 };
-use crate::adapters::InvocationAdapter;
 use crate::domain::*;
 use crate::gateway::{Gateway, ToolRejection};
 use crate::journal::JournalStore;
@@ -11,7 +10,6 @@ use crate::registry::snapshot::RegistrySnapshot;
 use anyhow::Result;
 use serde_json::json;
 use std::time::Duration;
-
 fn append_or_fatal(
     journal: &JournalStore,
     kind: JournalEventKind,
@@ -33,7 +31,6 @@ fn append_or_fatal(
             category: "journal_unwritable",
         })
 }
-
 fn rejected_result(rejection: ToolRejection) -> ToolCallOutcome {
     ToolCallOutcome::ToolResult {
         text: format!(
@@ -43,17 +40,31 @@ fn rejected_result(rejection: ToolRejection) -> ToolCallOutcome {
         ),
     }
 }
-
-/// Production inline binding dispatch + receipt recording.
-/// This is the single authoritative binding_key → handler match used by
-/// both `handle_inline_tool_call` (the tool loop) and tests that need to
-/// verify dispatch from a restored Run snapshot.
-///
-/// External binding dispatch preserves the adapter's actual receipt status
-/// instead of rewriting everything to Succeeded. `harness_read_timeout` is
-/// the per-response read timeout for the external harness transport; it is
-/// derived from the Runtime's config so a slow/unresponsive harness yields
-/// `error_category: timeout` instead of an unbounded hang.
+/// Typed dispatch error — maps to fixed error_category, no string matching.
+#[derive(Debug, Clone)]
+pub(crate) enum ToolDispatchError {
+    RetiredBuiltinOperation(String),
+    UnknownBuiltinBinding(String),
+}
+impl ToolDispatchError {
+    pub fn error_category(&self) -> &'static str {
+        match self {
+            Self::RetiredBuiltinOperation(_) => "retired_builtin_operation",
+            Self::UnknownBuiltinBinding(_) => "registry_binding_invalid",
+        }
+    }
+}
+impl std::fmt::Display for ToolDispatchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RetiredBuiltinOperation(key) => write!(f, "retired_builtin_operation: {key}"),
+            Self::UnknownBuiltinBinding(key) => write!(f, "registry_binding_invalid: {key}"),
+        }
+    }
+}
+impl std::error::Error for ToolDispatchError {}
+/// Authoritative binding_key → handler dispatch. External dispatch preserves
+/// the adapter's actual receipt status.
 pub(crate) fn dispatch_builtin_binding(
     spec: &crate::registry::snapshot::OperationSpec,
     approved: &ApprovedInvocation,
@@ -64,7 +75,6 @@ pub(crate) fn dispatch_builtin_binding(
     harness_read_timeout: Duration,
 ) -> ToolCallOutcome {
     let receipt_result: Result<Receipt> = match spec.binding_key.as_str() {
-        "builtin.time_now" => crate::adapters::TimeAdapter.execute(approved),
         "builtin.session_recall_recent" => {
             super::tool_rejection::execute_session_recall(journal, &session.id, approved).map(
                 |(status, output, _text)| Receipt {
@@ -83,6 +93,13 @@ pub(crate) fn dispatch_builtin_binding(
             external_ref: None,
             occurred_at: chrono::Utc::now(),
         }),
+        _ if spec.binding_key == "builtin.time_now" => {
+            // Retired builtin operation — no longer has a runtime handler.
+            // Historical Runs referencing this binding get fail-closed.
+            Err(anyhow::Error::from(
+                ToolDispatchError::RetiredBuiltinOperation(spec.binding_key.clone()),
+            ))
+        }
         _ => {
             if spec.binding_kind == crate::registry::snapshot::BindingKind::External {
                 let manifest_id = &spec.binding_key;
@@ -107,9 +124,8 @@ pub(crate) fn dispatch_builtin_binding(
                     )),
                 }
             } else {
-                Err(anyhow::anyhow!(
-                    "registry_binding_invalid: {}",
-                    spec.binding_key
+                Err(anyhow::Error::from(
+                    ToolDispatchError::UnknownBuiltinBinding(spec.binding_key.clone()),
                 ))
             }
         }
@@ -121,10 +137,10 @@ pub(crate) fn dispatch_builtin_binding(
                     format!("status: succeeded\noutput: {:?}", receipt.output)
                 }
                 ReceiptStatus::Failed => {
-                    let cat = receipt
+                    let cat: &str = receipt
                         .output
                         .get("error_category")
-                        .and_then(|v| v.as_str())
+                        .and_then(|v: &serde_json::Value| v.as_str())
                         .unwrap_or("harness_failed");
                     format!("status: execution_failed\nerror_category: {cat}")
                 }
@@ -135,7 +151,11 @@ pub(crate) fn dispatch_builtin_binding(
             (receipt.status, receipt.output, text)
         }
         Err(e) => {
-            let cat = if e.to_string().contains("timed out") || e.to_string().contains("timeout") {
+            // First try typed ToolDispatchError downcast for precise category.
+            // Fall back to string-based categorization for external harness errors.
+            let cat = if let Some(de) = e.downcast_ref::<ToolDispatchError>() {
+                de.error_category()
+            } else if e.to_string().contains("timed out") || e.to_string().contains("timeout") {
                 "timeout"
             } else if e.to_string().contains("connect failed") {
                 "connect_failed"
@@ -182,7 +202,6 @@ pub(crate) fn dispatch_builtin_binding(
     }
     ToolCallOutcome::ToolResult { text }
 }
-
 impl<L: LlmClient + 'static> super::Runtime<L> {
     pub(crate) fn handle_malformed_tool_call(
         &self,
@@ -212,7 +231,6 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
         }
         Ok(rejected_result(ToolRejection::MalformedToolCall))
     }
-
     pub(crate) fn handle_inline_tool_call(
         &self,
         journal: &JournalStore,
@@ -225,7 +243,6 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
         snapshot: &RegistrySnapshot,
     ) -> Result<ToolCallOutcome> {
         let audited_op = sanitize_operation_for_audit_with_snapshot(&tool_call.operation, snapshot);
-
         // Always write ToolCallIssued first (audit trail), even for operations
         // that will be rejected by the snapshot pre-check below.
         if let Some(fatal) = append_or_fatal(
@@ -238,7 +255,6 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
         ) {
             return Ok(fatal);
         }
-
         // Look up the operation in the Run's pinned RegistrySnapshot.
         // This is the single authoritative source — Gateway and dispatch both
         // use the resolved operation definition, never the static catalog.
@@ -255,7 +271,6 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
                 );
             }
         };
-
         let mut intent = match crate::gateway::validate_tool_call(
             tool_call, &run.id, turn_index, tool_index, snapshot,
         ) {
@@ -301,7 +316,6 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
         ) {
             return Ok(fatal);
         }
-
         let approved = match gateway.approve_invocation(intent, run, session, snapshot) {
             Ok(approved) => approved,
             Err(_) => {
@@ -335,7 +349,6 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
         ) {
             return Ok(fatal);
         }
-
         return Ok(dispatch_builtin_binding(
             spec,
             &approved,
@@ -346,7 +359,6 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
             Duration::from_millis(self.config.harness_read_timeout_ms),
         ));
     }
-
     fn record_rejection(
         &self,
         journal: &JournalStore,

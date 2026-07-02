@@ -37,15 +37,15 @@ mod grants_context_tests {
     #[test]
     fn single_time_now_grant_aligns_catalog_and_provider_tools() {
         let grants: Vec<String> = ExecutionProfile::for_channel(ChannelKind::Cli)
-            .with_extra(&crate::config::parse_env_list_value("time.now"))
+            .with_extra(&crate::config::parse_env_list_value("system.status"))
             .grants
             .into_iter()
             .map(|g| g.operation)
             .collect();
         let tools = tool_set_from_grants(&grants);
         let catalog = catalog_set_from_grants(&grants);
-        assert!(tools.contains(&"time.now".to_string()));
-        assert!(catalog.contains(&"time.now".to_string()));
+        assert!(tools.contains(&"system.status".to_string()));
+        assert!(catalog.contains(&"system.status".to_string()));
         assert_eq!(
             tools, catalog,
             "ToolCatalog set must equal Provider tools set"
@@ -55,21 +55,21 @@ mod grants_context_tests {
     fn multiple_readonly_grants_whitespace_and_duplicates() {
         let grants: Vec<String> = ExecutionProfile::for_channel(ChannelKind::Cli)
             .with_extra(&crate::config::parse_env_list_value(
-                "  time.now ,  system.status ,, time.now  ",
+                "  system.status ,  system.status ,, system.status  ",
             ))
             .grants
             .into_iter()
             .map(|g| g.operation)
             .collect();
-        // Deduped: time.now appears once.
+        // Deduped: system.status appears once.
         let tools = tool_set_from_grants(&grants);
         assert_eq!(
-            tools.iter().filter(|t| t == &"time.now").count(),
+            tools.iter().filter(|t| t == &"system.status").count(),
             1,
             "duplicates deduped"
         );
-        // system.status is auto-added by config; both present.
-        assert!(tools.contains(&"time.now".to_string()));
+        // system.status is auto-added by config; present once.
+        assert!(tools.contains(&"system.status".to_string()));
         assert!(tools.contains(&"system.status".to_string()));
         assert_eq!(
             tool_set_from_grants(&grants),
@@ -80,7 +80,7 @@ mod grants_context_tests {
     fn unknown_operations_do_not_enter_profile_or_tools() {
         let grants: Vec<String> = ExecutionProfile::for_channel(ChannelKind::Cli)
             .with_extra(&crate::config::parse_env_list_value(
-                "shell.exec, time.now, bogus_op",
+                "shell.exec, system.status, bogus_op",
             ))
             .grants
             .into_iter()
@@ -89,7 +89,7 @@ mod grants_context_tests {
         let tools = tool_set_from_grants(&grants);
         assert!(!tools.contains(&"shell.exec".to_string()));
         assert!(!tools.contains(&"bogus_op".to_string()));
-        assert!(tools.contains(&"time.now".to_string()));
+        assert!(tools.contains(&"system.status".to_string()));
     }
     #[test]
     fn write_operation_granted_but_never_in_tools_or_catalog() {
@@ -97,7 +97,7 @@ mod grants_context_tests {
         // hidden from BOTH Provider tools and the ToolCatalog (ReadOnly-only).
         let grants: Vec<String> = ExecutionProfile::for_channel(ChannelKind::Cli)
             .with_extra(&crate::config::parse_env_list_value(
-                "feishu.send_message, time.now",
+                "feishu.send_message, system.status",
             ))
             .grants
             .into_iter()
@@ -111,7 +111,7 @@ mod grants_context_tests {
         let catalog = catalog_set_from_grants(&grants);
         assert!(!tools.contains(&"feishu.send_message".to_string()));
         assert!(!catalog.contains(&"feishu.send_message".to_string()));
-        assert!(tools.contains(&"time.now".to_string()));
+        assert!(tools.contains(&"system.status".to_string()));
     }
     #[test]
     fn empty_grants_yield_no_tools_and_no_catalog_entries() {
@@ -185,7 +185,7 @@ mod grants_context_tests {
     }
     #[test]
     fn context_tool_catalog_omits_ungranted_time_now() {
-        // No time.now grant → the ToolCatalog block must not mention it.
+        // No system.status grant → the ToolCatalog block must not mention it.
         let grants: Vec<String> = ExecutionProfile::for_channel(ChannelKind::Cli)
             .grants
             .into_iter()
@@ -194,14 +194,14 @@ mod grants_context_tests {
         let blocks = build_blocks(&grants);
         let cat = catalog_block_text(&blocks);
         assert!(
-            !cat.contains("time.now"),
-            "ToolCatalog must omit un-granted time.now: {cat}"
+            !cat.contains("system.status"),
+            "ToolCatalog must omit un-granted system.status: {cat}"
         );
     }
     #[test]
-    fn context_tool_catalog_includes_granted_time_now() {
+    fn context_tool_catalog_includes_granted_system_status() {
         let grants: Vec<String> = ExecutionProfile::for_channel(ChannelKind::Cli)
-            .with_extra(&["time.now".to_string()])
+            .with_extra(&["system.status".to_string()])
             .grants
             .into_iter()
             .map(|g| g.operation)
@@ -209,8 +209,8 @@ mod grants_context_tests {
         let blocks = build_blocks(&grants);
         let cat = catalog_block_text(&blocks);
         assert!(
-            cat.contains("time.now"),
-            "granted time.now must be listed: {cat}"
+            cat.contains("system.status"),
+            "granted system.status must be listed: {cat}"
         );
         // Write ops never listed even when granted.
         assert!(!cat.contains("feishu.send_message"));

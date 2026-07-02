@@ -343,7 +343,7 @@ impl QueuedStub {
     }
 }
 
-const TOOL_CALL_RESPONSE: &str = r#"{"choices":[{"message":{"content":"","tool_calls":[{"id":"call_stub_1","type":"function","function":{"name":"time.now","arguments":"{}"}}]}}],"model":"stub"}"#;
+const TOOL_CALL_RESPONSE: &str = r#"{"choices":[{"message":{"content":"","tool_calls":[{"id":"call_stub_1","type":"function","function":{"name":"system.status","arguments":"{}"}}]}}],"model":"stub"}"#;
 const TEXT_RESPONSE: &str = r#"{"choices":[{"message":{"content":"The current time was retrieved successfully."}}],"model":"stub"}"#;
 
 #[test]
@@ -354,7 +354,7 @@ fn stub_http_provider_completes_tool_loop() -> Result<()> {
     config.openai_base_url = format!("{}/v1", server.base_url());
     config.openai_api_key = "stub-key".to_string();
     config.model = "stub".to_string();
-    config.extra_allowed_operations = vec!["time.now".to_string(), "system.status".to_string()];
+    config.extra_allowed_operations = vec!["system.status".to_string()];
 
     let journal = JournalStore::in_memory()?;
     let gateway = Gateway::new(config.clone());

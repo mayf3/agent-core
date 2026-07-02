@@ -52,10 +52,6 @@ pub const CATALOG: &[OperationSpec] = &[
         risk: Risk::Write,
     },
     OperationSpec {
-        name: TIME_NOW,
-        risk: Risk::ReadOnly,
-    },
-    OperationSpec {
         name: SESSION_RECALL_RECENT,
         risk: Risk::ReadOnly,
     },
@@ -67,10 +63,6 @@ pub const CATALOG: &[OperationSpec] = &[
 
 pub const STDOUT_SEND_TEXT: &str = "stdout.send_text";
 pub const FEISHU_SEND_MESSAGE: &str = "feishu.send_message";
-/// Read-only: return the current kernel wall-clock time. The first
-/// `Risk::ReadOnly` operation (Phase 2 M2e) — it produces no side effect and
-/// so may execute inline without approval. Implemented by `TimeAdapter`.
-pub const TIME_NOW: &str = "time.now";
 /// Read-only: recall recent messages from the **current session only**.
 /// Returns normalized text/role/event_id/created_at — never raw payload JSON,
 /// Authorization, tokens, or cross-session data. Implemented inline in the
@@ -110,15 +102,6 @@ pub fn provider_tool_definition(name: &str) -> Option<serde_json::Value> {
         return None;
     }
     let (description, parameters) = match spec.name {
-        TIME_NOW => (
-            "Return the current kernel wall-clock time (ISO-8601 + epoch ms).",
-            json!({
-                "type": "object",
-                "properties": {},
-                "required": [],
-                "additionalProperties": false
-            }),
-        ),
         SESSION_RECALL_RECENT => (
             "Recall recent messages from the current session (read-only, current session only).",
             json!({
@@ -190,7 +173,6 @@ pub fn catalog_for_context_grants(granted_operations: &[String]) -> String {
         .into_iter()
         .map(|name| {
             let desc = match name {
-                TIME_NOW => "read the current kernel wall-clock time (no side effect).",
                 SESSION_RECALL_RECENT => {
                     "recall recent messages from the current session (read-only, current session only)."
                 }
@@ -292,9 +274,7 @@ impl ExecutionProfile {
 /// LLM context (Phase 2 tool-surfacing foundation). Each line is
 /// `<name> (risk: <ReadOnly|Write>) — <one-line intent>`. Only catalogued
 /// operations appear; the model is told these are the only operations it may
-/// propose. Today this surfaces `time.now` (ReadOnly) alongside the two reply
-/// operations (Write). Surfacing is additive — proposing/executing an
-/// operation still goes through the existing intent → policy → adapter chain.
+/// propose.
 pub fn catalog_for_context() -> String {
     CATALOG
         .iter()
@@ -306,7 +286,6 @@ pub fn catalog_for_context() -> String {
             let desc = match spec.name {
                 STDOUT_SEND_TEXT => "send a text reply to the user (stdout).",
                 FEISHU_SEND_MESSAGE => "send a message reply to the Feishu chat.",
-                TIME_NOW => "read the current kernel wall-clock time (no side effect).",
                 SESSION_RECALL_RECENT => "recall recent messages from the current session (read-only, current session only, no cross-session access).",
                 SYSTEM_STATUS => "read system health and projection state (aggregate journal counts only, no secrets or payloads).",
                 _ => "catalogued operation.",
@@ -342,30 +321,29 @@ mod tests {
         let names: Vec<&str> = CATALOG.iter().map(|spec| spec.name).collect();
         assert!(names.contains(&STDOUT_SEND_TEXT));
         assert!(names.contains(&FEISHU_SEND_MESSAGE));
-        assert!(names.contains(&TIME_NOW));
         assert!(names.contains(&SESSION_RECALL_RECENT));
         assert!(names.contains(&SYSTEM_STATUS));
+        assert!(!names.contains(&"time.now"));
     }
 
     #[test]
     fn is_allowed_accepts_catalog_operations_only() {
         assert!(is_allowed(STDOUT_SEND_TEXT));
         assert!(is_allowed(FEISHU_SEND_MESSAGE));
-        assert!(is_allowed(TIME_NOW));
         assert!(is_allowed(SESSION_RECALL_RECENT));
         assert!(is_allowed(FEISHU_SEND_MESSAGE));
-        assert!(is_allowed(TIME_NOW));
+        assert!(!is_allowed("time.now"));
         assert!(!is_allowed("shell.exec"));
         assert!(!is_allowed(""));
     }
 
     #[test]
     fn write_operations_are_marked_write_and_read_only_ops_are_read_only() {
-        // ReadOnly operations: `time.now` + `session.recall_recent` (no side
+        // ReadOnly operations: `session.recall_recent` + `system.status` (no side
         // effect, may execute inline). The two reply operations are Write.
         for spec in CATALOG {
             match spec.name {
-                TIME_NOW | SESSION_RECALL_RECENT | SYSTEM_STATUS => assert_eq!(
+                SESSION_RECALL_RECENT | SYSTEM_STATUS => assert_eq!(
                     spec.risk,
                     Risk::ReadOnly,
                     "{} should be ReadOnly",
@@ -385,8 +363,9 @@ mod tests {
     fn execution_profile_for_cli_grants_stdout_send_text_and_recall() {
         // The CLI channel baseline includes the reply operation + the
         // session.recall_recent read-only tool (scoped to current session).
-        // system.status is NOT in the baseline — it is granted via
-        // extra_allowed_operations in the default config (see config.rs).
+        // system.status and time.now are NOT in the baseline — system.status is
+        // granted via extra_allowed_operations in the default config (see
+        // config.rs); time.now is retired and only available via external harness.
         let profile = ExecutionProfile::for_channel(ChannelKind::Cli);
         assert_eq!(profile.grants.len(), 2);
         let ops: Vec<&str> = profile
@@ -396,7 +375,6 @@ mod tests {
             .collect();
         assert!(ops.contains(&STDOUT_SEND_TEXT));
         assert!(ops.contains(&SESSION_RECALL_RECENT));
-        assert!(!ops.contains(&TIME_NOW));
         assert!(
             !ops.contains(&SYSTEM_STATUS),
             "system.status is NOT a channel-level grant"
@@ -417,7 +395,6 @@ mod tests {
             .collect();
         assert!(ops.contains(&FEISHU_SEND_MESSAGE));
         assert!(ops.contains(&SESSION_RECALL_RECENT));
-        assert!(!ops.contains(&TIME_NOW));
         assert!(
             !ops.contains(&SYSTEM_STATUS),
             "system.status is NOT a channel-level grant"

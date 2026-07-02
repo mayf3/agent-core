@@ -396,10 +396,10 @@ fn parse_kind_round_trips_approval_expired() -> Result<()> {
     Ok(())
 }
 
-// ---- Phase 2 tool-call MVP: inline time.now execution ----
+// ---- Phase 2 tool-call MVP: inline system.status execution ----
 
 #[test]
-fn validate_tool_call_accepts_time_now_and_rejects_others() {
+fn validate_tool_call_accepts_system_status_and_rejects_others() {
     use agent_core_kernel::domain::RunId;
     use agent_core_kernel::gateway::validate_tool_call;
     use agent_core_kernel::llm::ToolCall;
@@ -409,7 +409,7 @@ fn validate_tool_call_accepts_time_now_and_rejects_others() {
     let ok = validate_tool_call(
         &ToolCall {
             id: "c1".into(),
-            operation: "time.now".into(),
+            operation: "system.status".into(),
             arguments: json!({}),
         },
         &RunId::new(),
@@ -417,7 +417,7 @@ fn validate_tool_call_accepts_time_now_and_rejects_others() {
         0,
         &snap,
     );
-    assert!(ok.is_ok(), "time.now should be accepted");
+    assert!(ok.is_ok(), "system.status should be accepted");
     let unknown = validate_tool_call(
         &ToolCall {
             id: "c1".into(),

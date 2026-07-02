@@ -123,7 +123,7 @@ mod tool_name_mode_tests {
             json!({"model":"s","choices":[{"message":{"content":"no"}}]}),
         ]);
         let mut c = cfg();
-        c.extra_allowed_operations = vec!["time.now".to_string()];
+        c.extra_allowed_operations = vec!["system.status".to_string()];
         let llm =
             OpenAiCompatibleLlm::new(s.url(), "t".into(), "p".into(), 5000).with_indexed_primary();
         let j = JournalStore::in_memory()?;
@@ -158,30 +158,33 @@ mod tool_name_mode_tests {
             Some("malformed_tool_call"),
             "rejection category must be malformed_tool_call"
         );
-        // No time.now Proposed/Approved/Receipt — capability never executes.
+        // No system.status Proposed/Approved/Receipt — capability never executes.
         // (stdout.send_text reply Proposed may appear; that is expected and
         // unrelated to the tool call.)
         assert_eq!(
-            total_op(JournalEventKind::InvocationProposed, "time.now"),
+            total_op(JournalEventKind::InvocationProposed, "system.status"),
             0
         );
         assert_eq!(
-            total_op(JournalEventKind::InvocationApproved, "time.now"),
+            total_op(JournalEventKind::InvocationApproved, "system.status"),
             0
         );
-        assert_eq!(total_op(JournalEventKind::ReceiptReceived, "time.now"), 0);
-        // No Approved/Receipt under the time.now tool path (capability never
+        assert_eq!(
+            total_op(JournalEventKind::ReceiptReceived, "system.status"),
+            0
+        );
+        // No Approved/Receipt under the system.status tool path (capability never
         // executes). The stdout.send_text reply may itself be Proposed/Approved
         // by Gateway — that is the normal reply path, not the forged tool.
         assert_eq!(
-            total_op(JournalEventKind::InvocationApproved, "time.now"),
+            total_op(JournalEventKind::InvocationApproved, "system.status"),
             0,
-            "no time.now Approved"
+            "no system.status Approved"
         );
         assert_eq!(
-            total_op(JournalEventKind::ReceiptReceived, "time.now"),
+            total_op(JournalEventKind::ReceiptReceived, "system.status"),
             0,
-            "no time.now Receipt"
+            "no system.status Receipt"
         );
         // Journal must not contain the raw forged wire name.
         let jt = serde_json::to_string(&ev).unwrap_or_default();
@@ -203,13 +206,13 @@ mod tool_name_mode_tests {
             json!({"model":"s","choices":[{"message":{"content":"ok"}}]}),
         ]);
         let snap = crate::registry::snapshot::test_snapshot();
-        let provider_tools = snap.provider_tools_for_grants(&["time.now".to_string()]);
+        let provider_tools = snap.provider_tools_for_grants(&["system.status".to_string()]);
         let llm =
             OpenAiCompatibleLlm::new(fb.url(), "t".into(), "p".into(), 5000).with_indexed_primary();
         let _ = llm.complete(crate::llm::LlmInput {
             blocks: vec![],
             user_text: "x".into(),
-            granted_operations: vec!["time.now".to_string()],
+            granted_operations: vec!["system.status".to_string()],
             provider_tools,
             follow_ups: vec![],
         })?;
@@ -233,14 +236,14 @@ mod tool_name_mode_tests {
             json!({"model":"s","choices":[{"message":{"content":"ok"}}]}),
         ]);
         let snap = crate::registry::snapshot::test_snapshot();
-        let provider_tools = snap.provider_tools_for_grants(&["time.now".to_string()]);
+        let provider_tools = snap.provider_tools_for_grants(&["system.status".to_string()]);
         // Put "deepseek" in the path; mode stays Passthrough (no with_indexed_*).
         let url = fb.url().replace("/v1", "/deepseek/v1");
         let llm = OpenAiCompatibleLlm::new(url, "t".into(), "p".into(), 5000);
         let _ = llm.complete(crate::llm::LlmInput {
             blocks: vec![],
             user_text: "x".into(),
-            granted_operations: vec!["time.now".to_string()],
+            granted_operations: vec!["system.status".to_string()],
             provider_tools,
             follow_ups: vec![],
         })?;
@@ -253,7 +256,7 @@ mod tool_name_mode_tests {
             .filter_map(|t| t.pointer("/function/name").and_then(Value::as_str))
             .collect();
         assert!(
-            ns.contains(&"time.now"),
+            ns.contains(&"system.status"),
             "passthrough sends canonical even with deepseek URL: {ns:?}"
         );
         assert!(
@@ -271,7 +274,7 @@ mod tool_name_mode_tests {
             json!({"model":"s","choices":[{"message":{"content":"done"}}]}),
         ]);
         let mut c = cfg();
-        c.extra_allowed_operations = vec!["time.now".to_string()];
+        c.extra_allowed_operations = vec!["system.status".to_string()];
         c.openai_api_key = "t".into();
         c.model = "p".into();
         c.fallback_tool_name_indexed = true;
@@ -302,7 +305,7 @@ mod tool_name_mode_tests {
             .filter_map(|t| t.pointer("/function/name").and_then(Value::as_str))
             .collect();
         assert!(ns.contains(&"fn_0"), "fallback tools use fn_N");
-        assert!(!ns.iter().any(|n| n.contains("time.now")));
+        assert!(!ns.iter().any(|n| n.contains("system.status")));
         // Round-2 tools == round-1 (each round rebuilds its own map).
         let n2: Vec<&str> = reqs[1]["tools"]
             .as_array()
@@ -316,7 +319,8 @@ mod tool_name_mode_tests {
             ev.iter()
                 .filter(|e| {
                     e.kind == k
-                        && e.payload.get("operation").and_then(Value::as_str) == Some("time.now")
+                        && e.payload.get("operation").and_then(Value::as_str)
+                            == Some("system.status")
                 })
                 .count()
         };
@@ -329,9 +333,9 @@ mod tool_name_mode_tests {
             .iter()
             .find(|e| {
                 e.kind == JournalEventKind::InvocationApproved
-                    && e.payload.get("operation").and_then(Value::as_str) == Some("time.now")
+                    && e.payload.get("operation").and_then(Value::as_str) == Some("system.status")
             })
-            .expect("approved time.now");
+            .expect("approved system.status");
         let corr = approved.correlation_id.as_ref().expect("correlation_id");
         assert_eq!(
             approved.run_id.as_ref(),
@@ -361,7 +365,7 @@ mod tool_name_mode_tests {
             .expect("role:tool message in round 2");
         let tool_content = tool_msg["content"].as_str().unwrap_or("");
         assert!(
-            tool_content.contains("time.now") || tool_content.contains("succeeded"),
+            tool_content.contains("system.status") || tool_content.contains("succeeded"),
             "role:tool content references the tool result: {tool_content}"
         );
         // The assistant tool_call_id and tool.tool_call_id must match.

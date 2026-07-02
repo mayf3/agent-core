@@ -19,7 +19,7 @@ fn validate_model_arguments_returns_typed_rejections() {
     use crate::runtime::validate_model_arguments;
     let spec_sys = builtin_spec("system.status", Risk::ReadOnly);
     let spec_session = builtin_spec("session.recall_recent", Risk::ReadOnly);
-    let spec_time = builtin_spec("time.now", Risk::ReadOnly);
+    let spec_time = builtin_spec("system.status", Risk::ReadOnly);
     assert_eq!(
         validate_model_arguments(&spec_sys, &json!({"x": 1})),
         Err(ToolRejection::InvalidArguments)

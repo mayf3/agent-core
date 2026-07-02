@@ -198,6 +198,12 @@ impl JournalStore {
         *self.current_snapshot_id.lock().unwrap() = Some(snapshot_id.to_string());
     }
 
+    /// Get the cached current snapshot ID. Used to verify cache refresh after
+    /// CAS conflict.
+    pub fn get_current_snapshot_id_for_test(&self) -> Option<String> {
+        self.current_snapshot_id.lock().unwrap().clone()
+    }
+
     /// Create an in-memory journal with the CURRENT snapshot cleared after
     /// creation, so the registry is effectively uninitialized. Used to test
     /// deliver failure when no current snapshot exists.

@@ -209,7 +209,7 @@ Feishu / CLI text
 > **状态：完成。** M2a（operation catalog + typed adapter errors）、M2b（run principal
 > execution profile，config-driven grants）、M2c（fixed policy pipeline）、M2d（durable
 > approval state，opt-in；含 HTTP `/v1/approve`+`/v1/deny` 端点与 approval expiry）
-> 已全部落地（PRs #72–#80）。`time.now` 是第一个 `Risk::ReadOnly` 本地 adapter（M2e）。
+> 已全部落地（PRs #72–#80）。`time.now (retired in PR #165; now external.time_now harness only)` 是第一个 `Risk::ReadOnly` 本地 adapter（M2e）。
 > 后续工具可见性基础：`ToolCatalog` 上下文块使操作目录对模型可见（PR #99）。
 > 见 `docs/milestones.md` 与 `docs/decisions/phase2-invocation-gateway-scoping.md`。
 
