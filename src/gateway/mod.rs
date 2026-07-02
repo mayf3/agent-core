@@ -6,22 +6,18 @@ use anyhow::{bail, Result};
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 use uuid::Uuid;
-
 mod policy;
 pub use policy::{evaluate_policy, PolicyVerdict};
 mod tool_call;
 pub use tool_call::{validate_tool_call, ToolRejection};
-
 #[derive(Clone)]
 pub struct Gateway {
     config: KernelConfig,
 }
-
 impl Gateway {
     pub fn new(config: KernelConfig) -> Self {
         Self { config }
     }
-
     pub fn cli_ingress(&self, text: String) -> Result<IngressEnvelope> {
         let text = text.trim().to_string();
         if text.is_empty() {
@@ -39,7 +35,6 @@ impl Gateway {
             routing_hint: None,
         })
     }
-
     pub fn validate_ingress(
         &self,
         journal: &JournalStore,
@@ -56,7 +51,6 @@ impl Gateway {
             ExternalSource::Feishu => self.validate_feishu_ingress(journal, envelope),
         }
     }
-
     pub fn approve_invocation(
         &self,
         intent: InvocationIntent,
@@ -87,7 +81,6 @@ impl Gateway {
             format!("decision_{}", Uuid::new_v4().simple()),
         ))
     }
-
     /// Approve a harness change (enable/disable) requested by the operator
     /// via authenticated IPC. This is a narrow, authenticated operation — not
     /// a general-purpose control surface.
@@ -96,7 +89,6 @@ impl Gateway {
         intent: crate::harness::control::HarnessChangeIntent,
     ) -> Result<crate::harness::control::ApprovedHarnessChange> {
         use crate::harness::control::HarnessChangeAction;
-
         // Only ipc_operator is allowed.
         if intent.requested_by != "ipc_operator" {
             bail!("unauthorized: only ipc_operator may request harness changes");
@@ -110,7 +102,6 @@ impl Gateway {
             decision_id: format!("decision_{}", Uuid::new_v4().simple()),
         })
     }
-
     pub fn recover_validated_event(&self, event: &JournalEvent) -> Result<ValidatedEvent> {
         let source = string_arg(&event.payload, "source")?;
         let event_id = EventId(string_arg(&event.payload, "event_id")?);
@@ -126,7 +117,6 @@ impl Gateway {
             _ => bail!("unsupported_recovery_source:{source}"),
         }
     }
-
     fn validate_cli_ingress(
         &self,
         journal: &JournalStore,
@@ -176,7 +166,6 @@ impl Gateway {
         )?;
         Ok(event)
     }
-
     fn validate_feishu_ingress(
         &self,
         journal: &JournalStore,
@@ -289,7 +278,6 @@ impl Gateway {
         )?;
         Ok(event)
     }
-
     fn recover_cli_event(
         &self,
         event_id: EventId,
@@ -315,7 +303,6 @@ impl Gateway {
             occurred_at,
         })
     }
-
     fn recover_feishu_event(
         &self,
         event_id: EventId,
@@ -354,7 +341,6 @@ impl Gateway {
             occurred_at,
         })
     }
-
     fn cli_principal(&self) -> RunPrincipal {
         RunPrincipal {
             principal_id: PrincipalId("cli:local".to_string()),
@@ -366,7 +352,6 @@ impl Gateway {
             requester_id: Some("cli:local".to_string()),
         }
     }
-
     /// Phase 2 M2d: resume a run paused in `AwaitingApproval`. Loads the run's
     /// `ApprovalRequested` snapshot, appends `ApprovalGranted`, queues the
     /// dispatch, and advances the run to `WaitingDispatch`. **Idempotent**: if
@@ -425,10 +410,15 @@ impl Gateway {
         journal.update_run_status(run_id, "WaitingDispatch")?;
         Ok(())
     }
-
     /// Phase 2 M2d: deny a run paused in `AwaitingApproval`. Appends
     /// `ApprovalDenied` and fails the run (status `Failed`). **Idempotent**: if
     /// the run is not currently `AwaitingApproval`, this is a no-op `Ok(())`.
+    /// Check whether a principal ID has the capability_change.approve grant.
+    /// v1: only ipc_operator (authenticated via IPC token) has this grant.
+    pub fn has_grant(&self, principal_id: &str, grant: &str) -> bool {
+        if grant != crate::server::capability_routes::CAPABILITY_CHANGE_APPROVE_GRANT { return false; }
+        principal_id == "ipc_operator"
+    }
     pub fn deny_run(&self, journal: &JournalStore, run_id: &RunId) -> Result<()> {
         let status = journal.run_status(run_id)?;
         if status.as_deref() != Some("AwaitingApproval") {
@@ -457,7 +447,6 @@ impl Gateway {
         Ok(())
     }
 }
-
 fn string_arg(value: &Value, key: &str) -> Result<String> {
     value
         .get(key)
@@ -467,14 +456,12 @@ fn string_arg(value: &Value, key: &str) -> Result<String> {
         .map(str::to_string)
         .ok_or_else(|| anyhow::anyhow!("missing string argument: {key}"))
 }
-
 fn payload_hash(value: &Value) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(serde_json::to_string(value).unwrap_or_default().as_bytes());
     hex::encode(hasher.finalize())
 }
-
 fn has_mention(value: &Value) -> bool {
     value
         .get("mentions")
@@ -482,7 +469,6 @@ fn has_mention(value: &Value) -> bool {
         .map(|mentions| !mentions.is_empty())
         .unwrap_or(false)
 }
-
 fn normalized_text(value: &Value) -> String {
     value
         .get("text")

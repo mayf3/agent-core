@@ -2,13 +2,12 @@ use crate::config::KernelConfig;
 use crate::domain::{OutboxDispatchStatus, RunId};
 use crate::gateway::Gateway;
 use crate::journal::JournalStore;
+pub mod capability_routes;
 mod delivery;
 mod dispatcher_metrics;
 pub mod harness_routes;
-
 #[cfg(test)]
 pub(crate) use delivery::build_llm_from_config;
-
 use anyhow::{bail, Result};
 use delivery::{
     recover_undelivered_ingress, start_approval_expiry_loop, start_outbox_dispatcher_loop,
@@ -24,7 +23,6 @@ use std::sync::{
 };
 use std::thread;
 use std::time::Duration;
-
 pub fn serve(config: KernelConfig) -> Result<()> {
     if config.ipc_token.is_empty() {
         bail!("AGENT_CORE_IPC_TOKEN is required for serve");
@@ -40,7 +38,6 @@ pub fn serve(config: KernelConfig) -> Result<()> {
     let journal = Arc::new(JournalStore::open(&config.db_path)?);
     // Initialize the registry (creates baseline snapshot, sets current,
     // backfills old Runs). This must succeed — without a registry, no Run
-    // can be created.
     journal.initialize_registry()?;
     let recovered = journal.recover_unknown_invocations()?;
     if recovered > 0 {
@@ -48,7 +45,6 @@ pub fn serve(config: KernelConfig) -> Result<()> {
     }
     // Phase 2 M2d follow-up: expire ApprovalRequested runs older than the
     // operator-configured TTL. No-op unless both require_write_approval and a
-    // non-zero write_approval_ttl_secs are set.
     if config.require_write_approval && config.write_approval_ttl_secs > 0 {
         let expired = journal.expire_stale_approvals(config.write_approval_ttl_secs)?;
         if expired > 0 {
@@ -111,7 +107,6 @@ pub fn serve(config: KernelConfig) -> Result<()> {
     println!("agent-core kernel stopped gracefully");
     Ok(())
 }
-
 fn log_dispatcher_startup_state(journal: &JournalStore, enabled: bool) -> Result<()> {
     let pending = journal.outbox_status_count(OutboxDispatchStatus::Pending)?;
     let unknown = journal.outbox_status_count(OutboxDispatchStatus::Unknown)?;
@@ -124,7 +119,6 @@ fn log_dispatcher_startup_state(journal: &JournalStore, enabled: bool) -> Result
     println!("unknown items will not be retried automatically");
     Ok(())
 }
-
 fn install_shutdown_handler(running: &Arc<AtomicBool>) -> Result<()> {
     let signal = Arc::clone(running);
     ctrlc::set_handler(move || {
@@ -132,7 +126,6 @@ fn install_shutdown_handler(running: &Arc<AtomicBool>) -> Result<()> {
     })
     .map_err(|error| anyhow::anyhow!("failed to install shutdown handler: {error}"))
 }
-
 fn handle_connection(
     stream: &mut TcpStream,
     config: &KernelConfig,
@@ -157,14 +150,31 @@ fn handle_connection(
     // All non-/health routes are POST under /v1/* and require the IPC bearer
     // token. `/v1/approve` and `/v1/deny` (Phase 2 M2d follow-up) resume/deny a
     // run paused in `AwaitingApproval` over the wire — the durable equivalent of
-    // the in-process `Gateway::approve_run`/`deny_run` API.
     if request.method != "POST" || !request.path.starts_with("/v1/") {
         return write_json(stream, 404, json!({ "ok": false, "error": "not_found" }));
     }
     if request.bearer_token.as_deref() != Some(config.ipc_token.as_str()) {
         return write_json(stream, 401, json!({ "ok": false, "error": "unauthorized" }));
     }
-    match request.path.as_str() {
+    let path = request.path.as_str();
+    if let Some(pid) = path.strip_prefix("/v1/capability-change-proposals/")
+        .and_then(|s| s.strip_suffix("/approve"))
+    {
+        let b: Value = serde_json::from_slice(&request.body).unwrap_or_default();
+        let d = b.get("decided_by").and_then(|v| v.as_str()).unwrap_or("ipc_operator");
+        let r = capability_routes::handle_approve_proposal(&journal, &gateway, pid, d);
+        return handle_harness_result(stream, r.map(|v| serde_json::to_string(&v).unwrap_or_default()));
+    }
+    if let Some(pid) = path.strip_prefix("/v1/capability-change-proposals/")
+        .and_then(|s| s.strip_suffix("/reject"))
+    {
+        let b: Value = serde_json::from_slice(&request.body).unwrap_or_default();
+        let d = b.get("decided_by").and_then(|v| v.as_str()).unwrap_or("ipc_operator");
+        let reason = b.get("reason").and_then(|v| v.as_str()).unwrap_or("rejected");
+        let r = capability_routes::handle_reject_proposal(&journal, &gateway, pid, d, reason);
+        return handle_harness_result(stream, r.map(|v| serde_json::to_string(&v).unwrap_or_default()));
+    }
+    match path {
         "/v1/ingress" => handle_ingress(stream, &gateway, &journal, &request),
         "/v1/approve" => handle_approval_decision(stream, &gateway, &journal, &request, true),
         "/v1/deny" => handle_approval_decision(stream, &gateway, &journal, &request, false),
@@ -189,10 +199,18 @@ fn handle_connection(
                 harness_routes::handle_disable(&gateway, &journal, &body),
             )
         }
+        "/v1/capability-change-proposals" => {
+            let body: Value = serde_json::from_slice(&request.body)?;
+            match capability_routes::handle_submit_proposal(
+                &journal, &gateway, &body, None, None,
+            ) {
+                Ok(resp) => write_json(stream, 200, serde_json::to_value(&resp)?),
+                Err(e) => write_json(stream, 400, json!({"ok": false, "error": e.to_string()})),
+            }
+        }
         _ => write_json(stream, 404, json!({ "ok": false, "error": "not_found" })),
     }
 }
-
 fn handle_ingress(
     stream: &mut TcpStream,
     gateway: &Gateway,
@@ -233,12 +251,10 @@ fn handle_ingress(
         }),
     )
 }
-
 /// Phase 2 M2d follow-up: handle `POST /v1/approve` (`approved == true`) and
 /// `POST /v1/deny` (`approved == false`). Body: `{ "run_id": "<id>" }`. Both
 /// delegate to the (idempotent) `Gateway::approve_run`/`deny_run`. A run that
 /// is not `AwaitingApproval` is a no-op-200 (idempotent), matching the
-/// in-process API.
 fn handle_approval_decision(
     stream: &mut TcpStream,
     gateway: &Gateway,
@@ -270,7 +286,6 @@ fn handle_approval_decision(
         }),
     )
 }
-
 /// Map harness route errors to appropriate HTTP status codes.
 /// Never leaks database errors, paths, or tokens in the response.
 fn handle_harness_result(stream: &mut TcpStream, result: Result<String>) -> Result<()> {
@@ -305,7 +320,6 @@ fn handle_harness_result(stream: &mut TcpStream, result: Result<String>) -> Resu
         }
     }
 }
-
 pub fn health_snapshot(
     journal: &JournalStore,
     outbox_dispatcher_enabled: bool,
@@ -382,14 +396,12 @@ pub fn health_snapshot(
         }).collect::<Vec<_>>(),
     }))
 }
-
 struct HttpRequest {
     method: String,
     path: String,
     bearer_token: Option<String>,
     body: Vec<u8>,
 }
-
 fn read_request(stream: &mut TcpStream) -> Result<HttpRequest> {
     let mut buffer = Vec::new();
     let mut temp = [0_u8; 1024];
@@ -415,7 +427,6 @@ fn read_request(stream: &mut TcpStream) -> Result<HttpRequest> {
     }
     bail!("empty request")
 }
-
 fn parse_request(buffer: &[u8]) -> Result<HttpRequest> {
     let header_end =
         find_header_end(buffer).ok_or_else(|| anyhow::anyhow!("missing HTTP headers"))?;
@@ -446,7 +457,6 @@ fn parse_request(buffer: &[u8]) -> Result<HttpRequest> {
         body: buffer[header_end + 4..].to_vec(),
     })
 }
-
 fn write_json(stream: &mut TcpStream, status: u16, body: Value) -> Result<()> {
     let reason = if status == 200 {
         "OK"
@@ -466,11 +476,9 @@ fn write_json(stream: &mut TcpStream, status: u16, body: Value) -> Result<()> {
     stream.write_all(response.as_bytes())?;
     Ok(())
 }
-
 fn find_header_end(buffer: &[u8]) -> Option<usize> {
     buffer.windows(4).position(|window| window == b"\r\n\r\n")
 }
-
 fn content_length(head: &str) -> usize {
     for line in head.lines() {
         let Some((name, value)) = line.split_once(':') else {
@@ -482,11 +490,9 @@ fn content_length(head: &str) -> usize {
     }
     0
 }
-
 #[cfg(test)]
 #[path = "approval_endpoint_tests.rs"]
 mod approval_endpoint_tests;
-
 #[cfg(test)]
 #[path = "harness_endpoint_tests.rs"]
 mod harness_endpoint_tests;
