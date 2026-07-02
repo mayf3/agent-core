@@ -2,6 +2,7 @@ mod approval;
 pub mod capability_activation;
 pub mod capability_proposals;
 mod conversation;
+pub mod harness_activation_ops;
 pub mod harness_ops;
 mod hash_chain;
 mod outbox;
