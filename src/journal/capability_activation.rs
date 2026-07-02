@@ -4,7 +4,7 @@
 
 use crate::domain::capability_change::*;
 use crate::domain::*;
-use crate::registry::snapshot::{compute_snapshot_id, OperationSpec as SnapSpec, Risk};
+use crate::registry::snapshot::{compute_snapshot_id, OperationSpec as SnapSpec};
 use anyhow::{anyhow, bail, Result};
 use chrono::Utc;
 use rusqlite::{params, Transaction, TransactionBehavior};
@@ -85,7 +85,6 @@ impl super::JournalStore {
         )?;
 
         // 6. Write RegistrySnapshotActivated.
-        let ts = Utc::now().to_rfc3339();
         let snap_payload = json!({
             "action": "capability_activation", "previous_snapshot_id": expected_snapshot_id,
             "new_snapshot_id": snapshot_id, "decision_id": decision_id,
