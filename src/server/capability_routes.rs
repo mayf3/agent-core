@@ -100,6 +100,38 @@ pub fn sanitise_error(err: &anyhow::Error) -> String {
     }
 }
 
+/// Check that `bearer` matches the configured `expected` token. Returns
+/// `false` when the token is not configured (fail-closed).
+pub fn capability_token_matches(bearer: &str, expected: &Option<String>) -> bool {
+    match expected {
+        Some(t) => t == bearer,
+        None => false,
+    }
+}
+
+/// Map a `CapabilityRouteError` result into (status_code, body) for the HTTP
+/// response. Internal/unexpected errors return `Err` and are rendered as 500.
+pub fn map_capability_result(
+    result: Result<serde_json::Value>,
+) -> std::result::Result<(u16, serde_json::Value), anyhow::Error> {
+    match result {
+        Ok(v) => Ok((200, v)),
+        Err(e) => {
+            if let Some(cap_err) = e.downcast_ref::<CapabilityRouteError>() {
+                let status = cap_err.http_status();
+                let body = serde_json::json!({"ok": false, "error": cap_err.safe_error()});
+                Ok((status, body))
+            } else {
+                let sanitised = sanitise_error(&e);
+                Ok((
+                    500,
+                    serde_json::json!({"ok": false, "error": "internal_error", "error_category": sanitised}),
+                ))
+            }
+        }
+    }
+}
+
 #[derive(Deserialize)]
 pub struct SubmitProposalBody {
     pub target_agent_id: String,

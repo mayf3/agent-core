@@ -154,7 +154,7 @@ fn handle_connection(
     let bearer = request.bearer_token.as_deref().unwrap_or("");
     // ---- Capability proposal routes (use dedicated tokens only, no IPC bypass) ----
     if path == "/v1/capability-change-proposals" && request.method == "POST" {
-        if !capability_token_matches(bearer, &config.capability_submit_token) {
+        if !capability_routes::capability_token_matches(bearer, &config.capability_submit_token) {
             let err = if config.capability_submit_token.is_none() {
                 "capability_auth_not_configured"
             } else {
@@ -175,7 +175,7 @@ fn handle_connection(
             &config.agent_id,
         );
         let result = result.map(|resp| serde_json::to_value(&resp).unwrap_or_default());
-        match map_capability_result(result) {
+        match capability_routes::map_capability_result(result) {
             Ok((status, body)) => write_json(stream, status, body),
             Err(e) => write_json(stream, 500, json!({"ok": false, "error": e.to_string()})),
         }
@@ -183,7 +183,7 @@ fn handle_connection(
         .strip_prefix("/v1/capability-change-proposals/")
         .and_then(|s| s.strip_suffix("/decision"))
     {
-        if !capability_token_matches(bearer, &config.capability_decision_token) {
+        if !capability_routes::capability_token_matches(bearer, &config.capability_decision_token) {
             let err = if config.capability_decision_token.is_none() {
                 "capability_auth_not_configured"
             } else {
@@ -207,7 +207,7 @@ fn handle_connection(
             p,
             &config.agent_id,
         );
-        match map_capability_result(result) {
+        match capability_routes::map_capability_result(result) {
             Ok((status, body)) => write_json(stream, status, body),
             Err(e) => write_json(stream, 500, json!({"ok": false, "error": e.to_string()})),
         }
@@ -362,8 +362,7 @@ pub fn health_snapshot(
     let worker_job_counts = journal.worker_job_status_counts()?;
     let outbox_dispatch_counts = journal.outbox_dispatch_status_counts()?;
     let outbox_pending_count = journal.outbox_status_count(OutboxDispatchStatus::Pending)?;
-    // /health's unknown count excludes operator-acknowledged rows (acked_unknown=1), so an
-    // acked terminal-unknown no longer degrades status. See docs/decisions/ack-clear-terminal-unknown.md (option 1).
+    // /health unknown count excludes acked_unknown rows. See docs/decisions/ack-clear-terminal-unknown.md.
     let outbox_unknown_count = journal.outbox_unknown_unacked_count()?;
     let outbox_dispatching_count =
         journal.outbox_status_count(OutboxDispatchStatus::Dispatching)?;
@@ -378,15 +377,15 @@ pub fn health_snapshot(
         || outbox_projection_drift_count > 0
         || undelivered_ingress_count > 0
     {
-        // `degraded` when the Kernel cannot fully trust its state: live unknown invocations
-        // (dispatch started, no terminal receipt); terminal-unknown outbox rows (recovered, never
-        // auto-retried, but the dispatch outcome is permanently undetermined); projection drift
-        // (projection disagrees with the Journal terminal fact — recovery failed to reconcile);
-        // undelivered ingress (accepted but never turned into a worker job / run — transient
-        // during startup recovery; persistent non-zero means recovery failed to re-enqueue).
-        // Stale counts (outbox_stale_dispatching_count / worker_job_stale_count) are deliberately
-        // excluded: they are self-healing transients cleared by the next lease reclaim, not a loss of
-        // trust. See docs/decisions/health-rollup-semantics.md (档 C) & docs/decisions/health-rollup-undelivered-ingress.md.
+        // `degraded` when the Kernel cannot fully trust its state: live unknown invocations (dispatch
+        // started, no terminal receipt); terminal-unknown outbox rows (recovered, never auto-retried,
+        // but the dispatch outcome is permanently undetermined); projection drift (projection disagrees
+        // with the Journal terminal fact — recovery failed to reconcile); undelivered ingress (accepted
+        // but never turned into a worker job / run — transient during startup recovery; persistent
+        // non-zero means recovery failed to re-enqueue).
+        // Stale counts (outbox_stale_dispatching_count / worker_job_stale_count) are deliberately excluded:
+        // they are self-healing transients cleared by the next lease reclaim, not a loss of trust.
+        // See docs/decisions/health-rollup-semantics.md (档 C) & docs/decisions/health-rollup-undelivered-ingress.md.
         "degraded"
     } else {
         "ok"
@@ -509,52 +508,3 @@ fn content_length(head: &str) -> usize {
         .and_then(|(_, v)| v.trim().parse().ok())
         .unwrap_or(0)
 }
-
-/// Check that `bearer` matches the configured `expected` token. Returns
-/// `false` when the token is not configured (fail-closed).
-fn capability_token_matches(bearer: &str, expected: &Option<String>) -> bool {
-    match expected {
-        Some(t) => t == bearer,
-        None => false,
-    }
-}
-
-/// Map a `CapabilityRouteError` result into (status_code, body) for the HTTP
-/// response. Internal/unexpected errors return `Err` and are rendered as 500.
-fn map_capability_result(
-    result: Result<serde_json::Value>,
-) -> std::result::Result<(u16, serde_json::Value), anyhow::Error> {
-    match result {
-        Ok(v) => Ok((200, v)),
-        Err(e) => {
-            // Downcast to typed CapabilityRouteError for proper status mapping.
-            if let Some(cap_err) = e.downcast_ref::<capability_routes::CapabilityRouteError>() {
-                let status = cap_err.http_status();
-                let body = json!({"ok": false, "error": cap_err.safe_error()});
-                Ok((status, body))
-            } else {
-                // Treat unexpected errors as 500 with sanitised message.
-                let sanitised = capability_routes::sanitise_error(&e);
-                Ok((
-                    500,
-                    json!({"ok": false, "error": "internal_error", "error_category": sanitised}),
-                ))
-            }
-        }
-    }
-}
-#[cfg(test)]
-#[path = "approval_endpoint_tests.rs"]
-mod approval_endpoint_tests;
-#[cfg(test)]
-#[path = "capability_routes_negative_tests.rs"]
-mod capability_routes_negative_tests;
-#[cfg(test)]
-#[path = "capability_routes_support.rs"]
-mod capability_routes_support;
-#[cfg(test)]
-#[path = "capability_routes_tests.rs"]
-mod capability_routes_tests;
-#[cfg(test)]
-#[path = "harness_endpoint_tests.rs"]
-mod harness_endpoint_tests;
