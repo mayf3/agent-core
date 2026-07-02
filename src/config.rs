@@ -97,19 +97,7 @@ impl KernelConfig {
                 "http://127.0.0.1:4131/v1/execute",
             ),
             ipc_token: env_string("AGENT_CORE_IPC_TOKEN", ""),
-            capability_tokens: {
-                let mut m = std::collections::HashMap::new();
-                for (token, principal) in [("AGENT_CORE_BUILDER_TOKEN", "builder_principal"),
-                                            ("AGENT_CORE_REVIEWER_TOKEN", "reviewer_principal"),
-                                            ("AGENT_CORE_ACTIVATOR_TOKEN", "operator_principal")] {
-                    if let Ok(val) = std::env::var(token) {
-                        if !val.is_empty() {
-                            m.insert(val, principal.to_string());
-                        }
-                    }
-                }
-                m
-            },
+            capability_tokens: std::collections::HashMap::new(),
             feishu_allowed_open_ids: env_list("AGENT_CORE_FEISHU_ALLOWED_OPEN_IDS"),
             feishu_allowed_chat_ids: env_list("AGENT_CORE_FEISHU_ALLOWED_CHAT_IDS"),
             feishu_require_group_mention: env_bool("AGENT_CORE_FEISHU_REQUIRE_GROUP_MENTION", true),
