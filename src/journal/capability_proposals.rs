@@ -133,9 +133,27 @@ impl super::JournalStore {
                             ),
                         ))),
                     }?,
-                    created_at: Utc::now(),
-                    expires_at: Utc::now(),
-                    decided_at: None,
+                    created_at: parse_ts(&g(15)?).map_err(|e| {
+                        rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("invalid_created_at:{e}"),
+                        )))
+                    })?,
+                    expires_at: parse_ts(&g(16)?).map_err(|e| {
+                        rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("invalid_expires_at:{e}"),
+                        )))
+                    })?,
+                    decided_at: match go(17)? {
+                        Some(s) => Some(parse_ts(&s).map_err(|e| {
+                            rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                format!("invalid_decided_at:{e}"),
+                            )))
+                        })?),
+                        None => None,
+                    },
                     decided_by: go(18)?,
                     decision_reason: go(19)?,
                     activated_snapshot_id: go(20)?,

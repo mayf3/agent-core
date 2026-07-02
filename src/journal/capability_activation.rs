@@ -28,19 +28,25 @@ impl super::JournalStore {
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
         // 1. Verify proposal is still PendingApproval.
-        let cur_status: String = tx.query_row(
-            "SELECT status FROM capability_change_proposals WHERE proposal_id = ?1",
-            params![proposal.proposal_id], |row| row.get(0),
-        ).map_err(|_| anyhow!("proposal_not_found"))?;
+        let cur_status: String = tx
+            .query_row(
+                "SELECT status FROM capability_change_proposals WHERE proposal_id = ?1",
+                params![proposal.proposal_id],
+                |row| row.get(0),
+            )
+            .map_err(|_| anyhow!("proposal_not_found"))?;
         if cur_status != "PendingApproval" {
             bail!("proposal_not_pending: {cur_status}");
         }
 
         // 2. Verify active snapshot hasn't changed.
-        let (db_snap, db_ver): (String, i64) = tx.query_row(
-            "SELECT active_snapshot_id, version FROM registry_state WHERE singleton_id = 1",
-            [], |row| Ok((row.get(0)?, row.get(1)?)),
-        ).map_err(|_| anyhow!("registry_state_not_found"))?;
+        let (db_snap, db_ver): (String, i64) = tx
+            .query_row(
+                "SELECT active_snapshot_id, version FROM registry_state WHERE singleton_id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|_| anyhow!("registry_state_not_found"))?;
         if db_snap != expected_snapshot_id {
             bail!("stale_expected_snapshot: has {db_snap} expected {expected_snapshot_id}");
         }
@@ -73,7 +79,9 @@ impl super::JournalStore {
              WHERE singleton_id = 1 AND version = ?4",
             params![&snapshot_id, new_version, Utc::now().to_rfc3339(), db_ver],
         )?;
-        if changed == 0 { bail!("registry_activation_conflict"); }
+        if changed == 0 {
+            bail!("registry_activation_conflict");
+        }
 
         // 5. Update proposal to Activated.
         tx.execute(
@@ -81,7 +89,13 @@ impl super::JournalStore {
              decided_at = ?1, decided_by = ?2, decision_reason = ?3,
              activated_snapshot_id = ?4
              WHERE proposal_id = ?5",
-            params![Utc::now().to_rfc3339(), principal, "activated", &snapshot_id, proposal.proposal_id],
+            params![
+                Utc::now().to_rfc3339(),
+                principal,
+                "activated",
+                &snapshot_id,
+                proposal.proposal_id
+            ],
         )?;
 
         // 6. Write RegistrySnapshotActivated.
@@ -89,16 +103,28 @@ impl super::JournalStore {
             "action": "capability_activation", "previous_snapshot_id": expected_snapshot_id,
             "new_snapshot_id": snapshot_id, "decision_id": decision_id,
         });
-        append_journal_tx(&tx, "RegistrySnapshotActivated", &proposal.origin_run_id,
-            &proposal.origin_session_id, decision_id, &snap_payload)?;
+        append_journal_tx(
+            &tx,
+            "RegistrySnapshotActivated",
+            &proposal.origin_run_id,
+            &proposal.origin_session_id,
+            decision_id,
+            &snap_payload,
+        )?;
 
         // 7. Write CapabilityChangeActivated.
         let cap_payload = json!({
             "proposal_id": proposal.proposal_id, "decided_by": principal,
             "previous_snapshot_id": expected_snapshot_id, "new_snapshot_id": snapshot_id,
         });
-        append_journal_tx(&tx, "CapabilityChangeActivated", &proposal.origin_run_id,
-            &proposal.origin_session_id, &proposal.proposal_id, &cap_payload)?;
+        append_journal_tx(
+            &tx,
+            "CapabilityChangeActivated",
+            &proposal.origin_run_id,
+            &proposal.origin_session_id,
+            &proposal.proposal_id,
+            &cap_payload,
+        )?;
 
         tx.commit()?;
         drop(conn);
@@ -122,11 +148,19 @@ fn append_journal_tx(
     let ts = Utc::now().to_rfc3339();
     let payload_json = serde_json::to_string(payload)?;
     let previous: Option<(i64, String)> = tx
-        .query_row("SELECT sequence, hash FROM journal_events ORDER BY sequence DESC LIMIT 1",
-            [], |row| Ok((row.get(0)?, row.get(1)?))).ok();
+        .query_row(
+            "SELECT sequence, hash FROM journal_events ORDER BY sequence DESC LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .ok();
     let seq = previous.as_ref().map(|(s, _)| s + 1).unwrap_or(1);
     let hash = crate::journal::hash_chain::event_hash(
-        previous.as_ref().map(|(_, h)| h.as_str()), seq, kind, &payload_json);
+        previous.as_ref().map(|(_, h)| h.as_str()),
+        seq,
+        kind,
+        &payload_json,
+    );
     tx.execute(
         "INSERT INTO journal_events (sequence, event_id, run_id, session_id, correlation_id, kind, payload_json, previous_hash, hash, created_at)
          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
