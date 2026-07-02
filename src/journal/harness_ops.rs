@@ -124,11 +124,10 @@ impl super::JournalStore {
         let manifest_id = &manifest.manifest_id;
         let content_digest = manifest.compute_manifest_id()?;
 
-        // Read the full persisted manifest row using OptionalExtension to
-        // distinguish QueryReturnedNoRows (not found) from real SQLite errors.
-        // Any decode/parse failure is not treated as NotFound.
+        // Read the full persisted manifest row using OptionalExtension.
         use rusqlite::OptionalExtension;
         let existing_row: Option<(
+            String,
             String,
             String,
             String,
@@ -142,7 +141,7 @@ impl super::JournalStore {
             String,
         )> = tx
             .query_row(
-                "SELECT harness_id, artifact_digest, protocol_version, endpoint,
+                "SELECT manifest_id, harness_id, artifact_digest, protocol_version, endpoint,
                         operation_name, description, input_schema_json, output_schema_json,
                         idempotent, created_at, canonical_digest
                  FROM harness_manifests WHERE manifest_id = ?1",
@@ -157,9 +156,10 @@ impl super::JournalStore {
                         row.get(5)?,
                         row.get(6)?,
                         row.get(7)?,
-                        row.get::<_, i64>(8)? != 0,
-                        row.get(9)?,
+                        row.get(8)?,
+                        row.get::<_, i64>(9)? != 0,
                         row.get(10)?,
+                        row.get(11)?,
                     ))
                 },
             )
@@ -167,6 +167,7 @@ impl super::JournalStore {
             .map_err(|e| anyhow::anyhow!("manifest_lookup_failed:{e}"))?;
 
         if let Some((
+            stored_mid,
             e_hid,
             e_art,
             e_proto,
@@ -180,7 +181,6 @@ impl super::JournalStore {
             e_dig,
         )) = existing_row
         {
-            // Strictly parse all persisted fields. Any corruption fails closed
             // — never silently treated as "not found" or "reusable".
             let e_created_at = chrono::DateTime::parse_from_rfc3339(&e_ts)
                 .map_err(|_| anyhow!("corrupt_persisted_created_at:{manifest_id}"))?
@@ -190,10 +190,8 @@ impl super::JournalStore {
             let e_output_schema: serde_json::Value = serde_json::from_str(&e_out)
                 .map_err(|_| anyhow!("corrupt_persisted_output_schema:{manifest_id}"))?;
 
-            // Reconstruct the full persisted HarnessManifest using the database
-            // values (including created_at). Never substitute with incoming values.
             let persisted_manifest = HarnessManifest {
-                manifest_id: manifest_id.clone(),
+                manifest_id: stored_mid.clone(),
                 harness_id: e_hid,
                 artifact_digest: e_art,
                 protocol_version: e_proto,
@@ -206,18 +204,33 @@ impl super::JournalStore {
                 created_at: e_created_at,
             };
 
-            // Verify stored canonical_digest matches recomputed digest of stored data.
-            let recomputed_digest = persisted_manifest
+            // Verify four digest/ID invariants before structural comparison.
+            let recomputed_id = persisted_manifest
                 .compute_manifest_id()
                 .map_err(|_| anyhow!("manifest_digest_recompute_failed:{manifest_id}"))?;
-            if recomputed_digest != e_dig {
-                bail!("corrupt_persisted_canonical_digest:{manifest_id}: stored {e_dig} != recomputed {recomputed_digest}");
+
+            // Invariant 1: stored canonical_digest == recomputed from persisted data
+            if recomputed_id != e_dig {
+                bail!("corrupt_persisted_canonical_digest:{manifest_id}: stored={e_dig} recomputed={recomputed_id}");
+            }
+            // Invariant 2: stored manifest_id == recomputed (persisted data is self-consistent)
+            if stored_mid != recomputed_id {
+                bail!("corrupt_persisted_manifest_id:{manifest_id}: stored={stored_mid} recomputed={recomputed_id}");
+            }
+            // Invariant 3: incoming canonical digest == stored canonical_digest
+            if content_digest != e_dig {
+                bail!("manifest_identity_conflict: incoming digest {content_digest} != stored {e_dig}");
+            }
+            // Invariant 4: incoming manifest_id == stored manifest_id
+            if manifest.manifest_id != stored_mid {
+                bail!(
+                    "manifest_identity_conflict: incoming id {} != stored {stored_mid}",
+                    manifest.manifest_id
+                );
             }
 
-            // Full structural comparison: every immutable field, including
-            // created_at, must be identical for idempotent reuse.
-            if persisted_manifest.manifest_id != manifest.manifest_id
-                || persisted_manifest.harness_id != manifest.harness_id
+            // Full structural comparison: every immutable field must be identical.
+            if persisted_manifest.harness_id != manifest.harness_id
                 || persisted_manifest.artifact_digest != manifest.artifact_digest
                 || persisted_manifest.protocol_version != manifest.protocol_version
                 || persisted_manifest.endpoint != manifest.endpoint
@@ -235,14 +248,15 @@ impl super::JournalStore {
             return Ok(manifest_id.clone());
         }
 
-        // Also check for duplicate operation_name (operation bound to another manifest).
+        // Also check for duplicate operation_name using OptionalExtension.
         let op_exists: Option<String> = tx
             .query_row(
                 "SELECT manifest_id FROM harness_manifests WHERE operation_name = ?1",
                 params![&manifest.operation_name],
                 |row| row.get(0),
             )
-            .ok();
+            .optional()
+            .map_err(|e| anyhow::anyhow!("manifest_operation_lookup_failed:{e}"))?;
         if let Some(existing_mid) = op_exists {
             bail!("manifest_operation_conflict: operation {} already registered by manifest {existing_mid}", manifest.operation_name);
         }
