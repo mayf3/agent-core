@@ -2,6 +2,7 @@ use crate::config::KernelConfig;
 use crate::domain::{OutboxDispatchStatus, RunId};
 use crate::gateway::Gateway;
 use crate::journal::JournalStore;
+mod capability_http;
 pub mod capability_routes;
 mod delivery;
 mod dispatcher_metrics;
@@ -152,67 +153,23 @@ fn handle_connection(
     }
     let path = request.path.as_str();
     let bearer = request.bearer_token.as_deref().unwrap_or("");
-    // ---- Capability proposal routes (use dedicated tokens only, no IPC bypass) ----
-    if path == "/v1/capability-change-proposals" && request.method == "POST" {
-        if !capability_routes::capability_token_matches(bearer, &config.capability_submit_token) {
-            let err = if config.capability_submit_token.is_none() {
-                "capability_auth_not_configured"
-            } else {
-                "unauthorized"
-            };
-            return write_json(stream, 401, json!({"error": err}));
-        }
-        let body: Value = match serde_json::from_slice(&request.body) {
-            Ok(b) => b,
-            Err(_) => return write_json(stream, 400, json!({"error":"invalid_json"})),
-        };
-        let p = &"capability_submitter";
-        let result = capability_routes::handle_submit_proposal(
-            &journal,
-            &gateway,
-            &body,
-            p,
-            &config.agent_id,
-        );
-        let result = result.map(|resp| serde_json::to_value(&resp).unwrap_or_default());
-        match capability_routes::map_capability_result(result) {
-            Ok((status, body)) => write_json(stream, status, body),
-            Err(e) => write_json(stream, 500, json!({"ok": false, "error": e.to_string()})),
-        }
-    } else if let Some(pid) = path
-        .strip_prefix("/v1/capability-change-proposals/")
-        .and_then(|s| s.strip_suffix("/decision"))
-    {
-        if !capability_routes::capability_token_matches(bearer, &config.capability_decision_token) {
-            let err = if config.capability_decision_token.is_none() {
-                "capability_auth_not_configured"
-            } else {
-                "unauthorized"
-            };
-            return write_json(stream, 401, json!({"error": err}));
-        }
-        let p = &"approval_workflow";
-        let body: Value = match serde_json::from_slice(&request.body) {
-            Ok(b) => b,
-            Err(_) => return write_json(stream, 400, json!({"error":"invalid_json"})),
-        };
-        let store =
-            crate::capabilities::store::ContentStore::new(config.harness_artifact_root.clone());
-        let result = capability_routes::handle_decision(
-            &journal,
-            &gateway,
-            &store,
-            pid,
-            &body,
-            p,
-            &config.agent_id,
-        );
-        match capability_routes::map_capability_result(result) {
-            Ok((status, body)) => write_json(stream, status, body),
-            Err(e) => write_json(stream, 500, json!({"ok": false, "error": e.to_string()})),
-        }
+
+    // Try capability-specific routes first (extracted for structure gate).
+    if capability_http::try_handle_capability_request(
+        stream,
+        path,
+        &request.method,
+        bearer,
+        &request.body,
+        config,
+        &journal,
+        &gateway,
+    )? {
+        return Ok(());
+    }
+
     // ---- All other /v1/ routes require the IPC bearer token ----
-    } else if bearer != config.ipc_token.as_str() {
+    if bearer != config.ipc_token.as_str() {
         return write_json(stream, 401, json!({ "ok": false, "error": "unauthorized" }));
     } else if path == "/v1/ingress" {
         handle_ingress(stream, &gateway, &journal, &request)
