@@ -1,7 +1,5 @@
 //! Harness manifest and registry activation operations on JournalStore.
-//! These methods use the same SQLite connection as the rest of the Journal,
-//! sharing its mutex. All activation transactions use CAS (compare-and-swap)
-//! to prevent concurrent overwrites.
+//! All activation transactions use CAS (compare-and-swap) to prevent races.
 
 use crate::domain::*;
 use crate::harness::control::{ApprovedHarnessChange, RegistryActivationResult};
@@ -165,7 +163,7 @@ impl super::JournalStore {
         Ok(manifest_id.clone())
     }
 
-    /// Load a harness manifest by ID.
+    /// Load manifest by ID.
     pub fn load_harness_manifest(&self, manifest_id: &str) -> Result<Option<HarnessManifest>> {
         let conn = self
             .conn
@@ -250,10 +248,9 @@ impl super::JournalStore {
         }
     }
 
-    /// Enable a harness: create a new snapshot with the external operation,
+    /// Enable or disable a harness: create new snapshot + CAS-activate + journal event.
     /// atomically update the active registry state, and record a journal event.
     ///
-    /// Uses CAS on `expected_current_snapshot_id` and `version` to prevent
     /// concurrent activation races.
     pub fn enable_harness(
         &self,
@@ -318,7 +315,7 @@ impl super::JournalStore {
         })
     }
 
-    /// Disable a harness: create a new snapshot WITHOUT the external operation,
+    /// (same as enable)
     /// atomically update the active registry state, and record a journal event.
     pub fn disable_harness(
         &self,
@@ -378,8 +375,7 @@ impl super::JournalStore {
         })
     }
 
-    /// Atomic activation: BEGIN IMMEDIATE, CAS on expected_snapshot_id,
-    /// update registry_state, record journal event, commit, update memory cache.
+    /// Atomic activation: BEGIN IMMEDIATE, CAS, update registry, journal event, commit.
     fn activate_registry_snapshot_atomic(
         &self,
         new_snapshot_id: &str,
