@@ -43,7 +43,6 @@ pub fn serve(config: KernelConfig) -> Result<()> {
     if recovered > 0 {
         println!("agent-core recovered {recovered} unknown invocation(s)");
     }
-    // Phase 2 M2d follow-up: expire ApprovalRequested runs older than the
     // operator-configured TTL. No-op unless both require_write_approval and a
     if config.require_write_approval && config.write_approval_ttl_secs > 0 {
         let expired = journal.expire_stale_approvals(config.write_approval_ttl_secs)?;
@@ -147,43 +146,45 @@ fn handle_connection(
             )?,
         );
     }
-    // All non-/health routes are POST under /v1/* and require the IPC bearer
-    // token. `/v1/approve` and `/v1/deny` (Phase 2 M2d follow-up) resume/deny a
-    // run paused in `AwaitingApproval` over the wire — the durable equivalent of
+    // Non-health routes must be POST under /v1/.
     if request.method != "POST" || !request.path.starts_with("/v1/") {
         return write_json(stream, 404, json!({ "ok": false, "error": "not_found" }));
     }
-    if request.bearer_token.as_deref() != Some(config.ipc_token.as_str()) {
-        return write_json(stream, 401, json!({ "ok": false, "error": "unauthorized" }));
-    }
     let path = request.path.as_str();
-    // Resolve principal from bearer token (submit vs decision vs operator).
-    let principal = request
-        .bearer_token
-        .as_deref()
-        .and_then(|t| gateway.resolve_principal(t));
-    // Capability proposal decision route.
-    if let Some(pid) = path
-        .strip_prefix("/v1/capability-change-proposals/")
-        .and_then(|s| s.strip_suffix("/decision"))
-    {
-        let Some(ref p) = principal else {
+    let bearer = request.bearer_token.as_deref().unwrap_or("");
+    // ---- Capability proposal routes (use dedicated tokens) ----
+    if path == "/v1/capability-change-proposals" && request.method == "POST" {
+        if bearer != config.capability_submit_token && bearer != config.ipc_token {
             return write_json(stream, 401, json!({"error":"unauthorized"}));
-        };
-        let body: Value = match serde_json::from_slice(&request.body) { Ok(b) => b, Err(_) => return write_json(stream, 400, json!({"error":"invalid_json"})) };
-        match capability_routes::handle_decision(&journal, &gateway, pid, &body, p) {
-            Ok(v) => write_json(stream, 200, v),
-            Err(e) => write_json(stream, 400, json!({"ok": false, "error": e.to_string()})),
         }
-    } else if path == "/v1/capability-change-proposals" && request.method == "POST" {
-        let Some(ref p) = principal else {
-            return write_json(stream, 401, json!({"error":"unauthorized"}));
+        let body: Value = match serde_json::from_slice(&request.body) {
+            Ok(b) => b,
+            Err(_) => return write_json(stream, 400, json!({"error":"invalid_json"})),
         };
-        let body: Value = match serde_json::from_slice(&request.body) { Ok(b) => b, Err(_) => return write_json(stream, 400, json!({"error":"invalid_json"})) };
+        let p = &"capability_submitter";
         match capability_routes::handle_submit_proposal(&journal, &gateway, &body, p) {
             Ok(resp) => write_json(stream, 200, serde_json::to_value(&resp).unwrap_or_default()),
             Err(e) => write_json(stream, 400, json!({"ok": false, "error": e.to_string()})),
         }
+    } else if let Some(pid) = path
+        .strip_prefix("/v1/capability-change-proposals/")
+        .and_then(|s| s.strip_suffix("/decision"))
+    {
+        if bearer != config.capability_decision_token && bearer != config.ipc_token {
+            return write_json(stream, 401, json!({"error":"unauthorized"}));
+        }
+        let p = &"approval_workflow";
+        let body: Value = match serde_json::from_slice(&request.body) {
+            Ok(b) => b,
+            Err(_) => return write_json(stream, 400, json!({"error":"invalid_json"})),
+        };
+        match capability_routes::handle_decision(&journal, &gateway, pid, &body, p) {
+            Ok(v) => write_json(stream, 200, v),
+            Err(e) => write_json(stream, 400, json!({"ok": false, "error": e.to_string()})),
+        }
+    // ---- All other /v1/ routes require the IPC bearer token ----
+    } else if bearer != config.ipc_token.as_str() {
+        return write_json(stream, 401, json!({ "ok": false, "error": "unauthorized" }));
     } else if path == "/v1/ingress" {
         handle_ingress(stream, &gateway, &journal, &request)
     } else if path == "/v1/approve" {
