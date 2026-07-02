@@ -157,58 +157,59 @@ fn handle_connection(
         return write_json(stream, 401, json!({ "ok": false, "error": "unauthorized" }));
     }
     let path = request.path.as_str();
+    // Resolve the requesting principal from the bearer token.
+    let principal = request.bearer_token.as_deref()
+        .and_then(|t| gateway.resolve_principal(t));
+    // Capability proposal decision routes.
     if let Some(pid) = path.strip_prefix("/v1/capability-change-proposals/")
         .and_then(|s| s.strip_suffix("/approve"))
     {
-        let b: Value = serde_json::from_slice(&request.body).unwrap_or_default();
-        let d = b.get("decided_by").and_then(|v| v.as_str()).unwrap_or("ipc_operator");
-        let r = capability_routes::handle_approve_proposal(&journal, &gateway, pid, d);
+        let Some(ref p) = principal else { return write_json(stream, 401, json!({"error":"unauthorized"})); };
+        let r = capability_routes::handle_approve_proposal(&journal, &gateway, pid, p);
         return handle_harness_result(stream, r.map(|v| serde_json::to_string(&v).unwrap_or_default()));
     }
     if let Some(pid) = path.strip_prefix("/v1/capability-change-proposals/")
         .and_then(|s| s.strip_suffix("/reject"))
     {
-        let b: Value = serde_json::from_slice(&request.body).unwrap_or_default();
-        let d = b.get("decided_by").and_then(|v| v.as_str()).unwrap_or("ipc_operator");
-        let reason = b.get("reason").and_then(|v| v.as_str()).unwrap_or("rejected");
-        let r = capability_routes::handle_reject_proposal(&journal, &gateway, pid, d, reason);
+        let Some(ref p) = principal else { return write_json(stream, 401, json!({"error":"unauthorized"})); };
+        let reason = "rejected";
+        let r = capability_routes::handle_reject_proposal(&journal, &gateway, pid, p, reason);
         return handle_harness_result(stream, r.map(|v| serde_json::to_string(&v).unwrap_or_default()));
     }
-    match path {
-        "/v1/ingress" => handle_ingress(stream, &gateway, &journal, &request),
-        "/v1/approve" => handle_approval_decision(stream, &gateway, &journal, &request, true),
-        "/v1/deny" => handle_approval_decision(stream, &gateway, &journal, &request, false),
-        "/v1/harness/register" => {
-            let body: Value = serde_json::from_slice(&request.body)?;
-            handle_harness_result(
-                stream,
-                harness_routes::handle_register(&gateway, &journal, &body),
-            )
+    if let Some(pid) = path.strip_prefix("/v1/capability-change-proposals/")
+        .and_then(|s| s.strip_suffix("/activate"))
+    {
+        let Some(ref _p) = principal else { return write_json(stream, 401, json!({"error":"unauthorized"})); };
+        let r = Ok(json!({"proposal_id": pid, "status": "activate_not_implemented_yet"}));
+        return handle_harness_result(stream, r.map(|v| serde_json::to_string(&v).unwrap_or_default()));
+    }
+    if path == "/v1/capability-change-proposals" && request.method == "POST" {
+        let Some(ref p) = principal else { return write_json(stream, 401, json!({"error":"unauthorized"})); };
+        let body: Value = match serde_json::from_slice(&request.body) {
+            Ok(b) => b,
+            Err(_) => return write_json(stream, 400, json!({"error":"invalid_json"})),
+        };
+        match capability_routes::handle_submit_proposal(&journal, &gateway, &body, p) {
+            Ok(resp) => write_json(stream, 200, serde_json::to_value(&resp).unwrap_or_default()),
+            Err(e) => write_json(stream, 400, json!({"ok": false, "error": e.to_string()})),
         }
-        "/v1/harness/enable" => {
-            let body: Value = serde_json::from_slice(&request.body)?;
-            handle_harness_result(
-                stream,
-                harness_routes::handle_enable(&gateway, &journal, &body),
-            )
-        }
-        "/v1/harness/disable" => {
-            let body: Value = serde_json::from_slice(&request.body)?;
-            handle_harness_result(
-                stream,
-                harness_routes::handle_disable(&gateway, &journal, &body),
-            )
-        }
-        "/v1/capability-change-proposals" => {
-            let body: Value = serde_json::from_slice(&request.body)?;
-            match capability_routes::handle_submit_proposal(
-                &journal, &gateway, &body, None, None,
-            ) {
-                Ok(resp) => write_json(stream, 200, serde_json::to_value(&resp)?),
-                Err(e) => write_json(stream, 400, json!({"ok": false, "error": e.to_string()})),
-            }
-        }
-        _ => write_json(stream, 404, json!({ "ok": false, "error": "not_found" })),
+    } else if path == "/v1/ingress" {
+        handle_ingress(stream, &gateway, &journal, &request)
+    } else if path == "/v1/approve" {
+        handle_approval_decision(stream, &gateway, &journal, &request, true)
+    } else if path == "/v1/deny" {
+        handle_approval_decision(stream, &gateway, &journal, &request, false)
+    } else if path == "/v1/harness/register" {
+        let body: Value = serde_json::from_slice(&request.body)?;
+        handle_harness_result(stream, harness_routes::handle_register(&gateway, &journal, &body))
+    } else if path == "/v1/harness/enable" {
+        let body: Value = serde_json::from_slice(&request.body)?;
+        handle_harness_result(stream, harness_routes::handle_enable(&gateway, &journal, &body))
+    } else if path == "/v1/harness/disable" {
+        let body: Value = serde_json::from_slice(&request.body)?;
+        handle_harness_result(stream, harness_routes::handle_disable(&gateway, &journal, &body))
+    } else {
+        write_json(stream, 404, json!({ "ok": false, "error": "not_found" }))
     }
 }
 fn handle_ingress(

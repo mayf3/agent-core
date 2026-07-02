@@ -46,6 +46,7 @@ fn test_config() -> KernelConfig {
         fallback_tool_name_indexed: false,
         primary_tool_name_indexed: false,
         harness_read_timeout_ms: 10_000,
+        capability_tokens: std::collections::HashMap::new(),
     }
 }
 
