@@ -124,10 +124,10 @@ impl super::JournalStore {
         let manifest_id = &manifest.manifest_id;
         let content_digest = manifest.compute_manifest_id()?;
 
-        // Check if this manifest_id already exists. If so, read the full
-        // persisted row and do a strict structural comparison with the new
-        // manifest. Only byte-identical content (same canonical_digest +
-        // all immutable fields) is allowed as an idempotent reuse.
+        // Read the full persisted manifest row using OptionalExtension to
+        // distinguish QueryReturnedNoRows (not found) from real SQLite errors.
+        // Any decode/parse failure is not treated as NotFound.
+        use rusqlite::OptionalExtension;
         let existing_row: Option<(
             String,
             String,
@@ -163,7 +163,8 @@ impl super::JournalStore {
                     ))
                 },
             )
-            .ok();
+            .optional()
+            .map_err(|e| anyhow::anyhow!("manifest_lookup_failed:{e}"))?;
 
         if let Some((
             e_hid,
@@ -175,16 +176,23 @@ impl super::JournalStore {
             e_inp,
             e_out,
             e_idem,
-            _e_ts,
-            _e_dig,
+            e_ts,
+            e_dig,
         )) = existing_row
         {
-            // Reconstruct the persisted manifest for structural comparison.
+            // Strictly parse all persisted fields. Any corruption fails closed
+            // — never silently treated as "not found" or "reusable".
+            let e_created_at = chrono::DateTime::parse_from_rfc3339(&e_ts)
+                .map_err(|_| anyhow!("corrupt_persisted_created_at:{manifest_id}"))?
+                .with_timezone(&chrono::Utc);
             let e_input_schema: serde_json::Value = serde_json::from_str(&e_inp)
                 .map_err(|_| anyhow!("corrupt_persisted_input_schema:{manifest_id}"))?;
             let e_output_schema: serde_json::Value = serde_json::from_str(&e_out)
                 .map_err(|_| anyhow!("corrupt_persisted_output_schema:{manifest_id}"))?;
-            let existing_manifest = HarnessManifest {
+
+            // Reconstruct the full persisted HarnessManifest using the database
+            // values (including created_at). Never substitute with incoming values.
+            let persisted_manifest = HarnessManifest {
                 manifest_id: manifest_id.clone(),
                 harness_id: e_hid,
                 artifact_digest: e_art,
@@ -195,17 +203,36 @@ impl super::JournalStore {
                 input_schema: e_input_schema,
                 output_schema: e_output_schema,
                 idempotent: e_idem,
-                created_at: manifest.created_at, // created_at is system-set, skip comparison
+                created_at: e_created_at,
             };
-            // Compute the canonical digest from the persisted data.
-            let existing_digest = existing_manifest.compute_manifest_id()?;
-            if existing_digest == content_digest
-                && existing_manifest.artifact_digest == manifest.artifact_digest
-            {
-                // Full structural match — safe idempotent reuse.
-                return Ok(manifest_id.clone());
+
+            // Verify stored canonical_digest matches recomputed digest of stored data.
+            let recomputed_digest = persisted_manifest
+                .compute_manifest_id()
+                .map_err(|_| anyhow!("manifest_digest_recompute_failed:{manifest_id}"))?;
+            if recomputed_digest != e_dig {
+                bail!("corrupt_persisted_canonical_digest:{manifest_id}: stored {e_dig} != recomputed {recomputed_digest}");
             }
-            bail!("manifest_identity_conflict: manifest_id {manifest_id} already registered with different content");
+
+            // Full structural comparison: every immutable field, including
+            // created_at, must be identical for idempotent reuse.
+            if persisted_manifest.manifest_id != manifest.manifest_id
+                || persisted_manifest.harness_id != manifest.harness_id
+                || persisted_manifest.artifact_digest != manifest.artifact_digest
+                || persisted_manifest.protocol_version != manifest.protocol_version
+                || persisted_manifest.endpoint != manifest.endpoint
+                || persisted_manifest.operation_name != manifest.operation_name
+                || persisted_manifest.description != manifest.description
+                || persisted_manifest.input_schema != manifest.input_schema
+                || persisted_manifest.output_schema != manifest.output_schema
+                || persisted_manifest.idempotent != manifest.idempotent
+                || persisted_manifest.created_at != manifest.created_at
+            {
+                bail!("manifest_identity_conflict: manifest_id {manifest_id} already registered with different content");
+            }
+
+            // Full structural match — safe idempotent reuse.
+            return Ok(manifest_id.clone());
         }
 
         // Also check for duplicate operation_name (operation bound to another manifest).

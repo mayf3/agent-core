@@ -23,6 +23,10 @@ mod worker;
 mod registry_retirement;
 
 #[cfg(test)]
+#[path = "tests/manifest_idempotent.rs"]
+mod manifest_idempotent;
+
+#[cfg(test)]
 #[path = "tests/capability_concurrency.rs"]
 mod capability_concurrency;
 
