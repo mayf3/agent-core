@@ -28,6 +28,10 @@ pub fn serve(config: KernelConfig) -> Result<()> {
     if config.ipc_token.is_empty() {
         bail!("AGENT_CORE_IPC_TOKEN is required for serve");
     }
+    // Validate capability tokens: if configured, they must be distinct from
+    // each other and from the legacy IPC token. Failure exits before any
+    // listener starts — no HTTP request can observe a collision.
+    validate_capability_tokens(&config)?;
     let listener = TcpListener::bind(("127.0.0.1", config.kernel_port))?;
     println!(
         "agent-core kernel listening on 127.0.0.1:{}",
@@ -455,6 +459,32 @@ fn write_json(stream: &mut TcpStream, status: u16, body: Value) -> Result<()> {
     stream.write_all(response.as_bytes())?;
     Ok(())
 }
+
+/// Validate that capability tokens are distinct from each other and from the
+/// IPC token. Exits before any listener starts so no HTTP request can observe
+/// a collision. Error messages are stable categories, never raw token values.
+fn validate_capability_tokens(config: &KernelConfig) -> Result<()> {
+    if let (Some(ref sub), Some(ref dec)) = (
+        &config.capability_submit_token,
+        &config.capability_decision_token,
+    ) {
+        if sub == dec {
+            bail!("capability_token_collision: submit token must differ from decision token");
+        }
+    }
+    if let Some(ref sub) = config.capability_submit_token {
+        if sub == &config.ipc_token {
+            bail!("capability_token_collision: submit token must differ from IPC token");
+        }
+    }
+    if let Some(ref dec) = config.capability_decision_token {
+        if dec == &config.ipc_token {
+            bail!("capability_token_collision: decision token must differ from IPC token");
+        }
+    }
+    Ok(())
+}
+
 fn find_header_end(buffer: &[u8]) -> Option<usize> {
     buffer.windows(4).position(|window| window == b"\r\n\r\n")
 }
