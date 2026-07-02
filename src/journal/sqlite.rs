@@ -329,29 +329,38 @@ impl JournalStore {
             );
         }
         if applied == 0 {
-            // Fresh database: run all migrations and stamp the version.
+            // Fresh database: run all migrations and stamp current version.
             conn.execute_batch(include_str!("../../migrations/0001_init.sql"))?;
             conn.execute_batch(include_str!("../../migrations/0002_registry_snapshots.sql"))?;
-            conn.execute_batch(include_str!(
-                "../../migrations/0003_external_harness_hotload.sql"
-            ))?;
+            conn.execute_batch(include_str!("../../migrations/0003_external_harness_hotload.sql"))?;
+            conn.execute_batch(include_str!("../../migrations/0004_capability_change_proposals.sql"))?;
             super::queue::migrate(&conn)?;
             backfill_feishu_message_dedup(&conn)?;
             conn.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
         } else if applied == 1 {
-            // v1 → v2: add registry snapshot tables + runs column.
             conn.execute_batch(include_str!("../../migrations/0002_registry_snapshots.sql"))?;
             super::queue::migrate(&conn)?;
             backfill_feishu_message_dedup(&conn)?;
             conn.pragma_update(None, "user_version", 2)?;
-            // Continue to v2 → v3 below.
-        } else if applied == 2 {
-            // v2 → v3: add external harness tables + registry_state.
-            conn.execute_batch(include_str!(
-                "../../migrations/0003_external_harness_hotload.sql"
-            ))?;
-            conn.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
-        } else {
+            // Fall through to v2→v3→v4.
+        }
+        // Apply any pending version upgrades after the initial v0/v1 blocks.
+        loop {
+            let current = conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))?;
+            if current >= CURRENT_SCHEMA_VERSION { break; }
+            match current {
+                2 => {
+                    conn.execute_batch(include_str!("../../migrations/0003_external_harness_hotload.sql"))?;
+                    conn.pragma_update(None, "user_version", 3)?;
+                }
+                3 => {
+                    conn.execute_batch(include_str!("../../migrations/0004_capability_change_proposals.sql"))?;
+                    conn.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
+                }
+                _ => break,
+            }
+        }
+        if applied >= 1 {
             // Existing database at a known version: the base schema migration
             // is already applied. queue::migrate and the dedup backfill are
             // idempotent / read-only-safe, so they can run every startup to
