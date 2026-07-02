@@ -452,6 +452,7 @@ pub enum JournalEventKind {
     CapabilityChangeRejected,
     CapabilityChangeActivated,
     CapabilityChangeActivationFailed,
+    CapabilityChangeExpired,
     /// Sentinel produced by `parse_kind`/`row_to_event` when the stored
     /// `kind` text does not match any known variant. The kernel never writes
     /// `Unknown` — observing it at read time indicates either external

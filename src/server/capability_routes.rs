@@ -13,6 +13,89 @@ use serde_json::{json, Value};
 pub const CAPABILITY_CHANGE_PROPOSE_GRANT: &str = "capability_change.propose";
 pub const CAPABILITY_CHANGE_DECIDE_GRANT: &str = "capability_change.decide";
 
+/// Typed error classification for capability route handlers. Each variant
+/// maps to a single stable HTTP status and a bounded safe error string.
+#[derive(Debug, Clone)]
+pub enum CapabilityRouteError {
+    InvalidRequest(String),
+    AuthNotConfigured,
+    Unauthorized,
+    Forbidden(String),
+    NotFound(String),
+    Conflict(String),
+    Internal(String),
+}
+
+impl CapabilityRouteError {
+    pub fn http_status(&self) -> u16 {
+        match self {
+            Self::InvalidRequest(_) => 400,
+            Self::AuthNotConfigured | Self::Unauthorized => 401,
+            Self::Forbidden(_) => 403,
+            Self::NotFound(_) => 404,
+            Self::Conflict(_) => 409,
+            Self::Internal(_) => 500,
+        }
+    }
+
+    pub fn safe_error(&self) -> &'static str {
+        match self {
+            Self::InvalidRequest(_) => "invalid_request",
+            Self::AuthNotConfigured => "capability_auth_not_configured",
+            Self::Unauthorized => "unauthorized",
+            Self::Forbidden(_) => "forbidden",
+            Self::NotFound(_) => "not_found",
+            Self::Conflict(_) => "conflict",
+            Self::Internal(_) => "internal_error",
+        }
+    }
+
+    /// Include a safe bounded detail string for variants that carry one.
+    pub fn detail(&self) -> Option<&str> {
+        match self {
+            Self::InvalidRequest(d)
+            | Self::Forbidden(d)
+            | Self::NotFound(d)
+            | Self::Conflict(d)
+            | Self::Internal(d) => Some(d.as_str()),
+            Self::AuthNotConfigured | Self::Unauthorized => None,
+        }
+    }
+}
+
+impl std::fmt::Display for CapabilityRouteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let tag = match self {
+            Self::InvalidRequest(_) => "invalid_request",
+            Self::AuthNotConfigured => "capability_auth_not_configured",
+            Self::Unauthorized => "unauthorized",
+            Self::Forbidden(_) => "forbidden",
+            Self::NotFound(_) => "not_found",
+            Self::Conflict(_) => "conflict",
+            Self::Internal(_) => "internal_error",
+        };
+        write!(f, "{tag}")
+    }
+}
+
+impl std::error::Error for CapabilityRouteError {}
+
+/// Sanitise a generic anyhow error into a bounded safe string for HTTP 500
+/// responses. Never leaks SQL, paths, tokens, or backtraces.
+pub fn sanitise_error(err: &anyhow::Error) -> String {
+    let msg = err.to_string();
+    let safe: String = msg
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        .take(64)
+        .collect();
+    if safe.is_empty() {
+        "error".into()
+    } else {
+        safe
+    }
+}
+
 #[derive(Deserialize)]
 pub struct SubmitProposalBody {
     pub target_agent_id: String,
@@ -110,22 +193,9 @@ pub fn handle_decision(
         bail!("submitter_cannot_decide_own_proposal");
     }
     if proposal.expires_at < chrono::Utc::now() {
-        journal.decide_proposal(
-            proposal_id,
-            &[ProposalStatus::PendingApproval],
-            ProposalStatus::Expired,
-            principal,
-            "expired",
-            None,
-            None,
-        )?;
-        journal.append_event(
-            JournalEventKind::CapabilityChangeRejected,
-            Some(&proposal.origin_run_id),
-            Some(&proposal.origin_session_id),
-            Some(proposal_id),
-            json!({"proposal_id": proposal_id, "reason": "expired"}),
-        )?;
+        // Atomically expire: status → Expired + CapabilityChangeExpired event
+        // in a single transaction. No split Update-then-append race.
+        journal.expire_proposal_atomic(proposal_id, principal, "expired")?;
         bail!("proposal_expired");
     }
     if input.artifact_digest != proposal.artifact_digest {
@@ -275,22 +345,7 @@ pub fn handle_decision(
                       "activated_snapshot_id": new_snapshot_id}))
         }
         "rejected" => {
-            journal.decide_proposal(
-                proposal_id,
-                &[ProposalStatus::PendingApproval],
-                ProposalStatus::Rejected,
-                principal,
-                "rejected",
-                None,
-                None,
-            )?;
-            journal.append_event(
-                JournalEventKind::CapabilityChangeRejected,
-                Some(&proposal.origin_run_id),
-                Some(&proposal.origin_session_id),
-                Some(proposal_id),
-                json!({"proposal_id": proposal_id, "decided_by": principal}),
-            )?;
+            journal.reject_proposal_atomic(proposal_id, principal, "rejected")?;
             Ok(json!({"proposal_id": proposal_id, "status": "Rejected"}))
         }
         _ => bail!("invalid_decision: must be approved or rejected"),

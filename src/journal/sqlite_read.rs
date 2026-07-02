@@ -78,6 +78,7 @@ pub(crate) fn parse_kind(value: &str) -> JournalEventKind {
         "CapabilityChangeProposed" => JournalEventKind::CapabilityChangeProposed,
         "CapabilityChangeActivated" => JournalEventKind::CapabilityChangeActivated,
         "CapabilityChangeRejected" => JournalEventKind::CapabilityChangeRejected,
+        "CapabilityChangeExpired" => JournalEventKind::CapabilityChangeExpired,
         _ => JournalEventKind::Unknown,
     }
 }

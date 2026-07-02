@@ -152,26 +152,38 @@ fn handle_connection(
     }
     let path = request.path.as_str();
     let bearer = request.bearer_token.as_deref().unwrap_or("");
-    // ---- Capability proposal routes (use dedicated tokens) ----
+    // ---- Capability proposal routes (use dedicated tokens only, no IPC bypass) ----
     if path == "/v1/capability-change-proposals" && request.method == "POST" {
-        if bearer != config.capability_submit_token && bearer != config.ipc_token {
-            return write_json(stream, 401, json!({"error":"unauthorized"}));
+        if !capability_token_matches(bearer, &config.capability_submit_token) {
+            let err = if config.capability_submit_token.is_none() {
+                "capability_auth_not_configured"
+            } else {
+                "unauthorized"
+            };
+            return write_json(stream, 401, json!({"error": err}));
         }
         let body: Value = match serde_json::from_slice(&request.body) {
             Ok(b) => b,
             Err(_) => return write_json(stream, 400, json!({"error":"invalid_json"})),
         };
         let p = &"capability_submitter";
-        match capability_routes::handle_submit_proposal(&journal, &gateway, &body, p) {
-            Ok(resp) => write_json(stream, 200, serde_json::to_value(&resp).unwrap_or_default()),
-            Err(e) => write_json(stream, 400, json!({"ok": false, "error": e.to_string()})),
+        let result = capability_routes::handle_submit_proposal(&journal, &gateway, &body, p);
+        let result = result.map(|resp| serde_json::to_value(&resp).unwrap_or_default());
+        match map_capability_result(result) {
+            Ok((status, body)) => write_json(stream, status, body),
+            Err(e) => write_json(stream, 500, json!({"ok": false, "error": e.to_string()})),
         }
     } else if let Some(pid) = path
         .strip_prefix("/v1/capability-change-proposals/")
         .and_then(|s| s.strip_suffix("/decision"))
     {
-        if bearer != config.capability_decision_token && bearer != config.ipc_token {
-            return write_json(stream, 401, json!({"error":"unauthorized"}));
+        if !capability_token_matches(bearer, &config.capability_decision_token) {
+            let err = if config.capability_decision_token.is_none() {
+                "capability_auth_not_configured"
+            } else {
+                "unauthorized"
+            };
+            return write_json(stream, 401, json!({"error": err}));
         }
         let p = &"approval_workflow";
         let body: Value = match serde_json::from_slice(&request.body) {
@@ -180,9 +192,10 @@ fn handle_connection(
         };
         let store =
             crate::capabilities::store::ContentStore::new(config.harness_artifact_root.clone());
-        match capability_routes::handle_decision(&journal, &gateway, &store, pid, &body, p) {
-            Ok(v) => write_json(stream, 200, v),
-            Err(e) => write_json(stream, 400, json!({"ok": false, "error": e.to_string()})),
+        let result = capability_routes::handle_decision(&journal, &gateway, &store, pid, &body, p);
+        match map_capability_result(result) {
+            Ok((status, body)) => write_json(stream, status, body),
+            Err(e) => write_json(stream, 500, json!({"ok": false, "error": e.to_string()})),
         }
     // ---- All other /v1/ routes require the IPC bearer token ----
     } else if bearer != config.ipc_token.as_str() {
@@ -481,6 +494,40 @@ fn content_length(head: &str) -> usize {
         .find(|(n, _)| n.eq_ignore_ascii_case("content-length"))
         .and_then(|(_, v)| v.trim().parse().ok())
         .unwrap_or(0)
+}
+
+/// Check that `bearer` matches the configured `expected` token. Returns
+/// `false` when the token is not configured (fail-closed).
+fn capability_token_matches(bearer: &str, expected: &Option<String>) -> bool {
+    match expected {
+        Some(t) => t == bearer,
+        None => false,
+    }
+}
+
+/// Map a `CapabilityRouteError` result into (status_code, body) for the HTTP
+/// response. Internal/unexpected errors return `Err` and are rendered as 500.
+fn map_capability_result(
+    result: Result<serde_json::Value>,
+) -> std::result::Result<(u16, serde_json::Value), anyhow::Error> {
+    match result {
+        Ok(v) => Ok((200, v)),
+        Err(e) => {
+            // Downcast to typed CapabilityRouteError for proper status mapping.
+            if let Some(cap_err) = e.downcast_ref::<capability_routes::CapabilityRouteError>() {
+                let status = cap_err.http_status();
+                let body = json!({"ok": false, "error": cap_err.safe_error()});
+                Ok((status, body))
+            } else {
+                // Treat unexpected errors as 500 with sanitised message.
+                let sanitised = capability_routes::sanitise_error(&e);
+                Ok((
+                    500,
+                    json!({"ok": false, "error": "internal_error", "error_category": sanitised}),
+                ))
+            }
+        }
+    }
 }
 #[cfg(test)]
 #[path = "approval_endpoint_tests.rs"]

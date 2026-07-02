@@ -225,4 +225,92 @@ impl super::JournalStore {
         }
         Ok(ids)
     }
+
+    /// Atomically reject a PendingApproval proposal: CAS-update status to
+    /// Rejected and append the `CapabilityChangeRejected` event in a single
+    /// transaction. On failure (not found, not Pending) the transaction rolls
+    /// back and the proposal state is unchanged.
+    pub fn reject_proposal_atomic(
+        &self,
+        proposal_id: &str,
+        decided_by: &str,
+        reason: &str,
+    ) -> Result<()> {
+        let mut conn = self.conn.lock().map_err(|_| anyhow!("mutex poisoned"))?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let cur: Option<String> = tx
+            .query_row(
+                "SELECT status FROM capability_change_proposals WHERE proposal_id = ?1",
+                params![proposal_id],
+                |row| row.get(0),
+            )
+            .ok();
+        match cur.as_deref() {
+            Some("PendingApproval") => {}
+            Some(s) => bail!("proposal_not_pending:{s}"),
+            None => bail!("proposal_not_found"),
+        }
+        let now = Utc::now().to_rfc3339();
+        let changed = tx.execute(
+            "UPDATE capability_change_proposals SET status = 'Rejected', decided_at = ?1, decided_by = ?2, decision_reason = ?3 WHERE proposal_id = ?4 AND status = 'PendingApproval'",
+            params![now, decided_by, reason, proposal_id],
+        )?;
+        if changed != 1 {
+            bail!("proposal_not_pending");
+        }
+        super::queue::append_event_tx(
+            &tx,
+            JournalEventKind::CapabilityChangeRejected,
+            None,
+            None,
+            Some(proposal_id),
+            serde_json::json!({"proposal_id": proposal_id, "decided_by": decided_by, "reason": reason}),
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Atomically expire a PendingApproval proposal: CAS-update status to
+    /// Expired and append the `CapabilityChangeExpired` event in a single
+    /// transaction. On failure (not found, not Pending) the transaction rolls
+    /// back and the proposal state is unchanged.
+    pub fn expire_proposal_atomic(
+        &self,
+        proposal_id: &str,
+        decided_by: &str,
+        reason: &str,
+    ) -> Result<()> {
+        let mut conn = self.conn.lock().map_err(|_| anyhow!("mutex poisoned"))?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let cur: Option<String> = tx
+            .query_row(
+                "SELECT status FROM capability_change_proposals WHERE proposal_id = ?1",
+                params![proposal_id],
+                |row| row.get(0),
+            )
+            .ok();
+        match cur.as_deref() {
+            Some("PendingApproval") => {}
+            Some(s) => bail!("proposal_not_pending:{s}"),
+            None => bail!("proposal_not_found"),
+        }
+        let now = Utc::now().to_rfc3339();
+        let changed = tx.execute(
+            "UPDATE capability_change_proposals SET status = 'Expired', decided_at = ?1, decided_by = ?2, decision_reason = ?3 WHERE proposal_id = ?4 AND status = 'PendingApproval'",
+            params![now, decided_by, reason, proposal_id],
+        )?;
+        if changed != 1 {
+            bail!("proposal_not_pending");
+        }
+        super::queue::append_event_tx(
+            &tx,
+            JournalEventKind::CapabilityChangeExpired,
+            None,
+            None,
+            Some(proposal_id),
+            serde_json::json!({"proposal_id": proposal_id, "decided_by": decided_by, "reason": reason}),
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
 }
