@@ -27,8 +27,8 @@ fn config() -> crate::config::KernelConfig {
         kernel_port: 0,
         connector_execute_url: "http://127.0.0.1:0/v1/execute".to_string(),
         ipc_token: "test-token".to_string(),
-        capability_submit_token: String::new(),
-        capability_decision_token: String::new(),
+        capability_submit_token: None,
+        capability_decision_token: None,
         feishu_allowed_open_ids: vec![],
         feishu_allowed_chat_ids: vec![],
         feishu_require_group_mention: true,
@@ -342,7 +342,6 @@ fn approved_and_rejected_decisions_race_exactly_once() -> Result<()> {
     let v0 = registry_version(&store_a);
     let specs = new_specs(&store_a, &manifest)?;
     let proposal_a = store_a.load_proposal(&pid)?.unwrap();
-    let proposal_b = store_b.load_proposal(&pid)?.unwrap();
 
     let barrier = Arc::new(Barrier::new(2));
 
@@ -376,32 +375,23 @@ fn approved_and_rejected_decisions_race_exactly_once() -> Result<()> {
         })
     };
 
-    // Executor 2: rejected — decide_proposal is itself a CAS on status.
+    // Executor 2: rejected — uses the atomic reject method (single tx).
     let h2 = {
         let barrier = barrier.clone();
         let store_b = store_b.clone();
         let pid_c = pid.clone();
         thread::spawn(move || -> Result<()> {
             barrier.wait();
-            let changed = store_b.decide_proposal(
-                &pid_c,
-                &[ProposalStatus::PendingApproval],
-                ProposalStatus::Rejected,
-                "approval_workflow",
-                "rejected",
-                None,
-                None,
-            )?;
-            if changed {
-                store_b.append_event(
-                    JournalEventKind::CapabilityChangeRejected,
-                    Some(&proposal_b.origin_run_id),
-                    Some(&proposal_b.origin_session_id),
-                    Some(&pid_c),
-                    json!({"proposal_id": pid_c, "decided_by": "approval_workflow"}),
-                )?;
+            let result = store_b.reject_proposal_atomic(&pid_c, "approval_workflow", "rejected");
+            if let Err(e) = result {
+                // If the other executor activated first, reject is expected to
+                // fail with proposal_not_pending — consistent outcome.
+                let msg = e.to_string();
+                assert!(
+                    msg.contains("proposal_not_pending"),
+                    "unexpected reject-race error: {msg}"
+                );
             }
-            // If not changed, the other executor activated first — consistent.
             Ok(())
         })
     };
