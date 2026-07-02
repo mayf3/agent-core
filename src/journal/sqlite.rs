@@ -332,8 +332,12 @@ impl JournalStore {
             // Fresh database: run all migrations and stamp current version.
             conn.execute_batch(include_str!("../../migrations/0001_init.sql"))?;
             conn.execute_batch(include_str!("../../migrations/0002_registry_snapshots.sql"))?;
-            conn.execute_batch(include_str!("../../migrations/0003_external_harness_hotload.sql"))?;
-            conn.execute_batch(include_str!("../../migrations/0004_capability_change_proposals.sql"))?;
+            conn.execute_batch(include_str!(
+                "../../migrations/0003_external_harness_hotload.sql"
+            ))?;
+            conn.execute_batch(include_str!(
+                "../../migrations/0004_capability_change_proposals.sql"
+            ))?;
             super::queue::migrate(&conn)?;
             backfill_feishu_message_dedup(&conn)?;
             conn.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
@@ -347,14 +351,20 @@ impl JournalStore {
         // Apply any pending version upgrades after the initial v0/v1 blocks.
         loop {
             let current = conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))?;
-            if current >= CURRENT_SCHEMA_VERSION { break; }
+            if current >= CURRENT_SCHEMA_VERSION {
+                break;
+            }
             match current {
                 2 => {
-                    conn.execute_batch(include_str!("../../migrations/0003_external_harness_hotload.sql"))?;
+                    conn.execute_batch(include_str!(
+                        "../../migrations/0003_external_harness_hotload.sql"
+                    ))?;
                     conn.pragma_update(None, "user_version", 3)?;
                 }
                 3 => {
-                    conn.execute_batch(include_str!("../../migrations/0004_capability_change_proposals.sql"))?;
+                    conn.execute_batch(include_str!(
+                        "../../migrations/0004_capability_change_proposals.sql"
+                    ))?;
                     conn.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
                 }
                 _ => break,

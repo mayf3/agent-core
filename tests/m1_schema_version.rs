@@ -82,7 +82,10 @@ fn migration_v3_to_v4_creates_proposals_table() -> Result<()> {
             "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='capability_change_proposals'",
             [], |row| row.get(0),
         )?;
-        assert!(has_table, "capability_change_proposals table must exist after v3→v4 migration");
+        assert!(
+            has_table,
+            "capability_change_proposals table must exist after v3→v4 migration"
+        );
     }
     // Verify we can INSERT and SELECT.
     {

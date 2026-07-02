@@ -4,9 +4,11 @@ use crate::journal::JournalStore;
 use crate::registry::snapshot::RegistrySnapshot;
 use anyhow::{bail, Result};
 use chrono::{DateTime, Utc};
-use serde_json::{json, Value}; use uuid::Uuid;
+use serde_json::{json, Value};
+use uuid::Uuid;
 mod policy;
-pub use policy::{evaluate_policy, PolicyVerdict}; mod tool_call;
+pub use policy::{evaluate_policy, PolicyVerdict};
+mod tool_call;
 pub use tool_call::{validate_tool_call, ToolRejection};
 #[derive(Clone)]
 pub struct Gateway {
@@ -414,7 +416,11 @@ impl Gateway {
     /// Resolve a bearer token to a principal.
     /// Resolve a bearer token to a principal. v1: ipc_token → ipc_operator.
     pub fn resolve_principal(&self, token: &str) -> Option<String> {
-        if token == self.config.ipc_token { Some("ipc_operator".into()) } else { None }
+        if token == self.config.ipc_token {
+            Some("ipc_operator".into())
+        } else {
+            None
+        }
     }
     /// Check whether a principal has a specific grant (hardcoded v1 mapping).
     pub fn has_grant(&self, principal_id: &str, grant: &str) -> bool {

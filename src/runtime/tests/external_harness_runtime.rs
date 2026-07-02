@@ -39,7 +39,8 @@ pub(super) fn config() -> crate::config::KernelConfig {
         fallback_tool_name_indexed: false,
         primary_tool_name_indexed: false,
         harness_read_timeout_ms: 10_000,
-        capability_tokens: std::collections::HashMap::new(),
+        capability_submit_token: String::new(),
+        capability_decision_token: String::new(),
     }
 }
 

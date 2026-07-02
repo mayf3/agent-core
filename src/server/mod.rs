@@ -6,9 +6,9 @@ pub mod capability_routes;
 mod delivery;
 mod dispatcher_metrics;
 pub mod harness_routes;
+use anyhow::{bail, Result};
 #[cfg(test)]
 pub(crate) use delivery::build_llm_from_config;
-use anyhow::{bail, Result};
 use delivery::{
     recover_undelivered_ingress, start_approval_expiry_loop, start_outbox_dispatcher_loop,
     start_worker_loop,
@@ -157,29 +157,29 @@ fn handle_connection(
         return write_json(stream, 401, json!({ "ok": false, "error": "unauthorized" }));
     }
     let path = request.path.as_str();
-    // Resolve the requesting principal from the bearer token.
-    // For capability change operations, the ipc_token maps to the operator
-    // who can submit proposals and make decisions (via external workflow harness).
-    let principal = request.bearer_token.as_deref()
+    // Resolve principal from bearer token (submit vs decision vs operator).
+    let principal = request
+        .bearer_token
+        .as_deref()
         .and_then(|t| gateway.resolve_principal(t));
-    // Capability proposal decision route (single endpoint for approved/rejected).
-    if let Some(pid) = path.strip_prefix("/v1/capability-change-proposals/")
+    // Capability proposal decision route.
+    if let Some(pid) = path
+        .strip_prefix("/v1/capability-change-proposals/")
         .and_then(|s| s.strip_suffix("/decision"))
     {
-        let Some(ref p) = principal else { return write_json(stream, 401, json!({"error":"unauthorized"})); };
-        let body: Value = match serde_json::from_slice(&request.body) {
-            Ok(b) => b, Err(_) => return write_json(stream, 400, json!({"error":"invalid_json"})),
+        let Some(ref p) = principal else {
+            return write_json(stream, 401, json!({"error":"unauthorized"}));
         };
+        let body: Value = match serde_json::from_slice(&request.body) { Ok(b) => b, Err(_) => return write_json(stream, 400, json!({"error":"invalid_json"})) };
         match capability_routes::handle_decision(&journal, &gateway, pid, &body, p) {
             Ok(v) => write_json(stream, 200, v),
             Err(e) => write_json(stream, 400, json!({"ok": false, "error": e.to_string()})),
         }
     } else if path == "/v1/capability-change-proposals" && request.method == "POST" {
-        let Some(ref p) = principal else { return write_json(stream, 401, json!({"error":"unauthorized"})); };
-        let body: Value = match serde_json::from_slice(&request.body) {
-            Ok(b) => b,
-            Err(_) => return write_json(stream, 400, json!({"error":"invalid_json"})),
+        let Some(ref p) = principal else {
+            return write_json(stream, 401, json!({"error":"unauthorized"}));
         };
+        let body: Value = match serde_json::from_slice(&request.body) { Ok(b) => b, Err(_) => return write_json(stream, 400, json!({"error":"invalid_json"})) };
         match capability_routes::handle_submit_proposal(&journal, &gateway, &body, p) {
             Ok(resp) => write_json(stream, 200, serde_json::to_value(&resp).unwrap_or_default()),
             Err(e) => write_json(stream, 400, json!({"ok": false, "error": e.to_string()})),
@@ -192,13 +192,22 @@ fn handle_connection(
         handle_approval_decision(stream, &gateway, &journal, &request, false)
     } else if path == "/v1/harness/register" {
         let body: Value = serde_json::from_slice(&request.body)?;
-        handle_harness_result(stream, harness_routes::handle_register(&gateway, &journal, &body))
+        handle_harness_result(
+            stream,
+            harness_routes::handle_register(&gateway, &journal, &body),
+        )
     } else if path == "/v1/harness/enable" {
         let body: Value = serde_json::from_slice(&request.body)?;
-        handle_harness_result(stream, harness_routes::handle_enable(&gateway, &journal, &body))
+        handle_harness_result(
+            stream,
+            harness_routes::handle_enable(&gateway, &journal, &body),
+        )
     } else if path == "/v1/harness/disable" {
         let body: Value = serde_json::from_slice(&request.body)?;
-        handle_harness_result(stream, harness_routes::handle_disable(&gateway, &journal, &body))
+        handle_harness_result(
+            stream,
+            harness_routes::handle_disable(&gateway, &journal, &body),
+        )
     } else {
         write_json(stream, 404, json!({ "ok": false, "error": "not_found" }))
     }
