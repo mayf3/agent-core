@@ -143,15 +143,16 @@ pub fn handle_submit_proposal(
     {
         return Err(CapabilityRouteError::Forbidden("target_agent_mismatch".into()).into());
     }
-    for d in [
-        &input.artifact_digest,
-        &input.manifest_digest,
-        &input.evidence_digest,
-    ] {
-        if !d.starts_with("sha256:") || d.len() != 71 {
-            bail!("invalid_digest_format");
-        }
-    }
+    // Strictly parse all three digests using the existing Sha256Digest type.
+    // This rejects non-hex, uppercase, wrong length, empty, whitespace, and
+    // non-sha256 algorithm values. The canonical form (sha256:<64 lowercase hex>)
+    // is what gets persisted in the proposal.
+    let _a = Sha256Digest::parse(&input.artifact_digest)
+        .map_err(|e| anyhow!("invalid_digest_format:{e}"))?;
+    let _m = Sha256Digest::parse(&input.manifest_digest)
+        .map_err(|e| anyhow!("invalid_digest_format:{e}"))?;
+    let _e = Sha256Digest::parse(&input.evidence_digest)
+        .map_err(|e| anyhow!("invalid_digest_format:{e}"))?;
     if input.requested_operations.is_empty() {
         bail!("empty_requested_operations");
     }
