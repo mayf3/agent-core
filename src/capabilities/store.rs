@@ -1,12 +1,20 @@
 //! Content-addressed immutable store for artifact / manifest / evidence blobs.
 //! Objects are stored by SHA-256 digest under a configurable root directory.
 //! Only readable through verified digest lookups — no arbitrary file paths.
+//!
+//! On Unix/macOS the load path uses O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC and
+//! verifies the opened fd is a regular file before reading. All reads are
+//! bounded to MAX_OBJECT_SIZE to prevent unbounded allocation.
 
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
+use std::io::Read;
 use std::path::PathBuf;
 use std::sync::Mutex;
+
+/// Maximum size of a single content-addressed object in bytes.
+const MAX_OBJECT_SIZE: usize = 1 * 1024 * 1024; // 1 MiB
 
 /// A SHA-256 digest in canonical form: `sha256:<64 lowercase hex>`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,21 +88,83 @@ impl ContentStore {
         Ok(digest)
     }
 
-    /// Load a blob by digest. Returns error if not found or digest mismatch.
+    /// Load a blob by digest using O_NOFOLLOW, regular-file check, bounded read.
+    /// This prevents symlink following, FIFO blocking, and unbounded allocation.
     pub fn load(&self, digest: &Sha256Digest) -> Result<Vec<u8>> {
         let dir = self.object_dir(digest);
         let path = dir.join("object");
-        if !path.exists() {
-            bail!("content_object_not_found:{}", digest.as_str());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+                .open(&path)
+                .map_err(|e| {
+                    if e.kind() == std::io::ErrorKind::NotFound {
+                        anyhow::anyhow!("content_object_not_found:{}", digest.as_str())
+                    } else {
+                        anyhow::anyhow!("content_open_failed:{e}")
+                    }
+                })?;
+
+            // Verify the opened fd is a regular file (not FIFO, socket, device).
+            let meta = file
+                .metadata()
+                .map_err(|e| anyhow::anyhow!("content_metadata_failed:{e}"))?;
+            if !meta.is_file() {
+                bail!("content_object_not_regular_file:{}", digest.as_str());
+            }
+
+            // Validate file size before reading.
+            let file_len = meta.len() as usize;
+            if file_len > MAX_OBJECT_SIZE {
+                bail!("content_object_too_large:{} bytes", file_len);
+            }
+
+            // Bounded read: never allocate more than MAX_OBJECT_SIZE + 1.
+            let mut data = Vec::with_capacity(file_len.min(MAX_OBJECT_SIZE));
+            let mut reader = file.take((MAX_OBJECT_SIZE + 1) as u64);
+            let n = reader
+                .read_to_end(&mut data)
+                .map_err(|e| anyhow::anyhow!("content_read_failed:{e}"))?;
+
+            // If read returned more than MAX_OBJECT_SIZE, reject.
+            if n > MAX_OBJECT_SIZE {
+                bail!("content_object_exceeded_limit:{}", digest.as_str());
+            }
+
+            if !digest.verify(&data) {
+                bail!("content_digest_mismatch:{}", digest.as_str());
+            }
+            Ok(data)
         }
-        let data = std::fs::read(&path)?;
-        if data.len() > 1024 * 1024 {
-            bail!("content_object_too_large");
+
+        #[cfg(not(unix))]
+        {
+            // Non-Unix fallback: bounded read after metadata check.
+            let file = std::fs::File::open(&path)
+                .map_err(|_| anyhow::anyhow!("content_object_not_found:{}", digest.as_str()))?;
+            let meta = file.metadata()?;
+            if !meta.is_file() {
+                bail!("content_object_not_regular_file:{}", digest.as_str());
+            }
+            let file_len = meta.len() as usize;
+            if file_len > MAX_OBJECT_SIZE {
+                bail!("content_object_too_large:{} bytes", file_len);
+            }
+            let mut data = Vec::with_capacity(file_len.min(MAX_OBJECT_SIZE));
+            let mut reader = file.take((MAX_OBJECT_SIZE + 1) as u64);
+            let n = reader.read_to_end(&mut data)?;
+            if n > MAX_OBJECT_SIZE {
+                bail!("content_object_exceeded_limit:{}", digest.as_str());
+            }
+            if !digest.verify(&data) {
+                bail!("content_digest_mismatch:{}", digest.as_str());
+            }
+            Ok(data)
         }
-        if !digest.verify(&data) {
-            bail!("content_digest_mismatch:{}", digest.as_str());
-        }
-        Ok(data)
     }
 
     fn object_dir(&self, digest: &Sha256Digest) -> PathBuf {

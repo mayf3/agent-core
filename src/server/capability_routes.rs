@@ -6,7 +6,7 @@ use crate::domain::capability_change::*;
 use crate::domain::*;
 use crate::gateway::Gateway;
 use crate::journal::JournalStore;
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -74,7 +74,11 @@ impl std::fmt::Display for CapabilityRouteError {
             Self::Conflict(_) => "conflict",
             Self::Internal(_) => "internal_error",
         };
-        write!(f, "{tag}")
+        write!(f, "{tag}")?;
+        if let Some(d) = self.detail() {
+            write!(f, ":{d}")?;
+        }
+        Ok(())
     }
 }
 
@@ -132,8 +136,8 @@ pub fn handle_submit_proposal(
     principal: &str,
     config_agent_id: &AgentId,
 ) -> Result<SubmitProposalResponse> {
-    let input: SubmitProposalBody =
-        serde_json::from_value(body.clone()).map_err(|e| anyhow!("invalid_proposal_body: {e}"))?;
+    let input: SubmitProposalBody = serde_json::from_value(body.clone())
+        .map_err(|e| CapabilityRouteError::InvalidRequest(format!("{e}")))?;
 
     // Validate target_agent_id matches the Kernel's configured agent before
     // persisting the proposal. This is re-checked inside the activation tx.
@@ -144,19 +148,20 @@ pub fn handle_submit_proposal(
         return Err(CapabilityRouteError::Forbidden("target_agent_mismatch".into()).into());
     }
     // Strictly parse all three digests using the existing Sha256Digest type.
-    // This rejects non-hex, uppercase, wrong length, empty, whitespace, and
-    // non-sha256 algorithm values. The canonical form (sha256:<64 lowercase hex>)
-    // is what gets persisted in the proposal.
     let _a = Sha256Digest::parse(&input.artifact_digest)
-        .map_err(|e| anyhow!("invalid_digest_format:{e}"))?;
+        .map_err(|_| CapabilityRouteError::InvalidRequest("invalid_digest_format".into()))?;
     let _m = Sha256Digest::parse(&input.manifest_digest)
-        .map_err(|e| anyhow!("invalid_digest_format:{e}"))?;
+        .map_err(|_| CapabilityRouteError::InvalidRequest("invalid_digest_format".into()))?;
     let _e = Sha256Digest::parse(&input.evidence_digest)
-        .map_err(|e| anyhow!("invalid_digest_format:{e}"))?;
+        .map_err(|_| CapabilityRouteError::InvalidRequest("invalid_digest_format".into()))?;
     if input.requested_operations.is_empty() {
-        bail!("empty_requested_operations");
+        return Err(
+            CapabilityRouteError::InvalidRequest("empty_requested_operations".into()).into(),
+        );
     }
-    let sid = journal.current_registry_snapshot_id()?;
+    let sid = journal
+        .current_registry_snapshot_id()
+        .map_err(|e| CapabilityRouteError::Internal(format!("{e}")))?;
     let pid = format!("proposal_{}", uuid::Uuid::new_v4().simple());
     let p = CapabilityChangeProposal::new(
         pid.clone(),
@@ -174,7 +179,9 @@ pub fn handle_submit_proposal(
         input.risk_summary,
         sid.clone(),
     );
-    journal.create_proposal(&p)?;
+    journal
+        .create_proposal(&p)
+        .map_err(|e| CapabilityRouteError::Internal(format!("{e}")))?;
     Ok(SubmitProposalResponse {
         proposal_id: pid,
         status: "PendingApproval".into(),
@@ -197,24 +204,28 @@ pub fn handle_decision(
         serde_json::from_value(body.clone()).map_err(|e| anyhow!("invalid_decision_body: {e}"))?;
     let proposal = journal
         .load_proposal(proposal_id)?
-        .ok_or_else(|| anyhow!("proposal_not_found"))?;
+        .ok_or_else(|| CapabilityRouteError::NotFound("proposal_not_found".into()))?;
     if proposal.status != ProposalStatus::PendingApproval {
-        bail!("proposal_not_pending: {:?}", proposal.status);
+        return Err(CapabilityRouteError::Conflict(format!(
+            "proposal_not_pending:{:?}",
+            proposal.status
+        ))
+        .into());
     }
     if proposal.submitter_principal_id == principal {
-        bail!("submitter_cannot_decide_own_proposal");
+        return Err(CapabilityRouteError::Forbidden("self_decision".into()).into());
     }
     if proposal.expires_at < chrono::Utc::now() {
         // Atomically expire: status → Expired + CapabilityChangeExpired event
         // in a single transaction. No split Update-then-append race.
         journal.expire_proposal_atomic(proposal_id, principal, "expired")?;
-        bail!("proposal_expired");
+        return Err(CapabilityRouteError::Conflict("proposal_expired".into()).into());
     }
     if input.artifact_digest != proposal.artifact_digest {
-        bail!("artifact_digest_mismatch");
+        return Err(CapabilityRouteError::InvalidRequest("artifact_digest_mismatch".into()).into());
     }
     if input.manifest_digest != proposal.manifest_digest {
-        bail!("manifest_digest_mismatch");
+        return Err(CapabilityRouteError::InvalidRequest("manifest_digest_mismatch".into()).into());
     }
 
     match input.decision.as_str() {
@@ -222,7 +233,9 @@ pub fn handle_decision(
             // 1. Verify active snapshot matches expected.
             let current_snap_id = journal.current_registry_snapshot_id()?;
             if proposal.expected_active_snapshot_id != current_snap_id {
-                bail!("stale_expected_snapshot");
+                return Err(
+                    CapabilityRouteError::Conflict("stale_expected_snapshot".into()).into(),
+                );
             }
 
             // 2. Parse digests and re-load + re-hash the three blobs from the
@@ -262,12 +275,17 @@ pub fn handle_decision(
                 .compute_manifest_id()
                 .map_err(|e| anyhow!("manifest_id_recompute_failed:{e}"))?;
             if recomputed_manifest_id != manifest.manifest_id {
-                bail!("manifest_id_mismatch");
+                return Err(
+                    CapabilityRouteError::InvalidRequest("manifest_id_mismatch".into()).into(),
+                );
             }
 
             // 4. Bind the manifest artifact_digest to the proposal artifact_digest.
             if manifest.artifact_digest != proposal.artifact_digest {
-                bail!("manifest_artifact_digest_mismatch");
+                return Err(CapabilityRouteError::InvalidRequest(
+                    "manifest_artifact_digest_mismatch".into(),
+                )
+                .into());
             }
 
             // 5. Extract the manifest operation set and require exact set
@@ -277,22 +295,34 @@ pub fn handle_decision(
                 std::collections::BTreeSet::new();
             if !manifest.operation_name.is_empty() {
                 if !manifest_ops.insert(manifest.operation_name.clone()) {
-                    bail!("duplicate_manifest_operation");
+                    return Err(CapabilityRouteError::InvalidRequest(
+                        "duplicate_manifest_operation".into(),
+                    )
+                    .into());
                 }
             }
             let proposal_ops: std::collections::BTreeSet<String> =
                 proposal.requested_operations.iter().cloned().collect();
             if proposal_ops.len() != proposal.requested_operations.len() {
-                bail!("duplicate_proposal_operation");
+                return Err(CapabilityRouteError::InvalidRequest(
+                    "duplicate_proposal_operation".into(),
+                )
+                .into());
             }
             if manifest_ops != proposal_ops {
                 // Distinguish the common cases for clearer error categories.
                 let missing: Vec<_> = proposal_ops.difference(&manifest_ops).cloned().collect();
                 let extra: Vec<_> = manifest_ops.difference(&proposal_ops).cloned().collect();
                 if !missing.is_empty() {
-                    bail!("manifest_operation_missing:{missing:?}");
+                    return Err(CapabilityRouteError::InvalidRequest(format!(
+                        "manifest_operation_missing:{missing:?}"
+                    ))
+                    .into());
                 }
-                bail!("manifest_operation_extra:{extra:?}");
+                return Err(CapabilityRouteError::InvalidRequest(format!(
+                    "manifest_operation_extra:{extra:?}"
+                ))
+                .into());
             }
 
             // 6. Namespace + conflict guards. Only external.* is permitted;
@@ -300,10 +330,16 @@ pub fn handle_decision(
             //    are caught by validate_operation_name above.
             for op in &proposal.requested_operations {
                 if op.starts_with("builtin.") {
-                    bail!("builtin_namespace_not_allowed:{op}");
+                    return Err(CapabilityRouteError::Forbidden(format!(
+                        "builtin_namespace_not_allowed:{op}"
+                    ))
+                    .into());
                 }
                 if op.starts_with("development.") {
-                    bail!("development_namespace_not_allowed:{op}");
+                    return Err(CapabilityRouteError::Forbidden(format!(
+                        "development_namespace_not_allowed:{op}"
+                    ))
+                    .into());
                 }
             }
 
@@ -312,7 +348,10 @@ pub fn handle_decision(
             let current_snap = journal.load_registry_snapshot(&current_snap_id)?;
             for op in &proposal.requested_operations {
                 if current_snap.lookup(op).is_some() {
-                    bail!("existing_operation_conflict:{op}");
+                    return Err(CapabilityRouteError::Conflict(format!(
+                        "existing_operation_conflict:{op}"
+                    ))
+                    .into());
                 }
             }
 
@@ -353,6 +392,6 @@ pub fn handle_decision(
             journal.reject_proposal_atomic(proposal_id, principal, "rejected")?;
             Ok(json!({"proposal_id": proposal_id, "status": "Rejected"}))
         }
-        _ => bail!("invalid_decision: must be approved or rejected"),
+        _ => return Err(CapabilityRouteError::InvalidRequest("invalid_decision".into()).into()),
     }
 }

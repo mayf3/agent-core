@@ -209,7 +209,7 @@ fn capability_probe_full_runtime_loop() -> Result<()> {
     .unwrap_err()
     .to_string();
     assert!(
-        self_err.contains("submitter_cannot_decide_own_proposal"),
+        self_err.contains("self_decision") || self_err.contains("forbidden"),
         "submitter must not self-decide; got: {self_err}"
     );
 
