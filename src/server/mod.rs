@@ -158,32 +158,23 @@ fn handle_connection(
     }
     let path = request.path.as_str();
     // Resolve the requesting principal from the bearer token.
+    // For capability change operations, the ipc_token maps to the operator
+    // who can submit proposals and make decisions (via external workflow harness).
     let principal = request.bearer_token.as_deref()
         .and_then(|t| gateway.resolve_principal(t));
-    // Capability proposal decision routes.
+    // Capability proposal decision route (single endpoint for approved/rejected).
     if let Some(pid) = path.strip_prefix("/v1/capability-change-proposals/")
-        .and_then(|s| s.strip_suffix("/approve"))
+        .and_then(|s| s.strip_suffix("/decision"))
     {
         let Some(ref p) = principal else { return write_json(stream, 401, json!({"error":"unauthorized"})); };
-        let r = capability_routes::handle_approve_proposal(&journal, &gateway, pid, p);
-        return handle_harness_result(stream, r.map(|v| serde_json::to_string(&v).unwrap_or_default()));
-    }
-    if let Some(pid) = path.strip_prefix("/v1/capability-change-proposals/")
-        .and_then(|s| s.strip_suffix("/reject"))
-    {
-        let Some(ref p) = principal else { return write_json(stream, 401, json!({"error":"unauthorized"})); };
-        let reason = "rejected";
-        let r = capability_routes::handle_reject_proposal(&journal, &gateway, pid, p, reason);
-        return handle_harness_result(stream, r.map(|v| serde_json::to_string(&v).unwrap_or_default()));
-    }
-    if let Some(pid) = path.strip_prefix("/v1/capability-change-proposals/")
-        .and_then(|s| s.strip_suffix("/activate"))
-    {
-        let Some(ref _p) = principal else { return write_json(stream, 401, json!({"error":"unauthorized"})); };
-        let r = Ok(json!({"proposal_id": pid, "status": "activate_not_implemented_yet"}));
-        return handle_harness_result(stream, r.map(|v| serde_json::to_string(&v).unwrap_or_default()));
-    }
-    if path == "/v1/capability-change-proposals" && request.method == "POST" {
+        let body: Value = match serde_json::from_slice(&request.body) {
+            Ok(b) => b, Err(_) => return write_json(stream, 400, json!({"error":"invalid_json"})),
+        };
+        match capability_routes::handle_decision(&journal, &gateway, pid, &body, p) {
+            Ok(v) => write_json(stream, 200, v),
+            Err(e) => write_json(stream, 400, json!({"ok": false, "error": e.to_string()})),
+        }
+    } else if path == "/v1/capability-change-proposals" && request.method == "POST" {
         let Some(ref p) = principal else { return write_json(stream, 401, json!({"error":"unauthorized"})); };
         let body: Value = match serde_json::from_slice(&request.body) {
             Ok(b) => b,

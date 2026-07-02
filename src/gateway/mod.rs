@@ -412,32 +412,15 @@ impl Gateway {
     /// `ApprovalDenied` and fails the run (status `Failed`). **Idempotent**: if
     /// the run is not currently `AwaitingApproval`, this is a no-op `Ok(())`.
     /// Resolve a bearer token to a principal.
+    /// Resolve a bearer token to a principal. v1: ipc_token → ipc_operator.
     pub fn resolve_principal(&self, token: &str) -> Option<String> {
-        if let Some(p) = self.config.capability_tokens.get(token) {
-            return Some(p.clone());
-        }
-        if token == self.config.ipc_token {
-            return Some("ipc_operator".to_string());
-        }
-        None
+        if token == self.config.ipc_token { Some("ipc_operator".into()) } else { None }
     }
     /// Check whether a principal has a specific grant (hardcoded v1 mapping).
     pub fn has_grant(&self, principal_id: &str, grant: &str) -> bool {
-        match grant {
-            crate::server::capability_routes::CAPABILITY_CHANGE_PROPOSE_GRANT => {
-                matches!(principal_id, "builder_principal" | "ipc_operator")
-            }
-            crate::server::capability_routes::CAPABILITY_CHANGE_APPROVE_GRANT => {
-                matches!(principal_id, "reviewer_principal" | "ipc_operator")
-            }
-            crate::server::capability_routes::CAPABILITY_CHANGE_REJECT_GRANT => {
-                matches!(principal_id, "reviewer_principal" | "ipc_operator")
-            }
-            crate::server::capability_routes::CAPABILITY_CHANGE_ACTIVATE_GRANT => {
-                matches!(principal_id, "operator_principal" | "ipc_operator")
-            }
-            _ => false,
-        }
+        let is_op = principal_id == "ipc_operator";
+        matches!(grant, crate::server::capability_routes::CAPABILITY_CHANGE_PROPOSE_GRANT
+            | crate::server::capability_routes::CAPABILITY_CHANGE_DECIDE_GRANT if is_op)
     }
     pub fn deny_run(&self, journal: &JournalStore, run_id: &RunId) -> Result<()> {
         let status = journal.run_status(run_id)?;
