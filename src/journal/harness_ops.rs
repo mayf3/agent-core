@@ -123,8 +123,40 @@ impl super::JournalStore {
     ) -> Result<String> {
         let manifest_id = &manifest.manifest_id;
         let content_digest = manifest.compute_manifest_id()?;
+
+        // Check if this manifest_id already exists with the same content.
+        let existing: Option<(String, String)> = tx
+            .query_row(
+                "SELECT canonical_digest, artifact_digest FROM harness_manifests WHERE manifest_id = ?1",
+                params![manifest_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .ok();
+
+        if let Some((existing_digest, existing_artifact)) = existing {
+            // Same manifest_id: require byte-identical content (same digest)
+            // AND same artifact_digest. Any difference is a conflict.
+            if existing_digest == content_digest && existing_artifact == manifest.artifact_digest {
+                // Idempotent: same content → reuse existing.
+                return Ok(manifest_id.clone());
+            }
+            bail!("manifest_identity_conflict: manifest_id {manifest_id} already registered with different content");
+        }
+
+        // Also check for duplicate operation_name (operation bound to another manifest).
+        let op_exists: Option<String> = tx
+            .query_row(
+                "SELECT manifest_id FROM harness_manifests WHERE operation_name = ?1",
+                params![&manifest.operation_name],
+                |row| row.get(0),
+            )
+            .ok();
+        if let Some(existing_mid) = op_exists {
+            bail!("manifest_operation_conflict: operation {} already registered by manifest {existing_mid}", manifest.operation_name);
+        }
+
         tx.execute(
-            "INSERT OR IGNORE INTO harness_manifests
+            "INSERT INTO harness_manifests
              (manifest_id, harness_id, artifact_digest, protocol_version, endpoint,
               operation_name, description, input_schema_json, output_schema_json,
               idempotent, created_at, canonical_digest)
