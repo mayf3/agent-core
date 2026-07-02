@@ -133,6 +133,7 @@ fn registry_activation_event_failure_rolls_back_everything() -> Result<()> {
         specs,
         &expected,
         &format!("activation:{pid}"),
+        None,
     );
     assert!(res.is_err(), "activation must fail when event write fails");
 
@@ -208,6 +209,7 @@ fn capability_activation_event_failure_rolls_back_everything() -> Result<()> {
         specs,
         &expected,
         &format!("activation:{pid}"),
+        None,
     );
     assert!(
         res.is_err(),

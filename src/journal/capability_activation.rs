@@ -1,9 +1,11 @@
-//! Atomic activation of approved capability proposals. All steps (Registry
-//! Snapshot composition, CAS state update, proposal status, Journal events)
-//! execute in a single SQLite transaction.
+//! Atomic activation of approved capability proposals. All steps (Manifest
+//! registration (when provided), Registry Snapshot composition, CAS state
+//! update, proposal status, Journal events) execute in a single SQLite
+//! transaction.
 
 use crate::domain::capability_change::*;
 use crate::domain::*;
+use crate::harness::manifest::HarnessManifest;
 use crate::registry::snapshot::{compute_snapshot_id, OperationSpec as SnapSpec};
 use anyhow::{anyhow, bail, Result};
 use chrono::Utc;
@@ -11,11 +13,19 @@ use rusqlite::{params, Transaction, TransactionBehavior};
 use serde_json::json;
 
 impl super::JournalStore {
-    /// Atomically activate a proposal: create a new RegistrySnapshot, CAS-update
-    /// registry_state, mark proposal Activated, write all Journal events, commit.
+    /// Atomically activate a proposal, optionally registering a harness
+    /// manifest in the same transaction.
     ///
-    /// All steps fail or succeed together. On success the in-memory registry
-    /// cache is refreshed. On failure nothing changes.
+    /// When `manifest` is `Some`, the manifest row + HarnessManifestRegistered
+    /// event are inserted before the activation steps. All operations (manifest
+    /// registration, Registry Snapshot, CAS state update, proposal status,
+    /// journal events) happen inside a single BEGIN IMMEDIATE transaction.
+    ///
+    /// On success the in-memory registry cache is refreshed. On failure
+    /// (manifest registration fails, proposal not Pending, stale snapshot,
+    /// CAS conflict, event write failure) the ENTIRE transaction rolls back:
+    /// no manifest row persists, no HarnessManifestRegistered event,
+    /// no Registry Snapshot, no status change, no terminal events.
     pub fn activate_proposal_atomic(
         &self,
         proposal: &CapabilityChangeProposal,
@@ -23,9 +33,16 @@ impl super::JournalStore {
         new_operations: Vec<SnapSpec>,
         expected_snapshot_id: &str,
         decision_id: &str,
+        manifest: Option<&HarnessManifest>,
     ) -> Result<String> {
         let mut conn = self.conn.lock().map_err(|_| anyhow!("mutex poisoned"))?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        // 0. Register the harness manifest inside the transaction (if provided).
+        if let Some(m) = manifest {
+            self.register_harness_manifest_in_tx(&tx, m)
+                .map_err(|e| anyhow!("manifest_registration_failed:{e}"))?;
+        }
 
         // 1. Verify proposal is still PendingApproval.
         let cur_status: String = tx

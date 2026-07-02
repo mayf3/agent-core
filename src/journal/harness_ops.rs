@@ -9,7 +9,7 @@ use crate::harness::manifest::HarnessManifest;
 use crate::registry::snapshot::{BindingKind, OperationSpec, Risk};
 use anyhow::{anyhow, bail, Result};
 use chrono::Utc;
-use rusqlite::params;
+use rusqlite::{params, Transaction, TransactionBehavior};
 
 impl super::JournalStore {
     /// Register a new harness manifest. Idempotent: same content produces the
@@ -111,6 +111,57 @@ impl super::JournalStore {
             payload,
         )?;
 
+        Ok(manifest_id.clone())
+    }
+
+    /// Register a harness manifest inside an existing transaction. Only the
+    /// INSERT and the HarnessManifestRegistered event happen in the tx;
+    /// validation must be performed by the caller before calling this.
+    /// Returns the manifest_id.
+    pub fn register_harness_manifest_in_tx(
+        &self,
+        tx: &Transaction<'_>,
+        manifest: &HarnessManifest,
+    ) -> Result<String> {
+        let manifest_id = &manifest.manifest_id;
+        let content_digest = manifest.compute_manifest_id()?;
+        tx.execute(
+            "INSERT OR IGNORE INTO harness_manifests
+             (manifest_id, harness_id, artifact_digest, protocol_version, endpoint,
+              operation_name, description, input_schema_json, output_schema_json,
+              idempotent, created_at, canonical_digest)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                manifest_id,
+                &manifest.harness_id,
+                &manifest.artifact_digest,
+                &manifest.protocol_version,
+                &manifest.endpoint,
+                &manifest.operation_name,
+                &manifest.description,
+                serde_json::to_string(&manifest.input_schema)?,
+                serde_json::to_string(&manifest.output_schema)?,
+                manifest.idempotent as i64,
+                manifest.created_at.to_rfc3339(),
+                &content_digest,
+            ],
+        )?;
+        // Record HarnessManifestRegistered in the same transaction.
+        let payload = serde_json::json!({
+            "manifest_id": manifest_id,
+            "harness_id": manifest.harness_id,
+            "artifact_digest": manifest.artifact_digest,
+            "operation_name": manifest.operation_name,
+            "protocol_version": manifest.protocol_version,
+        });
+        super::queue::append_event_tx(
+            tx,
+            JournalEventKind::HarnessManifestRegistered,
+            None,
+            None,
+            Some(manifest_id),
+            payload,
+        )?;
         Ok(manifest_id.clone())
     }
 

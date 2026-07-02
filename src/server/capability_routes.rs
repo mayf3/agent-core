@@ -304,22 +304,13 @@ pub fn handle_decision(
                 }
             }
 
-            // 8. Register the verified manifest in the dispatchable harness
-            //    table. The new snapshot's operation binding_key is the
-            //    manifest_id, and the Runtime's external dispatch resolves it
-            //    via load_harness_manifest at tool-call time. Registration is
-            //    idempotent (same content → same manifest_id).
-            journal
-                .register_harness_manifest(&manifest)
-                .map_err(|e| anyhow!("manifest_registration_failed:{e}"))?;
-
-            // 9. Build the new operation specs from the verified manifest and
-            //    activate atomically. activate_proposal_atomic performs, in a
-            //    single BEGIN IMMEDIATE transaction: proposal-Pending recheck,
-            //    registry CAS (version), new Snapshot insert + operations insert,
-            //    registry version +1, Proposal→Activated, and the
-            //    RegistrySnapshotActivated + CapabilityChangeActivated journal
-            //    events. Any failure rolls back the entire transaction.
+            // 8. Build the new operation specs from the verified manifest and
+            //    activate atomically. Manifest registration, Registry Snapshot
+            //    creation, CAS state update, proposal status, and all journal
+            //    events happen INSIDE a single BEGIN IMMEDIATE transaction via
+            //    activate_proposal_atomic. Any failure rolls back everything —
+            //    no manifest row, no HarnessManifestRegistered event, no Snapshot,
+            //    no status change, no terminal events.
             let mut new_specs: Vec<crate::registry::snapshot::OperationSpec> =
                 current_snap.operations.iter().cloned().collect();
             new_specs.push(crate::registry::snapshot::OperationSpec {
@@ -338,6 +329,7 @@ pub fn handle_decision(
                 new_specs,
                 &proposal.expected_active_snapshot_id,
                 &decision_id,
+                Some(&manifest),
             )?;
 
             Ok(json!({"proposal_id": proposal_id, "status": "Activated",
