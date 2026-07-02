@@ -465,3 +465,19 @@ fn content_length(head: &str) -> usize {
         .and_then(|(_, v)| v.trim().parse().ok())
         .unwrap_or(0)
 }
+
+#[cfg(test)]
+#[path = "approval_endpoint_tests.rs"]
+mod approval_endpoint_tests;
+#[cfg(test)]
+#[path = "capability_routes_negative_tests.rs"]
+mod capability_routes_negative_tests;
+#[cfg(test)]
+#[path = "capability_routes_support.rs"]
+mod capability_routes_support;
+#[cfg(test)]
+#[path = "capability_routes_tests.rs"]
+mod capability_routes_tests;
+#[cfg(test)]
+#[path = "harness_endpoint_tests.rs"]
+mod harness_endpoint_tests;
