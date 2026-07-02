@@ -58,8 +58,16 @@ mod external_harness_failures;
 mod recall_security;
 
 #[cfg(test)]
+#[path = "tests/recall_test_support.rs"]
+mod recall_test_support;
+
+#[cfg(test)]
 #[path = "tests/recall_isolation.rs"]
 mod recall_isolation;
+
+#[cfg(test)]
+#[path = "tests/recall_audit.rs"]
+mod recall_audit;
 
 #[cfg(test)]
 #[path = "tests/tool_execution_dispatch.rs"]
