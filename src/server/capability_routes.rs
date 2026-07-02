@@ -84,7 +84,7 @@ impl std::fmt::Display for CapabilityRouteError {
 
 impl std::error::Error for CapabilityRouteError {}
 
-/// Sanitise a generic anyhow error — returns a fixed category string for HTTP
+/// Sanitise a generic anyhow error — returns a fixed category string for HTTP Fixed category, no original text.
 /// 500 responses. NEVER includes original error text, SQL, paths, or tokens.
 /// The full error is logged server-side; only a stable category reaches the
 /// HTTP body.

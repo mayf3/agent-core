@@ -151,13 +151,12 @@ fn handle_connection(
             )?,
         );
     }
-    // Non-health routes must be POST under /v1/.
+    // Non-health routes require POST /v1/
     if request.method != "POST" || !request.path.starts_with("/v1/") {
         return write_json(stream, 404, json!({ "ok": false, "error": "not_found" }));
     }
     let path = request.path.as_str();
     let bearer = request.bearer_token.as_deref().unwrap_or("");
-
     // Try capability-specific routes first (extracted for structure gate).
     if capability_http::try_handle_capability_request(
         stream,
@@ -171,7 +170,6 @@ fn handle_connection(
     )? {
         return Ok(());
     }
-
     // ---- All other /v1/ routes require the IPC bearer token ----
     if bearer != config.ipc_token.as_str() {
         return write_json(stream, 401, json!({ "ok": false, "error": "unauthorized" }));
@@ -278,8 +276,7 @@ fn handle_approval_decision(
         }),
     )
 }
-/// Map harness route errors to appropriate HTTP status codes.
-/// Never leaks database errors, paths, or tokens in the response body.
+/// Map harness route errors to HTTP status. Never leaks tokens/paths.
 fn handle_harness_result(stream: &mut TcpStream, result: Result<String>) -> Result<()> {
     match result {
         Ok(body) => write_json(stream, 200, serde_json::from_str(&body)?),
@@ -441,28 +438,20 @@ fn parse_request(buffer: &[u8]) -> Result<HttpRequest> {
     })
 }
 fn write_json(stream: &mut TcpStream, status: u16, body: Value) -> Result<()> {
-    let reason = if status == 200 {
-        "OK"
-    } else if status == 401 {
-        "Unauthorized"
-    } else if status == 404 {
-        "Not Found"
-    } else {
-        "Error"
+    let reason = match status {
+        200 => "OK",
+        401 => "Unauthorized",
+        404 => "Not Found",
+        _ => "Error",
     };
     let payload = serde_json::to_string(&body)?;
     let response = format!(
         "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        payload.len(),
-        payload
-    );
+        payload.len(), payload);
     stream.write_all(response.as_bytes())?;
     Ok(())
 }
-
-/// Validate that capability tokens are distinct from each other and from the
-/// IPC token. Exits before any listener starts so no HTTP request can observe
-/// a collision. Error messages are stable categories, never raw token values.
+/// Validate capability tokens are all distinct. Error is stable category, never raw token.
 fn validate_capability_tokens(config: &KernelConfig) -> Result<()> {
     if let (Some(ref sub), Some(ref dec)) = (
         &config.capability_submit_token,
@@ -484,7 +473,6 @@ fn validate_capability_tokens(config: &KernelConfig) -> Result<()> {
     }
     Ok(())
 }
-
 fn find_header_end(buffer: &[u8]) -> Option<usize> {
     buffer.windows(4).position(|window| window == b"\r\n\r\n")
 }
@@ -495,7 +483,6 @@ fn content_length(head: &str) -> usize {
         .and_then(|(_, v)| v.trim().parse().ok())
         .unwrap_or(0)
 }
-
 #[cfg(test)]
 #[path = "approval_endpoint_tests.rs"]
 mod approval_endpoint_tests;
