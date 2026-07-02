@@ -115,7 +115,6 @@ pub(crate) fn execute_session_recall(
     }
 
     let output = json!({
-        "session_id": session_id.0,
         "count": results.len(),
         "messages": results,
     });

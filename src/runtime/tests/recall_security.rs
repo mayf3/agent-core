@@ -185,8 +185,16 @@ fn recall_provider_turn_and_follow_up_chain() -> Result<()> {
         Some("Succeeded")
     );
 
+    // Receipt output must NOT contain session_id.
+    let output = receipt.payload.get("output").cloned().unwrap_or_default();
+    assert!(
+        output.get("session_id").is_none(),
+        "Receipt output must not contain session_id: {:?}",
+        output
+    );
+
     // If recall returned messages, verify strict key set.
-    if let Some(messages) = receipt.payload["output"]["messages"].as_array() {
+    if let Some(messages) = output.get("messages").and_then(|m| m.as_array()) {
         if !messages.is_empty() {
             let allowed: BTreeSet<&str> = BTreeSet::from(["event_id", "role", "text"]);
             for msg in messages {
@@ -202,6 +210,15 @@ fn recall_provider_turn_and_follow_up_chain() -> Result<()> {
                 );
             }
         }
+    }
+
+    // ToolResult and Provider round 2 must not contain session_id.
+    for fu in &inputs[1].follow_ups {
+        let result_str = &fu.result_content;
+        assert!(
+            !result_str.contains("session_id"),
+            "ToolResult must not contain session_id: {result_str}"
+        );
     }
 
     Ok(())

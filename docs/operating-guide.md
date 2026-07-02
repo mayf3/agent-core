@@ -179,7 +179,7 @@ state and its available actions:
 | `RuntimeContract` | the kernel-boundary contract: external actions require approved invocations. |
 | `AgentProfile` | the active agent profile (`agents/main/AGENT.md`). |
 | `SkillCatalog` | installed skills (`skills/`), so the model knows what it can do conversationally. |
-| `ToolCatalog` | the operation catalog (Phase 2): every catalogued operation and its risk class (`ReadOnly`/`Write`). Generated from the single source of truth in `src/domain/operation.rs`. This is how the model learns it may propose e.g. `time.now` (read-only). |
+| `ToolCatalog` | the operation catalog (Phase 2): every catalogued operation and its risk class (`ReadOnly`/`Write`). Generated from the single source of truth in `src/domain/operation.rs`. This is how the model learns which read-only tools are available (e.g. external.time_now via harness). |
 | `ActiveSkill` | the active skill instructions. |
 | `RecentMessages` | recent user turns (configurable via `AGENT_CORE_CONTEXT_RECENT_MESSAGES`). |
 | `UserMessage` | the current user message. |
