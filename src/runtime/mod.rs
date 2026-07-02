@@ -73,6 +73,22 @@ mod recall_audit;
 #[path = "tests/tool_execution_dispatch.rs"]
 mod tool_execution_dispatch;
 
+#[cfg(test)]
+#[path = "tests/capability_snapshot_pin.rs"]
+mod capability_snapshot_pin;
+
+#[cfg(test)]
+#[path = "tests/capability_probe_e2e.rs"]
+mod capability_probe_e2e;
+
+#[cfg(test)]
+#[path = "tests/capability_probe_reopen.rs"]
+mod capability_probe_reopen;
+
+#[cfg(test)]
+#[path = "tests/capability_probe_rollback.rs"]
+mod capability_probe_rollback;
+
 pub struct Runtime<L> {
     config: KernelConfig,
     llm: L,

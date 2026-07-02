@@ -11,6 +11,17 @@ pub struct KernelConfig {
     pub kernel_port: u16,
     pub connector_execute_url: String,
     pub ipc_token: String,
+    /// Token for the capability submitter principal. `None` means the
+    /// capability change routes are disabled (fail-closed). Must differ from
+    /// `capability_decision_token` and `ipc_token`. Configured via
+    /// AGENT_CORE_CAPABILITY_SUBMIT_TOKEN.
+    pub capability_submit_token: Option<String>,
+    /// Token for the external Approval Workflow principal that makes
+    /// approve/reject decisions on capability change proposals. `None` means
+    /// the decision routes are disabled (fail-closed). Must differ from
+    /// `capability_submit_token` and `ipc_token`. Configured via
+    /// AGENT_CORE_CAPABILITY_DECISION_TOKEN.
+    pub capability_decision_token: Option<String>,
     pub feishu_allowed_open_ids: Vec<String>,
     pub feishu_allowed_chat_ids: Vec<String>,
     pub feishu_require_group_mention: bool,
@@ -56,6 +67,13 @@ pub struct KernelConfig {
     /// `timeout` (never an unbounded hang). Configured via
     /// AGENT_CORE_HARNESS_READ_TIMEOUT_MS.
     pub harness_read_timeout_ms: u64,
+    /// Root directory of the content-addressed store holding capability
+    /// change proposal blobs (artifact / manifest / evidence). The Kernel
+    /// reads and re-hashes these bytes during decision verification — never
+    /// trusts the submitter's claimed digest. Defaults to
+    /// `<data_dir>/harness-artifacts`. Configured via
+    /// AGENT_CORE_HARNESS_ARTIFACT_ROOT.
+    pub harness_artifact_root: PathBuf,
 }
 
 impl KernelConfig {
@@ -81,6 +99,9 @@ impl KernelConfig {
             Ok(_) => {}
             Err(_) => eprintln!("bootstrap_prompt_setup_failed"),
         }
+        let harness_artifact_root = std::env::var("AGENT_CORE_HARNESS_ARTIFACT_ROOT")
+            .map(|v| expand_home(v.trim()))
+            .unwrap_or_else(|_| data_dir.join("harness-artifacts"));
         Self {
             db_path: db_path.map(PathBuf::from).unwrap_or(default_db_path),
             data_dir,
@@ -92,6 +113,8 @@ impl KernelConfig {
                 "http://127.0.0.1:4131/v1/execute",
             ),
             ipc_token: env_string("AGENT_CORE_IPC_TOKEN", ""),
+            capability_submit_token: env_optional_string("AGENT_CORE_CAPABILITY_SUBMIT_TOKEN"),
+            capability_decision_token: env_optional_string("AGENT_CORE_CAPABILITY_DECISION_TOKEN"),
             feishu_allowed_open_ids: env_list("AGENT_CORE_FEISHU_ALLOWED_OPEN_IDS"),
             feishu_allowed_chat_ids: env_list("AGENT_CORE_FEISHU_ALLOWED_CHAT_IDS"),
             feishu_require_group_mention: env_bool("AGENT_CORE_FEISHU_REQUIRE_GROUP_MENTION", true),
@@ -130,6 +153,7 @@ impl KernelConfig {
             fallback_tool_name_indexed: env_bool("AGENT_CORE_FALLBACK_TOOL_NAME_INDEXED", false),
             primary_tool_name_indexed: env_bool("AGENT_CORE_PRIMARY_TOOL_NAME_INDEXED", false),
             harness_read_timeout_ms: env_u64("AGENT_CORE_HARNESS_READ_TIMEOUT_MS", 10_000),
+            harness_artifact_root,
         }
     }
 }
@@ -150,6 +174,16 @@ fn load_local_env() {
             continue;
         }
         std::env::set_var(key.trim(), unquote(value.trim()));
+    }
+}
+
+fn env_optional_string(key: &str) -> Option<String> {
+    let val = std::env::var(key).ok()?;
+    let trimmed = val.trim().to_string();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
     }
 }
 

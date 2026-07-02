@@ -17,6 +17,7 @@
 //! structured JSON values as receipt output, which the model formats into
 //! user-facing replies (which go through the normal outbox path).
 
+pub mod store;
 mod system_status;
 
 pub use system_status::execute;
