@@ -21,4 +21,8 @@ mod worker;
 #[path = "tests/registry_retirement.rs"]
 mod registry_retirement;
 
+#[cfg(test)]
+#[path = "tests/capability_concurrency.rs"]
+mod capability_concurrency;
+
 pub use sqlite::JournalStore;

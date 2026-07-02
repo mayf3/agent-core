@@ -93,6 +93,7 @@ pub fn handle_submit_proposal(
 pub fn handle_decision(
     journal: &JournalStore,
     _gateway: &Gateway,
+    store: &ContentStore,
     proposal_id: &str,
     body: &Value,
     principal: &str,
@@ -141,56 +142,134 @@ pub fn handle_decision(
             if proposal.expected_active_snapshot_id != current_snap_id {
                 bail!("stale_expected_snapshot");
             }
-            // 2. Parse and verify digests.
+
+            // 2. Parse digests and re-load + re-hash the three blobs from the
+            //    content store. ContentStore::load verifies the digest against
+            //    the freshly-read bytes (re-hashes), so any tampering fails here
+            //    and the Proposal stays PendingApproval (fail-closed, retryable).
             let art_digest = Sha256Digest::parse(&proposal.artifact_digest)
                 .map_err(|_| anyhow!("invalid_artifact_digest_in_proposal"))?;
             let man_digest = Sha256Digest::parse(&proposal.manifest_digest)
                 .map_err(|_| anyhow!("invalid_manifest_digest_in_proposal"))?;
-            // 3. Verify content via store (reads + re-hashes).
-            let store = ContentStore::new(std::path::PathBuf::from("/tmp/dev-harness-artifacts"));
-            let _artifact_bytes = store.load(&art_digest)
+            let ev_digest = Sha256Digest::parse(&proposal.evidence_digest)
+                .map_err(|_| anyhow!("invalid_evidence_digest_in_proposal"))?;
+            let _artifact_bytes = store
+                .load(&art_digest)
                 .map_err(|e| anyhow!("artifact_verification_failed:{e}"))?;
-            let _manifest_bytes = store.load(&man_digest)
+            let manifest_bytes = store
+                .load(&man_digest)
                 .map_err(|e| anyhow!("manifest_verification_failed:{e}"))?;
-            // Note: evidence verification and manifest parsing are stubs for now.
-            // Full implementation requires the harness manifest parser integration.
+            let _evidence_bytes = store
+                .load(&ev_digest)
+                .map_err(|e| anyhow!("evidence_verification_failed:{e}"))?;
 
-            // 4. Real Registry Snapshot activation.
+            // 3. Parse the manifest bytes using the EXISTING HarnessManifest
+            //    parser (serde) and run the EXISTING full validator.
+            //    validate_all() covers: endpoint loopback, operation_name
+            //    `external.` prefix, artifact_digest format, protocol_version,
+            //    and both input/output JSON schemas.
+            let manifest: crate::harness::manifest::HarnessManifest =
+                serde_json::from_slice(&manifest_bytes)
+                    .map_err(|e| anyhow!("manifest_parse_failed:{e}"))?;
+            manifest
+                .validate_all()
+                .map_err(|e| anyhow!("manifest_validation_failed:{e}"))?;
+            // Recompute the manifest content digest and confirm it matches the
+            // stored manifest_id — a tampered manifest fails closed here too.
+            let recomputed_manifest_id = manifest
+                .compute_manifest_id()
+                .map_err(|e| anyhow!("manifest_id_recompute_failed:{e}"))?;
+            if recomputed_manifest_id != manifest.manifest_id {
+                bail!("manifest_id_mismatch");
+            }
+
+            // 4. Bind the manifest artifact_digest to the proposal artifact_digest.
+            if manifest.artifact_digest != proposal.artifact_digest {
+                bail!("manifest_artifact_digest_mismatch");
+            }
+
+            // 5. Extract the manifest operation set and require exact set
+            //    equality with proposal.requested_operations. No missing,
+            //    no extra, no duplicates (set semantics; order-independent).
+            let mut manifest_ops: std::collections::BTreeSet<String> =
+                std::collections::BTreeSet::new();
+            if !manifest.operation_name.is_empty() {
+                if !manifest_ops.insert(manifest.operation_name.clone()) {
+                    bail!("duplicate_manifest_operation");
+                }
+            }
+            let proposal_ops: std::collections::BTreeSet<String> =
+                proposal.requested_operations.iter().cloned().collect();
+            if proposal_ops.len() != proposal.requested_operations.len() {
+                bail!("duplicate_proposal_operation");
+            }
+            if manifest_ops != proposal_ops {
+                // Distinguish the common cases for clearer error categories.
+                let missing: Vec<_> = proposal_ops.difference(&manifest_ops).cloned().collect();
+                let extra: Vec<_> = manifest_ops.difference(&proposal_ops).cloned().collect();
+                if !missing.is_empty() {
+                    bail!("manifest_operation_missing:{missing:?}");
+                }
+                bail!("manifest_operation_extra:{extra:?}");
+            }
+
+            // 6. Namespace + conflict guards. Only external.* is permitted;
+            //    builtin.* and development.* are rejected. Empty/illegal names
+            //    are caught by validate_operation_name above.
+            for op in &proposal.requested_operations {
+                if op.starts_with("builtin.") {
+                    bail!("builtin_namespace_not_allowed:{op}");
+                }
+                if op.starts_with("development.") {
+                    bail!("development_namespace_not_allowed:{op}");
+                }
+            }
+
+            // 7. Reject activation if any requested operation already exists in
+            //    the current active snapshot (no silent overwrite).
             let current_snap = journal.load_registry_snapshot(&current_snap_id)?;
-            let new_op = crate::registry::snapshot::OperationSpec {
-                name: proposal.requested_operations.get(0).cloned().unwrap_or_default(),
-                risk: crate::registry::snapshot::Risk::ReadOnly,
-                description: proposal.risk_summary.clone(),
-                parameters: serde_json::json!({"type":"object"}),
-                idempotent: true,
-                binding_kind: crate::registry::snapshot::BindingKind::External,
-                binding_key: format!("manifest_{}", proposal_id),
-            };
+            for op in &proposal.requested_operations {
+                if current_snap.lookup(op).is_some() {
+                    bail!("existing_operation_conflict:{op}");
+                }
+            }
+
+            // 8. Register the verified manifest in the dispatchable harness
+            //    table. The new snapshot's operation binding_key is the
+            //    manifest_id, and the Runtime's external dispatch resolves it
+            //    via load_harness_manifest at tool-call time. Registration is
+            //    idempotent (same content → same manifest_id).
+            journal
+                .register_harness_manifest(&manifest)
+                .map_err(|e| anyhow!("manifest_registration_failed:{e}"))?;
+
+            // 9. Build the new operation specs from the verified manifest and
+            //    activate atomically. activate_proposal_atomic performs, in a
+            //    single BEGIN IMMEDIATE transaction: proposal-Pending recheck,
+            //    registry CAS (version), new Snapshot insert + operations insert,
+            //    registry version +1, Proposal→Activated, and the
+            //    RegistrySnapshotActivated + CapabilityChangeActivated journal
+            //    events. Any failure rolls back the entire transaction.
             let mut new_specs: Vec<crate::registry::snapshot::OperationSpec> =
-                current_snap.operations.clone();
-            new_specs.push(new_op);
-            let new_snapshot = journal.create_registry_snapshot(new_specs)?;
-            let new_snapshot_id = new_snapshot.snapshot_id.clone();
-            // 5. CAS activate via the authoritative activation function.
+                current_snap.operations.iter().cloned().collect();
+            new_specs.push(crate::registry::snapshot::OperationSpec {
+                name: manifest.operation_name.clone(),
+                risk: crate::registry::snapshot::Risk::ReadOnly,
+                description: manifest.description.clone(),
+                parameters: manifest.input_schema.clone(),
+                idempotent: manifest.idempotent,
+                binding_kind: crate::registry::snapshot::BindingKind::External,
+                binding_key: manifest.manifest_id.clone(),
+            });
             let decision_id = format!("activation:{}", proposal_id);
-            journal.activate_snapshot_transactional(
-                &proposal.expected_active_snapshot_id, &new_snapshot_id,
-                &decision_id, "capability_activation",
+            let new_snapshot_id = journal.activate_proposal_atomic(
+                &proposal,
+                principal,
+                new_specs,
+                &proposal.expected_active_snapshot_id,
+                &decision_id,
             )?;
-            // 6. Mark proposal Activated.
-            journal.decide_proposal(
-                proposal_id, &[ProposalStatus::PendingApproval],
-                ProposalStatus::Activated, principal, "activated",
-                Some(&new_snapshot_id), None,
-            )?;
-            journal.append_event(
-                JournalEventKind::CapabilityChangeActivated,
-                Some(&proposal.origin_run_id), Some(&proposal.origin_session_id),
-                Some(proposal_id),
-                json!({"proposal_id": proposal_id, "decided_by": principal,
-                       "previous_snapshot_id": proposal.expected_active_snapshot_id,
-                       "new_snapshot_id": new_snapshot_id}),
-            )?;
+
             Ok(json!({"proposal_id": proposal_id, "status": "Activated",
                       "previous_snapshot_id": proposal.expected_active_snapshot_id,
                       "activated_snapshot_id": new_snapshot_id}))

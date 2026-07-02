@@ -178,7 +178,9 @@ fn handle_connection(
             Ok(b) => b,
             Err(_) => return write_json(stream, 400, json!({"error":"invalid_json"})),
         };
-        match capability_routes::handle_decision(&journal, &gateway, pid, &body, p) {
+        let store =
+            crate::capabilities::store::ContentStore::new(config.harness_artifact_root.clone());
+        match capability_routes::handle_decision(&journal, &gateway, &store, pid, &body, p) {
             Ok(v) => write_json(stream, 200, v),
             Err(e) => write_json(stream, 400, json!({"ok": false, "error": e.to_string()})),
         }
@@ -289,7 +291,7 @@ fn handle_approval_decision(
     )
 }
 /// Map harness route errors to appropriate HTTP status codes.
-/// Never leaks database errors, paths, or tokens in the response.
+/// Never leaks database errors, paths, or tokens in the response body.
 fn handle_harness_result(stream: &mut TcpStream, result: Result<String>) -> Result<()> {
     match result {
         Ok(body) => write_json(stream, 200, serde_json::from_str(&body)?),
@@ -333,9 +335,8 @@ pub fn health_snapshot(
     let worker_job_counts = journal.worker_job_status_counts()?;
     let outbox_dispatch_counts = journal.outbox_dispatch_status_counts()?;
     let outbox_pending_count = journal.outbox_status_count(OutboxDispatchStatus::Pending)?;
-    // /health's unknown count excludes operator-acknowledged rows
-    // (acked_unknown=1), so an acked terminal-unknown no longer degrades
-    // status. See docs/decisions/ack-clear-terminal-unknown.md (option 1).
+    // /health's unknown count excludes operator-acknowledged rows (acked_unknown=1), so an
+    // acked terminal-unknown no longer degrades status. See docs/decisions/ack-clear-terminal-unknown.md (option 1).
     let outbox_unknown_count = journal.outbox_unknown_unacked_count()?;
     let outbox_dispatching_count =
         journal.outbox_status_count(OutboxDispatchStatus::Dispatching)?;
@@ -350,20 +351,15 @@ pub fn health_snapshot(
         || outbox_projection_drift_count > 0
         || undelivered_ingress_count > 0
     {
-        // `degraded` when the Kernel cannot fully trust its state:
-        // - live unknown invocations (dispatch started, no terminal receipt);
-        // - terminal-unknown outbox rows (recovered, never auto-retried, but
-        //   the dispatch outcome is permanently undetermined);
-        // - projection drift (projection disagrees with the Journal terminal
-        //   fact — recovery failed to reconcile);
-        // - undelivered ingress (accepted but never turned into a worker job /
-        //   run — transient during startup recovery; persistent non-zero
-        //   means recovery failed to re-enqueue).
-        // Stale counts (outbox_stale_dispatching_count / worker_job_stale_count)
-        // are deliberately excluded: they are self-healing transients cleared
-        // by the next lease reclaim, not a loss of trust. See
-        // docs/decisions/health-rollup-semantics.md (档 C) and
-        // docs/decisions/health-rollup-undelivered-ingress.md.
+        // `degraded` when the Kernel cannot fully trust its state: live unknown invocations
+        // (dispatch started, no terminal receipt); terminal-unknown outbox rows (recovered, never
+        // auto-retried, but the dispatch outcome is permanently undetermined); projection drift
+        // (projection disagrees with the Journal terminal fact — recovery failed to reconcile);
+        // undelivered ingress (accepted but never turned into a worker job / run — transient
+        // during startup recovery; persistent non-zero means recovery failed to re-enqueue).
+        // Stale counts (outbox_stale_dispatching_count / worker_job_stale_count) are deliberately
+        // excluded: they are self-healing transients cleared by the next lease reclaim, not a loss of
+        // trust. See docs/decisions/health-rollup-semantics.md (档 C) & docs/decisions/health-rollup-undelivered-ingress.md.
         "degraded"
     } else {
         "ok"
@@ -388,14 +384,12 @@ pub fn health_snapshot(
         "worker_job_stale_count": worker_job_stale_count,
         "awaiting_approval_count": awaiting_approval_count,
         "unknown_invocation_count": unknown_invocations.len(),
-        "unknown_invocations": unknown_invocations.iter().map(|invocation| {
-            json!({
-                "invocation_id": invocation.invocation_id,
-                "run_id": invocation.run_id.as_ref().map(|id| id.0.as_str()),
-                "session_id": invocation.session_id.as_ref().map(|id| id.0.as_str()),
-                "first_dispatch_at": invocation.first_dispatch_at.to_rfc3339(),
-            })
-        }).collect::<Vec<_>>(),
+        "unknown_invocations": unknown_invocations.iter().map(|invocation| json!({
+            "invocation_id": invocation.invocation_id,
+            "run_id": invocation.run_id.as_ref().map(|id| id.0.as_str()),
+            "session_id": invocation.session_id.as_ref().map(|id| id.0.as_str()),
+            "first_dispatch_at": invocation.first_dispatch_at.to_rfc3339(),
+        })).collect::<Vec<_>>(),
     }))
 }
 struct HttpRequest {
@@ -482,19 +476,24 @@ fn find_header_end(buffer: &[u8]) -> Option<usize> {
     buffer.windows(4).position(|window| window == b"\r\n\r\n")
 }
 fn content_length(head: &str) -> usize {
-    for line in head.lines() {
-        let Some((name, value)) = line.split_once(':') else {
-            continue;
-        };
-        if name.eq_ignore_ascii_case("content-length") {
-            return value.trim().parse().unwrap_or(0);
-        }
-    }
-    0
+    head.lines()
+        .filter_map(|l| l.split_once(':'))
+        .find(|(n, _)| n.eq_ignore_ascii_case("content-length"))
+        .and_then(|(_, v)| v.trim().parse().ok())
+        .unwrap_or(0)
 }
 #[cfg(test)]
 #[path = "approval_endpoint_tests.rs"]
 mod approval_endpoint_tests;
+#[cfg(test)]
+#[path = "capability_routes_negative_tests.rs"]
+mod capability_routes_negative_tests;
+#[cfg(test)]
+#[path = "capability_routes_support.rs"]
+mod capability_routes_support;
+#[cfg(test)]
+#[path = "capability_routes_tests.rs"]
+mod capability_routes_tests;
 #[cfg(test)]
 #[path = "harness_endpoint_tests.rs"]
 mod harness_endpoint_tests;
