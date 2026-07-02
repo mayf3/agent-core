@@ -156,13 +156,17 @@ impl super::JournalStore {
             Ok(_) => Ok(()),
             Err(cas_error) => {
                 // Attempt to refresh cache. On failure, cache is None.
-                    self.refresh_cache_from_db().map_err(|refresh_error| {
-                        anyhow::anyhow!(
-                            "retirement CAS conflict then cache refresh failure: {}; {}",
-                            cas_error.to_string().chars().take(80).collect::<String>(),
-                            refresh_error.to_string().chars().take(80).collect::<String>(),
-                        )
-                    })?;
+                self.refresh_cache_from_db().map_err(|refresh_error| {
+                    anyhow::anyhow!(
+                        "retirement CAS conflict then cache refresh failure: {}; {}",
+                        cas_error.to_string().chars().take(80).collect::<String>(),
+                        refresh_error
+                            .to_string()
+                            .chars()
+                            .take(80)
+                            .collect::<String>(),
+                    )
+                })?;
                 Err(cas_error)
             }
         }
