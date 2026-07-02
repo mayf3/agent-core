@@ -251,6 +251,7 @@ fn disabled_dispatcher_loop_returns_without_draining_outbox() -> Result<()> {
         fallback_tool_name_indexed: false,
         primary_tool_name_indexed: false,
         harness_read_timeout_ms: 10_000,
+        capability_tokens: std::collections::HashMap::new(),
     };
 
     let journal = Arc::new(JournalStore::in_memory()?);
@@ -420,6 +421,7 @@ fn disabled_test_config() -> KernelConfig {
         fallback_tool_name_indexed: false,
         primary_tool_name_indexed: false,
         harness_read_timeout_ms: 10_000,
+        capability_tokens: std::collections::HashMap::new(),
     }
 }
 

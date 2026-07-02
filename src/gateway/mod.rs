@@ -4,11 +4,9 @@ use crate::journal::JournalStore;
 use crate::registry::snapshot::RegistrySnapshot;
 use anyhow::{bail, Result};
 use chrono::{DateTime, Utc};
-use serde_json::{json, Value};
-use uuid::Uuid;
+use serde_json::{json, Value}; use uuid::Uuid;
 mod policy;
-pub use policy::{evaluate_policy, PolicyVerdict};
-mod tool_call;
+pub use policy::{evaluate_policy, PolicyVerdict}; mod tool_call;
 pub use tool_call::{validate_tool_call, ToolRejection};
 #[derive(Clone)]
 pub struct Gateway {
@@ -413,11 +411,33 @@ impl Gateway {
     /// Phase 2 M2d: deny a run paused in `AwaitingApproval`. Appends
     /// `ApprovalDenied` and fails the run (status `Failed`). **Idempotent**: if
     /// the run is not currently `AwaitingApproval`, this is a no-op `Ok(())`.
-    /// Check whether a principal ID has the capability_change.approve grant.
-    /// v1: only ipc_operator (authenticated via IPC token) has this grant.
+    /// Resolve a bearer token to a principal.
+    pub fn resolve_principal(&self, token: &str) -> Option<String> {
+        if let Some(p) = self.config.capability_tokens.get(token) {
+            return Some(p.clone());
+        }
+        if token == self.config.ipc_token {
+            return Some("ipc_operator".to_string());
+        }
+        None
+    }
+    /// Check whether a principal has a specific grant (hardcoded v1 mapping).
     pub fn has_grant(&self, principal_id: &str, grant: &str) -> bool {
-        if grant != crate::server::capability_routes::CAPABILITY_CHANGE_APPROVE_GRANT { return false; }
-        principal_id == "ipc_operator"
+        match grant {
+            crate::server::capability_routes::CAPABILITY_CHANGE_PROPOSE_GRANT => {
+                matches!(principal_id, "builder_principal" | "ipc_operator")
+            }
+            crate::server::capability_routes::CAPABILITY_CHANGE_APPROVE_GRANT => {
+                matches!(principal_id, "reviewer_principal" | "ipc_operator")
+            }
+            crate::server::capability_routes::CAPABILITY_CHANGE_REJECT_GRANT => {
+                matches!(principal_id, "reviewer_principal" | "ipc_operator")
+            }
+            crate::server::capability_routes::CAPABILITY_CHANGE_ACTIVATE_GRANT => {
+                matches!(principal_id, "operator_principal" | "ipc_operator")
+            }
+            _ => false,
+        }
     }
     pub fn deny_run(&self, journal: &JournalStore, run_id: &RunId) -> Result<()> {
         let status = journal.run_status(run_id)?;

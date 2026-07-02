@@ -11,6 +11,11 @@ pub struct KernelConfig {
     pub kernel_port: u16,
     pub connector_execute_url: String,
     pub ipc_token: String,
+    /// Token → principal mapping for capability change operations.
+    /// Key: bearer token value. Value: principal_id (e.g. "builder_principal").
+    /// In v1, these are separate from the general ipc_token so approval
+    /// authority can be separated from general API access.
+    pub capability_tokens: std::collections::HashMap<String, String>,
     pub feishu_allowed_open_ids: Vec<String>,
     pub feishu_allowed_chat_ids: Vec<String>,
     pub feishu_require_group_mention: bool,
@@ -92,6 +97,19 @@ impl KernelConfig {
                 "http://127.0.0.1:4131/v1/execute",
             ),
             ipc_token: env_string("AGENT_CORE_IPC_TOKEN", ""),
+            capability_tokens: {
+                let mut m = std::collections::HashMap::new();
+                for (token, principal) in [("AGENT_CORE_BUILDER_TOKEN", "builder_principal"),
+                                            ("AGENT_CORE_REVIEWER_TOKEN", "reviewer_principal"),
+                                            ("AGENT_CORE_ACTIVATOR_TOKEN", "operator_principal")] {
+                    if let Ok(val) = std::env::var(token) {
+                        if !val.is_empty() {
+                            m.insert(val, principal.to_string());
+                        }
+                    }
+                }
+                m
+            },
             feishu_allowed_open_ids: env_list("AGENT_CORE_FEISHU_ALLOWED_OPEN_IDS"),
             feishu_allowed_chat_ids: env_list("AGENT_CORE_FEISHU_ALLOWED_CHAT_IDS"),
             feishu_require_group_mention: env_bool("AGENT_CORE_FEISHU_REQUIRE_GROUP_MENTION", true),

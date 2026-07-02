@@ -4,11 +4,14 @@ use crate::domain::capability_change::*;
 use crate::domain::*;
 use crate::gateway::Gateway;
 use crate::journal::JournalStore;
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 
+pub const CAPABILITY_CHANGE_PROPOSE_GRANT: &str = "capability_change.propose";
 pub const CAPABILITY_CHANGE_APPROVE_GRANT: &str = "capability_change.approve";
+pub const CAPABILITY_CHANGE_REJECT_GRANT: &str = "capability_change.reject";
+pub const CAPABILITY_CHANGE_ACTIVATE_GRANT: &str = "capability_change.activate";
 
 #[derive(Deserialize)]
 pub struct SubmitProposalBody {
@@ -29,11 +32,14 @@ pub struct SubmitProposalResponse {
 }
 
 pub fn handle_submit_proposal(
-    journal: &JournalStore, _gateway: &Gateway,
-    body: &serde_json::Value, _session: Option<&Session>, _run: Option<&Run>,
+    journal: &JournalStore, gateway: &Gateway,
+    body: &Value, principal: &str,
 ) -> Result<SubmitProposalResponse> {
+    if !gateway.has_grant(principal, CAPABILITY_CHANGE_PROPOSE_GRANT) {
+        bail!("capability_change_propose_denied: missing grant");
+    }
     let input: SubmitProposalBody = serde_json::from_value(body.clone())
-        .map_err(|e| anyhow::anyhow!("invalid_proposal_body: {e}"))?;
+        .map_err(|e| anyhow!("invalid_proposal_body: {e}"))?;
     for (name, val) in [("artifact_digest", &input.artifact_digest),
                         ("manifest_digest", &input.manifest_digest),
                         ("evidence_digest", &input.evidence_digest)] {
@@ -47,7 +53,7 @@ pub fn handle_submit_proposal(
     let active_snapshot_id = journal.current_registry_snapshot_id()?;
     let proposal_id = format!("proposal_{}", uuid::Uuid::new_v4().simple());
     let proposal = CapabilityChangeProposal::new(
-        proposal_id.clone(), "ipc_operator".into(),
+        proposal_id.clone(), principal.to_string(),
         AgentId(input.target_agent_id), SessionId(String::new()), RunId(String::new()),
         input.artifact_ref, input.artifact_digest,
         input.manifest_ref, input.manifest_digest,
@@ -66,9 +72,9 @@ pub fn handle_submit_proposal(
 
 pub fn handle_approve_proposal(
     journal: &JournalStore, gateway: &Gateway,
-    proposal_id: &str, decided_by: &str,
-) -> Result<serde_json::Value> {
-    if !gateway.has_grant(decided_by, CAPABILITY_CHANGE_APPROVE_GRANT) {
+    proposal_id: &str, principal: &str,
+) -> Result<Value> {
+    if !gateway.has_grant(principal, CAPABILITY_CHANGE_APPROVE_GRANT) {
         bail!("capability_change_approve_denied: missing grant");
     }
     let proposal = journal.load_proposal(proposal_id)?
@@ -76,9 +82,12 @@ pub fn handle_approve_proposal(
     if proposal.status != ProposalStatus::PendingApproval {
         bail!("proposal_not_pending: {:?}", proposal.status);
     }
+    if proposal.submitter_principal_id == principal {
+        bail!("submitter_cannot_approve_own_proposal");
+    }
     let changed = journal.decide_proposal(
         proposal_id, &[ProposalStatus::PendingApproval],
-        ProposalStatus::Approved, decided_by, "approved",
+        ProposalStatus::Approved, principal, "approved",
         None, None,
     )?;
     if !changed { bail!("proposal_concurrent_modification"); }
@@ -86,7 +95,7 @@ pub fn handle_approve_proposal(
         JournalEventKind::CapabilityChangeApproved,
         Some(&proposal.origin_run_id), Some(&proposal.origin_session_id),
         Some(proposal_id),
-        json!({"proposal_id": proposal_id, "decided_by": decided_by,
+        json!({"proposal_id": proposal_id, "decided_by": principal,
                "expected_snapshot_id": proposal.expected_active_snapshot_id}),
     )?;
     Ok(json!({"proposal_id": proposal_id, "status": "Approved",
@@ -94,9 +103,12 @@ pub fn handle_approve_proposal(
 }
 
 pub fn handle_reject_proposal(
-    journal: &JournalStore, _gateway: &Gateway,
-    proposal_id: &str, decided_by: &str, reason: &str,
-) -> Result<serde_json::Value> {
+    journal: &JournalStore, gateway: &Gateway,
+    proposal_id: &str, principal: &str, reason: &str,
+) -> Result<Value> {
+    if !gateway.has_grant(principal, CAPABILITY_CHANGE_REJECT_GRANT) {
+        bail!("capability_change_reject_denied: missing grant");
+    }
     let proposal = journal.load_proposal(proposal_id)?
         .ok_or_else(|| anyhow::anyhow!("proposal_not_found"))?;
     if proposal.status != ProposalStatus::PendingApproval {
@@ -104,14 +116,14 @@ pub fn handle_reject_proposal(
     }
     let changed = journal.decide_proposal(
         proposal_id, &[ProposalStatus::PendingApproval],
-        ProposalStatus::Rejected, decided_by, reason, None, None,
+        ProposalStatus::Rejected, principal, reason, None, None,
     )?;
     if !changed { bail!("proposal_concurrent_modification"); }
     journal.append_event(
         JournalEventKind::CapabilityChangeRejected,
         Some(&proposal.origin_run_id), Some(&proposal.origin_session_id),
         Some(proposal_id),
-        json!({"proposal_id": proposal_id, "decided_by": decided_by, "reason": reason}),
+        json!({"proposal_id": proposal_id, "decided_by": principal, "reason": reason}),
     )?;
     Ok(json!({"proposal_id": proposal_id, "status": "Rejected"}))
 }
