@@ -1,4 +1,5 @@
 mod approval;
+pub mod capability_activation;
 pub mod capability_proposals;
 mod conversation;
 pub mod harness_ops;
