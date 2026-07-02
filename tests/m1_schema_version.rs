@@ -65,3 +65,33 @@ fn unique_temp_path() -> PathBuf {
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
     std::env::temp_dir().join(format!("agent-core-schema-{}-{}.db", std::process::id(), n))
 }
+
+#[test]
+fn migration_v3_to_v4_creates_proposals_table() -> Result<()> {
+    let db_path = unique_temp_path();
+    // Create a v3 database.
+    {
+        JournalStore::open(&db_path)?;
+    }
+    // Verify version is 4 and proposals table exists.
+    {
+        let journal = JournalStore::open(&db_path)?;
+        assert_eq!(journal.schema_version()?, 4);
+        let conn = rusqlite::Connection::open(&db_path)?;
+        let has_table: bool = conn.query_row(
+            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='capability_change_proposals'",
+            [], |row| row.get(0),
+        )?;
+        assert!(has_table, "capability_change_proposals table must exist after v3→v4 migration");
+    }
+    // Verify we can INSERT and SELECT.
+    {
+        let conn = rusqlite::Connection::open(&db_path)?;
+        conn.execute(
+            "INSERT INTO capability_change_proposals (proposal_id, submitter_principal_id, target_agent_id, origin_session_id, origin_run_id, artifact_ref, artifact_digest, manifest_ref, manifest_digest, evidence_ref, evidence_digest, requested_operations_json, risk_summary, expected_active_snapshot_id, status, created_at, expires_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+            rusqlite::params!["test_prop", "submitter", "agent", "sess", "run", "ref", "sha256:0000000000000000000000000000000000000000000000000000000000000000", "mref", "sha256:1111111111111111111111111111111111111111111111111111111111111111", "eref", "sha256:2222222222222222222222222222222222222222222222222222222222222222", "[\"test.op\"]", "risk", "snap_0", "PendingApproval", "2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z"],
+        )?;
+    }
+    std::fs::remove_file(&db_path).ok();
+    Ok(())
+}
