@@ -90,8 +90,8 @@ mod capability_probe_reopen;
 mod capability_probe_rollback;
 
 #[cfg(test)]
-#[path = "tests/coding_workspace/mod.rs"]
-mod coding_workspace_e2e;
+#[path = "tests/coding_workspace_tests.rs"]
+mod coding_workspace_tests;
 
 pub struct Runtime<L> {
     config: KernelConfig,

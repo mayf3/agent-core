@@ -10,17 +10,24 @@ use anyhow::{anyhow, bail, Result};
 use chrono::Utc;
 use rusqlite::params;
 
-/// Determine risk for an external harness operation by convention.
-/// Write operations (containing _write, _mkdir, or _exec) are Risk::Write.
-/// All others default to Risk::ReadOnly.
+/// Determine risk for an external harness operation by exact match.
+/// Only the six known Coding Workspace Harness operations are explicitly
+/// classified. Any unknown external operation defaults to Risk::Write
+/// (fail-closed).
 fn risk_for_external_op(operation_name: &str) -> Risk {
-    if operation_name.contains("_write")
-        || operation_name.contains("_mkdir")
-        || operation_name.contains("_exec")
-    {
-        Risk::Write
-    } else {
-        Risk::ReadOnly
+    match operation_name {
+        // Pre-existing external operations (backward compatible).
+        "external.time_now" => Risk::ReadOnly,
+        // Coding Workspace Harness v1: six exact-matched operations.
+        "external.workspace_list"
+        | "external.workspace_read"
+        | "external.workspace_stat"
+        | "external.workspace_metadata" => Risk::ReadOnly,
+        "external.workspace_write" | "external.workspace_mkdir" | "external.workspace_exec" => {
+            Risk::Write
+        }
+        // Fail-closed: any unknown external operation is treated as Write.
+        _ => Risk::Write,
     }
 }
 
@@ -254,5 +261,57 @@ impl super::JournalStore {
         *self.current_snapshot_id.lock().unwrap() = Some(new_snapshot_id.to_string());
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::registry::snapshot::Risk;
+
+    #[test]
+    fn risk_classification_known_operations_exact() {
+        // Pre-existing external operation (backward compatible).
+        assert_eq!(risk_for_external_op("external.time_now"), Risk::ReadOnly);
+        assert_eq!(
+            risk_for_external_op("external.workspace_list"),
+            Risk::ReadOnly
+        );
+        assert_eq!(
+            risk_for_external_op("external.workspace_read"),
+            Risk::ReadOnly
+        );
+        assert_eq!(
+            risk_for_external_op("external.workspace_stat"),
+            Risk::ReadOnly
+        );
+        assert_eq!(
+            risk_for_external_op("external.workspace_metadata"),
+            Risk::ReadOnly
+        );
+        assert_eq!(
+            risk_for_external_op("external.workspace_write"),
+            Risk::Write
+        );
+        assert_eq!(
+            risk_for_external_op("external.workspace_mkdir"),
+            Risk::Write
+        );
+        assert_eq!(risk_for_external_op("external.workspace_exec"), Risk::Write);
+    }
+
+    #[test]
+    fn risk_classification_unknown_operations_default_write() {
+        // Fail-closed: any operation not in the exact-match list is Write.
+        assert_eq!(
+            risk_for_external_op("external.workspace_delete"),
+            Risk::Write
+        );
+        assert_eq!(risk_for_external_op("external.git_push"), Risk::Write);
+        assert_eq!(risk_for_external_op("external.unknown"), Risk::Write);
+        // Substring-based matches that would have previously matched
+        // (e.g. "external.read_anything") must NOT be ReadOnly.
+        assert_eq!(risk_for_external_op("external.read_anything"), Risk::Write);
+        assert_eq!(risk_for_external_op("external.write_anything"), Risk::Write);
     }
 }

@@ -469,6 +469,9 @@ mod tests {
         // empty string dropped → 3.
         assert_eq!(profile.grants.len(), 3);
         assert!(profile.grants.iter().any(|g| g.operation == "shell.exec"));
-        assert!(profile.grants.iter().any(|g| g.operation == STDOUT_SEND_TEXT));
+        assert!(profile
+            .grants
+            .iter()
+            .any(|g| g.operation == STDOUT_SEND_TEXT));
     }
 }
