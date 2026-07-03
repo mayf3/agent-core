@@ -89,6 +89,10 @@ mod capability_probe_reopen;
 #[path = "tests/capability_probe_rollback.rs"]
 mod capability_probe_rollback;
 
+#[cfg(test)]
+#[path = "tests/coding_harness_e2e/mod.rs"]
+mod coding_harness_e2e;
+
 pub struct Runtime<L> {
     config: KernelConfig,
     llm: L,
