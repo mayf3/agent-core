@@ -1,54 +1,22 @@
-//! Capability proposal support for coding.capability.propose.
-//!
-//! Uses the real `HarnessManifest` type, `Sha256Digest` for content-addressed
-//! digest computation, `ContentStore` for blob storage, and the existing
-//! `handle_submit_proposal` API to create proposals.
-//!
-//! The Coding Harness does NOT hold or call decision tokens.
-
-use crate::capabilities::store::{ContentStore, Sha256Digest};
-use crate::domain::AgentId;
-use crate::gateway::Gateway;
-use crate::harness::manifest::HarnessManifest;
-use crate::journal::JournalStore;
-use crate::server::capability_routes::handle_submit_proposal;
+use crate::config::CodingConfig;
+use crate::paths::{assert_no_symlink_escape, resolve_path_unchecked, validate_relative};
+use agent_core_kernel::capabilities::store::{ContentStore, Sha256Digest};
+use agent_core_kernel::harness::manifest::HarnessManifest;
 use chrono::Utc;
 use serde_json::{json, Value};
+use std::io::Read;
 use std::path::Path;
+use std::time::Duration;
 
-/// Maximum size for manifest and evidence files.
+const MAX_ARTIFACT_SIZE: usize = 2 * 1024 * 1024;
 const MAX_MANIFEST_SIZE: usize = 256 * 1024;
 const MAX_EVIDENCE_SIZE: usize = 256 * 1024;
 
-fn ok(r: Value) -> Value {
-    json!({"protocol_version":"external-harness-v1","ok":true,"result":r})
-}
 fn err(c: &str) -> Value {
     json!({"protocol_version":"external-harness-v1","ok":false,"error_code":c})
 }
 
-/// Handle a capability proposal request.
-///
-/// Args (from request JSON):
-/// - artifact_path: relative path to the artifact binary
-/// - manifest_path: relative path to the manifest JSON (optionally partial)
-/// - evidence_path: relative path to the evidence JSON
-/// - target_agent_id: the agent ID to target (default "main")
-/// - origin_session_id: session ID for the proposal
-/// - origin_run_id: run ID for the proposal
-/// - risk_summary: description of risk (default "read-only")
-///
-/// The manifest JSON at manifest_path is read and parsed as a (possibly
-/// partial) HarnessManifest. The artifact_digest and manifest_id fields are
-/// then computed and set before storage.
-pub fn handle_propose(
-    root: &Path,
-    args: &Value,
-    journal: &JournalStore,
-    gateway: &Gateway,
-    store: &ContentStore,
-    config_agent_id: &AgentId,
-) -> Value {
+pub fn handle_propose(root: &Path, args: &Value, config: &CodingConfig) -> Value {
     let artifact_rel = args
         .get("artifact_path")
         .and_then(Value::as_str)
@@ -66,12 +34,35 @@ pub fn handle_propose(
         return err("missing_path");
     }
 
-    let artifact_path = root.join(artifact_rel);
-    let manifest_path = root.join(manifest_rel);
-    let evidence_path = root.join(evidence_rel);
+    // Validate paths (reject absolute, .., symlink escape)
+    for rel in &[artifact_rel, manifest_rel, evidence_rel] {
+        if let Err(e) = validate_relative(rel) {
+            return err(&format!("invalid_path: {e}"));
+        }
+    }
 
-    // ── Read all three files ──
-    let artifact_data = match bounded_read(&artifact_path, 2 * 1024 * 1024) {
+    let artifact_path = match resolve_path_unchecked(root, artifact_rel) {
+        Ok(p) => p,
+        Err(e) => return err(&format!("artifact_resolve_failed: {e}")),
+    };
+    let manifest_path = match resolve_path_unchecked(root, manifest_rel) {
+        Ok(p) => p,
+        Err(e) => return err(&format!("manifest_resolve_failed: {e}")),
+    };
+    let evidence_path = match resolve_path_unchecked(root, evidence_rel) {
+        Ok(p) => p,
+        Err(e) => return err(&format!("evidence_resolve_failed: {e}")),
+    };
+
+    // Check symlink escape for all three
+    for p in [&artifact_path, &manifest_path, &evidence_path] {
+        if let Err(e) = assert_no_symlink_escape(root, p) {
+            return err(&format!("symlink_escape: {e}"));
+        }
+    }
+
+    // Read files
+    let artifact_data = match bounded_read(&artifact_path, MAX_ARTIFACT_SIZE) {
         Ok(d) => d,
         Err(e) => return err(&format!("artifact_read_failed: {e}")),
     };
@@ -84,17 +75,14 @@ pub fn handle_propose(
         Err(e) => return err(&format!("evidence_read_failed: {e}")),
     };
 
-    // ── Compute artifact digest via real Sha256Digest ──
+    // Compute digests
     let artifact_digest = Sha256Digest::compute(&artifact_data);
 
-    // ── Parse manifest as (possibly partial) HarnessManifest ──
     let manifest_value: Value = match serde_json::from_slice(&manifest_raw) {
         Ok(v) => v,
         Err(e) => return err(&format!("manifest_parse_failed: {e}")),
     };
 
-    // Build a complete HarnessManifest from the workspace manifest JSON.
-    // Fill in artifact_digest and compute manifest_id.
     let mut manifest = HarnessManifest {
         manifest_id: String::new(),
         harness_id: manifest_value
@@ -136,24 +124,19 @@ pub fn handle_propose(
         created_at: Utc::now(),
     };
 
-    // Compute manifest ID using the real method.
     let manifest_id = match manifest.compute_manifest_id() {
         Ok(id) => id,
-        Err(e) => return err(&format!("manifest_id_compute_failed: {e}")),
+        Err(e) => return err(&format!("manifest_id_failed: {e}")),
     };
     manifest.manifest_id = manifest_id;
 
-    // ── Serialize final manifest ──
     let final_manifest_bytes = match serde_json::to_vec(&manifest) {
         Ok(b) => b,
         Err(e) => return err(&format!("manifest_serialize_failed: {e}")),
     };
 
-    // ── Compute manifest digest and evidence digest ──
-    let _manifest_digest = Sha256Digest::compute(&final_manifest_bytes);
-    let _evidence_digest = Sha256Digest::compute(&evidence_data);
-
-    // ── Store all three blobs in ContentStore ──
+    // Store in ContentStore
+    let store = ContentStore::new(config.artifact_root.clone());
     let (stored_artifact_digest, stored_manifest_digest, stored_evidence_digest) = match (
         store.store(&artifact_data),
         store.store(&final_manifest_bytes),
@@ -165,7 +148,7 @@ pub fn handle_propose(
         (_, _, Err(e)) => return err(&format!("store_evidence_failed: {e}")),
     };
 
-    // ── Call existing Capability Proposal API ──
+    // Build proposal body for the kernel API
     let target_agent = manifest_value
         .get("target_agent_id")
         .and_then(Value::as_str)
@@ -173,7 +156,7 @@ pub fn handle_propose(
     let risk = manifest_value
         .get("risk_summary")
         .and_then(Value::as_str)
-        .unwrap_or("read-only coding harness proposal");
+        .unwrap_or("read-only");
 
     let submit_body = json!({
         "target_agent_id": target_agent,
@@ -183,39 +166,57 @@ pub fn handle_propose(
         "manifest_digest": stored_manifest_digest.as_str(),
         "evidence_ref": evidence_rel,
         "evidence_digest": stored_evidence_digest.as_str(),
-        "requested_operations": [manifest.operation_name.clone()],
+        "requested_operations": [manifest.operation_name],
         "risk_summary": risk,
     });
 
-    match handle_submit_proposal(
-        journal,
-        gateway,
-        &submit_body,
-        "coding_harness",
-        config_agent_id,
-    ) {
-        Ok(response) => ok(json!({
-            "proposal_id": response.proposal_id,
-            "status": response.status,
-            "expected_active_snapshot_id": response.expected_active_snapshot_id,
-            "requested_operations": response.requested_operations,
-            "expires_at": response.expires_at,
-            "artifact_digest": stored_artifact_digest.as_str(),
-            "manifest_digest": stored_manifest_digest.as_str(),
-            "evidence_digest": stored_evidence_digest.as_str(),
-            "manifest_id": manifest.manifest_id,
-            "operation_name": manifest.operation_name,
-            "artifact_path": artifact_rel,
-            "manifest_path": manifest_rel,
-            "evidence_path": evidence_rel,
-        })),
-        Err(e) => err(&format!("proposal_submit_failed: {e}")),
-    }
+    // Submit via HTTP to the Kernel's proposal API
+    let api_url = format!(
+        "{}/v1/capability-change-proposals",
+        config.kernel_api_url.trim_end_matches('/')
+    );
+
+    let agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(30)))
+        .build()
+        .new_agent();
+
+    let response = agent
+        .post(&api_url)
+        .header(
+            "Authorization",
+            &format!("Bearer {}", config.capability_submit_token),
+        )
+        .header("Content-Type", "application/json")
+        .send_json(submit_body);
+
+    let mut resp = match response {
+        Ok(r) => r,
+        Err(ureq::Error::StatusCode(code)) => {
+            return err(&format!("kernel_api_error_{}", code));
+        }
+        Err(e) => return err(&format!("kernel_api_failed: {e}")),
+    };
+    let response_body: Value = match resp.body_mut().read_json::<Value>() {
+        Ok(v) => v,
+        Err(e) => return err(&format!("kernel_api_json_failed: {e}")),
+    };
+
+    ok(json!({
+        "proposal_id": response_body.get("proposal_id"),
+        "status": response_body.get("status"),
+        "expected_active_snapshot_id": response_body.get("expected_active_snapshot_id"),
+        "requested_operations": response_body.get("requested_operations"),
+        "expires_at": response_body.get("expires_at"),
+        "artifact_digest": stored_artifact_digest.as_str(),
+        "manifest_digest": stored_manifest_digest.as_str(),
+        "evidence_digest": stored_evidence_digest.as_str(),
+        "manifest_id": manifest.manifest_id,
+        "operation_name": manifest.operation_name,
+    }))
 }
 
-/// Read a file with a size limit.
 fn bounded_read(path: &Path, max: usize) -> Result<Vec<u8>, String> {
-    use std::io::Read;
     let mut f = std::fs::File::open(path).map_err(|e| format!("{e}"))?;
     let meta = f.metadata().map_err(|e| format!("{e}"))?;
     if meta.len() > max as u64 {
@@ -224,4 +225,8 @@ fn bounded_read(path: &Path, max: usize) -> Result<Vec<u8>, String> {
     let mut data = Vec::with_capacity((meta.len() as usize).min(max));
     f.read_to_end(&mut data).map_err(|e| format!("{e}"))?;
     Ok(data)
+}
+
+fn ok(r: Value) -> Value {
+    json!({"protocol_version":"external-harness-v1","ok":true,"result":r})
 }

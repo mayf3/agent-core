@@ -1,11 +1,5 @@
-//! Workspace file-system operations: list, read, write, exec.
-//!
-//! Exec supports `command` and `args` as the primary interface.
-//! `program` is kept as a compatibility alias for `command`.
-//! Shell mode requires both request `shell=true` and workspace config `shell=true`.
-
-use crate::harness::coding::config::WorkspacePermission;
-use crate::harness::coding::paths::{resolve_path, resolve_path_unchecked, validate_relative};
+use crate::config::WorkspacePermission;
+use crate::paths::{resolve_path, resolve_path_unchecked, validate_relative};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
@@ -27,8 +21,6 @@ fn ok_v(r: Value) -> Value {
 fn err_v(c: &str) -> Value {
     json!({"protocol_version":"external-harness-v1","ok":false,"error_code":c})
 }
-
-// ── List ──
 
 pub fn handle_list(root: &Path, args: &Value) -> Value {
     let relative = match validate_relative(
@@ -67,8 +59,6 @@ pub fn handle_list(root: &Path, args: &Value) -> Value {
     ok_v(json!({"entries": entries, "entry_count": entries.len()}))
 }
 
-// ── Read ──
-
 pub fn handle_read(root: &Path, args: &Value) -> Value {
     let relative = match validate_relative(
         args.get("relative_path")
@@ -104,8 +94,6 @@ pub fn handle_read(root: &Path, args: &Value) -> Value {
     )
 }
 
-// ── Write ──
-
 pub fn handle_write(root: &Path, args: &Value) -> Value {
     let relative = match validate_relative(
         args.get("relative_path")
@@ -123,7 +111,6 @@ pub fn handle_write(root: &Path, args: &Value) -> Value {
     if content.len() > MAX_WRITE {
         return err_v("content_exceeds_max_size");
     }
-
     let path = match resolve_path_unchecked(root, relative) {
         Ok(p) => p,
         Err(e) => return err_v(&e.to_string()),
@@ -134,7 +121,6 @@ pub fn handle_write(root: &Path, args: &Value) -> Value {
     if path.exists() && path.is_symlink() {
         return err_v("symlink_write_not_allowed");
     }
-
     if let Some(parent) = path.parent() {
         if !parent.exists() {
             if let Err(e) = std::fs::create_dir_all(parent) {
@@ -142,7 +128,6 @@ pub fn handle_write(root: &Path, args: &Value) -> Value {
             }
         }
     }
-
     let bytes = match mode {
         "replace" => content.as_bytes().to_vec(),
         "append" => {
@@ -152,7 +137,6 @@ pub fn handle_write(root: &Path, args: &Value) -> Value {
         }
         other => return err_v(&format!("unknown_mode: {other}")),
     };
-
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     let tmp = path.with_extension(format!(".tmp_{}_{}", std::process::id(), seq));
     let wr = (|| -> std::io::Result<()> {
@@ -172,16 +156,16 @@ pub fn handle_write(root: &Path, args: &Value) -> Value {
         let _ = std::fs::remove_file(&tmp);
         return err_v(&format!("rename_failed: {e}"));
     }
-
     let mut h = Sha256::new();
     h.update(&bytes);
     ok_v(json!({"bytes_written": bytes.len(), "sha256": hex::encode(h.finalize()), "mode": mode}))
 }
 
-// ── Exec ──
-
 pub fn handle_exec(root: &Path, args: &Value, perm: &WorkspacePermission) -> Value {
-    // Determine command: try "command" first, then fall back to "program".
+    let shell_requested = args.get("shell").and_then(Value::as_bool).unwrap_or(false);
+    if shell_requested && !perm.shell {
+        return err_v("shell_not_permitted");
+    }
     let program = match args.get("command").and_then(Value::as_str) {
         Some(c) if !c.is_empty() => c,
         _ => match args.get("program").and_then(Value::as_str) {
@@ -189,19 +173,11 @@ pub fn handle_exec(root: &Path, args: &Value, perm: &WorkspacePermission) -> Val
             _ => return err_v("missing_command"),
         },
     };
-
     let cmd_args: Vec<&str> = args
         .get("args")
         .and_then(Value::as_array)
         .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
         .unwrap_or_default();
-
-    // Shell mode: only when request explicitly sets shell=true AND workspace permits it.
-    let shell_requested = args.get("shell").and_then(Value::as_bool).unwrap_or(false);
-    if shell_requested && !perm.shell {
-        return err_v("shell_not_permitted");
-    }
-
     let cwd_rel = args
         .get("relative_cwd")
         .and_then(Value::as_str)
@@ -216,7 +192,6 @@ pub fn handle_exec(root: &Path, args: &Value, perm: &WorkspacePermission) -> Val
         .and_then(Value::as_u64)
         .unwrap_or(DEFAULT_MAX_OUTPUT as u64)
         .min(ABSOLUTE_MAX as u64) as usize;
-
     let cwd = match resolve_path(root, cwd_rel) {
         Ok(p) => p,
         Err(e) => return err_v(&format!("cwd_error: {e}")),
@@ -224,11 +199,9 @@ pub fn handle_exec(root: &Path, args: &Value, perm: &WorkspacePermission) -> Val
     if !cwd.is_dir() {
         return err_v("cwd_not_a_directory");
     }
-
     let mut cmd = if shell_requested {
         let mut sh = std::process::Command::new("sh");
         sh.arg("-c");
-        // When using shell, join program and args into a single command string.
         let full_cmd = if cmd_args.is_empty() {
             program.to_string()
         } else {
@@ -241,7 +214,6 @@ pub fn handle_exec(root: &Path, args: &Value, perm: &WorkspacePermission) -> Val
         c.args(&cmd_args);
         c
     };
-
     cmd.current_dir(&cwd);
     cmd.env_clear();
     for var in &["PATH", "HOME", "TMPDIR"] {
@@ -257,83 +229,36 @@ pub fn handle_exec(root: &Path, args: &Value, perm: &WorkspacePermission) -> Val
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            return err_v(&format!(
-                "{}",
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    "program_not_found"
-                } else {
-                    "spawn_failed"
-                }
-            ))
+            return err_v(if e.kind() == std::io::ErrorKind::NotFound {
+                "program_not_found"
+            } else {
+                "spawn_failed"
+            })
         }
     };
 
-    // ── Concurrent stdout/stderr draining ──
     let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();
-    let out_buf: std::sync::Arc<std::sync::Mutex<Vec<u8>>> =
-        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let err_buf: std::sync::Arc<std::sync::Mutex<Vec<u8>>> =
-        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let done: std::sync::Arc<std::sync::atomic::AtomicBool> =
-        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let out_buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let err_buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let max_o = max_output;
+    let max_e = max_output;
 
     if let Some(pipe) = stdout_pipe {
         let b = std::sync::Arc::clone(&out_buf);
         let d = std::sync::Arc::clone(&done);
-        std::thread::spawn(move || {
-            let mut r = pipe;
-            let mut buf = [0u8; 65536];
-            loop {
-                if d.load(std::sync::atomic::Ordering::SeqCst) {
-                    let mut l = Vec::new();
-                    let _ = r.read_to_end(&mut l);
-                    if !l.is_empty() {
-                        b.lock().unwrap().extend_from_slice(&l);
-                    }
-                    break;
-                }
-                match r.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        b.lock().unwrap().extend_from_slice(&buf[..n]);
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
+        std::thread::spawn(move || drain_reader(pipe, b, d, max_o));
     }
     if let Some(pipe) = stderr_pipe {
         let b = std::sync::Arc::clone(&err_buf);
         let d = std::sync::Arc::clone(&done);
-        std::thread::spawn(move || {
-            let mut r = pipe;
-            let mut buf = [0u8; 65536];
-            loop {
-                if d.load(std::sync::atomic::Ordering::SeqCst) {
-                    let mut l = Vec::new();
-                    let _ = r.read_to_end(&mut l);
-                    if !l.is_empty() {
-                        b.lock().unwrap().extend_from_slice(&l);
-                    }
-                    break;
-                }
-                match r.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        b.lock().unwrap().extend_from_slice(&buf[..n]);
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
+        std::thread::spawn(move || drain_reader(pipe, b, d, max_e));
     }
 
-    // ── Wait with timeout ──
     let deadline = Duration::from_secs(timeout_secs);
     let start = std::time::Instant::now();
     let mut timed_out = false;
@@ -345,32 +270,82 @@ pub fn handle_exec(root: &Path, args: &Value, perm: &WorkspacePermission) -> Val
         }
         if start.elapsed() >= deadline {
             timed_out = true;
-            done.store(true, std::sync::atomic::Ordering::SeqCst);
-            let _ = child.kill();
+            done.store(true, Ordering::SeqCst);
+            let _ = kill_process_tree(child.id());
             let _ = child.wait();
             break;
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    done.store(true, std::sync::atomic::Ordering::SeqCst);
+    done.store(true, Ordering::SeqCst);
     let exit_code = child.wait().ok().and_then(|s| s.code()).unwrap_or(-1);
 
     let stdout_all = out_buf.lock().unwrap_or_else(|e| e.into_inner()).clone();
     let stderr_all = err_buf.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    let trunc = |data: &[u8], max: usize| -> String {
-        if data.len() <= max {
-            String::from_utf8_lossy(data).to_string()
-        } else {
-            let mut s = String::from_utf8_lossy(&data[..max]).to_string();
-            s.truncate(s.len().saturating_sub(3));
-            s.push_str("...");
-            s
-        }
-    };
-
     ok_v(
         json!({"exit_code": exit_code, "stdout": trunc(&stdout_all, max_output), "stderr": trunc(&stderr_all, max_output),
         "timed_out": timed_out, "stdout_truncated": stdout_all.len() > max_output, "stderr_truncated": stderr_all.len() > max_output,
         "stdout_bytes": stdout_all.len(), "stderr_bytes": stderr_all.len()}),
     )
+}
+
+fn drain_reader(
+    mut pipe: impl Read,
+    buf: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    max: usize,
+) {
+    let mut local = Vec::new();
+    let mut tmp = [0u8; 65536];
+    loop {
+        if done.load(Ordering::SeqCst) {
+            let mut rest = Vec::new();
+            let _ = pipe.read_to_end(&mut rest);
+            if !rest.is_empty() && local.len() < max {
+                let remaining = max.saturating_sub(local.len());
+                local.extend_from_slice(&rest[..rest.len().min(remaining)]);
+            }
+            break;
+        }
+        match pipe.read(&mut tmp) {
+            Ok(0) => break,
+            Ok(n) => {
+                if local.len() < max {
+                    let remaining = max.saturating_sub(local.len());
+                    local.extend_from_slice(&tmp[..n.min(remaining)]);
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    buf.lock().unwrap().extend_from_slice(&local);
+}
+
+#[cfg(unix)]
+fn kill_process_tree(pid: u32) {
+    // Kill the process group. We use raw syscall wrappers via libc.
+    // First try SIGTERM for graceful shutdown, then SIGKILL.
+    unsafe {
+        let _ = libc::killpg(pid as libc::pid_t, libc::SIGTERM);
+        std::thread::sleep(Duration::from_millis(500));
+        let _ = libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_process_tree(pid: u32) {
+    let _ = std::process::Command::new("taskkill")
+        .args(&["/F", "/T", "/PID", &pid.to_string()])
+        .output();
+}
+
+fn trunc(data: &[u8], max: usize) -> String {
+    if data.len() <= max {
+        String::from_utf8_lossy(data).to_string()
+    } else {
+        let mut s = String::from_utf8_lossy(&data[..max]).to_string();
+        s.truncate(s.len().saturating_sub(3));
+        s.push_str("...");
+        s
+    }
 }
