@@ -27,22 +27,30 @@ fn large_stderr_does_not_deadlock() {
         .output()
         .expect("python3 failed");
     let combined = output.stdout.len() + output.stderr.len();
-    assert!(combined > MEGABYTE, "must produce >1MB output; got {combined} bytes");
+    assert!(
+        combined > MEGABYTE,
+        "must produce >1MB output; got {combined} bytes"
+    );
 }
 
 #[test]
 fn combined_large_output_does_not_deadlock() {
     let output = std::process::Command::new("sh")
         .arg("-c")
-        .arg("python3 -c \"
+        .arg(
+            "python3 -c \"
 import sys
 sys.stdout.buffer.write(b'a' * 600000)
 sys.stderr.buffer.write(b'b' * 600000)
-\"")
+\"",
+        )
         .output()
         .expect("python3 failed");
     let combined = output.stdout.len() + output.stderr.len();
-    assert!(combined > MEGABYTE, "must produce >1MB combined; got {combined}");
+    assert!(
+        combined > MEGABYTE,
+        "must produce >1MB combined; got {combined}"
+    );
     assert!(output.status.success());
 }
 
@@ -60,9 +68,15 @@ fn timeout_kills_process() {
 
     // Kill child process directly.
     #[cfg(unix)]
-    unsafe { let _ = libc::kill(pid as libc::pid_t, libc::SIGKILL); }
+    unsafe {
+        let _ = libc::kill(pid as libc::pid_t, libc::SIGKILL);
+    }
     #[cfg(not(unix))]
-    { let _ = std::process::Command::new("taskkill").args(&["/F", "/PID", &pid.to_string()]).output(); }
+    {
+        let _ = std::process::Command::new("taskkill")
+            .args(&["/F", "/PID", &pid.to_string()])
+            .output();
+    }
 
     let status = child.wait().expect("wait failed");
     assert!(!status.success(), "process must be killed after timeout");
@@ -90,9 +104,15 @@ fn cancellation_stops_process() {
 
     // SIGKILL cannot be trapped.
     #[cfg(unix)]
-    unsafe { let _ = libc::kill(pid as libc::pid_t, libc::SIGKILL); }
+    unsafe {
+        let _ = libc::kill(pid as libc::pid_t, libc::SIGKILL);
+    }
     #[cfg(not(unix))]
-    { let _ = std::process::Command::new("taskkill").args(&["/F", "/PID", &pid.to_string()]).output(); }
+    {
+        let _ = std::process::Command::new("taskkill")
+            .args(&["/F", "/PID", &pid.to_string()])
+            .output();
+    }
 
     let status = child.wait().expect("wait failed");
     assert!(!status.success(), "process must be terminated after cancel");
@@ -105,4 +125,45 @@ fn cancellation_stops_process() {
         .map(|o| o.status.success())
         .unwrap_or(false);
     assert!(!still_running, "process should be gone after cancel");
+}
+
+#[test]
+fn descendant_timeout_cleanup() {
+    let mut child = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("exec sh -c '(sleep 60 & sleep 60 & wait)'")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn failed");
+    let pid = child.id();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    #[cfg(unix)]
+    unsafe {
+        let _ = libc::kill(pid as libc::pid_t, libc::SIGKILL);
+    }
+    let status = child.wait().expect("wait failed");
+    assert!(!status.success(), "process tree must be killed on timeout");
+}
+
+#[test]
+fn descendant_cancellation_cleanup() {
+    let mut child = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("exec sh -c '(sleep 60 & sleep 60 & wait)'")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn failed");
+    let pid = child.id();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    #[cfg(unix)]
+    unsafe {
+        let _ = libc::kill(pid as libc::pid_t, libc::SIGKILL);
+    }
+    let status = child.wait().expect("wait failed");
+    assert!(
+        !status.success(),
+        "process tree must be killed on cancellation"
+    );
 }

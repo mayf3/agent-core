@@ -25,7 +25,13 @@ struct CancelState {
 pub(crate) fn register_cancel(task_id: &str) -> Arc<AtomicBool> {
     let flag = Arc::new(AtomicBool::new(false));
     let mut map = CANCEL_TOKENS.lock().unwrap();
-    map.insert(task_id.to_string(), CancelState { cancelled: flag.clone(), pid: None });
+    map.insert(
+        task_id.to_string(),
+        CancelState {
+            cancelled: flag.clone(),
+            pid: None,
+        },
+    );
     flag
 }
 
@@ -106,21 +112,30 @@ pub(super) fn run_opencode(
     cancel_flag: Option<Arc<AtomicBool>>,
 ) -> Result<TaskOutput, String> {
     let opencode_path = find_opencode().map_err(|e| format!("opencode_not_found: {e}"))?;
-    let resolved_model = if model.is_empty() { "deepseek/deepseek-v4-flash" } else { model };
+    let resolved_model = if model.is_empty() {
+        "deepseek/deepseek-v4-flash"
+    } else {
+        model
+    };
     let prompt = build_prompt(objective);
     let ws_root = workspace_root.to_string();
 
     let mut cmd = std::process::Command::new(&opencode_path);
     cmd.arg("run")
-        .arg("--model").arg(resolved_model)
-        .arg("--format").arg("json")
-        .arg("--dir").arg(&ws_root)
+        .arg("--model")
+        .arg(resolved_model)
+        .arg("--format")
+        .arg("json")
+        .arg("--dir")
+        .arg(&ws_root)
         .arg("--auto")
         .arg(&prompt);
 
     cmd.env_clear();
     for var in &["PATH", "HOME", "TMPDIR", "DEEPSEEK_API_KEY"] {
-        if let Some(v) = std::env::var_os(var) { cmd.env(var, v); }
+        if let Some(v) = std::env::var_os(var) {
+            cmd.env(var, v);
+        }
     }
     // Pass permission config via env var, not .opencode.json file.
     cmd.env("OPENCODE_CONFIG_CONTENT", build_config_json());
@@ -132,8 +147,11 @@ pub(super) fn run_opencode(
         cmd.process_group(0);
     }
 
-    cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
-    let mut child = cmd.spawn().map_err(|e| format!("opencode_spawn_failed: {e}"))?;
+    cmd.stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("opencode_spawn_failed: {e}"))?;
     let pid = child.id();
     set_pid(task_id, pid);
 
@@ -202,17 +220,27 @@ pub(super) fn run_opencode(
         let (commit_sha, changed_files, diff_summary, test_command, test_result, summary) =
             parse_output(&stdout_str, objective);
         Ok(TaskOutput {
-            summary, commit_sha, changed_files, diff_summary, test_command, test_result,
-            stdout: stdout_str, stderr: stderr_str, exit_code, timed_out,
+            summary,
+            commit_sha,
+            changed_files,
+            diff_summary,
+            test_command,
+            test_result,
+            stdout: stdout_str,
+            stderr: stderr_str,
+            exit_code,
+            timed_out,
         })
     } else {
-        Err(format!("opencode_exit_{}: {}", exit_code,
-            truncate_str(&stderr_str.lines().last().unwrap_or(&stderr_str), 300)))
+        Err(format!(
+            "opencode_exit_{}: {}",
+            exit_code,
+            truncate_str(&stderr_str.lines().last().unwrap_or(&stderr_str), 300)
+        ))
     }
 }
 
-fn drain_pipe(mut pipe: impl Read, buf: Arc<Mutex<Vec<u8>>>,
-              done: Arc<AtomicBool>, max: usize) {
+fn drain_pipe(mut pipe: impl Read, buf: Arc<Mutex<Vec<u8>>>, done: Arc<AtomicBool>, max: usize) {
     let mut local = Vec::new();
     let mut tmp = [0u8; 65536];
     loop {
@@ -256,7 +284,11 @@ fn kill_process_group(pid: u32) {
 }
 
 fn find_opencode() -> Result<String, String> {
-    if std::process::Command::new("opencode").arg("--version").output().is_ok() {
+    if std::process::Command::new("opencode")
+        .arg("--version")
+        .output()
+        .is_ok()
+    {
         Ok("opencode".to_string())
     } else {
         Err("opencode binary not found in PATH".into())
@@ -291,7 +323,9 @@ fn parse_output(stdout: &str, objective: &str) -> (String, String, String, Strin
 
     for line in stdout.lines() {
         let trimmed = line.trim();
-        if trimmed.is_empty() { continue; }
+        if trimmed.is_empty() {
+            continue;
+        }
         if let Ok(event) = serde_json::from_str::<serde_json::Value>(trimmed) {
             if let Some(et) = event.get("type").and_then(|v| v.as_str()) {
                 match et {
@@ -302,7 +336,9 @@ fn parse_output(stdout: &str, objective: &str) -> (String, String, String, Strin
                     }
                     "file_change" | "edit" | "write" => {
                         if let Some(p) = event.get("path").and_then(|v| v.as_str()) {
-                            if !changed_files.is_empty() { changed_files.push_str(", "); }
+                            if !changed_files.is_empty() {
+                                changed_files.push_str(", ");
+                            }
                             changed_files.push_str(p);
                         }
                     }
@@ -322,7 +358,10 @@ fn parse_output(stdout: &str, objective: &str) -> (String, String, String, Strin
                     "bash" | "tool_use" => {
                         if let Some(cmd_name) = event.pointer("/tool").and_then(|v| v.as_str()) {
                             if cmd_name == "bash" {
-                                if let Some(input) = event.pointer("/state/input/command").and_then(|v| v.as_str()) {
+                                if let Some(input) = event
+                                    .pointer("/state/input/command")
+                                    .and_then(|v| v.as_str())
+                                {
                                     test_command = truncate_str(input, 200).to_string();
                                 }
                             }
@@ -338,8 +377,17 @@ fn parse_output(stdout: &str, objective: &str) -> (String, String, String, Strin
             }
         }
     }
-    if changed_files.is_empty() { changed_files = "unknown".to_string(); }
-    (commit_sha, changed_files, diff_summary, test_command, test_result, summary)
+    if changed_files.is_empty() {
+        changed_files = "unknown".to_string();
+    }
+    (
+        commit_sha,
+        changed_files,
+        diff_summary,
+        test_command,
+        test_result,
+        summary,
+    )
 }
 
 #[cfg(test)]
@@ -388,8 +436,10 @@ mod tests {
         // Each entry must be allow or deny
         for (_k, v) in perm {
             let val = v.as_str().unwrap();
-            assert!(val == "allow" || val == "deny" || val == "ask",
-                    "permission value must be allow/deny/ask, got: {val}");
+            assert!(
+                val == "allow" || val == "deny" || val == "ask",
+                "permission value must be allow/deny/ask, got: {val}"
+            );
         }
     }
 }

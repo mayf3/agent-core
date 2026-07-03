@@ -158,14 +158,18 @@ fn execute_task(
 ) {
     // If queued task was cancelled before starting, don't run.
     if let Some(ref flag) = cancel_flag {
-        if flag.load(Ordering::SeqCst) { return; }
+        if flag.load(Ordering::SeqCst) {
+            return;
+        }
     }
 
     // Transition to Running.
     {
         let mut store = tasks().lock().unwrap();
         if let Some(t) = store.get_mut(task_id) {
-            if t.status != TaskStatus::Queued { return; }
+            if t.status != TaskStatus::Queued {
+                return;
+            }
             t.status = TaskStatus::Running;
             t.updated_at = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -175,7 +179,9 @@ fn execute_task(
     }
 
     let result = match backend {
-        "opencode" => opencode_backend::run_opencode(task_id, workspace_root, objective, model, cancel_flag),
+        "opencode" => {
+            opencode_backend::run_opencode(task_id, workspace_root, objective, model, cancel_flag)
+        }
         _ => run_fake(objective),
     };
 
