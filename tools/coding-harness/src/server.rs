@@ -25,12 +25,12 @@ fn handle(mut stream: TcpStream, config: &CodingConfig) {
         let mut chunk = [0u8; 1024];
         let n = match stream.read(&mut chunk) {
             Ok(0) => {
-                let _ = respond(&mut stream, 400, "connection_closed");
+                let _ = respond_error(&mut stream, 400, "connection_closed");
                 return;
             }
             Ok(n) => n,
             Err(_) => {
-                let _ = respond(&mut stream, 400, "read_error");
+                let _ = respond_error(&mut stream, 400, "read_error");
                 return;
             }
         };
@@ -39,7 +39,7 @@ fn handle(mut stream: TcpStream, config: &CodingConfig) {
             break pos;
         }
         if buf.len() > 65536 {
-            let _ = respond(&mut stream, 413, "headers_too_large");
+            let _ = respond_error(&mut stream, 413, "headers_too_large");
             return;
         }
     };
@@ -48,20 +48,20 @@ fn handle(mut stream: TcpStream, config: &CodingConfig) {
     let content_length = match parse_cl(&headers) {
         Ok(Some(n)) => n,
         Ok(None) => {
-            let _ = respond(&mut stream, 400, "missing_content_length");
+            let _ = respond_error(&mut stream, 400, "missing_content_length");
             return;
         }
         Err(e) => {
-            let _ = respond(&mut stream, 400, e);
+            let _ = respond_error(&mut stream, 400, e);
             return;
         }
     };
     if content_length > MAX_BODY {
-        let _ = respond(&mut stream, 413, "body_too_large");
+        let _ = respond_error(&mut stream, 413, "body_too_large");
         return;
     }
     if has_chunked(&headers) {
-        let _ = respond(&mut stream, 400, "chunked_not_supported");
+        let _ = respond_error(&mut stream, 400, "chunked_not_supported");
         return;
     }
 
@@ -71,12 +71,12 @@ fn handle(mut stream: TcpStream, config: &CodingConfig) {
         let mut chunk = vec![0u8; (content_length - body.len()).min(65536)];
         let n = match stream.read(&mut chunk) {
             Ok(0) => {
-                let _ = respond(&mut stream, 400, "body_truncated");
+                let _ = respond_error(&mut stream, 400, "body_truncated");
                 return;
             }
             Ok(n) => n,
             Err(_) => {
-                let _ = respond(&mut stream, 400, "body_read_error");
+                let _ = respond_error(&mut stream, 400, "body_read_error");
                 return;
             }
         };
@@ -86,14 +86,14 @@ fn handle(mut stream: TcpStream, config: &CodingConfig) {
     let body_str = match String::from_utf8(body) {
         Ok(s) => s,
         Err(_) => {
-            let _ = respond(&mut stream, 400, "invalid_utf8");
+            let _ = respond_error(&mut stream, 400, "invalid_utf8");
             return;
         }
     };
     let parsed: Value = match serde_json::from_str(&body_str) {
         Ok(v) => v,
         Err(_) => {
-            let _ = respond(&mut stream, 400, "invalid_json");
+            let _ = respond_error(&mut stream, 400, "invalid_json");
             return;
         }
     };
@@ -104,7 +104,7 @@ fn handle(mut stream: TcpStream, config: &CodingConfig) {
         .unwrap_or("")
         != "external-harness-v1"
     {
-        let _ = respond(&mut stream, 400, "unsupported_protocol");
+        let _ = respond_error(&mut stream, 400, "unsupported_protocol");
         return;
     }
 
@@ -113,9 +113,32 @@ fn handle(mut stream: TcpStream, config: &CodingConfig) {
         .and_then(|v| v.as_str())
         .unwrap_or("");
     let args = parsed.get("arguments").cloned().unwrap_or(json!({}));
-    let resp_body = dispatch(config, op, &args);
-    let body_str = serde_json::to_string(&resp_body).unwrap_or_default();
-    let _ = respond(&mut stream, 200, &body_str);
+
+    // Dispatch to handler, get structured response (already has ok/error_code).
+    let handler_result = dispatch(config, op, &args);
+    let body_bytes = serde_json::to_vec(&handler_result).unwrap_or_default();
+
+    // Write HTTP 200 with the handler response as body.
+    let reason = "OK";
+    let resp = format!(
+        "HTTP/1.1 200 {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body_bytes.len()
+    );
+    let _ = stream.write_all(resp.as_bytes());
+    let _ = stream.write_all(&body_bytes);
+}
+
+/// Send a service-level error response (protocol errors, not operation errors).
+fn respond_error(stream: &mut TcpStream, status: u16, error_code: &str) {
+    let body = json!({"protocol_version":"external-harness-v1","ok":false,"error_code":error_code});
+    let body_bytes = serde_json::to_vec(&body).unwrap_or_default();
+    let reason = if status == 200 { "OK" } else { "Error" };
+    let resp = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body_bytes.len()
+    );
+    let _ = stream.write_all(resp.as_bytes());
+    let _ = stream.write_all(&body_bytes);
 }
 
 fn dispatch(config: &CodingConfig, operation: &str, args: &Value) -> Value {
@@ -228,15 +251,6 @@ fn has_chunked(headers: &str) -> bool {
         .any(|(n, v)| {
             n.eq_ignore_ascii_case("transfer-encoding") && v.trim().eq_ignore_ascii_case("chunked")
         })
-}
-
-fn respond(stream: &mut TcpStream, status: u16, error_code: &str) -> std::io::Result<()> {
-    let body = format!(
-        r#"{{"protocol_version":"external-harness-v1","ok":false,"error_code":"{error_code}"}}"#
-    );
-    let reason = if status == 200 { "OK" } else { "Error" };
-    let resp = format!("HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
-    stream.write_all(resp.as_bytes())
 }
 
 fn err_value(code: &str) -> Value {
