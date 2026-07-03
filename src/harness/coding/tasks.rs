@@ -2,16 +2,17 @@
 //!
 //! Backend modes:
 //! - "fake" (default for CI/testing): state machine without real subprocess.
-//! - "zcode": spawns zcode subprocess with workspace scoping.
+//! - "zcode": spawns zcode subprocess (planned — binary not present).
+//! - "opencode": spawns `opencode run` with DeepSeek-V4-Flash.
 //!
 //! State machine: queued → running → succeeded | failed | cancelled.
-//! stdoud/stderr are captured and bounded.
+//! stdout/stderr are captured and bounded.
 
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 static TASK_SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -29,8 +30,11 @@ pub enum TaskStatus {
 struct Task {
     id: String,
     workspace_id: String,
+    workspace_root: String,
     objective: String,
+    acceptance_criteria: String,
     backend: String,
+    model: String,
     status: TaskStatus,
     summary: String,
     commit_sha: String,
@@ -39,6 +43,8 @@ struct Task {
     failure_reason: String,
     stdout_bounded: String,
     stderr_bounded: String,
+    exit_code: i32,
+    timed_out: bool,
     created_at: u64,
     updated_at: u64,
 }
@@ -50,13 +56,16 @@ fn tasks() -> &'static Mutex<HashMap<String, Task>> {
 }
 
 /// Submit a new task. Returns task_id and queued status.
-/// `backend` can be "zcode" or "fake". When "zcode", the workspace must
-/// have zcode permission (caller must check this before calling).
+/// `backend` can be "fake", "zcode", or "opencode".
+/// `workspace_root` is required for opencode backend (used as --dir).
+/// `model` is the provider/model for opencode backend.
 pub fn submit_task(
     workspace_id: &str,
     objective: &str,
     acceptance_criteria: &str,
     backend: &str,
+    workspace_root: Option<&str>,
+    model: Option<&str>,
 ) -> Value {
     let seq = TASK_SEQ.fetch_add(1, Ordering::Relaxed);
     let id = format!("task_{seq:x}");
@@ -65,17 +74,21 @@ pub fn submit_task(
         .unwrap_or_default()
         .as_secs();
 
-    let (backend_used, initial_status) = match backend {
-        "zcode" => ("zcode", TaskStatus::Queued),
-        _ => ("fake", TaskStatus::Queued),
+    let backend_used = match backend {
+        "zcode" => "zcode",
+        "opencode" => "opencode",
+        _ => "fake",
     };
 
     let task = Task {
         id: id.clone(),
         workspace_id: workspace_id.to_string(),
+        workspace_root: workspace_root.unwrap_or(".").to_string(),
         objective: objective.to_string(),
+        acceptance_criteria: acceptance_criteria.to_string(),
         backend: backend_used.to_string(),
-        status: initial_status,
+        model: model.unwrap_or("").to_string(),
+        status: TaskStatus::Queued,
         summary: String::new(),
         commit_sha: String::new(),
         diff_summary: String::new(),
@@ -83,6 +96,8 @@ pub fn submit_task(
         failure_reason: String::new(),
         stdout_bounded: String::new(),
         stderr_bounded: String::new(),
+        exit_code: -1,
+        timed_out: false,
         created_at: now,
         updated_at: now,
     };
@@ -91,11 +106,13 @@ pub fn submit_task(
     // Spawn async execution thread.
     let tid = id.clone();
     let ws = workspace_id.to_string();
+    let wr = workspace_root.unwrap_or(".").to_string();
     let obj = objective.to_string();
     let acc = acceptance_criteria.to_string();
     let bk = backend_used.to_string();
+    let mdl = model.unwrap_or("").to_string();
     std::thread::spawn(move || {
-        execute_task(&tid, &ws, &obj, &acc, &bk);
+        execute_task(&tid, &ws, &wr, &obj, &acc, &bk, &mdl);
     });
 
     ok(json!({"task_id": id, "status": "queued", "backend": backend_used, "created_at": now}))
@@ -105,9 +122,11 @@ pub fn submit_task(
 fn execute_task(
     task_id: &str,
     _workspace_id: &str,
+    workspace_root: &str,
     objective: &str,
     acceptance_criteria: &str,
     backend: &str,
+    model: &str,
 ) {
     // Transition to Running.
     {
@@ -130,6 +149,7 @@ fn execute_task(
     }
 
     let result = match backend {
+        "opencode" => run_opencode(workspace_root, objective, acceptance_criteria, model),
         "zcode" => run_zcode(objective, acceptance_criteria),
         _ => run_fake(objective, acceptance_criteria),
     };
@@ -138,19 +158,20 @@ fn execute_task(
     if let Some(t) = store.get_mut(task_id) {
         match t.status {
             TaskStatus::Cancelled => {
-                // Was cancelled during execution; don't overwrite status.
                 return;
             }
             TaskStatus::Running => {
                 match result {
                     Ok(out) => {
                         t.status = TaskStatus::Succeeded;
+                        t.exit_code = out.exit_code;
                         t.summary = out.summary;
                         t.commit_sha = out.commit_sha;
                         t.diff_summary = out.diff_summary;
                         t.test_result = out.test_result;
                         t.stdout_bounded = truncate_str(&out.stdout, 100_000);
                         t.stderr_bounded = truncate_str(&out.stderr, 100_000);
+                        t.timed_out = out.timed_out;
                     }
                     Err(e) => {
                         t.status = TaskStatus::Failed(e.clone());
@@ -167,19 +188,20 @@ fn execute_task(
     }
 }
 
-struct TaskOutput {
-    summary: String,
-    commit_sha: String,
-    diff_summary: String,
-    test_result: String,
-    stdout: String,
-    stderr: String,
+pub(crate) struct TaskOutput {
+    pub(crate) summary: String,
+    pub(crate) commit_sha: String,
+    pub(crate) diff_summary: String,
+    pub(crate) test_result: String,
+    pub(crate) stdout: String,
+    pub(crate) stderr: String,
+    pub(crate) exit_code: i32,
+    pub(crate) timed_out: bool,
 }
 
 /// Fake backend: simulates a successful task execution for CI/testing.
 fn run_fake(objective: &str, acceptance_criteria: &str) -> Result<TaskOutput, String> {
-    // Simulate a brief delay so the state machine can be observed.
-    std::thread::sleep(std::time::Duration::from_millis(10));
+    std::thread::sleep(Duration::from_millis(10));
     Ok(TaskOutput {
         summary: format!(
             "fake: completed objective '{}'",
@@ -193,13 +215,14 @@ fn run_fake(objective: &str, acceptance_criteria: &str) -> Result<TaskOutput, St
         ),
         stdout: "fake: task completed successfully\n".into(),
         stderr: String::new(),
+        exit_code: 0,
+        timed_out: false,
     })
 }
 
-/// Real zcode backend: spawns a zcode subprocess.
+/// ZCode backend (planned): spawns a zcode subprocess.
 fn run_zcode(objective: &str, acceptance_criteria: &str) -> Result<TaskOutput, String> {
     let zcode_path = find_zcode().map_err(|e| format!("zcode_not_found: {e}"))?;
-
     let mut cmd = std::process::Command::new(&zcode_path);
     cmd.arg("--objective")
         .arg(objective)
@@ -214,15 +237,12 @@ fn run_zcode(objective: &str, acceptance_criteria: &str) -> Result<TaskOutput, S
     }
     cmd.stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-
     let output = cmd
         .output()
         .map_err(|e| format!("zcode_spawn_failed: {e}"))?;
-
     let exit_code = output.status.code().unwrap_or(-1);
     let stdout_str = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr_str = String::from_utf8_lossy(&output.stderr).to_string();
-
     if exit_code == 0 {
         Ok(TaskOutput {
             summary: format!(
@@ -239,6 +259,8 @@ fn run_zcode(objective: &str, acceptance_criteria: &str) -> Result<TaskOutput, S
             ),
             stdout: stdout_str,
             stderr: stderr_str,
+            exit_code,
+            timed_out: false,
         })
     } else {
         Err(format!(
@@ -250,7 +272,6 @@ fn run_zcode(objective: &str, acceptance_criteria: &str) -> Result<TaskOutput, S
 }
 
 fn find_zcode() -> Result<String, String> {
-    // Check common locations.
     for path in &["zcode", "/usr/local/bin/zcode", "/opt/homebrew/bin/zcode"] {
         if std::process::Command::new(path)
             .arg("--version")
@@ -261,6 +282,20 @@ fn find_zcode() -> Result<String, String> {
         }
     }
     Err("zcode binary not found in PATH or common locations".into())
+}
+
+fn run_opencode(
+    workspace_root: &str,
+    objective: &str,
+    acceptance_criteria: &str,
+    model: &str,
+) -> Result<TaskOutput, String> {
+    crate::harness::coding::opencode_backend::run_opencode(
+        workspace_root,
+        objective,
+        acceptance_criteria,
+        model,
+    )
 }
 
 fn extract_sha_from_output(output: &str) -> String {
@@ -276,7 +311,7 @@ fn extract_sha_from_output(output: &str) -> String {
     String::new()
 }
 
-fn truncate_str(s: &str, max: usize) -> String {
+pub(crate) fn truncate_str(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {
@@ -304,12 +339,15 @@ pub fn get_status(task_id: &str) -> Value {
                 "task_id": t.id,
                 "status": status_str,
                 "backend": t.backend,
+                "model": t.model,
                 "created_at": t.created_at,
                 "updated_at": t.updated_at,
                 "summary": t.summary,
                 "commit_sha": t.commit_sha,
                 "diff_summary": t.diff_summary,
                 "test_result": t.test_result,
+                "exit_code": t.exit_code,
+                "timed_out": t.timed_out,
                 "stdout_truncated": t.stdout_bounded,
                 "stderr_truncated": t.stderr_bounded,
             });
@@ -355,68 +393,5 @@ fn err(c: &str) -> Value {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn fake_backend_full_state_machine() {
-        // Submit → queued
-        let resp = submit_task("ws1", "test objective", "must pass", "fake");
-        let tid = resp["result"]["task_id"].as_str().unwrap().to_string();
-        assert_eq!(resp["result"]["status"], "queued");
-        assert_eq!(resp["result"]["backend"], "fake");
-
-        // Wait briefly for execution
-        std::thread::sleep(std::time::Duration::from_millis(50));
-
-        // Status → succeeded
-        let s = get_status(&tid);
-        assert_eq!(
-            s["result"]["status"], "succeeded",
-            "fake backend should reach succeeded; got: {s}"
-        );
-        assert!(s["result"]["summary"]
-            .as_str()
-            .unwrap_or("")
-            .contains("fake"));
-        assert!(s["result"]["commit_sha"]
-            .as_str()
-            .unwrap_or("")
-            .contains("fake_sha"));
-    }
-
-    #[test]
-    fn task_cancel_before_execution() {
-        let resp = submit_task("ws1", "cancellable objective", "", "fake");
-        let tid = resp["result"]["task_id"].as_str().unwrap().to_string();
-        // Cancel immediately (may still be Queued).
-        let cancel_resp = cancel_task(&tid);
-        assert_eq!(cancel_resp["result"]["status"], "cancelled");
-
-        let s = get_status(&tid);
-        assert_eq!(s["result"]["status"], "cancelled");
-    }
-
-    #[test]
-    fn task_not_found() {
-        let s = get_status("nonexistent");
-        assert_eq!(s["ok"], false);
-        assert_eq!(s["error_code"], "task_not_found");
-    }
-
-    #[test]
-    fn task_submit_includes_acceptance_criteria() {
-        let resp = submit_task("ws1", "build", "test passes", "fake");
-        let tid = resp["result"]["task_id"].as_str().unwrap().to_string();
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        let s = get_status(&tid);
-        assert_eq!(s["result"]["status"], "succeeded");
-        assert!(
-            s["result"]["test_result"]
-                .as_str()
-                .unwrap_or("")
-                .contains("test passes"),
-            "test_result should include acceptance criteria text"
-        );
-    }
-}
+#[path = "tasks_tests.rs"]
+mod tests;

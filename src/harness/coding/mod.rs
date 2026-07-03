@@ -5,6 +5,7 @@
 
 pub mod capability;
 pub mod config;
+pub mod opencode_backend;
 pub mod paths;
 pub mod tasks;
 pub mod workspace;

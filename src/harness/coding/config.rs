@@ -1,5 +1,5 @@
 //! Workspace configuration with per-workspace permissions.
-//! Supports: read, write, exec, zcode, network, shell.
+//! Supports: read, write, exec, zcode, opencode, network, shell.
 //! Defaults: network=false, shell=false.
 
 use std::collections::HashMap;
@@ -11,6 +11,7 @@ pub struct WorkspacePermission {
     pub write: bool,
     pub exec: bool,
     pub zcode: bool,
+    pub opencode: bool,
     pub network: bool,
     pub shell: bool,
 }
@@ -22,6 +23,7 @@ impl Default for WorkspacePermission {
             write: false,
             exec: false,
             zcode: false,
+            opencode: false,
             network: false,
             shell: false,
         }
@@ -69,6 +71,10 @@ impl CodingConfig {
                     write: cfg.get("write").and_then(|v| v.as_bool()).unwrap_or(false),
                     exec: cfg.get("exec").and_then(|v| v.as_bool()).unwrap_or(false),
                     zcode: cfg.get("zcode").and_then(|v| v.as_bool()).unwrap_or(false),
+                    opencode: cfg
+                        .get("opencode")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
                     network: cfg
                         .get("network")
                         .and_then(|v| v.as_bool())

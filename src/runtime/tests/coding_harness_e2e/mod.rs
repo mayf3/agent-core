@@ -7,6 +7,7 @@
 
 mod calculator_e2e;
 mod helpers;
+mod opencode_smoke;
 
 use crate::config::KernelConfig;
 use anyhow::Result;
@@ -139,7 +140,14 @@ fn coding_harness_task_state_machine_e2e() -> Result<()> {
     use crate::harness::coding::tasks;
 
     // Submit a fake-backend task.
-    let submit_resp = tasks::submit_task("ws1", "build project", "build must pass", "fake");
+    let submit_resp = tasks::submit_task(
+        "ws1",
+        "build project",
+        "build must pass",
+        "fake",
+        Some("."),
+        None,
+    );
     assert_eq!(submit_resp["result"]["status"], "queued");
     let tid = submit_resp["result"]["task_id"]
         .as_str()
