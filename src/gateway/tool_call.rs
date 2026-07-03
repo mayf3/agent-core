@@ -9,7 +9,7 @@
 
 use crate::domain::{InvocationId, InvocationIntent, RunId};
 use crate::llm::ToolCall;
-use crate::registry::snapshot::{RegistrySnapshot, Risk};
+use crate::registry::snapshot::RegistrySnapshot;
 
 /// Typed, bounded reasons for rejecting a model tool call before capability
 /// execution. Messages never include provider input or infrastructure errors.
@@ -61,9 +61,12 @@ impl ToolRejection {
 /// [`InvocationIntent`]. Returns a typed [`ToolRejection`] (without executing
 /// anything) when:
 /// - the operation is not in the provided registry snapshot (`UnknownOperation`);
-/// - the operation is `Risk::Write` (`OperationNotAllowed`) — the MVP
-///   restricts this path to `ReadOnly` only;
 /// - the arguments are not a JSON object (`MalformedArguments`).
+///
+/// Write operations are allowed; Gateway approval provides the security
+/// boundary. Previously the MVP restricted this path to ReadOnly only, but
+/// the harness hotload mechanism (PR #162/#166) now registers Write
+/// operations that need inline execution through the same tool-call path.
 ///
 /// The idempotency key is scoped by trusted call position to make provider
 /// `tool_call.id` collisions impossible within and across turns:
@@ -86,11 +89,8 @@ pub fn validate_tool_call(
     tool_index: usize,
     snapshot: &RegistrySnapshot,
 ) -> Result<InvocationIntent, ToolRejection> {
-    let Some(spec) = snapshot.lookup(&call.operation) else {
+    if snapshot.lookup(&call.operation).is_none() {
         return Err(ToolRejection::UnknownOperation);
-    };
-    if spec.risk != Risk::ReadOnly {
-        return Err(ToolRejection::OperationNotAllowed);
     }
     if !call.arguments.is_object() {
         return Err(ToolRejection::MalformedArguments);
@@ -228,11 +228,13 @@ mod tests {
     }
 
     #[test]
-    fn rejects_write_operation_typed() {
-        let err = validate_tool_call(&call("feishu.send_message"), &RunId::new(), 0, 0, &snap())
-            .unwrap_err();
-        assert_eq!(err, ToolRejection::OperationNotAllowed);
-        assert_eq!(err.category(), "operation_not_allowed");
+    fn write_operations_are_allowed_through_tool_call() {
+        // Write operations are now allowed; Gateway approval provides the
+        // security boundary. feishu.send_message is Write but the tool call
+        // path no longer blocks it.
+        let intent = validate_tool_call(&call("feishu.send_message"), &RunId::new(), 0, 0, &snap())
+            .expect("Write operations should be allowed");
+        assert_eq!(intent.operation, "feishu.send_message");
     }
 
     #[test]

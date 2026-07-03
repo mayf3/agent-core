@@ -255,9 +255,12 @@ impl ExecutionProfile {
             if name.is_empty() {
                 continue;
             }
-            if lookup(name).is_none() {
-                continue;
-            }
+            // NOTE: the lookup check against the static CATALOG was removed
+            // because dynamically-registered external harness operations
+            // (e.g. external.workspace_list) are not in CATALOG but exist in
+            // the RegistrySnapshot. The Gateway's policy pipeline validates
+            // against the Run's pinned snapshot, so dropping non-CATALOG ops
+            // here would prevent granting legitimate external operations.
             let already = self.grants.iter().any(|g| &g.operation == name);
             if !already {
                 self.grants.push(CapabilityGrant {
@@ -450,19 +453,22 @@ mod tests {
     }
 
     #[test]
-    fn with_extra_drops_unknown_operations() {
-        // Operations not in the catalog cannot be approved by the gateway
-        // allowlist, so they are dropped from the grant set rather than
-        // appearing as grants that will always be denied.
+    fn with_extra_includes_non_catalog_operations() {
+        // Operations not in the static CATALOG are now included because
+        // dynamically-registered external harness operations need grants.
+        // The Gateway's policy pipeline validates against the Run's pinned
+        // registry snapshot for the final authorization boundary.
         let extra = vec![
             "shell.exec".to_string(),
             "".to_string(),
             STDOUT_SEND_TEXT.to_string(), // duplicate of baseline → dropped
         ];
         let profile = ExecutionProfile::for_channel(ChannelKind::Cli).with_extra(&extra);
-        // Baseline is 2 (stdout + recall); the extra STDOUT_SEND_TEXT is a
-        // duplicate (dropped), unknown/empty dropped → still 2.
-        assert_eq!(profile.grants.len(), 2);
-        assert_eq!(profile.grants[0].operation, STDOUT_SEND_TEXT);
+        // Baseline is 2 (stdout + recall); "shell.exec" added (not in CATALOG
+        // but no longer dropped); STDOUT_SEND_TEXT is a duplicate (dropped);
+        // empty string dropped → 3.
+        assert_eq!(profile.grants.len(), 3);
+        assert!(profile.grants.iter().any(|g| g.operation == "shell.exec"));
+        assert!(profile.grants.iter().any(|g| g.operation == STDOUT_SEND_TEXT));
     }
 }
