@@ -17,6 +17,7 @@ dependencies = [
  "chrono",
  "ctrlc",
  "hex",
+ "libc",
  "rusqlite",
  "serde",
  "serde_json",

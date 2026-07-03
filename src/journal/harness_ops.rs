@@ -1,15 +1,13 @@
 //! Harness manifest and registry activation operations on JournalStore.
-//! These methods use the same SQLite connection as the rest of the Journal,
-//! sharing its mutex. All activation transactions use CAS (compare-and-swap)
-//! to prevent concurrent overwrites.
+//! All activation transactions use CAS (compare-and-swap) to prevent races.
 
 use crate::domain::*;
-use crate::harness::control::{ApprovedHarnessChange, RegistryActivationResult};
+
 use crate::harness::manifest::HarnessManifest;
-use crate::registry::snapshot::{BindingKind, OperationSpec, Risk};
+
 use anyhow::{anyhow, bail, Result};
 use chrono::Utc;
-use rusqlite::params;
+use rusqlite::{params, Transaction};
 
 impl super::JournalStore {
     /// Register a new harness manifest. Idempotent: same content produces the
@@ -114,7 +112,196 @@ impl super::JournalStore {
         Ok(manifest_id.clone())
     }
 
-    /// Load a harness manifest by ID.
+    /// Register a harness manifest inside an existing transaction. Only the
+    /// INSERT and the HarnessManifestRegistered event happen in the tx;
+    /// validation must be performed by the caller before calling this.
+    /// Returns the manifest_id.
+    pub fn register_harness_manifest_in_tx(
+        &self,
+        tx: &Transaction<'_>,
+        manifest: &HarnessManifest,
+    ) -> Result<String> {
+        let manifest_id = &manifest.manifest_id;
+        let content_digest = manifest.compute_manifest_id()?;
+
+        // Read the full persisted manifest row using OptionalExtension.
+        use rusqlite::OptionalExtension;
+        let existing_row: Option<(
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            bool,
+            String,
+            String,
+        )> = tx
+            .query_row(
+                "SELECT manifest_id, harness_id, artifact_digest, protocol_version, endpoint,
+                        operation_name, description, input_schema_json, output_schema_json,
+                        idempotent, created_at, canonical_digest
+                 FROM harness_manifests WHERE manifest_id = ?1",
+                params![manifest_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                        row.get::<_, i64>(9)? != 0,
+                        row.get(10)?,
+                        row.get(11)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|e| anyhow::anyhow!("manifest_lookup_failed:{e}"))?;
+
+        if let Some((
+            stored_mid,
+            e_hid,
+            e_art,
+            e_proto,
+            e_ep,
+            e_op,
+            e_desc,
+            e_inp,
+            e_out,
+            e_idem,
+            e_ts,
+            e_dig,
+        )) = existing_row
+        {
+            // — never silently treated as "not found" or "reusable".
+            let e_created_at = chrono::DateTime::parse_from_rfc3339(&e_ts)
+                .map_err(|_| anyhow!("corrupt_persisted_created_at:{manifest_id}"))?
+                .with_timezone(&chrono::Utc);
+            let e_input_schema: serde_json::Value = serde_json::from_str(&e_inp)
+                .map_err(|_| anyhow!("corrupt_persisted_input_schema:{manifest_id}"))?;
+            let e_output_schema: serde_json::Value = serde_json::from_str(&e_out)
+                .map_err(|_| anyhow!("corrupt_persisted_output_schema:{manifest_id}"))?;
+
+            let persisted_manifest = HarnessManifest {
+                manifest_id: stored_mid.clone(),
+                harness_id: e_hid,
+                artifact_digest: e_art,
+                protocol_version: e_proto,
+                endpoint: e_ep,
+                operation_name: e_op,
+                description: e_desc,
+                input_schema: e_input_schema,
+                output_schema: e_output_schema,
+                idempotent: e_idem,
+                created_at: e_created_at,
+            };
+
+            // Verify four digest/ID invariants before structural comparison.
+            let recomputed_id = persisted_manifest
+                .compute_manifest_id()
+                .map_err(|_| anyhow!("manifest_digest_recompute_failed:{manifest_id}"))?;
+
+            // Invariant 1: stored canonical_digest == recomputed from persisted data
+            if recomputed_id != e_dig {
+                bail!("corrupt_persisted_canonical_digest:{manifest_id}: stored={e_dig} recomputed={recomputed_id}");
+            }
+            // Invariant 2: stored manifest_id == recomputed (persisted data is self-consistent)
+            if stored_mid != recomputed_id {
+                bail!("corrupt_persisted_manifest_id:{manifest_id}: stored={stored_mid} recomputed={recomputed_id}");
+            }
+            // Invariant 3: incoming canonical digest == stored canonical_digest
+            if content_digest != e_dig {
+                bail!("manifest_identity_conflict: incoming digest {content_digest} != stored {e_dig}");
+            }
+            // Invariant 4: incoming manifest_id == stored manifest_id
+            if manifest.manifest_id != stored_mid {
+                bail!(
+                    "manifest_identity_conflict: incoming id {} != stored {stored_mid}",
+                    manifest.manifest_id
+                );
+            }
+
+            // Full structural comparison: every immutable field must be identical.
+            if persisted_manifest.harness_id != manifest.harness_id
+                || persisted_manifest.artifact_digest != manifest.artifact_digest
+                || persisted_manifest.protocol_version != manifest.protocol_version
+                || persisted_manifest.endpoint != manifest.endpoint
+                || persisted_manifest.operation_name != manifest.operation_name
+                || persisted_manifest.description != manifest.description
+                || persisted_manifest.input_schema != manifest.input_schema
+                || persisted_manifest.output_schema != manifest.output_schema
+                || persisted_manifest.idempotent != manifest.idempotent
+                || persisted_manifest.created_at != manifest.created_at
+            {
+                bail!("manifest_identity_conflict: manifest_id {manifest_id} already registered with different content");
+            }
+
+            // Full structural match — safe idempotent reuse.
+            return Ok(manifest_id.clone());
+        }
+
+        // Also check for duplicate operation_name using OptionalExtension.
+        let op_exists: Option<String> = tx
+            .query_row(
+                "SELECT manifest_id FROM harness_manifests WHERE operation_name = ?1",
+                params![&manifest.operation_name],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| anyhow::anyhow!("manifest_operation_lookup_failed:{e}"))?;
+        if let Some(existing_mid) = op_exists {
+            bail!("manifest_operation_conflict: operation {} already registered by manifest {existing_mid}", manifest.operation_name);
+        }
+
+        tx.execute(
+            "INSERT INTO harness_manifests
+             (manifest_id, harness_id, artifact_digest, protocol_version, endpoint,
+              operation_name, description, input_schema_json, output_schema_json,
+              idempotent, created_at, canonical_digest)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                manifest_id,
+                &manifest.harness_id,
+                &manifest.artifact_digest,
+                &manifest.protocol_version,
+                &manifest.endpoint,
+                &manifest.operation_name,
+                &manifest.description,
+                serde_json::to_string(&manifest.input_schema)?,
+                serde_json::to_string(&manifest.output_schema)?,
+                manifest.idempotent as i64,
+                manifest.created_at.to_rfc3339(),
+                &content_digest,
+            ],
+        )?;
+        // Record HarnessManifestRegistered in the same transaction.
+        let payload = serde_json::json!({
+            "manifest_id": manifest_id,
+            "harness_id": manifest.harness_id,
+            "artifact_digest": manifest.artifact_digest,
+            "operation_name": manifest.operation_name,
+            "protocol_version": manifest.protocol_version,
+        });
+        super::queue::append_event_tx(
+            tx,
+            JournalEventKind::HarnessManifestRegistered,
+            None,
+            None,
+            Some(manifest_id),
+            payload,
+        )?;
+        Ok(manifest_id.clone())
+    }
+
+    /// Load manifest by ID.
     pub fn load_harness_manifest(&self, manifest_id: &str) -> Result<Option<HarnessManifest>> {
         let conn = self
             .conn
@@ -199,242 +386,10 @@ impl super::JournalStore {
         }
     }
 
-    /// Enable a harness: create a new snapshot with the external operation,
+    /// Enable or disable a harness: create new snapshot + CAS-activate + journal event.
     /// atomically update the active registry state, and record a journal event.
     ///
-    /// Uses CAS on `expected_current_snapshot_id` and `version` to prevent
     /// concurrent activation races.
-    pub fn enable_harness(
-        &self,
-        approved: &ApprovedHarnessChange,
-    ) -> Result<RegistryActivationResult> {
-        let manifest_id = &approved.intent.manifest_id;
-        let expected_snapshot_id = &approved.intent.expected_snapshot_id;
-
-        // Load the manifest.
-        let manifest = self
-            .load_harness_manifest(manifest_id)?
-            .ok_or_else(|| anyhow!("manifest not found: {manifest_id}"))?;
-
-        // Load the current snapshot.
-        let current = self.current_registry_snapshot_id()?;
-        if &current != expected_snapshot_id {
-            bail!("snapshot_conflict: expected {expected_snapshot_id}, current {current}");
-        }
-
-        let current_snap = self.load_registry_snapshot(&current)?;
-
-        // Check if the operation is already in the current snapshot.
-        if current_snap.lookup(&manifest.operation_name).is_some() {
-            // Operation already present — idempotent, return current.
-            return Ok(RegistryActivationResult {
-                previous_snapshot_id: current.clone(),
-                active_snapshot_id: current,
-                changed: false,
-            });
-        }
-
-        // Build new spec list: existing ops + new external op.
-        let mut new_specs: Vec<OperationSpec> = current_snap.operations.clone();
-        new_specs.push(OperationSpec {
-            name: manifest.operation_name.clone(),
-            risk: Risk::ReadOnly,
-            description: manifest.description.clone(),
-            parameters: manifest.input_schema.clone(),
-            idempotent: manifest.idempotent,
-            binding_kind: BindingKind::External,
-            binding_key: manifest_id.clone(),
-        });
-
-        // Compute new snapshot ID.
-        let new_snapshot = self.create_registry_snapshot(new_specs)?;
-        let new_snapshot_id = new_snapshot.snapshot_id.clone();
-
-        // Atomically: update registry_state and record journal event.
-        self.activate_registry_snapshot_atomic(
-            &new_snapshot_id,
-            expected_snapshot_id,
-            &approved.decision_id,
-            "enable",
-            manifest_id,
-            &manifest.operation_name,
-        )?;
-
-        Ok(RegistryActivationResult {
-            previous_snapshot_id: current,
-            active_snapshot_id: new_snapshot_id,
-            changed: true,
-        })
-    }
-
-    /// Disable a harness: create a new snapshot WITHOUT the external operation,
-    /// atomically update the active registry state, and record a journal event.
-    pub fn disable_harness(
-        &self,
-        approved: &ApprovedHarnessChange,
-    ) -> Result<RegistryActivationResult> {
-        let manifest_id = &approved.intent.manifest_id;
-        let expected_snapshot_id = &approved.intent.expected_snapshot_id;
-
-        // Load the manifest to get the operation_name.
-        let manifest = self
-            .load_harness_manifest(manifest_id)?
-            .ok_or_else(|| anyhow!("manifest not found: {manifest_id}"))?;
-
-        // Load the current snapshot.
-        let current = self.current_registry_snapshot_id()?;
-        if &current != expected_snapshot_id {
-            bail!("snapshot_conflict: expected {expected_snapshot_id}, current {current}");
-        }
-
-        let current_snap = self.load_registry_snapshot(&current)?;
-
-        // Check if the operation is already absent.
-        if current_snap.lookup(&manifest.operation_name).is_none() {
-            // Already absent — idempotent.
-            return Ok(RegistryActivationResult {
-                previous_snapshot_id: current.clone(),
-                active_snapshot_id: current,
-                changed: false,
-            });
-        }
-
-        // Build new spec list: existing ops minus the external one.
-        let new_specs: Vec<OperationSpec> = current_snap
-            .operations
-            .iter()
-            .filter(|op| op.name != manifest.operation_name)
-            .cloned()
-            .collect();
-
-        let new_snapshot = self.create_registry_snapshot(new_specs)?;
-        let new_snapshot_id = new_snapshot.snapshot_id.clone();
-
-        // Atomically: update registry_state and record journal event.
-        self.activate_registry_snapshot_atomic(
-            &new_snapshot_id,
-            expected_snapshot_id,
-            &approved.decision_id,
-            "disable",
-            manifest_id,
-            &manifest.operation_name,
-        )?;
-
-        Ok(RegistryActivationResult {
-            previous_snapshot_id: current,
-            active_snapshot_id: new_snapshot_id,
-            changed: true,
-        })
-    }
-
-    /// Atomic activation: BEGIN IMMEDIATE, CAS on expected_snapshot_id,
-    /// update registry_state, record journal event, commit, update memory cache.
-    fn activate_registry_snapshot_atomic(
-        &self,
-        new_snapshot_id: &str,
-        expected_snapshot_id: &str,
-        decision_id: &str,
-        action: &str,
-        manifest_id: &str,
-        operation_name: &str,
-    ) -> Result<()> {
-        let mut conn = self
-            .conn
-            .lock()
-            .map_err(|_| anyhow!("journal mutex poisoned"))?;
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .map_err(|_| anyhow!("cannot begin transaction"))?;
-
-        // CAS: read current registry_state and verify.
-        let (db_snapshot_id, db_version): (String, i64) = tx
-            .query_row(
-                "SELECT active_snapshot_id, version FROM registry_state WHERE singleton_id = 1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .map_err(|_| anyhow!("registry_state not initialized"))?;
-
-        if db_snapshot_id != expected_snapshot_id {
-            bail!("snapshot_conflict: registry_state has {db_snapshot_id}, expected {expected_snapshot_id}");
-        }
-
-        let new_version = db_version + 1;
-
-        // Update registry_state with CAS (version check).
-        let changed = tx.execute(
-            "UPDATE registry_state SET active_snapshot_id = ?1, version = ?2, updated_at = ?3
-             WHERE singleton_id = 1 AND version = ?4",
-            params![
-                new_snapshot_id,
-                new_version,
-                Utc::now().to_rfc3339(),
-                db_version,
-            ],
-        )?;
-        if changed == 0 {
-            bail!("snapshot_conflict: version CAS failed");
-        }
-
-        // Record journal event.
-        let payload = serde_json::json!({
-            "action": action,
-            "manifest_id": manifest_id,
-            "operation_name": operation_name,
-            "previous_snapshot_id": expected_snapshot_id,
-            "new_snapshot_id": new_snapshot_id,
-            "decision_id": decision_id,
-        });
-        let kind_text = "RegistrySnapshotActivated";
-        let event_id = EventId::new();
-        let created_at = Utc::now();
-        let payload_json = serde_json::to_string(&payload)?;
-
-        // Get previous hash for chain.
-        let previous: Option<(i64, String)> = tx
-            .query_row(
-                "SELECT sequence, hash FROM journal_events ORDER BY sequence DESC LIMIT 1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .ok();
-        let sequence = previous.as_ref().map(|(seq, _)| seq + 1).unwrap_or(1);
-        let previous_hash = previous.map(|(_, hash)| hash);
-        let hash = crate::journal::hash_chain::event_hash(
-            previous_hash.as_deref(),
-            sequence,
-            kind_text,
-            &payload_json,
-        );
-
-        tx.execute(
-            "INSERT INTO journal_events
-             (sequence, event_id, run_id, session_id, correlation_id, kind, payload_json, previous_hash, hash, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            params![
-                sequence,
-                event_id.0,
-                Option::<String>::None,
-                Option::<String>::None,
-                decision_id,
-                kind_text,
-                payload_json,
-                previous_hash,
-                hash,
-                created_at.to_rfc3339(),
-            ],
-        )?;
-
-        tx.commit()?;
-
-        // Release DB lock before updating memory cache.
-        drop(conn);
-
-        // Update memory cache AFTER successful commit.
-        *self.current_snapshot_id.lock().unwrap() = Some(new_snapshot_id.to_string());
-
-        Ok(())
-    }
 
     /// Initialize the registry_state row (singleton) at first boot.
     /// Called during initialize_registry when the baseline snapshot is created.
