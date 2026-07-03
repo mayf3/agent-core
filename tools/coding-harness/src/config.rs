@@ -1,7 +1,3 @@
-//! Workspace configuration with per-workspace permissions.
-//! Supports: read, write, exec, zcode, opencode, network, shell.
-//! Defaults: network=false, shell=false.
-
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -10,7 +6,6 @@ pub struct WorkspacePermission {
     pub read: bool,
     pub write: bool,
     pub exec: bool,
-    pub zcode: bool,
     pub opencode: bool,
     pub network: bool,
     pub shell: bool,
@@ -22,7 +17,6 @@ impl Default for WorkspacePermission {
             read: false,
             write: false,
             exec: false,
-            zcode: false,
             opencode: false,
             network: false,
             shell: false,
@@ -39,27 +33,20 @@ pub struct WorkspaceEntry {
 #[derive(Debug, Clone)]
 pub struct CodingConfig {
     pub workspaces: HashMap<String, WorkspaceEntry>,
+    /// Kernel API URL for capability proposal submission (e.g. http://127.0.0.1:4130)
+    pub kernel_api_url: String,
+    /// Submit token for POST /v1/capability-change-proposals
+    pub capability_submit_token: String,
+    /// Content store root for artifact/manifest/evidence blobs
+    pub artifact_root: PathBuf,
 }
 
 impl CodingConfig {
     pub fn from_env() -> Self {
-        let raw = match std::env::var("CODING_CONFIG") {
-            Ok(v) => v,
-            Err(_) => {
-                return Self {
-                    workspaces: HashMap::new(),
-                }
-            }
-        };
-        let parsed: serde_json::Value = match serde_json::from_str(&raw) {
-            Ok(v) => v,
-            Err(_) => {
-                eprintln!("warning: CODING_CONFIG is not valid JSON");
-                return Self {
-                    workspaces: HashMap::new(),
-                };
-            }
-        };
+        let raw = std::env::var("CODING_CONFIG").unwrap_or_default();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
+
         let mut workspaces = HashMap::new();
         if let Some(wss) = parsed.get("workspaces").and_then(|v| v.as_object()) {
             for (id, cfg) in wss {
@@ -70,7 +57,6 @@ impl CodingConfig {
                     read: cfg.get("read").and_then(|v| v.as_bool()).unwrap_or(false),
                     write: cfg.get("write").and_then(|v| v.as_bool()).unwrap_or(false),
                     exec: cfg.get("exec").and_then(|v| v.as_bool()).unwrap_or(false),
-                    zcode: cfg.get("zcode").and_then(|v| v.as_bool()).unwrap_or(false),
                     opencode: cfg
                         .get("opencode")
                         .and_then(|v| v.as_bool())
@@ -84,7 +70,16 @@ impl CodingConfig {
                 workspaces.insert(id.clone(), WorkspaceEntry { root: canon, perm });
             }
         }
-        Self { workspaces }
+
+        Self {
+            workspaces,
+            kernel_api_url: std::env::var("KERNEL_API_URL")
+                .unwrap_or_else(|_| "http://127.0.0.1:4130".into()),
+            capability_submit_token: std::env::var("CAPABILITY_SUBMIT_TOKEN").unwrap_or_default(),
+            artifact_root: std::env::var("HARNESS_ARTIFACT_ROOT")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| std::env::temp_dir().join("coding-harness-artifacts")),
+        }
     }
 
     pub fn root_for(&self, id: &str) -> Option<&PathBuf> {

@@ -1,5 +1,3 @@
-//! Path resolution and escape-prevention for workspace operations.
-
 use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,6 +25,7 @@ impl std::fmt::Display for PathError {
     }
 }
 
+/// Validate that a relative path is safe (no absolute, no ..).
 pub fn validate_relative(relative: &str) -> Result<&str, PathError> {
     if relative.is_empty() {
         return Ok(relative);
@@ -43,6 +42,7 @@ pub fn validate_relative(relative: &str) -> Result<&str, PathError> {
     Ok(relative)
 }
 
+/// Resolve a relative path within root, following symlinks (canonicalize).
 pub fn resolve_path(root: &Path, relative: &str) -> Result<PathBuf, PathError> {
     let root_canon = std::fs::canonicalize(root).map_err(|_| PathError::UnknownWorkspace)?;
     let candidate = root_canon.join(relative);
@@ -53,6 +53,7 @@ pub fn resolve_path(root: &Path, relative: &str) -> Result<PathBuf, PathError> {
     Ok(canonical)
 }
 
+/// Resolve a relative path without following symlinks on the final component.
 pub fn resolve_path_unchecked(root: &Path, relative: &str) -> Result<PathBuf, PathError> {
     let root_canon = std::fs::canonicalize(root).map_err(|_| PathError::UnknownWorkspace)?;
     let candidate = root_canon.join(relative);
@@ -75,4 +76,22 @@ fn nearest_existing(path: &Path) -> PathBuf {
             _ => return cur,
         }
     }
+}
+
+/// Check that a file path doesn't escape workspace via symlinks.
+pub fn assert_no_symlink_escape(root: &Path, path: &Path) -> Result<(), PathError> {
+    let root_canon = std::fs::canonicalize(root).map_err(|_| PathError::UnknownWorkspace)?;
+    if path.is_symlink() {
+        let target = std::fs::read_link(path).map_err(|_| PathError::SymlinkEscape)?;
+        if !target.is_absolute() {
+            let resolved = path.parent().unwrap_or(root).join(&target);
+            let canon = std::fs::canonicalize(&resolved).map_err(|_| PathError::SymlinkEscape)?;
+            if !canon.starts_with(&root_canon) {
+                return Err(PathError::SymlinkEscape);
+            }
+        } else if !target.starts_with(&root_canon) {
+            return Err(PathError::SymlinkEscape);
+        }
+    }
+    Ok(())
 }
