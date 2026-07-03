@@ -4,6 +4,7 @@ use serde_json::Value;
 use std::path::PathBuf;
 use uuid::Uuid;
 
+pub mod capability_change;
 pub mod operation;
 pub mod retry;
 pub mod status;
@@ -445,6 +446,13 @@ pub enum JournalEventKind {
     /// payload: `action`, `manifest_id`, `operation_name`, `previous_snapshot_id`, `new_snapshot_id`, `decision_id`
     /// correlation_id: decision_id
     RegistrySnapshotActivated,
+    // Capability Change Proposal lifecycle events.
+    CapabilityChangeProposed,
+    CapabilityChangeApproved,
+    CapabilityChangeRejected,
+    CapabilityChangeActivated,
+    CapabilityChangeActivationFailed,
+    CapabilityChangeExpired,
     /// Sentinel produced by `parse_kind`/`row_to_event` when the stored
     /// `kind` text does not match any known variant. The kernel never writes
     /// `Unknown` — observing it at read time indicates either external

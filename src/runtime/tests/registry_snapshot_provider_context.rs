@@ -51,6 +51,9 @@ fn test_config() -> KernelConfig {
         fallback_tool_name_indexed: false,
         primary_tool_name_indexed: false,
         harness_read_timeout_ms: 10_000,
+        harness_artifact_root: std::env::temp_dir().join(format!("ha_root_{}", std::process::id())),
+        capability_submit_token: None,
+        capability_decision_token: None,
     }
 }
 
