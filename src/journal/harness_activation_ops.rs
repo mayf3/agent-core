@@ -10,6 +10,20 @@ use anyhow::{anyhow, bail, Result};
 use chrono::Utc;
 use rusqlite::params;
 
+/// Determine risk for an external harness operation by convention.
+/// Write operations (containing _write, _mkdir, or _exec) are Risk::Write.
+/// All others default to Risk::ReadOnly.
+fn risk_for_external_op(operation_name: &str) -> Risk {
+    if operation_name.contains("_write")
+        || operation_name.contains("_mkdir")
+        || operation_name.contains("_exec")
+    {
+        Risk::Write
+    } else {
+        Risk::ReadOnly
+    }
+}
+
 impl super::JournalStore {
     pub fn enable_harness(
         &self,
@@ -45,7 +59,7 @@ impl super::JournalStore {
         let mut new_specs: Vec<OperationSpec> = current_snap.operations.clone();
         new_specs.push(OperationSpec {
             name: manifest.operation_name.clone(),
-            risk: Risk::ReadOnly,
+            risk: risk_for_external_op(&manifest.operation_name),
             description: manifest.description.clone(),
             parameters: manifest.input_schema.clone(),
             idempotent: manifest.idempotent,

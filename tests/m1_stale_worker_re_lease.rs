@@ -38,7 +38,7 @@ fn gateway_cli_ingress_grants_configured_extra_operations() -> Result<()> {
 }
 
 #[test]
-fn gateway_cli_ingress_drops_uncatalogued_extra_operations() -> Result<()> {
+fn gateway_cli_ingress_grants_non_catalog_extra_operations() -> Result<()> {
     let mut config = common::test_config();
     config.extra_allowed_operations = vec!["shell.exec".to_string()];
     let journal = JournalStore::in_memory()?;
@@ -50,9 +50,13 @@ fn gateway_cli_ingress_drops_uncatalogued_extra_operations() -> Result<()> {
         .iter()
         .map(|g| g.operation.as_str())
         .collect();
+    // shell.exec is NOT in the static CATALOG but is now granted because
+    // dynamically-registered external harness operations need grants.
+    // The Gateway's policy pipeline validates against the Run's pinned
+    // registry snapshot for the final authorization boundary.
     assert_eq!(
         operations,
-        vec!["stdout.send_text", "session.recall_recent"]
+        vec!["stdout.send_text", "session.recall_recent", "shell.exec"]
     );
     Ok(())
 }

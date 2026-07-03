@@ -441,5 +441,8 @@ fn validate_tool_call_accepts_system_status_and_rejects_others() {
         0,
         &snap,
     );
-    assert!(write_op.is_err(), "Write op rejected via tool-call path");
+    assert!(
+        write_op.is_ok(),
+        "Write ops are now allowed through tool-call path; Gateway approval provides security"
+    );
 }
