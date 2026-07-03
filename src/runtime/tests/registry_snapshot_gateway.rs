@@ -276,7 +276,10 @@ fn d_risk_from_run_snapshot() -> Result<()> {
     // Activate v2 (Write) for Run B.
     journal.activate_registry_snapshot(&s2.snapshot_id)?;
 
-    // Run B bound to v2 (Write) — tool call rejected as operation_not_allowed.
+    // Run B bound to v2 (Write) — tool call now allowed through the tool call
+    // path (the Write operation restriction was removed from validate_tool_call
+    // since Gateway approval provides the security boundary). The Write risk
+    // still affects provider_tools filtering (Write ops are not auto-surfaced).
     let cfg_b = test_config();
     let gw_b = Gateway::new(cfg_b.clone());
     let llm_b = ToolCallLlm::new("system.status");
@@ -289,6 +292,7 @@ fn d_risk_from_run_snapshot() -> Result<()> {
         .into_iter()
         .filter(|e| e.run_id == Some(run_b.run_id.clone()))
         .collect();
+    // Write operations are no longer rejected by the tool call path.
     let b_not_allowed = b_events
         .iter()
         .filter(|e| {
@@ -297,10 +301,11 @@ fn d_risk_from_run_snapshot() -> Result<()> {
                     == Some("operation_not_allowed")
         })
         .count();
-    assert!(
-        b_not_allowed > 0,
-        "Run B (v2 Write) must be rejected as operation_not_allowed"
+    assert_eq!(
+        b_not_allowed, 0,
+        "Run B (v2 Write) must not be rejected as operation_not_allowed"
     );
+    // System.status (Write in v2) still dispatches and succeeds.
     let b_succeeded = b_events
         .iter()
         .filter(|e| {
@@ -308,9 +313,9 @@ fn d_risk_from_run_snapshot() -> Result<()> {
                 && e.payload.get("status").and_then(Value::as_str) == Some("Succeeded")
         })
         .count();
-    assert_eq!(
-        b_succeeded, 0,
-        "Run B (v2 Write) must have 0 Succeeded Receipts"
+    assert!(
+        b_succeeded > 0,
+        "Run B (v2 Write) must have Succeeded Receipts (Write ops are allowed)"
     );
 
     Ok(())
