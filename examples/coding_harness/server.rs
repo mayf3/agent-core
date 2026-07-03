@@ -1,6 +1,6 @@
 //! HTTP server with proper Content-Length parsing and bounded body handling.
 
-use crate::config::CodingConfig;
+use agent_core_kernel::harness::coding::config::CodingConfig;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
