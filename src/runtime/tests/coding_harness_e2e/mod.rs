@@ -1,18 +1,20 @@
-//! Coding Harness E2E tests — develop calculator, propose, approve, verify 42.
+//! Coding Harness E2E tests — workspace ops, task state machine, and
+//! full calculator development-to-42 pipeline via real capability proposal.
+//!
+//! All tests use real production code from `crate::harness::coding::*` and
+//! the real capability proposal/approval pipeline. No mock harness implementations.
+//! See calculator_e2e.rs for the full proposal → approval → activation → call flow.
 
+mod calculator_e2e;
 mod helpers;
 
-use crate::domain::*;
-use crate::gateway::Gateway;
-use crate::journal::JournalStore;
+use crate::config::KernelConfig;
 use anyhow::Result;
 use serde_json::json;
 use std::path::PathBuf;
 
-use helpers::*;
-
-fn cfg() -> crate::config::KernelConfig {
-    crate::config::KernelConfig {
+pub(super) fn cfg() -> KernelConfig {
+    KernelConfig {
         db_path: PathBuf::from(":memory:"),
         data_dir: PathBuf::from(".agent-core-test"),
         agent_id: crate::domain::AgentId("main".to_string()),
@@ -49,12 +51,16 @@ fn cfg() -> crate::config::KernelConfig {
         write_approval_ttl_secs: 0,
         fallback_tool_name_indexed: false,
         primary_tool_name_indexed: false,
-        harness_read_timeout_ms: 30_000,
+        harness_read_timeout_ms: 15_000,
         harness_artifact_root: std::env::temp_dir().join(format!("ch_e2e_{}", std::process::id())),
-        capability_submit_token: None,
-        capability_decision_token: None,
+        capability_submit_token: Some("submit-token".into()),
+        capability_decision_token: Some("decision-token".into()),
     }
 }
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Test 1: Workspace operations via real handler functions
+// ═════════════════════════════════════════════════════════════════════════════
 
 #[test]
 fn coding_harness_workspace_ops_e2e() -> Result<()> {
@@ -62,207 +68,104 @@ fn coding_harness_workspace_ops_e2e() -> Result<()> {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
 
-    let (ep, _sd, _port) = start_mock_harness(dir.clone())?;
-    let j = JournalStore::in_memory()?;
-    let g = Gateway::new(cfg());
+    use crate::harness::coding::workspace;
 
-    for name in &[
-        "external.coding_workspace_list",
-        "external.coding_workspace_read",
-        "external.coding_workspace_write",
-        "external.coding_workspace_exec",
-    ] {
-        let mid = register_manifest(
-            &j,
-            &ep,
-            name,
-            json!({"type":"object"}),
-            json!({"type":"object"}),
-        )?;
-        enable_op(&j, &g, &mid)?;
-    }
+    let perm = crate::harness::coding::config::WorkspacePermission {
+        read: true,
+        write: true,
+        exec: true,
+        ..Default::default()
+    };
 
-    let llm = SingleToolLlm::new(
-        "external.coding_workspace_write",
-        json!({"workspace_id":"test","relative_path":"calc.rs","content":"fn add(a:i32,b:i32)->i32{a+b}","mode":"replace"}),
+    // Write a file using the real handler.
+    let write_args = json!({
+        "relative_path": "calc.rs",
+        "content": "fn add(a:i32,b:i32)->i32{a+b}",
+        "mode": "replace",
+    });
+    let write_resp = workspace::handle_write(&dir, &write_args);
+    assert_eq!(write_resp["ok"], true, "write should succeed");
+    assert!(dir.join("calc.rs").is_file(), "calc.rs should exist");
+
+    // Read the file using the real handler.
+    let read_args = json!({"relative_path": "calc.rs"});
+    let read_resp = workspace::handle_read(&dir, &read_args);
+    assert_eq!(read_resp["ok"], true, "read should succeed");
+    assert_eq!(
+        read_resp["result"]["content"],
+        "fn add(a:i32,b:i32)->i32{a+b}"
     );
-    let rt = super::Runtime::new(cfg(), llm);
-    let ev = g.validate_ingress(&j, g.cli_ingress("write?".into())?)?;
-    let o = rt.deliver(&j, &g, ev)?;
-    assert!(!o.output.trim().is_empty());
-    let ev = j.events()?;
-    let r: Vec<_> = ev
-        .iter()
-        .filter(|e| e.kind == JournalEventKind::ReceiptReceived)
-        .collect();
-    assert_eq!(r.len(), 1);
-    assert_eq!(r[0].payload["status"], "Succeeded");
-    assert!(dir.join("calc.rs").is_file());
 
-    let j2 = JournalStore::in_memory()?;
-    let mid = register_manifest(
-        &j2,
-        &ep,
-        "external.coding_workspace_read",
-        json!({"type":"object"}),
-        json!({"type":"object"}),
-    )?;
-    enable_op(&j2, &g, &mid)?;
-    let llm2 = SingleToolLlm::new(
-        "external.coding_workspace_read",
-        json!({"workspace_id":"test","relative_path":"calc.rs"}),
+    // List the directory using the real handler.
+    let list_args = json!({"relative_path": "."});
+    let list_resp = workspace::handle_list(&dir, &list_args);
+    assert_eq!(list_resp["ok"], true, "list should succeed");
+    let entries = list_resp["result"]["entries"].as_array().unwrap();
+    assert!(
+        entries.iter().any(|e| e["name"] == "calc.rs"),
+        "calc.rs should be in listing"
     );
-    let rt2 = super::Runtime::new(cfg(), llm2);
-    let ev2 = g.validate_ingress(&j2, g.cli_ingress("read?".into())?)?;
-    let o2 = rt2.deliver(&j2, &g, ev2)?;
-    assert!(!o2.output.trim().is_empty());
-    let ev2 = j2.events()?;
-    let r2: Vec<_> = ev2
-        .iter()
-        .filter(|e| e.kind == JournalEventKind::ReceiptReceived)
-        .collect();
-    assert_eq!(r2[0].payload["status"], "Succeeded");
+
+    // Exec the rustc compiler using the real handler (compile as library, no main needed).
+    let exec_args = json!({
+        "command": "rustc",
+        "args": ["calc.rs", "--crate-type", "lib"],
+        "relative_cwd": ".",
+        "timeout_seconds": 60,
+        "max_output_bytes": 65536,
+    });
+    let exec_resp = workspace::handle_exec(&dir, &exec_args, &perm);
+    assert_eq!(
+        exec_resp["ok"], true,
+        "compile should report ok; got: {exec_resp}"
+    );
+    let exit_code = exec_resp["result"]["exit_code"].as_i64().unwrap_or(-1);
+    assert_eq!(
+        exit_code, 0,
+        "rustc exit code should be 0; stderr: {}",
+        exec_resp["result"]["stderr"]
+    );
+
     let _ = std::fs::remove_dir_all(&dir);
     Ok(())
 }
 
+// ═════════════════════════════════════════════════════════════════════════════
+// Test 2: Task submit/status state machine via real handlers
+// ═════════════════════════════════════════════════════════════════════════════
+
 #[test]
-fn calculator_development_to_42_e2e() -> Result<()> {
-    let ws_root = std::env::temp_dir().join(format!("ch_calc_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&ws_root);
-    std::fs::create_dir_all(&ws_root).unwrap();
+fn coding_harness_task_state_machine_e2e() -> Result<()> {
+    use crate::harness::coding::tasks;
 
-    let (ch_ep, _ch_sd, _ch_port) = start_mock_harness(ws_root.clone())?;
-    let (calc_ep, _calc_sd, _calc_port) = start_calculator_harness()?;
-    let j = JournalStore::in_memory()?;
-    let g = Gateway::new(cfg());
+    // Submit a fake-backend task.
+    let submit_resp = tasks::submit_task("ws1", "build project", "build must pass", "fake");
+    assert_eq!(submit_resp["result"]["status"], "queued");
+    let tid = submit_resp["result"]["task_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
-    let s0 = j.current_registry_snapshot_id()?;
-    assert!(j
-        .load_registry_snapshot(&s0)?
-        .lookup("external.calculator")
-        .is_none());
+    // Wait for execution to complete (fake backend runs in < 100ms).
+    std::thread::sleep(std::time::Duration::from_millis(200));
 
-    for name in &[
-        "external.coding_workspace_write",
-        "external.coding_workspace_exec",
-    ] {
-        let mid = register_manifest(
-            &j,
-            &ch_ep,
-            name,
-            json!({"type":"object"}),
-            json!({"type":"object"}),
-        )?;
-        enable_op(&j, &g, &mid)?;
-    }
-
-    let src = r#"fn main() { let a:f64=std::env::args().nth(2).unwrap_or("0").parse().unwrap_or(0.0); let b:f64=std::env::args().nth(3).unwrap_or("0").parse().unwrap_or(0.0); let r=match std::env::args().nth(1).unwrap_or("").as_str(){ "add"=>a+b,"sub"=>a-b,"mul"=>a*b,"div"=>if b==0.0{eprintln!("div_by_zero");std::process::exit(1)}else{a/b},_=>{eprintln!("unsup");std::process::exit(1)}}; println!("{}",r); }"#;
-    let llm = SingleToolLlm::new(
-        "external.coding_workspace_write",
-        json!({"workspace_id":"test","relative_path":"calc.rs","content":src,"mode":"replace"}),
-    );
-    let rt = super::Runtime::new(cfg(), llm);
-    let ev = g.validate_ingress(&j, g.cli_ingress("write?".into())?)?;
-    let o = rt.deliver(&j, &g, ev)?;
-    assert!(!o.output.trim().is_empty());
-    let ev = j.events()?;
-    let r: Vec<_> = ev
-        .iter()
-        .filter(|e| e.kind == JournalEventKind::ReceiptReceived)
-        .collect();
-    assert_eq!(r[0].payload["status"], "Succeeded");
-    assert!(ws_root.join("calc.rs").is_file());
-
-    // Build
-    let j2 = JournalStore::in_memory()?;
-    let mid = register_manifest(
-        &j2,
-        &ch_ep,
-        "external.coding_workspace_exec",
-        json!({"type":"object"}),
-        json!({"type":"object"}),
-    )?;
-    enable_op(&j2, &g, &mid)?;
-    let llm2 = SingleToolLlm::new(
-        "external.coding_workspace_exec",
-        json!({"workspace_id":"test","program":"rustc","args":["calc.rs","-o","calc"],"relative_cwd":".","timeout_seconds":60,"max_output_bytes":65536}),
-    );
-    let rt2 = super::Runtime::new(cfg(), llm2);
-    let ev2 = g.validate_ingress(&j2, g.cli_ingress("build?".into())?)?;
-    let o2 = rt2.deliver(&j2, &g, ev2)?;
-    assert!(!o2.output.trim().is_empty());
-
-    // Test multiply
-    let j3 = JournalStore::in_memory()?;
-    let mid3 = register_manifest(
-        &j3,
-        &ch_ep,
-        "external.coding_workspace_exec",
-        json!({"type":"object"}),
-        json!({"type":"object"}),
-    )?;
-    enable_op(&j3, &g, &mid3)?;
-    let llm3 = SingleToolLlm::new(
-        "external.coding_workspace_exec",
-        json!({"workspace_id":"test","program":"./calc","args":["mul","6","7"],"relative_cwd":".","timeout_seconds":30,"max_output_bytes":1024}),
-    );
-    let rt3 = super::Runtime::new(cfg(), llm3);
-    let ev3 = g.validate_ingress(&j3, g.cli_ingress("6*7?".into())?)?;
-    let o3 = rt3.deliver(&j3, &g, ev3)?;
-    assert!(!o3.output.trim().is_empty());
-
-    // Register calculator harness
-    let calc_mid = register_manifest(
-        &j,
-        &calc_ep,
-        "external.calculator",
-        json!({"type":"object","properties":{"operation":{"type":"string"},"a":{"type":"number"},"b":{"type":"number"}},"required":["operation","a","b"]}),
-        json!({"type":"object","properties":{"result":{"type":"number"}},"required":["result"]}),
-    )?;
-    enable_op(&j, &g, &calc_mid)?;
-
-    // S1
-    let s1 = j.current_registry_snapshot_id()?;
-    assert_ne!(s0, s1);
-    assert!(j
-        .load_registry_snapshot(&s1)?
-        .lookup("external.calculator")
-        .is_some());
-
-    // Call multiply(6,7) → 42
-    let j4 = JournalStore::in_memory()?;
-    let cmid = register_manifest(
-        &j4,
-        &calc_ep,
-        "external.calculator",
-        json!({"type":"object","properties":{"operation":{"type":"string"},"a":{"type":"number"},"b":{"type":"number"}},"required":["operation","a","b"]}),
-        json!({"type":"object","properties":{"result":{"type":"number"}},"required":["result"]}),
-    )?;
-    enable_op(&j4, &g, &cmid)?;
-
-    let llm4 = SingleToolLlm::new(
-        "external.calculator",
-        json!({"operation":"multiply","a":6,"b":7}),
-    );
-    let rt4 = super::Runtime::new(cfg(), llm4);
-    let ev4 = g.validate_ingress(&j4, g.cli_ingress("6*7?".into())?)?;
-    let o4 = rt4.deliver(&j4, &g, ev4)?;
-    assert!(!o4.output.trim().is_empty());
-
-    let ev4 = j4.events()?;
-    let r4: Vec<_> = ev4
-        .iter()
-        .filter(|e| e.kind == JournalEventKind::ReceiptReceived)
-        .collect();
-    assert_eq!(r4.len(), 1);
-    assert_eq!(r4[0].payload["status"], "Succeeded");
-    let out = serde_json::to_string(&r4[0].payload["output"]).unwrap_or_default();
+    // Check status → succeeded.
+    let status_resp = tasks::get_status(&tid);
+    assert_eq!(status_resp["result"]["status"], "succeeded");
     assert!(
-        out.contains("42") || out.contains("result"),
-        "Receipt must contain 42; got: {out}"
+        status_resp["result"]["summary"]
+            .as_str()
+            .unwrap_or("")
+            .contains("fake"),
+        "summary should contain 'fake'"
+    );
+    assert!(
+        status_resp["result"]["commit_sha"]
+            .as_str()
+            .unwrap_or("")
+            .contains("fake_sha"),
+        "commit_sha should contain 'fake_sha'"
     );
 
-    let _ = std::fs::remove_dir_all(&ws_root);
     Ok(())
 }

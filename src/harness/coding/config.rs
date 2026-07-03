@@ -1,4 +1,6 @@
 //! Workspace configuration with per-workspace permissions.
+//! Supports: read, write, exec, zcode, network, shell.
+//! Defaults: network=false, shell=false.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -9,6 +11,21 @@ pub struct WorkspacePermission {
     pub write: bool,
     pub exec: bool,
     pub zcode: bool,
+    pub network: bool,
+    pub shell: bool,
+}
+
+impl Default for WorkspacePermission {
+    fn default() -> Self {
+        Self {
+            read: false,
+            write: false,
+            exec: false,
+            zcode: false,
+            network: false,
+            shell: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -52,6 +69,11 @@ impl CodingConfig {
                     write: cfg.get("write").and_then(|v| v.as_bool()).unwrap_or(false),
                     exec: cfg.get("exec").and_then(|v| v.as_bool()).unwrap_or(false),
                     zcode: cfg.get("zcode").and_then(|v| v.as_bool()).unwrap_or(false),
+                    network: cfg
+                        .get("network")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
+                    shell: cfg.get("shell").and_then(|v| v.as_bool()).unwrap_or(false),
                 };
                 workspaces.insert(id.clone(), WorkspaceEntry { root: canon, perm });
             }

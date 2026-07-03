@@ -1,6 +1,8 @@
-//! Mock helpers for coding_harness_e2e tests.
+//! Test helpers for coding_harness_e2e tests.
+//!
+//! Provides real handler function wrappers and mock LLM stubs.
+//! No mock harness implementations — all tests use real production code.
 
-use crate::domain::*;
 use crate::gateway::Gateway;
 use crate::harness::control::{HarnessChangeAction, HarnessChangeIntent};
 use crate::harness::manifest::HarnessManifest;
@@ -10,14 +12,15 @@ use chrono::Utc;
 use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-pub fn register_manifest(
+/// Register a harness manifest and enable it in the registry.
+pub fn register_and_enable(
     j: &JournalStore,
+    g: &Gateway,
     ep: &str,
     name: &str,
     input: Value,
@@ -40,22 +43,21 @@ pub fn register_manifest(
     let mid = m.compute_manifest_id()?;
     m.manifest_id = mid.clone();
     j.register_harness_manifest(&m)?;
+    let intent = HarnessChangeIntent {
+        action: HarnessChangeAction::Enable,
+        manifest_id: mid.clone(),
+        expected_snapshot_id: j.current_registry_snapshot_id()?,
+        requested_by: "ipc_operator".into(),
+    };
+    j.enable_harness(&g.approve_harness_change(intent)?)?;
     Ok(mid)
 }
 
-pub fn enable_op(j: &JournalStore, g: &Gateway, mid: &str) -> Result<()> {
-    j.enable_harness(&g.approve_harness_change(HarnessChangeIntent {
-        action: HarnessChangeAction::Enable,
-        manifest_id: mid.into(),
-        expected_snapshot_id: j.current_registry_snapshot_id()?,
-        requested_by: "ipc_operator".into(),
-    })?)?;
-    Ok(())
-}
-
-// ── Mock TCP coding harness ──
-
-pub fn start_mock_harness(ws_root: PathBuf) -> Result<(String, Arc<AtomicBool>, u16)> {
+/// Start a real inline TCP harness responder that delegates to the real
+/// workspace handler functions. Returns (endpoint, shutdown_flag).
+pub fn start_coding_harness_responder(
+    ws_root: std::path::PathBuf,
+) -> Result<(String, Arc<AtomicBool>, u16)> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let port = listener.local_addr()?.port();
     let endpoint = format!("http://127.0.0.1:{port}/execute");
@@ -73,7 +75,7 @@ pub fn start_mock_harness(ws_root: PathBuf) -> Result<(String, Arc<AtomicBool>, 
                     Ok(s) => s,
                     _ => return,
                 };
-                let mut buf = [0u8; 16384];
+                let mut buf = [0u8; 65536];
                 let n = stream.read(&mut buf).unwrap_or(0);
                 if n == 0 {
                     return;
@@ -86,7 +88,52 @@ pub fn start_mock_harness(ws_root: PathBuf) -> Result<(String, Arc<AtomicBool>, 
                     .and_then(Value::as_str)
                     .unwrap_or("");
                 let args = parsed.get("arguments").cloned().unwrap_or(json!({}));
-                let resp = dispatch(&root, op, &args);
+
+                // Use real handler functions from the coding module.
+                use crate::harness::coding::config::WorkspacePermission;
+                use crate::harness::coding::workspace;
+
+                let default_perm = WorkspacePermission {
+                    read: true,
+                    write: true,
+                    exec: true,
+                    zcode: true,
+                    ..Default::default()
+                };
+
+                let resp = match op {
+                    "external.coding_workspace_list" => workspace::handle_list(&root, &args),
+                    "external.coding_workspace_read" => workspace::handle_read(&root, &args),
+                    "external.coding_workspace_write" => workspace::handle_write(&root, &args),
+                    "external.coding_workspace_exec" => {
+                        workspace::handle_exec(&root, &args, &default_perm)
+                    }
+                    "external.coding_task_submit" => {
+                        let ws_id = args
+                            .get("workspace_id")
+                            .and_then(Value::as_str)
+                            .unwrap_or("test");
+                        let objective = args.get("objective").and_then(Value::as_str).unwrap_or("");
+                        let acceptance = args
+                            .get("acceptance_criteria")
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        let backend = args
+                            .get("backend")
+                            .and_then(Value::as_str)
+                            .unwrap_or("fake");
+                        crate::harness::coding::tasks::submit_task(
+                            ws_id, objective, acceptance, backend,
+                        )
+                    }
+                    "external.coding_task_status" => {
+                        let task_id = args.get("task_id").and_then(Value::as_str).unwrap_or("");
+                        crate::harness::coding::tasks::get_status(task_id)
+                    }
+                    _ => {
+                        json!({"protocol_version":"external-harness-v1","ok":false,"error_code":"unknown_operation"})
+                    }
+                };
                 let body = serde_json::to_string(&resp).unwrap_or_default();
                 let http = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
                 let _ = stream.write_all(http.as_bytes());
@@ -97,129 +144,8 @@ pub fn start_mock_harness(ws_root: PathBuf) -> Result<(String, Arc<AtomicBool>, 
     Ok((endpoint, shutdown, port))
 }
 
-fn dispatch(root: &PathBuf, op: &str, args: &Value) -> Value {
-    match op {
-        "external.coding_workspace_list" => mock_list(root, args),
-        "external.coding_workspace_read" => mock_read(root, args),
-        "external.coding_workspace_write" => mock_write(root, args),
-        "external.coding_workspace_exec" => mock_exec(root, args),
-        "external.coding_task_submit" => {
-            json!({"protocol_version":"external-harness-v1","ok":true,"result":{"task_id":"task_1","status":"queued"}})
-        }
-        "external.coding_task_status" => {
-            json!({"protocol_version":"external-harness-v1","ok":true,"result":{"task_id":"task_1","status":"succeeded","summary":"ok"}})
-        }
-        "external.coding_capability_propose" => {
-            json!({"protocol_version":"external-harness-v1","ok":true,"result":{"proposal":{"operation_name":"external.calculator","artifact_digest":"sha256:abc","manifest_size":100},"status":"pending_proposal"}})
-        }
-        _ => {
-            json!({"protocol_version":"external-harness-v1","ok":false,"error_code":"unknown_operation"})
-        }
-    }
-}
-
-fn mock_list(root: &PathBuf, args: &Value) -> Value {
-    let rel = args
-        .get("relative_path")
-        .and_then(Value::as_str)
-        .unwrap_or(".");
-    let dir = root.join(rel);
-    if !dir.is_dir() {
-        return json!({"protocol_version":"external-harness-v1","ok":false,"error_code":"not_found"});
-    }
-    use std::fs;
-    let mut entries = Vec::new();
-    if let Ok(rd) = fs::read_dir(&dir) {
-        for entry in rd.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            let typ = if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                "dir"
-            } else {
-                "file"
-            };
-            let rp = entry
-                .path()
-                .strip_prefix(root)
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_default();
-            entries.push(json!({"name":name,"type":typ,"relative_path":rp}));
-        }
-    }
-    json!({"protocol_version":"external-harness-v1","ok":true,"result":{"entries":entries,"entry_count":entries.len()}})
-}
-
-fn mock_read(root: &PathBuf, args: &Value) -> Value {
-    let rel = args
-        .get("relative_path")
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    let path = root.join(rel);
-    if !path.is_file() {
-        return json!({"protocol_version":"external-harness-v1","ok":false,"error_code":"not_found"});
-    }
-    let data = std::fs::read(&path).unwrap_or_default();
-    let content = String::from_utf8_lossy(&data).to_string();
-    json!({"protocol_version":"external-harness-v1","ok":true,"result":{"content":content,"truncated":false,"size_bytes":data.len()}})
-}
-
-fn mock_write(root: &PathBuf, args: &Value) -> Value {
-    let rel = args
-        .get("relative_path")
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    let content = args.get("content").and_then(Value::as_str).unwrap_or("");
-    let path = root.join(rel);
-    if let Some(p) = path.parent() {
-        let _ = std::fs::create_dir_all(p);
-    }
-    match std::fs::write(&path, content) {
-        Ok(_) => {
-            json!({"protocol_version":"external-harness-v1","ok":true,"result":{"bytes_written":content.len()}})
-        }
-        Err(e) => {
-            json!({"protocol_version":"external-harness-v1","ok":false,"error_code":format!("{e}")})
-        }
-    }
-}
-
-fn mock_exec(root: &PathBuf, args: &Value) -> Value {
-    let program = args.get("program").and_then(Value::as_str).unwrap_or("");
-    let cmd_args: Vec<&str> = args
-        .get("args")
-        .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
-        .unwrap_or_default();
-    let cwd = root.join(
-        args.get("relative_cwd")
-            .and_then(Value::as_str)
-            .unwrap_or("."),
-    );
-    let mut cmd = std::process::Command::new(program);
-    cmd.args(&cmd_args).current_dir(&cwd);
-    cmd.env_clear();
-    if let Some(v) = std::env::var_os("PATH") {
-        cmd.env("PATH", v);
-    }
-    if let Some(v) = std::env::var_os("HOME") {
-        cmd.env("HOME", v);
-    }
-    if let Some(v) = std::env::var_os("TMPDIR") {
-        cmd.env("TMPDIR", v);
-    }
-    cmd.stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    let output = match cmd.output() {
-        Ok(o) => o,
-        Err(e) => {
-            return json!({"protocol_version":"external-harness-v1","ok":false,"error_code":format!("spawn_failed: {e}")})
-        }
-    };
-    json!({"protocol_version":"external-harness-v1","ok":true,"result":{"exit_code":output.status.code().unwrap_or(-1),"stdout":String::from_utf8_lossy(&output.stdout).to_string(),"stderr":String::from_utf8_lossy(&output.stderr).to_string(),"timed_out":false}})
-}
-
-// ── Mock calculator harness ──
-
-pub fn start_calculator_harness() -> Result<(String, Arc<AtomicBool>, u16)> {
+/// Start an inline calculator harness responder.
+pub fn start_calculator_responder() -> Result<(String, Arc<AtomicBool>, u16)> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let port = listener.local_addr()?.port();
     let endpoint = format!("http://127.0.0.1:{port}/execute");
@@ -275,8 +201,7 @@ pub fn start_calculator_harness() -> Result<(String, Arc<AtomicBool>, u16)> {
     Ok((endpoint, shutdown, port))
 }
 
-// ── Mock LLM ──
-
+/// A mock LLM that returns a single scripted tool call on round 1, done on round 2.
 pub struct SingleToolLlm {
     tc: Option<Value>,
     pub captured: Arc<Mutex<Vec<Value>>>,
