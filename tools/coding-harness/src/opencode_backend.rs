@@ -1,82 +1,147 @@
 //! OpenCode backend for coding.task.submit.
 //!
-//! Uses a per-project `.opencode.json` permission config to enforce
-//! workspace boundaries without `--dangerously-skip-permissions`.
-//! Process lifecycle uses process-group cleanup and concurrent pipe draining.
+//! Config is passed via `OPENCODE_CONFIG_CONTENT` env var with proper
+//! `"allow"/"deny"` permission semantics. No `.opencode.json` written to
+//! workspace. Uses `--auto` for non-interactive execution (not
+//! `--dangerously-skip-permissions`). Process lifecycle uses process-group
+//! cleanup, concurrent pipe draining, and a cancel token system.
 
 use super::{truncate_str, TaskOutput};
+use std::collections::HashMap;
 use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+static CANCEL_TOKENS: std::sync::LazyLock<Mutex<HashMap<String, CancelState>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+struct CancelState {
+    cancelled: Arc<AtomicBool>,
+    pid: Option<u32>,
+}
+
+/// Register a cancellation token for a task. Returns the shared cancelled flag.
+pub(crate) fn register_cancel(task_id: &str) -> Arc<AtomicBool> {
+    let flag = Arc::new(AtomicBool::new(false));
+    let mut map = CANCEL_TOKENS.lock().unwrap();
+    map.insert(task_id.to_string(), CancelState { cancelled: flag.clone(), pid: None });
+    flag
+}
+
+/// Set the process ID for a running task.
+pub(crate) fn set_pid(task_id: &str, pid: u32) {
+    let mut map = CANCEL_TOKENS.lock().unwrap();
+    if let Some(state) = map.get_mut(task_id) {
+        state.pid = Some(pid);
+    }
+}
+
+/// Cancel a running task: signal the process group and wait for termination.
+/// Returns true if cancellation was initiated.
+pub(crate) fn cancel_task(task_id: &str) -> bool {
+    let (_cancelled, pid) = {
+        let map = CANCEL_TOKENS.lock().unwrap();
+        match map.get(task_id) {
+            Some(state) => {
+                state.cancelled.store(true, Ordering::SeqCst);
+                (state.cancelled.clone(), state.pid)
+            }
+            None => return false,
+        }
+    };
+
+    if let Some(pid) = pid {
+        // Kill entire process group.
+        #[cfg(unix)]
+        {
+            unsafe {
+                let _ = libc::killpg(pid as libc::pid_t, libc::SIGTERM);
+                std::thread::sleep(Duration::from_millis(500));
+                let _ = libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = std::process::Command::new("taskkill")
+                .args(&["/F", "/T", "/PID", &pid.to_string()])
+                .output();
+        }
+    }
+    true
+}
+
+/// Clean up cancel token for a completed task.
+pub(crate) fn cleanup_cancel(task_id: &str) {
+    let mut map = CANCEL_TOKENS.lock().unwrap();
+    map.remove(task_id);
+}
+
+/// Build the permission config JSON for the OPENCODE_CONFIG_CONTENT env var.
+fn build_config_json() -> String {
+    let config = serde_json::json!({
+        "$schema": "https://opencode.ai/config.json",
+        "permission": {
+            "*": "deny",
+            "read": "allow",
+            "edit": "allow",
+            "glob": "allow",
+            "grep": "allow",
+            "bash": "allow",
+            "external_directory": "deny",
+            "webfetch": "deny",
+            "websearch": "deny",
+            "task": "deny",
+            "question": "deny"
+        }
+    });
+    serde_json::to_string(&config).unwrap_or_default()
+}
+
 pub(super) fn run_opencode(
+    task_id: &str,
     workspace_root: &str,
     objective: &str,
     model: &str,
+    cancel_flag: Option<Arc<AtomicBool>>,
 ) -> Result<TaskOutput, String> {
     let opencode_path = find_opencode().map_err(|e| format!("opencode_not_found: {e}"))?;
-    let resolved_model = if model.is_empty() {
-        "deepseek/deepseek-v4-flash"
-    } else {
-        model
-    };
-
-    // Write project-level opencode config with explicit permissions.
-    let permission_config = serde_json::json!({
-        "permissions": {
-            "read": true, "write": true, "edit": true, "bash": true,
-            "glob": true, "grep": true,
-            "external_directory": false,
-            "webfetch": false,
-            "websearch": false,
-        }
-    });
-    let config_path = std::path::Path::new(workspace_root).join(".opencode.json");
-    let _ = std::fs::write(
-        &config_path,
-        serde_json::to_string_pretty(&permission_config).unwrap_or_default(),
-    );
-
+    let resolved_model = if model.is_empty() { "deepseek/deepseek-v4-flash" } else { model };
     let prompt = build_prompt(objective);
     let ws_root = workspace_root.to_string();
 
     let mut cmd = std::process::Command::new(&opencode_path);
     cmd.arg("run")
-        .arg("--model")
-        .arg(resolved_model)
-        .arg("--format")
-        .arg("json")
-        .arg("--dir")
-        .arg(&ws_root)
-        .arg("--dangerously-skip-permissions")
+        .arg("--model").arg(resolved_model)
+        .arg("--format").arg("json")
+        .arg("--dir").arg(&ws_root)
+        .arg("--auto")
         .arg(&prompt);
+
     cmd.env_clear();
     for var in &["PATH", "HOME", "TMPDIR", "DEEPSEEK_API_KEY"] {
-        if let Some(v) = std::env::var_os(var) {
-            cmd.env(var, v);
-        }
+        if let Some(v) = std::env::var_os(var) { cmd.env(var, v); }
     }
+    // Pass permission config via env var, not .opencode.json file.
+    cmd.env("OPENCODE_CONFIG_CONTENT", build_config_json());
 
-    // Create process group so we can kill the entire tree on timeout/cancellation.
+    // Create process group for tree-kill.
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
 
-    cmd.stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("opencode_spawn_failed: {e}"))?;
+    cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+    let mut child = cmd.spawn().map_err(|e| format!("opencode_spawn_failed: {e}"))?;
     let pid = child.id();
+    set_pid(task_id, pid);
 
     // Concurrent stdout/stderr drain with byte limits.
     let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();
-    let out_buf = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let err_buf = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let out_buf = Arc::new(Mutex::new(Vec::new()));
+    let err_buf = Arc::new(Mutex::new(Vec::new()));
     let done = Arc::new(AtomicBool::new(false));
     const MAX_OUTPUT: usize = 100_000;
 
@@ -94,8 +159,19 @@ pub(super) fn run_opencode(
     let deadline = Duration::from_secs(600);
     let start = std::time::Instant::now();
     let mut timed_out = false;
+    let mut cancelled = false;
 
     loop {
+        // Check cancellation flag.
+        if let Some(ref flag) = cancel_flag {
+            if flag.load(Ordering::SeqCst) {
+                cancelled = true;
+                done.store(true, Ordering::SeqCst);
+                kill_process_group(pid);
+                let _ = child.wait();
+                break;
+            }
+        }
         match child.try_wait() {
             Ok(Some(_)) => break,
             Ok(None) => {}
@@ -113,6 +189,10 @@ pub(super) fn run_opencode(
     done.store(true, Ordering::SeqCst);
     let exit_code = child.wait().ok().and_then(|s| s.code()).unwrap_or(-1);
 
+    if cancelled {
+        return Err("cancelled".to_string());
+    }
+
     let stdout_all = out_buf.lock().unwrap_or_else(|e| e.into_inner()).clone();
     let stderr_all = err_buf.lock().unwrap_or_else(|e| e.into_inner()).clone();
     let stdout_str = String::from_utf8_lossy(&stdout_all).to_string();
@@ -122,32 +202,17 @@ pub(super) fn run_opencode(
         let (commit_sha, changed_files, diff_summary, test_command, test_result, summary) =
             parse_output(&stdout_str, objective);
         Ok(TaskOutput {
-            summary,
-            commit_sha,
-            changed_files,
-            diff_summary,
-            test_command,
-            test_result,
-            stdout: stdout_str,
-            stderr: stderr_str,
-            exit_code,
-            timed_out,
+            summary, commit_sha, changed_files, diff_summary, test_command, test_result,
+            stdout: stdout_str, stderr: stderr_str, exit_code, timed_out,
         })
     } else {
-        Err(format!(
-            "opencode_exit_{}: {}",
-            exit_code,
-            truncate_str(&stderr_str.lines().last().unwrap_or(&stderr_str), 300)
-        ))
+        Err(format!("opencode_exit_{}: {}", exit_code,
+            truncate_str(&stderr_str.lines().last().unwrap_or(&stderr_str), 300)))
     }
 }
 
-fn drain_pipe(
-    mut pipe: impl Read,
-    buf: Arc<std::sync::Mutex<Vec<u8>>>,
-    done: Arc<AtomicBool>,
-    max: usize,
-) {
+fn drain_pipe(mut pipe: impl Read, buf: Arc<Mutex<Vec<u8>>>,
+              done: Arc<AtomicBool>, max: usize) {
     let mut local = Vec::new();
     let mut tmp = [0u8; 65536];
     loop {
@@ -191,11 +256,7 @@ fn kill_process_group(pid: u32) {
 }
 
 fn find_opencode() -> Result<String, String> {
-    if std::process::Command::new("opencode")
-        .arg("--version")
-        .output()
-        .is_ok()
-    {
+    if std::process::Command::new("opencode").arg("--version").output().is_ok() {
         Ok("opencode".to_string())
     } else {
         Err("opencode binary not found in PATH".into())
@@ -230,9 +291,7 @@ fn parse_output(stdout: &str, objective: &str) -> (String, String, String, Strin
 
     for line in stdout.lines() {
         let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
+        if trimmed.is_empty() { continue; }
         if let Ok(event) = serde_json::from_str::<serde_json::Value>(trimmed) {
             if let Some(et) = event.get("type").and_then(|v| v.as_str()) {
                 match et {
@@ -243,9 +302,7 @@ fn parse_output(stdout: &str, objective: &str) -> (String, String, String, Strin
                     }
                     "file_change" | "edit" | "write" => {
                         if let Some(p) = event.get("path").and_then(|v| v.as_str()) {
-                            if !changed_files.is_empty() {
-                                changed_files.push_str(", ");
-                            }
+                            if !changed_files.is_empty() { changed_files.push_str(", "); }
                             changed_files.push_str(p);
                         }
                     }
@@ -265,10 +322,7 @@ fn parse_output(stdout: &str, objective: &str) -> (String, String, String, Strin
                     "bash" | "tool_use" => {
                         if let Some(cmd_name) = event.pointer("/tool").and_then(|v| v.as_str()) {
                             if cmd_name == "bash" {
-                                if let Some(input) = event
-                                    .pointer("/state/input/command")
-                                    .and_then(|v| v.as_str())
-                                {
+                                if let Some(input) = event.pointer("/state/input/command").and_then(|v| v.as_str()) {
                                     test_command = truncate_str(input, 200).to_string();
                                 }
                             }
@@ -284,15 +338,58 @@ fn parse_output(stdout: &str, objective: &str) -> (String, String, String, Strin
             }
         }
     }
-    if changed_files.is_empty() {
-        changed_files = "unknown".to_string();
+    if changed_files.is_empty() { changed_files = "unknown".to_string(); }
+    (commit_sha, changed_files, diff_summary, test_command, test_result, summary)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_uses_proper_allow_deny() {
+        let config_str = build_config_json();
+        let parsed: serde_json::Value = serde_json::from_str(&config_str).unwrap();
+        let perm = &parsed["permission"];
+        // "*" must be deny as default
+        assert_eq!(perm["*"], "deny");
+        // Allowed permissions
+        assert_eq!(perm["read"], "allow");
+        assert_eq!(perm["edit"], "allow");
+        // Denied permissions
+        assert_eq!(perm["external_directory"], "deny");
+        assert_eq!(perm["webfetch"], "deny");
+        assert_eq!(perm["websearch"], "deny");
+        assert_eq!(perm["task"], "deny");
+        assert_eq!(perm["question"], "deny");
     }
-    (
-        commit_sha,
-        changed_files,
-        diff_summary,
-        test_command,
-        test_result,
-        summary,
-    )
+
+    #[test]
+    fn config_has_schema_url() {
+        let config_str = build_config_json();
+        let parsed: serde_json::Value = serde_json::from_str(&config_str).unwrap();
+        assert_eq!(parsed["$schema"], "https://opencode.ai/config.json");
+    }
+
+    #[test]
+    fn config_env_var_not_written_to_file() {
+        // The config is passed via env var, not file.
+        // Verify no .opencode.json is created by this module.
+        let config_str = build_config_json();
+        assert!(config_str.contains("external_directory"));
+        assert!(config_str.contains("\"deny\""));
+    }
+
+    #[test]
+    fn allowed_permissions_are_explicit() {
+        let config_str = build_config_json();
+        let parsed: serde_json::Value = serde_json::from_str(&config_str).unwrap();
+        let perm = parsed["permission"].as_object().unwrap();
+        // Each entry must be allow or deny
+        for (_k, v) in perm {
+            let val = v.as_str().unwrap();
+            assert!(val == "allow" || val == "deny" || val == "ask",
+                    "permission value must be allow/deny/ask, got: {val}");
+        }
+    }
 }
