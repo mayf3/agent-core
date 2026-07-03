@@ -30,16 +30,18 @@ pub fn dispatch(config: &CodingConfig, operation: &str, args: &Value) -> Value {
                 let perm = config.perm_for(id).unwrap();
                 let needs_exec = operation == "external.coding_workspace_exec"
                     || operation == "external.coding_task_submit";
-                let needs_zcode = operation == "external.coding_task_submit";
                 let needs_write = operation == "external.coding_workspace_write";
                 if needs_exec && !perm.exec {
                     return err_value("exec_not_permitted");
                 }
-                if needs_zcode {
-                    // Check if the backend is "zcode" and if so require zcode permission.
+                if operation == "external.coding_task_submit" {
                     if let Some(backend) = args.get("backend").and_then(Value::as_str) {
-                        if backend == "zcode" && !perm.zcode {
-                            return err_value("zcode_not_permitted");
+                        match backend {
+                            "zcode" if !perm.zcode => return err_value("zcode_not_permitted"),
+                            "opencode" if !perm.opencode => {
+                                return err_value("opencode_not_permitted")
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -84,8 +86,15 @@ pub fn dispatch(config: &CodingConfig, operation: &str, args: &Value) -> Value {
                 .get("backend")
                 .and_then(Value::as_str)
                 .unwrap_or("fake");
+            let model = args.get("model").and_then(Value::as_str);
+            let wr: Option<String> = root.as_ref().map(|r| r.to_string_lossy().to_string());
             agent_core_kernel::harness::coding::tasks::submit_task(
-                ws, objective, acceptance, backend,
+                ws,
+                objective,
+                acceptance,
+                backend,
+                wr.as_deref(),
+                model,
             )
         }
         "external.coding_task_status" => {

@@ -122,8 +122,15 @@ pub fn start_coding_harness_responder(
                             .get("backend")
                             .and_then(Value::as_str)
                             .unwrap_or("fake");
+                        let model = args.get("model").and_then(Value::as_str);
+                        let wr = root.to_string_lossy().to_string();
                         crate::harness::coding::tasks::submit_task(
-                            ws_id, objective, acceptance, backend,
+                            ws_id,
+                            objective,
+                            acceptance,
+                            backend,
+                            Some(&wr),
+                            model,
                         )
                     }
                     "external.coding_task_status" => {
