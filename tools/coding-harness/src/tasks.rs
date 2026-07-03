@@ -9,8 +9,8 @@ mod opencode_backend;
 
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 static TASK_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -134,7 +134,15 @@ pub fn submit_task(
     let obj = objective.to_string();
     let bk = backend_used.to_string();
     let mdl = model.unwrap_or("").to_string();
-    std::thread::spawn(move || execute_task(&tid, &ws, &wr, &obj, &bk, &mdl));
+
+    // Register cancel token for opencode backend.
+    let cancel_flag = if bk == "opencode" {
+        Some(opencode_backend::register_cancel(&tid))
+    } else {
+        None
+    };
+
+    std::thread::spawn(move || execute_task(&tid, &ws, &wr, &obj, &bk, &mdl, cancel_flag));
 
     ok(json!({"task_id": id, "status": "queued", "backend": backend_used, "created_at": now}))
 }
@@ -146,14 +154,18 @@ fn execute_task(
     objective: &str,
     backend: &str,
     model: &str,
+    cancel_flag: Option<Arc<AtomicBool>>,
 ) {
+    // If queued task was cancelled before starting, don't run.
+    if let Some(ref flag) = cancel_flag {
+        if flag.load(Ordering::SeqCst) { return; }
+    }
+
     // Transition to Running.
     {
         let mut store = tasks().lock().unwrap();
         if let Some(t) = store.get_mut(task_id) {
-            if t.status != TaskStatus::Queued {
-                return;
-            }
+            if t.status != TaskStatus::Queued { return; }
             t.status = TaskStatus::Running;
             t.updated_at = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -163,9 +175,12 @@ fn execute_task(
     }
 
     let result = match backend {
-        "opencode" => opencode_backend::run_opencode(workspace_root, objective, model),
+        "opencode" => opencode_backend::run_opencode(task_id, workspace_root, objective, model, cancel_flag),
         _ => run_fake(objective),
     };
+
+    // Clean up cancel token after execution.
+    opencode_backend::cleanup_cancel(task_id);
 
     let mut store = tasks().lock().unwrap();
     if let Some(t) = store.get_mut(task_id) {
@@ -258,6 +273,9 @@ pub fn get_status(task_id: &str) -> Value {
 }
 
 pub fn cancel_task(task_id: &str) -> Value {
+    // First, stop any running process via the cancel token.
+    let killed = opencode_backend::cancel_task(task_id);
+
     let mut store = tasks().lock().unwrap();
     match store.get_mut(task_id) {
         Some(t) => {
@@ -267,9 +285,7 @@ pub fn cancel_task(task_id: &str) -> Value {
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs();
-                // Note: if process is running, cancellation only marks the status.
-                // The process continues but the task is considered cancelled.
-                ok(json!({"task_id": task_id, "status": "cancelled"}))
+                ok(json!({"task_id": task_id, "status": "cancelled", "process_killed": killed}))
             } else {
                 err("task_not_cancellable")
             }
