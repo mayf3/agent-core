@@ -8,110 +8,84 @@ use crate::registry::snapshot::RegistrySnapshot;
 use anyhow::{bail, Result};
 use chrono::Utc;
 use serde_json::json;
-
 pub mod outbox_dispatcher;
 mod tool_execution;
 mod tool_loop;
 mod tool_rejection;
-
 pub use crate::gateway::ToolRejection;
 pub use tool_rejection::validate_model_arguments;
-
-#[cfg(test)]
-#[path = "tests/registry_snapshot_provider_context.rs"]
-mod registry_snapshot_provider_context;
-
-#[cfg(test)]
-#[path = "tests/registry_snapshot_recovery_failure.rs"]
-mod registry_snapshot_recovery_failure;
-
-#[cfg(test)]
-#[path = "tests/registry_snapshot_failure.rs"]
-mod registry_snapshot_failure;
-
-#[cfg(test)]
-#[path = "tests/registry_snapshot_gateway.rs"]
-mod registry_snapshot_gateway;
-
-#[cfg(test)]
-#[path = "tests/external_harness_hotload.rs"]
-mod external_harness_hotload;
-
-#[cfg(test)]
-#[path = "tests/external_harness_transport.rs"]
-mod external_harness_transport;
-
-#[cfg(test)]
-#[path = "tests/external_harness_runtime.rs"]
-mod external_harness_runtime;
-
-#[cfg(test)]
-#[path = "tests/external_harness_pinning.rs"]
-mod external_harness_pinning;
-
-#[cfg(test)]
-#[path = "tests/external_harness_failures.rs"]
-mod external_harness_failures;
-
-#[cfg(test)]
-#[path = "tests/recall_security.rs"]
-mod recall_security;
-
-#[cfg(test)]
-#[path = "tests/recall_test_support.rs"]
-mod recall_test_support;
-
-#[cfg(test)]
-#[path = "tests/recall_isolation.rs"]
-mod recall_isolation;
-
-#[cfg(test)]
-#[path = "tests/recall_audit.rs"]
-mod recall_audit;
-
-#[cfg(test)]
-#[path = "tests/tool_execution_dispatch.rs"]
-mod tool_execution_dispatch;
-
-#[cfg(test)]
-#[path = "tests/capability_snapshot_pin.rs"]
-mod capability_snapshot_pin;
-
 #[cfg(test)]
 #[path = "tests/capability_probe_e2e.rs"]
 mod capability_probe_e2e;
-
 #[cfg(test)]
 #[path = "tests/capability_probe_reopen.rs"]
 mod capability_probe_reopen;
-
 #[cfg(test)]
 #[path = "tests/capability_probe_rollback.rs"]
 mod capability_probe_rollback;
-
+#[cfg(test)]
+#[path = "tests/capability_snapshot_pin.rs"]
+mod capability_snapshot_pin;
+#[cfg(test)]
+#[path = "tests/external_harness_failures.rs"]
+mod external_harness_failures;
+#[cfg(test)]
+#[path = "tests/external_harness_hotload.rs"]
+mod external_harness_hotload;
+#[cfg(test)]
+#[path = "tests/external_harness_pinning.rs"]
+mod external_harness_pinning;
+#[cfg(test)]
+#[path = "tests/external_harness_runtime.rs"]
+mod external_harness_runtime;
+#[cfg(test)]
+#[path = "tests/external_harness_transport.rs"]
+mod external_harness_transport;
+#[cfg(test)]
+#[path = "tests/recall_audit.rs"]
+mod recall_audit;
+#[cfg(test)]
+#[path = "tests/recall_isolation.rs"]
+mod recall_isolation;
+#[cfg(test)]
+#[path = "tests/recall_security.rs"]
+mod recall_security;
+#[cfg(test)]
+#[path = "tests/recall_test_support.rs"]
+mod recall_test_support;
+#[cfg(test)]
+#[path = "tests/registry_snapshot_failure.rs"]
+mod registry_snapshot_failure;
+#[cfg(test)]
+#[path = "tests/registry_snapshot_gateway.rs"]
+mod registry_snapshot_gateway;
+#[cfg(test)]
+#[path = "tests/registry_snapshot_provider_context.rs"]
+mod registry_snapshot_provider_context;
+#[cfg(test)]
+#[path = "tests/registry_snapshot_recovery_failure.rs"]
+mod registry_snapshot_recovery_failure;
+#[cfg(test)]
+#[path = "tests/tool_execution_dispatch.rs"]
+mod tool_execution_dispatch;
 #[cfg(test)]
 #[path = "tests/tool_round_budget.rs"]
 mod tool_round_budget;
-
 pub struct Runtime<L> {
     config: KernelConfig,
     llm: L,
 }
-
 pub struct RuntimeOutcome {
     pub run_id: RunId,
     pub session_id: SessionId,
     pub output: String,
 }
-
 pub fn session_spawn() -> Result<()> {
     bail!("not_enabled:session.spawn")
 }
-
 pub fn run_yield() -> Result<()> {
     bail!("not_enabled:run.yield")
 }
-
 impl<L> Runtime<L>
 where
     L: LlmClient + 'static,
@@ -119,7 +93,6 @@ where
     pub fn new(config: KernelConfig, llm: L) -> Self {
         Self { config, llm }
     }
-
     /// Phase 2 M2d: decide whether an approved invocation is dispatched now or
     /// paused for human approval. ReadOnly ops queue immediately; Write ops
     /// pause when require_write_approval is enabled. Risk is determined from
@@ -161,7 +134,6 @@ where
         journal.update_run_status(&run.id, "WaitingDispatch")?;
         Ok(())
     }
-
     pub fn deliver(
         &self,
         journal: &JournalStore,
@@ -207,7 +179,6 @@ where
                 "principal_id": run.principal.principal_id.0,
             }),
         )?;
-
         let RuntimeEventPayload::UserMessage {
             text,
             message_id,
@@ -223,7 +194,6 @@ where
 
         // The loaded snapshot (Arc clone) is used throughout the Run's
         // lifetime for Context, Provider tools, and Gateway validation.
-
         let mut blocks = ContextAssembler::from_config(&self.config).build(
             journal,
             &session,
@@ -246,25 +216,46 @@ where
         // once here. All LLM rounds for this Run reuse the same tools list.
         let provider_tools = snapshot.provider_tools_for_grants(&granted_operations);
 
-        let first = self.llm.complete(LlmInput {
+        // Phase 1: initial LLM call. On failure, record RunFailed and deliver
+        // a static notification (never a silent Err).
+        let first = match self.llm.complete(LlmInput {
             blocks: blocks.clone(),
             user_text: text.clone(),
             granted_operations: granted_operations.clone(),
             provider_tools: provider_tools.clone(),
             follow_ups: vec![],
-        })?;
-        journal.append_event(
+        }) {
+            Ok(llm) => llm,
+            Err(_) => {
+                let _ = journal.fail_run(&run.id);
+                let _ = journal.append_event(
+                    JournalEventKind::RunFailed,
+                    Some(&run.id),
+                    Some(&session.id),
+                    None,
+                    json!({ "run_id": run.id.0, "error_category": "initial_llm_failed" }),
+                );
+                return self.reply_with_failure(
+                    journal,
+                    &run,
+                    &session,
+                    message_id,
+                    chat_id,
+                    crate::runtime::tool_loop::INITIAL_LLM_FAILED_MSG,
+                );
+            }
+        };
+        let _ = journal.append_event(
             JournalEventKind::LlmCompleted,
             Some(&run.id),
             Some(&session.id),
             None,
             first.journal_payload.clone(),
-        )?;
+        );
 
-        // Session Recall Loop (Task 1): when the first LLM round emits a
-        // read-only tool call, execute it, append a ToolResult block, and
-        // re-invoke the LLM. Bounded by config.max_tool_rounds; a no-op when
-        // the model emits no tool call (backwards compatible).
+        // Phase 2: tool recall loop. Follow-up LLM failures are handled
+        // internally (tool_loop::handle_followup_llm_failure records RunFailed
+        // and returns a static failure LlmOutput).
         let llm = self.run_tool_recall_loop(
             journal,
             gateway,
@@ -276,12 +267,24 @@ where
             &snapshot,
         )?;
 
-        // Never enqueue a blank reply (empty first-round content with no tool
-        // call, or empty second-round content). The fallback is a fixed,
-        // minimal, generic message — no product styling. The Journal still
-        // records the true (possibly empty) model content for audit; only the
-        // reply intent text is guarded.
+        // Phase 3: deliver reply. If the run already failed (e.g. follow-up LLM
+        // error), enqueue the reply without changing status. Otherwise use the
+        // normal enqueue_or_pause path.
         let reply_text = ensure_nonblank_reply(&llm.content);
+        let is_failed = matches!(
+            journal.run_status(&run.id),
+            Ok(Some(s)) if s == "Failed"
+        );
+        if is_failed {
+            return self.reply_with_failure(
+                journal,
+                &run,
+                &session,
+                message_id,
+                chat_id,
+                &reply_text,
+            );
+        }
         let intent = self.reply_intent(&run, &session, &reply_text, message_id, chat_id);
         let correlation_id = intent.invocation_id.0.clone();
         journal.append_event(
@@ -319,7 +322,6 @@ where
             output: reply_text,
         })
     }
-
     pub fn deliver_echo(
         &self,
         journal: &JournalStore,
@@ -410,7 +412,6 @@ where
             output: reply,
         })
     }
-
     fn create_run(
         &self,
         session: &Session,
@@ -449,7 +450,6 @@ where
             registry_snapshot_id: snapshot_id.to_string(),
         }
     }
-
     fn reply_intent(
         &self,
         run: &Run,

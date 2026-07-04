@@ -7,6 +7,15 @@ use crate::runtime::tool_rejection::sanitize_operation_for_audit;
 use anyhow::Result;
 use serde_json::json;
 
+/// Static user-facing message when the LLM fails during processing.
+/// NEVER includes internal error categories, stack traces, or provider details.
+/// The Run is Failed but the user still gets a notification.
+pub(crate) const FOLLOWUP_LLM_FAILED_MSG: &str =
+    "这次处理在调用模型生成后续回复时失败了。工具执行结果已记录，但任务可能尚未完成。你可以发送「继续」让我接着处理。";
+
+pub(crate) const INITIAL_LLM_FAILED_MSG: &str =
+    "这次处理模型暂时不可用，任务尚未开始完成。请稍后重试。";
+
 /// Single tool-call MVP: only `tool_calls[0]` is parsed and executed per round.
 
 pub(crate) enum ToolCallOutcome {
@@ -51,7 +60,7 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
                         .handle_malformed_tool_call(journal, run, session, turn_index, this_tool)?;
                     match outcome {
                         ToolCallOutcome::Fatal { category } => {
-                            return self.terminate_run_failure(journal, run, session, category);
+                            return self.handle_fatal_failure(journal, run, session, category);
                         }
                         ToolCallOutcome::ToolResult { text } => {
                             blocks.push(ContextBlock {
@@ -92,7 +101,7 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
                     )?;
                     match outcome {
                         ToolCallOutcome::Fatal { category } => {
-                            return self.terminate_run_failure(journal, run, session, category);
+                            return self.handle_fatal_failure(journal, run, session, category);
                         }
                         ToolCallOutcome::ToolResult { text } => {
                             let op_for_ref = sanitize_operation_for_audit(&tool_call.operation);
@@ -180,12 +189,7 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
         }) {
             Ok(next) => next,
             Err(_) => {
-                return self.terminate_run_failure(
-                    journal,
-                    run,
-                    session,
-                    "tool_followup_llm_failed",
-                )
+                return self.handle_followup_llm_failure(journal, run, session);
             }
         };
         if journal
@@ -198,36 +202,125 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
             )
             .is_err()
         {
-            return self.terminate_run_failure(
-                journal,
-                run,
-                session,
-                "tool_followup_journal_failed",
-            );
+            return self.handle_followup_llm_failure(journal, run, session);
         }
         Ok(next)
     }
 
-    fn terminate_run_failure(
+    /// Handle a fatal tool-loop infrastructure failure: record RunFailed and
+    /// return a static failure LlmOutput so deliver() can enqueue a reply.
+    fn handle_fatal_failure(
         &self,
         journal: &JournalStore,
         run: &Run,
         session: &Session,
         category: &'static str,
     ) -> Result<LlmOutput> {
-        let run_status_recorded = journal.fail_run(&run.id).is_ok();
-        let failure_fact_recorded = journal
-            .append_event(
-                JournalEventKind::RunFailed,
+        let _ = journal.fail_run(&run.id);
+        let _ = journal.append_event(
+            JournalEventKind::RunFailed,
+            Some(&run.id),
+            Some(&session.id),
+            None,
+            json!({ "run_id": run.id.0, "error_category": category }),
+        );
+        Ok(LlmOutput {
+            provider: "system".into(),
+            model: "system".into(),
+            content: FOLLOWUP_LLM_FAILED_MSG.to_string(),
+            journal_payload: json!({"s":"failure_notification"}),
+            tool_call: ToolCallResult::Absent,
+            provider_turn: None,
+        })
+    }
+
+    /// Enqueue a reply for a failed run without changing Run status (stays
+    /// Failed). Uses a stable idempotency key scoped to this run so at most
+    /// one failure notification is enqueued.
+    pub(super) fn reply_with_failure(
+        &self,
+        journal: &JournalStore,
+        run: &Run,
+        session: &Session,
+        message_id: Option<String>,
+        chat_id: Option<String>,
+        text: &str,
+    ) -> std::result::Result<super::RuntimeOutcome, anyhow::Error> {
+        let mut intent = self.reply_intent(run, session, text, message_id, chat_id);
+        intent.idempotency_key = Some(format!("failure-reply:{}", run.id.0));
+        let correlation_id = intent.invocation_id.0.clone();
+        let _ = journal.append_event(
+            crate::domain::JournalEventKind::InvocationProposed,
+            Some(&run.id),
+            Some(&session.id),
+            Some(&correlation_id),
+            serde_json::json!({
+                "operation": intent.operation,
+                "idempotency_key": intent.idempotency_key,
+            }),
+        );
+        let reply_spec = crate::registry::snapshot::OperationSpec {
+            name: intent.operation.clone(),
+            risk: crate::registry::snapshot::Risk::Write,
+            description: "reply".into(),
+            parameters: serde_json::json!({"type":"object"}),
+            idempotent: true,
+            binding_kind: crate::registry::snapshot::BindingKind::Builtin,
+            binding_key: format!("builtin.{}", intent.operation),
+        };
+        if let Ok(approved) = crate::gateway::Gateway::new(self.config.clone()).approve_invocation(
+            intent,
+            run,
+            session,
+            &crate::registry::snapshot::RegistrySnapshot {
+                snapshot_id: "snap_failure_reply".to_string(),
+                created_at: chrono::Utc::now(),
+                operations: vec![reply_spec],
+            },
+        ) {
+            let _ = journal.append_event(
+                crate::domain::JournalEventKind::InvocationApproved,
                 Some(&run.id),
                 Some(&session.id),
-                None,
-                json!({ "run_id": run.id.0, "error_category": category }),
-            )
-            .is_ok();
-        Err(anyhow::anyhow!(
-            "tool loop infrastructure failure: {category}; run_status_recorded={run_status_recorded}; failure_fact_recorded={failure_fact_recorded}"
-        ))
+                Some(&correlation_id),
+                serde_json::json!({
+                    "decision_id": approved.decision_id,
+                    "operation": approved.intent().operation,
+                }),
+            );
+            let _ = journal.queue_outbox_dispatch(&approved, Some(&session.id));
+        }
+        Ok(super::RuntimeOutcome {
+            run_id: run.id.clone(),
+            session_id: session.id.clone(),
+            output: text.to_string(),
+        })
+    }
+
+    /// Record RunFailed and return a static failure LlmOutput (no LLM call).
+    /// The caller (deliver) is responsible for creating the reply outbox entry.
+    fn handle_followup_llm_failure(
+        &self,
+        journal: &JournalStore,
+        run: &Run,
+        session: &Session,
+    ) -> Result<LlmOutput> {
+        let _ = journal.fail_run(&run.id);
+        let _ = journal.append_event(
+            JournalEventKind::RunFailed,
+            Some(&run.id),
+            Some(&session.id),
+            None,
+            json!({ "run_id": run.id.0, "error_category": "tool_followup_llm_failed" }),
+        );
+        Ok(LlmOutput {
+            provider: "system".into(),
+            model: "system".into(),
+            content: FOLLOWUP_LLM_FAILED_MSG.to_string(),
+            journal_payload: json!({"s":"failure_notification"}),
+            tool_call: ToolCallResult::Absent,
+            provider_turn: None,
+        })
     }
 }
 
