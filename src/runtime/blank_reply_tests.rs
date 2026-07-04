@@ -1,11 +1,10 @@
 use super::super::Runtime;
 use super::tool_loop_tests::test_config;
-use crate::domain::JournalEventKind;
+use crate::domain::*;
 use crate::gateway::Gateway;
 use crate::journal::JournalStore;
 use crate::llm::{LlmClient, LlmInput, LlmOutput, ToolCall, ToolCallResult};
 use serde_json::json;
-use std::collections::HashSet;
 use std::sync::atomic::AtomicUsize;
 
 struct WhitespaceLlm {
@@ -69,12 +68,10 @@ fn assert_whitespace_reply_is_guarded(first_tool: bool) {
         1
     );
 }
-
 #[test]
 fn first_round_whitespace_reply_is_not_enqueued_blank() {
     assert_whitespace_reply_is_guarded(false);
 }
-
 #[test]
 fn post_tool_whitespace_reply_is_not_enqueued_blank() {
     assert_whitespace_reply_is_guarded(true);
@@ -110,7 +107,6 @@ impl LlmClient for FailingRecallLlm {
         })
     }
 }
-
 #[test]
 fn recall_query_failure_closes_receipt_and_run_without_leaks() {
     let config = test_config();
@@ -168,7 +164,6 @@ impl LlmClient for FollowupFailureLlm {
         })
     }
 }
-
 #[test]
 fn failed_followup_llm_marks_the_accurate_run_failed() {
     let mut config = test_config();
@@ -208,11 +203,7 @@ fn failed_followup_llm_marks_the_accurate_run_failed() {
         .iter()
         .filter(|e| e.kind == JournalEventKind::InvocationProposed)
         .collect();
-    assert_eq!(
-        props.len(),
-        2,
-        "InvocationProposed: tool call + failure reply"
-    );
+    assert_eq!(props.len(), 2, "InvocationProposed: tool + failure");
 
     // InvocationApproved: 1 for tool call + 1 for failure reply = 2.
     let approved: Vec<_> = events
@@ -236,9 +227,7 @@ fn failed_followup_llm_marks_the_accurate_run_failed() {
     // The output is the static Chinese failure message, no provider details.
     assert!(
         outcome.output.contains("模型生成后续回复时失败了")
-            || outcome.output.contains("工具执行结果已记录"),
-        "user-friendly failure message: {}",
-        outcome.output
+            || outcome.output.contains("工具执行结果已记录")
     );
     assert!(!outcome.output.contains("provider details"));
     assert!(!outcome.output.contains("tool_followup_llm_failed"));
@@ -246,7 +235,6 @@ fn failed_followup_llm_marks_the_accurate_run_failed() {
     // Journal hash chain is valid.
     assert!(journal.verify_hash_chain().unwrap());
 }
-
 /// LLM that fails on the very first call (no tool execution).
 struct InitialFailureLlm;
 
@@ -255,7 +243,6 @@ impl LlmClient for InitialFailureLlm {
         anyhow::bail!("simulated initial LLM failure, no provider details");
     }
 }
-
 #[test]
 fn initial_llm_failure_still_replies() {
     let config = test_config();
@@ -301,7 +288,6 @@ fn initial_llm_failure_still_replies() {
         .iter()
         .all(|e| e.kind != JournalEventKind::LlmCompleted));
 }
-
 /// LLM that returns a tool call whose execution fails, then follow-up fails.
 struct ToolFailsThenFollowupFailsLlm(AtomicUsize);
 
@@ -325,7 +311,6 @@ impl LlmClient for ToolFailsThenFollowupFailsLlm {
         }
     }
 }
-
 #[test]
 fn tool_failure_then_llm_failure_still_replies() {
     let config = test_config();
@@ -372,45 +357,144 @@ fn tool_failure_then_llm_failure_still_replies() {
     assert!(outcome.output.contains("模型生成后续回复时失败了"));
     assert!(!outcome.output.contains("shell.exec"));
 }
-
-/// Run with two identical failures to verify duplicate protection.
+/// Verify direct duplicate calls to reply_with_failure produce exactly one
+/// outbox entry thanks to the stable idempotency key.
 #[test]
 fn duplicate_failure_reply_not_enqueued_twice() {
-    // Use the FollowupFailureLlm which triggers a follow-up LLM failure.
     let mut config = test_config();
     config.extra_allowed_operations = vec!["system.status".into()];
     let journal = JournalStore::in_memory().unwrap();
     let gateway = Gateway::new(config.clone());
-    let runtime = Runtime::new(
-        config,
-        FollowupFailureLlm(std::sync::atomic::AtomicUsize::new(0)),
-    );
-    let event = gateway
-        .validate_ingress(&journal, gateway.cli_ingress("dup".into()).unwrap())
-        .unwrap();
-    let _ = runtime.deliver(&journal, &gateway, event).unwrap();
+    let snapshot = crate::registry::snapshot::test_snapshot();
+    let run = Run {
+        id: RunId::new(),
+        session_id: SessionId("s_dup".into()),
+        agent_id: AgentId("main".into()),
+        trigger_event_id: EventId::new(),
+        principal: RunPrincipal {
+            principal_id: PrincipalId("cli:local".into()),
+            subject: PrincipalSubject::LocalUser,
+            source: PrincipalSource::Cli,
+            grants: vec![
+                CapabilityGrant {
+                    operation: "stdout.send_text".into(),
+                    scope: "current_session".into(),
+                },
+                CapabilityGrant {
+                    operation: "system.status".into(),
+                    scope: "current_session".into(),
+                },
+            ],
+            requester_id: Some("cli:local".into()),
+        },
+        parent_run_id: None,
+        delegated_by: None,
+        status: RunStatus::Running,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+        registry_snapshot_id: String::new(),
+    };
+    journal.insert_run(&run).unwrap();
+    let session = Session {
+        id: SessionId("s_dup".into()),
+        agent_id: AgentId("main".into()),
+        channel: ChannelKind::Cli,
+        conversation_key: "local".into(),
+        summary: None,
+        summarized_until_event_id: None,
+        last_active_at: chrono::Utc::now(),
+        status: SessionStatus::Active,
+        version: 1,
+    };
+    let runtime = Runtime::new(config, crate::llm::LocalEchoLlm);
 
-    // Calling deliver_echo or a second deliver for the same run would be
-    // a different scenario; for this test we verify that calling
-    // reply_with_failure twice with the same run does not create a second
-    // outbox entry. Since reply_with_failure uses a stable idempotency key
-    // (failure-reply:<run_id>), a second call should not duplicate.
-    // We verify this by checking the outbox directly (only via journal events
-    // since there's no public outbox query method).
+    // First call.
+    let r1 = runtime.reply_with_failure(
+        &journal,
+        &gateway,
+        &snapshot,
+        &run,
+        &session,
+        None,
+        None,
+        "failure msg",
+    );
+    assert!(r1.is_ok());
+    let events_after_1st = journal.events().unwrap();
+    let oq1: Vec<_> = events_after_1st
+        .iter()
+        .filter(|e| e.kind == JournalEventKind::OutboxQueued)
+        .collect();
+    assert_eq!(oq1.len(), 1, "first call creates one outbox entry");
+
+    // Second call with same run — idempotency key should prevent duplication.
+    let r2 = runtime.reply_with_failure(
+        &journal,
+        &gateway,
+        &snapshot,
+        &run,
+        &session,
+        None,
+        None,
+        "failure msg",
+    );
+    assert!(r2.is_ok());
+    let events_after_2nd = journal.events().unwrap();
+    let oq2: Vec<_> = events_after_2nd
+        .iter()
+        .filter(|e| e.kind == JournalEventKind::OutboxQueued)
+        .collect();
+    assert_eq!(
+        oq2.len(),
+        1,
+        "second call does NOT add a second outbox entry"
+    );
+
+    // The idempotency key prevents duplicate outbox.
+    assert!(oq2.len() == 1, "at most one outbox dispatch");
+}
+/// Error injection: InvocationProposed append failure.
+#[test]
+
+/// Error injection: queue_outbox_dispatch failure after RunFailed.
+#[test]
+fn outbox_failure_after_runfailed_returns_err() {
+    let mut config = test_config();
+    config.extra_allowed_operations = vec!["system.status".into()];
+    let journal = JournalStore::in_memory().unwrap();
+    let gateway = Gateway::new(config.clone());
+    let runtime = Runtime::new(config, FollowupFailureLlm(AtomicUsize::new(0)));
+    // Drop outbox_dispatches table so queue_outbox_dispatch fails.
+    journal
+        .execute_sql_for_test("DROP TABLE outbox_dispatches")
+        .unwrap();
+    let event = gateway
+        .validate_ingress(&journal, gateway.cli_ingress("x".into()).unwrap())
+        .unwrap();
+    let result = runtime.deliver(&journal, &gateway, event);
+    assert!(
+        result.is_err(),
+        "deliver must return Err when outbox enqueue fails"
+    );
+
+    // RunFailed should still be recorded.
     let events = journal.events().unwrap();
+    let failed: Vec<_> = events
+        .iter()
+        .filter(|e| e.kind == JournalEventKind::RunFailed)
+        .collect();
+    assert_eq!(failed.len(), 1, "RunFailed recorded despite outbox failure");
+    // No OutboxQueued.
     let oq: Vec<_> = events
         .iter()
         .filter(|e| e.kind == JournalEventKind::OutboxQueued)
         .collect();
-    // Use dispatch_id from the first (and only) outbox to verify uniqueness.
-    let dispatch_ids: HashSet<_> = oq
-        .iter()
-        .filter_map(|e| e.payload.get("dispatch_id").and_then(|v| v.as_str()))
-        .collect();
-    assert_eq!(
-        oq.len(),
-        dispatch_ids.len(),
-        "duplicate outbox entries with distinct ids: {}",
-        oq.len().saturating_sub(dispatch_ids.len())
+    assert_eq!(oq.len(), 0, "no outbox entry on failure");
+    // No RunCompleted.
+    assert!(
+        events
+            .iter()
+            .all(|e| e.kind != JournalEventKind::RunCompleted),
+        "no RunCompleted"
     );
 }

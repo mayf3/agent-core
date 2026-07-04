@@ -227,16 +227,18 @@ where
         }) {
             Ok(llm) => llm,
             Err(_) => {
-                let _ = journal.fail_run(&run.id);
-                let _ = journal.append_event(
+                journal.fail_run(&run.id)?;
+                journal.append_event(
                     JournalEventKind::RunFailed,
                     Some(&run.id),
                     Some(&session.id),
                     None,
                     json!({ "run_id": run.id.0, "error_category": "initial_llm_failed" }),
-                );
+                )?;
                 return self.reply_with_failure(
                     journal,
+                    gateway,
+                    &snapshot,
                     &run,
                     &session,
                     message_id,
@@ -245,14 +247,13 @@ where
                 );
             }
         };
-        let _ = journal.append_event(
+        journal.append_event(
             JournalEventKind::LlmCompleted,
             Some(&run.id),
             Some(&session.id),
             None,
             first.journal_payload.clone(),
-        );
-
+        )?;
         // Phase 2: tool recall loop. Follow-up LLM failures are handled
         // internally (tool_loop::handle_followup_llm_failure records RunFailed
         // and returns a static failure LlmOutput).
@@ -266,8 +267,6 @@ where
             first,
             &snapshot,
         )?;
-
-        // Phase 3: deliver reply. If the run already failed (e.g. follow-up LLM
         // error), enqueue the reply without changing status. Otherwise use the
         // normal enqueue_or_pause path.
         let reply_text = ensure_nonblank_reply(&llm.content);
@@ -278,6 +277,8 @@ where
         if is_failed {
             return self.reply_with_failure(
                 journal,
+                gateway,
+                &snapshot,
                 &run,
                 &session,
                 message_id,
@@ -485,9 +486,7 @@ where
         }
     }
 }
-
 /// Return a non-blank reply string. If the model produced only whitespace
-/// (empty first-round content with no tool call, or empty second-round
 /// content), substitute a fixed, minimal, generic message so the Outbox never
 /// receives a blank string. This is the single place reply text is synthesized.
 fn ensure_nonblank_reply(content: &str) -> String {
