@@ -74,6 +74,13 @@ pub struct KernelConfig {
     /// `<data_dir>/harness-artifacts`. Configured via
     /// AGENT_CORE_HARNESS_ARTIFACT_ROOT.
     pub harness_artifact_root: PathBuf,
+    /// Maximum number of tool-call rounds per Run (each round is one LLM
+    /// invocation that returns one or more tool calls). When the model
+    /// reaches this limit without producing a final reply, the Run completes
+    /// with ToolBudgetExhausted. Range 1–64, default 12. Configured via
+    /// AGENT_CORE_MAX_TOOL_ROUNDS. A value outside the range causes a startup
+    /// error (process exits with diagnostic).
+    pub max_tool_rounds: usize,
 }
 
 impl KernelConfig {
@@ -154,6 +161,7 @@ impl KernelConfig {
             primary_tool_name_indexed: env_bool("AGENT_CORE_PRIMARY_TOOL_NAME_INDEXED", false),
             harness_read_timeout_ms: env_u64("AGENT_CORE_HARNESS_READ_TIMEOUT_MS", 10_000),
             harness_artifact_root,
+            max_tool_rounds: env_max_tool_rounds("AGENT_CORE_MAX_TOOL_ROUNDS", 12),
         }
     }
 }
@@ -259,6 +267,25 @@ fn env_usize(key: &str, fallback: usize) -> usize {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(fallback)
+}
+
+fn env_max_tool_rounds(key: &str, fallback: usize) -> usize {
+    let raw = match std::env::var(key) {
+        Ok(v) => v,
+        Err(_) => return fallback,
+    };
+    let parsed: usize = match raw.parse() {
+        Ok(n) => n,
+        Err(_) => {
+            eprintln!("invalid_config: {key} must be an integer between 1 and 64, got {raw:?}");
+            std::process::exit(1);
+        }
+    };
+    if parsed < 1 || parsed > 64 {
+        eprintln!("invalid_config: {key} must be between 1 and 64, got {parsed}");
+        std::process::exit(1);
+    }
+    parsed
 }
 
 fn unquote(value: &str) -> String {

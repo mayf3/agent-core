@@ -50,6 +50,7 @@ fn config() -> crate::config::KernelConfig {
         primary_tool_name_indexed: false,
         harness_read_timeout_ms: 10_000,
         harness_artifact_root: std::env::temp_dir().join(format!("ha_root_{}", std::process::id())),
+        max_tool_rounds: 12,
     }
 }
 

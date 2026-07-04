@@ -252,6 +252,7 @@ fn disabled_dispatcher_loop_returns_without_draining_outbox() -> Result<()> {
         primary_tool_name_indexed: false,
         harness_read_timeout_ms: 10_000,
         harness_artifact_root: std::env::temp_dir().join(format!("ha_root_{}", std::process::id())),
+        max_tool_rounds: 12,
         capability_submit_token: None,
         capability_decision_token: None,
     };
@@ -424,6 +425,7 @@ fn disabled_test_config() -> KernelConfig {
         primary_tool_name_indexed: false,
         harness_read_timeout_ms: 10_000,
         harness_artifact_root: std::env::temp_dir().join(format!("ha_root_{}", std::process::id())),
+        max_tool_rounds: 12,
         capability_submit_token: None,
         capability_decision_token: None,
     }

@@ -155,7 +155,9 @@ impl LlmClient for AlwaysRecallLlm {
 
 #[test]
 fn recall_loop_is_bounded_by_max_tool_rounds() -> Result<()> {
-    let config = common::test_config();
+    // Use a low max_tool_rounds for this bounded test.
+    let mut config = common::test_config();
+    config.max_tool_rounds = 2;
     let journal = JournalStore::in_memory()?;
     let gateway = Gateway::new(config.clone());
     let runtime = Runtime::new(
