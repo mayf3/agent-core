@@ -32,13 +32,47 @@ fn append_or_fatal(
         })
 }
 fn rejected_result(rejection: ToolRejection) -> ToolCallOutcome {
-    ToolCallOutcome::ToolResult {
-        text: format!(
+    let text = match &rejection {
+        ToolRejection::InvalidArgumentsWithDetails(issue) => {
+            use crate::registry::schema::SchemaValidationIssue;
+            let mut details = serde_json::json!({"retryable": true});
+            match issue.as_ref() {
+                SchemaValidationIssue::MissingRequired { fields } => {
+                    details["error_category"] = serde_json::json!("invalid_arguments");
+                    details["missing_fields"] = serde_json::json!(fields);
+                }
+                SchemaValidationIssue::EnumMismatch { property, allowed } => {
+                    details["error_category"] = serde_json::json!("invalid_arguments");
+                    if let Some(p) = property {
+                        details["invalid_field"] = serde_json::json!(p);
+                    }
+                    details["allowed_values"] = serde_json::json!(allowed);
+                }
+                SchemaValidationIssue::UnexpectedProperty { property } => {
+                    details["error_category"] = serde_json::json!("invalid_arguments");
+                    details["unexpected_field"] = serde_json::json!(property);
+                }
+                _ => {
+                    details["error_category"] = serde_json::json!("invalid_arguments");
+                }
+            }
+            serde_json::to_string(&serde_json::json!({
+                "status": "rejected",
+                "error_category": "invalid_arguments",
+                "retryable": true,
+                "details": details,
+            }))
+            .unwrap_or_else(|_| {
+                format!("status: rejected\nerror_category: {}", rejection.category())
+            })
+        }
+        _ => format!(
             "status: rejected\nerror_category: {}\nmessage: {}",
             rejection.category(),
             rejection.safe_message()
         ),
-    }
+    };
+    ToolCallOutcome::ToolResult { text }
 }
 /// Typed dispatch error — maps to fixed error_category, no string matching.
 #[derive(Debug, Clone)]

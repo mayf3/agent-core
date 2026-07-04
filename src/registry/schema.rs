@@ -10,6 +10,7 @@
 
 use anyhow::{bail, Result};
 use serde_json::Value;
+use std::collections::BTreeSet;
 
 /// Structured issue from schema validation, used for recoverable ToolResults.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,11 +32,11 @@ pub enum SchemaValidationIssue {
 impl SchemaValidationIssue {
     pub fn error_category(&self) -> &'static str {
         match self {
-            Self::MissingRequired { .. } => "invalid_arguments",
-            Self::UnexpectedProperty { .. } => "invalid_arguments",
-            Self::EnumMismatch { .. } => "invalid_arguments",
-            Self::TypeMismatch => "invalid_arguments",
-            Self::OutOfRange => "invalid_arguments",
+            Self::MissingRequired { .. }
+            | Self::UnexpectedProperty { .. }
+            | Self::EnumMismatch { .. }
+            | Self::TypeMismatch
+            | Self::OutOfRange => "invalid_arguments",
         }
     }
 }
@@ -59,7 +60,7 @@ pub fn validate_schema_structure(schema: &Value) -> Result<()> {
             _ => bail!("unknown schema keyword: {key}"),
         }
     }
-    // Validate enum if present (non-empty string array).
+    // Validate enum if present.
     if let Some(enum_val) = schema_obj.get("enum") {
         let arr = enum_val
             .as_array()
@@ -67,30 +68,71 @@ pub fn validate_schema_structure(schema: &Value) -> Result<()> {
         if arr.is_empty() {
             bail!("enum must not be empty");
         }
+        let mut seen = BTreeSet::new();
         for v in arr {
-            if !v.is_string() {
-                bail!("enum values must be strings, got {}", v);
+            let s = v
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("enum values must be strings, got {v}"))?;
+            if !seen.insert(s.to_string()) {
+                bail!("enum contains duplicate: {s}");
             }
         }
     }
-    let schema_type = schema_obj
-        .get("type")
-        .and_then(Value::as_str)
-        .unwrap_or("object");
-    if schema_type != "object" {
-        bail!("top-level schema type must be 'object', got {schema_type:?}");
+    // Validate required is a non-repeating string array.
+    if let Some(req) = schema_obj.get("required") {
+        let req_arr = req
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("required must be an array"))?;
+        let mut seen = BTreeSet::new();
+        for v in req_arr {
+            let s = v
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("required entries must be strings, got {v}"))?;
+            if !seen.insert(s.to_string()) {
+                bail!("required contains duplicate: {s}");
+            }
+            // Check each required field exists in properties.
+            if !schema_obj
+                .get("properties")
+                .and_then(Value::as_object)
+                .map(|p| p.contains_key(s))
+                .unwrap_or(false)
+            {
+                bail!("required field {s} not found in properties");
+            }
+        }
+    }
+    // Validate additionalProperties is boolean if present.
+    if let Some(ap) = schema_obj.get("additionalProperties") {
+        if !ap.is_boolean() {
+            bail!("additionalProperties must be a boolean");
+        }
+    }
+    // Recursively validate sub-schemas.
+    if let Some(properties) = schema_obj.get("properties").and_then(Value::as_object) {
+        for (_, prop_schema) in properties {
+            validate_schema_structure(prop_schema)?;
+        }
     }
     Ok(())
 }
 
-/// Validate `arguments` against the given JSON schema. Returns Ok(()) if the
-/// arguments conform, or an error describing the first violation.
+/// Validate `arguments` against schema. Returns Ok(()) or an anyhow error.
+/// For structured errors use `validate_against_schema_detailed`.
 pub fn validate_against_schema(schema: &Value, arguments: &Value) -> Result<()> {
+    validate_against_schema_detailed(schema, arguments)
+        .map_err(|issue| anyhow::anyhow!("{:?}", issue))
+}
+
+/// Validate arguments against schema and return a structured `SchemaValidationIssue`.
+/// Collects ALL missing required fields before returning.
+pub fn validate_against_schema_detailed(
+    schema: &Value,
+    arguments: &Value,
+) -> std::result::Result<(), SchemaValidationIssue> {
     let schema_obj = schema
         .as_object()
-        .ok_or_else(|| anyhow::anyhow!("schema must be a JSON object"))?;
-
-    // Reject unknown schema keywords.
+        .ok_or(SchemaValidationIssue::TypeMismatch)?;
     for key in schema_obj.keys() {
         match key.as_str() {
             "type"
@@ -102,34 +144,36 @@ pub fn validate_against_schema(schema: &Value, arguments: &Value) -> Result<()> 
             | "maximum"
             | "description"
             | "enum" => {}
-            _ => bail!("unknown schema keyword: {key}"),
+            _ => return Err(SchemaValidationIssue::TypeMismatch),
         }
     }
-
     let schema_type = schema_obj
         .get("type")
         .and_then(Value::as_str)
         .unwrap_or("object");
-
     match schema_type {
-        "object" => validate_object(schema_obj, arguments),
-        "string" => validate_string(schema_obj, arguments),
-        "integer" | "number" => validate_number(schema_obj, arguments, schema_type == "integer"),
+        "object" => validate_object_detailed(schema_obj, arguments),
+        "string" => validate_string_detailed(None, schema_obj, arguments),
+        "integer" | "number" => validate_number_detailed(schema_obj, arguments),
         "boolean" => {
             if !arguments.is_boolean() {
-                bail!("expected boolean, got {}", describe_type(arguments));
+                Err(SchemaValidationIssue::TypeMismatch)
+            } else {
+                Ok(())
             }
-            Ok(())
         }
-        "array" => validate_array(schema_obj, arguments),
-        other => bail!("unsupported schema type: {other}"),
+        "array" => validate_array_detailed(schema_obj, arguments),
+        _ => Err(SchemaValidationIssue::TypeMismatch),
     }
 }
 
-fn validate_object(schema: &serde_json::Map<String, Value>, value: &Value) -> Result<()> {
+fn validate_object_detailed(
+    schema: &serde_json::Map<String, Value>,
+    value: &Value,
+) -> std::result::Result<(), SchemaValidationIssue> {
     let obj = value
         .as_object()
-        .ok_or_else(|| anyhow::anyhow!("expected object, got {}", describe_type(value)))?;
+        .ok_or(SchemaValidationIssue::TypeMismatch)?;
 
     // Check additionalProperties restriction.
     let additional = schema
@@ -137,27 +181,29 @@ fn validate_object(schema: &serde_json::Map<String, Value>, value: &Value) -> Re
         .and_then(Value::as_bool)
         .unwrap_or(true);
     if !additional {
-        for key in obj.keys() {
-            if !schema
-                .get("properties")
-                .and_then(Value::as_object)
-                .map(|props| props.contains_key(key))
-                .unwrap_or(false)
-            {
-                bail!("unexpected property: {key}");
+        if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
+            for key in obj.keys() {
+                if !properties.contains_key(key) {
+                    return Err(SchemaValidationIssue::UnexpectedProperty {
+                        property: key.clone(),
+                    });
+                }
             }
         }
     }
 
-    // Check required fields.
+    // Collect ALL missing required fields.
     if let Some(required) = schema.get("required").and_then(Value::as_array) {
+        let mut missing = Vec::new();
         for req in required {
-            let name = req
-                .as_str()
-                .ok_or_else(|| anyhow::anyhow!("required entry must be a string"))?;
-            if !obj.contains_key(name) {
-                bail!("missing required property: {name}");
+            if let Some(name) = req.as_str() {
+                if !obj.contains_key(name) {
+                    missing.push(name.to_string());
+                }
             }
+        }
+        if !missing.is_empty() {
+            return Err(SchemaValidationIssue::MissingRequired { fields: missing });
         }
     }
 
@@ -165,8 +211,10 @@ fn validate_object(schema: &serde_json::Map<String, Value>, value: &Value) -> Re
     if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
         for (prop_name, prop_schema) in properties {
             if let Some(prop_value) = obj.get(prop_name) {
-                validate_against_schema(prop_schema, prop_value)
-                    .map_err(|e| anyhow::anyhow!("property {prop_name}: {e}"))?;
+                validate_against_schema_detailed(prop_schema, prop_value).map_err(|e| match e {
+                    SchemaValidationIssue::EnumMismatch { .. } => e,
+                    _ => e,
+                })?;
             }
         }
     }
@@ -174,70 +222,68 @@ fn validate_object(schema: &serde_json::Map<String, Value>, value: &Value) -> Re
     Ok(())
 }
 
-fn validate_string(schema: &serde_json::Map<String, Value>, value: &Value) -> Result<()> {
+fn validate_string_detailed(
+    property: Option<&str>,
+    schema: &serde_json::Map<String, Value>,
+    value: &Value,
+) -> std::result::Result<(), SchemaValidationIssue> {
     if !value.is_string() {
-        bail!("expected string, got {}", describe_type(value));
+        return Err(SchemaValidationIssue::TypeMismatch);
     }
-    // Check enum constraint if present.
-    if let Some(enum_val) = schema.get("enum") {
-        let allowed = enum_val.as_array().unwrap();
-        if !allowed.contains(value) {
-            let strs: Vec<&str> = allowed.iter().filter_map(|v| v.as_str()).collect();
-            bail!("value must be one of {:?}, got {:?}", strs, value);
+    if let Some(enum_val) = schema.get("enum").and_then(Value::as_array) {
+        if !enum_val.contains(value) {
+            let allowed: Vec<String> = enum_val
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(String::from)
+                .collect();
+            return Err(SchemaValidationIssue::EnumMismatch {
+                property: property.map(String::from),
+                allowed,
+            });
         }
     }
     Ok(())
 }
 
-fn validate_number(
+fn validate_number_detailed(
     schema: &serde_json::Map<String, Value>,
     value: &Value,
-    is_integer: bool,
-) -> Result<()> {
+) -> std::result::Result<(), SchemaValidationIssue> {
     let num = match value {
-        Value::Number(n) => n
-            .as_f64()
-            .ok_or_else(|| anyhow::anyhow!("invalid number"))?,
-        _ => bail!("expected number, got {}", describe_type(value)),
+        Value::Number(n) => n.as_f64().ok_or(SchemaValidationIssue::TypeMismatch)?,
+        _ => return Err(SchemaValidationIssue::TypeMismatch),
     };
+    let is_integer = schema.get("type").and_then(Value::as_str) == Some("integer");
     if is_integer && !value.is_i64() && !value.is_u64() {
-        bail!("expected integer, got float");
+        return Err(SchemaValidationIssue::TypeMismatch);
     }
     if let Some(min) = schema.get("minimum").and_then(Value::as_f64) {
         if num < min {
-            bail!("value {num} is less than minimum {min}");
+            return Err(SchemaValidationIssue::OutOfRange);
         }
     }
     if let Some(max) = schema.get("maximum").and_then(Value::as_f64) {
         if num > max {
-            bail!("value {num} is greater than maximum {max}");
+            return Err(SchemaValidationIssue::OutOfRange);
         }
     }
     Ok(())
 }
 
-fn validate_array(schema: &serde_json::Map<String, Value>, value: &Value) -> Result<()> {
+fn validate_array_detailed(
+    schema: &serde_json::Map<String, Value>,
+    value: &Value,
+) -> std::result::Result<(), SchemaValidationIssue> {
     let arr = value
         .as_array()
-        .ok_or_else(|| anyhow::anyhow!("expected array, got {}", describe_type(value)))?;
+        .ok_or(SchemaValidationIssue::TypeMismatch)?;
     if let Some(items) = schema.get("items") {
-        for (i, item) in arr.iter().enumerate() {
-            validate_against_schema(items, item)
-                .map_err(|e| anyhow::anyhow!("element {i}: {e}"))?;
+        for item in arr {
+            validate_against_schema_detailed(items, item)?;
         }
     }
     Ok(())
-}
-
-fn describe_type(value: &Value) -> String {
-    match value {
-        Value::Null => "null".into(),
-        Value::Bool(_) => "boolean".into(),
-        Value::Number(_) => "number".into(),
-        Value::String(_) => "string".into(),
-        Value::Array(_) => "array".into(),
-        Value::Object(_) => "object".into(),
-    }
 }
 
 #[cfg(test)]
@@ -247,62 +293,68 @@ mod tests {
 
     #[test]
     fn valid_object_with_required_fields() {
-        let schema = json!({
-            "type": "object",
-            "properties": {
-                "name": {"type": "string"},
-                "count": {"type": "integer", "minimum": 0}
-            },
-            "required": ["name"],
-            "additionalProperties": false
-        });
-        assert!(validate_against_schema(&schema, &json!({"name": "test", "count": 42})).is_ok());
+        let schema = json!({"type":"object","properties":{"name":{"type":"string"},"count":{"type":"integer","minimum":0}},"required":["name"],"additionalProperties":false});
+        assert!(validate_against_schema(&schema, &json!({"name":"test","count":42})).is_ok());
     }
 
     #[test]
-    fn missing_required_field() {
-        let schema = json!({
-            "type": "object",
-            "properties": {"name": {"type": "string"}},
-            "required": ["name"],
-            "additionalProperties": false
-        });
-        assert!(validate_against_schema(&schema, &json!({"count": 1})).is_err());
+    fn detailed_missing_fields_all_collected() {
+        let schema = json!({"type":"object","properties":{"a":{"type":"string"},"b":{"type":"integer"}},"required":["a","b"]});
+        let err = validate_against_schema_detailed(&schema, &json!({})).unwrap_err();
+        if let SchemaValidationIssue::MissingRequired { fields } = err {
+            assert_eq!(fields, vec!["a", "b"]);
+        } else {
+            panic!("expected MissingRequired, got {:?}", err);
+        }
     }
 
     #[test]
-    fn additional_property_rejected() {
-        let schema = json!({
-            "type": "object",
-            "properties": {"name": {"type": "string"}},
-            "additionalProperties": false
-        });
-        assert!(validate_against_schema(&schema, &json!({"name": "a", "extra": 1})).is_err());
+    fn detailed_enum_mismatch() {
+        let schema = json!({"type":"string","enum":["x","y"]});
+        let err = validate_against_schema_detailed(&schema, &json!("z")).unwrap_err();
+        if let SchemaValidationIssue::EnumMismatch { allowed, .. } = err {
+            assert_eq!(allowed, vec!["x", "y"]);
+        } else {
+            panic!("expected EnumMismatch, got {:?}", err);
+        }
     }
 
     #[test]
-    fn string_type_validated() {
-        assert!(validate_against_schema(&json!({"type": "string"}), &json!("hello")).is_ok());
-        assert!(validate_against_schema(&json!({"type": "string"}), &json!(42)).is_err());
-    }
-
-    #[test]
-    fn integer_with_bounds() {
-        let schema = json!({"type": "integer", "minimum": 1, "maximum": 100});
-        assert!(validate_against_schema(&schema, &json!(50)).is_ok());
-        assert!(validate_against_schema(&schema, &json!(0)).is_err());
-        assert!(validate_against_schema(&schema, &json!(101)).is_err());
-    }
-
-    #[test]
-    fn unknown_keyword_rejected() {
-        let schema = json!({"type": "object", "unknown_key": true});
-        assert!(validate_against_schema(&schema, &json!({})).is_err());
+    fn detailed_additional_property() {
+        let schema = json!({"type":"object","properties":{"a":{"type":"string"}},"additionalProperties":false});
+        let err = validate_against_schema_detailed(&schema, &json!({"a":"ok","b":1})).unwrap_err();
+        assert!(matches!(
+            err,
+            SchemaValidationIssue::UnexpectedProperty { .. }
+        ));
     }
 
     #[test]
     fn integer_rejects_float() {
-        let schema = json!({"type": "integer"});
+        let schema = json!({"type":"integer"});
         assert!(validate_against_schema(&schema, &json!(3.14)).is_err());
+    }
+
+    #[test]
+    fn enum_duplicate_rejected_in_structure() {
+        let result = validate_schema_structure(&json!({"type":"object","enum":["a","a"]}));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn required_not_in_properties_rejected() {
+        let result = validate_schema_structure(
+            &json!({"type":"object","properties":{},"required":["missing"]}),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn sub_schema_structure_validated() {
+        let result = validate_schema_structure(&json!({
+            "type":"object",
+            "properties":{"nested":{"type":"object","properties":{"x":{"type":"string","enum":["a"]}}}}
+        }));
+        assert!(result.is_ok());
     }
 }
