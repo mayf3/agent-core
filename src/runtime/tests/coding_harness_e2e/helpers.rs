@@ -27,7 +27,8 @@ pub fn register_and_enable(
     let mut m = HarnessManifest {
         manifest_id: String::new(),
         harness_id: "h".into(),
-        artifact_digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+        artifact_digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            .into(),
         protocol_version: "external-harness-v1".into(),
         endpoint: ep.into(),
         operation_name: name.into(),
@@ -65,7 +66,9 @@ pub fn start_mock_kernel_api(
     let tok = submit_token.to_string();
     thread::spawn(move || {
         for stream in listener.incoming() {
-            if sd.load(Ordering::SeqCst) { break; }
+            if sd.load(Ordering::SeqCst) {
+                break;
+            }
             if let Ok(mut s) = stream {
                 let mut buf = [0u8; 65536];
                 match s.read(&mut buf) {
@@ -90,7 +93,13 @@ pub fn start_mock_kernel_api(
                             continue;
                         }
                         // Call the real proposal handler.
-                        match handle_submit_proposal(journal, gateway, &parsed, "coding_harness", agent_id) {
+                        match handle_submit_proposal(
+                            journal,
+                            gateway,
+                            &parsed,
+                            "coding_harness",
+                            agent_id,
+                        ) {
                             Ok(response) => {
                                 let body = serde_json::to_string(&response).unwrap_or_default();
                                 let resp = format!(
