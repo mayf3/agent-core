@@ -96,6 +96,7 @@ pub fn submit_task(
         .unwrap_or_default()
         .as_secs();
     let acc = normalize_acceptance(acceptance_criteria);
+    let ac = acc.clone(); // clone for the spawned thread before moving acc into Task
 
     let (backend_used, initial_status) = match backend {
         "opencode" => ("opencode", TaskStatus::Queued),
@@ -142,7 +143,7 @@ pub fn submit_task(
         None
     };
 
-    std::thread::spawn(move || execute_task(&tid, &ws, &wr, &obj, &bk, &mdl, cancel_flag));
+    std::thread::spawn(move || execute_task(&tid, &ws, &wr, &obj, &ac, &bk, &mdl, cancel_flag));
 
     ok(json!({"task_id": id, "status": "queued", "backend": backend_used, "created_at": now}))
 }
@@ -152,6 +153,7 @@ fn execute_task(
     _workspace_id: &str,
     workspace_root: &str,
     objective: &str,
+    acceptance_criteria: &str,
     backend: &str,
     model: &str,
     cancel_flag: Option<Arc<AtomicBool>>,
@@ -179,9 +181,14 @@ fn execute_task(
     }
 
     let result = match backend {
-        "opencode" => {
-            opencode_backend::run_opencode(task_id, workspace_root, objective, model, cancel_flag)
-        }
+        "opencode" => opencode_backend::run_opencode(
+            task_id,
+            workspace_root,
+            objective,
+            acceptance_criteria,
+            model,
+            cancel_flag,
+        ),
         _ => run_fake(objective),
     };
 
