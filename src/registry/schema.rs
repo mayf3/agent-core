@@ -4,15 +4,43 @@
 //! - `type`: object, string, integer, number, boolean, array
 //! - `properties`, `required`, `additionalProperties: false`
 //! - `minimum`, `maximum` for numeric types
+//! - `enum` for string values
 //!
 //! Unknown schema keywords cause validation to fail (fail-closed).
 
 use anyhow::{bail, Result};
 use serde_json::Value;
 
+/// Structured issue from schema validation, used for recoverable ToolResults.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SchemaValidationIssue {
+    MissingRequired {
+        fields: Vec<String>,
+    },
+    UnexpectedProperty {
+        property: String,
+    },
+    EnumMismatch {
+        property: Option<String>,
+        allowed: Vec<String>,
+    },
+    TypeMismatch,
+    OutOfRange,
+}
+
+impl SchemaValidationIssue {
+    pub fn error_category(&self) -> &'static str {
+        match self {
+            Self::MissingRequired { .. } => "invalid_arguments",
+            Self::UnexpectedProperty { .. } => "invalid_arguments",
+            Self::EnumMismatch { .. } => "invalid_arguments",
+            Self::TypeMismatch => "invalid_arguments",
+            Self::OutOfRange => "invalid_arguments",
+        }
+    }
+}
+
 /// Validate that a schema value itself is structurally valid.
-/// This is a sanity check for manifest registration. It checks that
-/// the schema uses only allowed keywords and has a valid top-level type.
 pub fn validate_schema_structure(schema: &Value) -> Result<()> {
     let schema_obj = schema
         .as_object()
@@ -26,8 +54,23 @@ pub fn validate_schema_structure(schema: &Value) -> Result<()> {
             | "items"
             | "minimum"
             | "maximum"
-            | "description" => {}
+            | "description"
+            | "enum" => {}
             _ => bail!("unknown schema keyword: {key}"),
+        }
+    }
+    // Validate enum if present (non-empty string array).
+    if let Some(enum_val) = schema_obj.get("enum") {
+        let arr = enum_val
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("enum must be an array"))?;
+        if arr.is_empty() {
+            bail!("enum must not be empty");
+        }
+        for v in arr {
+            if !v.is_string() {
+                bail!("enum values must be strings, got {}", v);
+            }
         }
     }
     let schema_type = schema_obj
@@ -57,7 +100,8 @@ pub fn validate_against_schema(schema: &Value, arguments: &Value) -> Result<()> 
             | "items"
             | "minimum"
             | "maximum"
-            | "description" => {}
+            | "description"
+            | "enum" => {}
             _ => bail!("unknown schema keyword: {key}"),
         }
     }
@@ -130,9 +174,17 @@ fn validate_object(schema: &serde_json::Map<String, Value>, value: &Value) -> Re
     Ok(())
 }
 
-fn validate_string(_schema: &serde_json::Map<String, Value>, value: &Value) -> Result<()> {
+fn validate_string(schema: &serde_json::Map<String, Value>, value: &Value) -> Result<()> {
     if !value.is_string() {
         bail!("expected string, got {}", describe_type(value));
+    }
+    // Check enum constraint if present.
+    if let Some(enum_val) = schema.get("enum") {
+        let allowed = enum_val.as_array().unwrap();
+        if !allowed.contains(value) {
+            let strs: Vec<&str> = allowed.iter().filter_map(|v| v.as_str()).collect();
+            bail!("value must be one of {:?}, got {:?}", strs, value);
+        }
     }
     Ok(())
 }
