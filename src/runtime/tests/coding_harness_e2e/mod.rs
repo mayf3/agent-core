@@ -3,7 +3,7 @@
 //!
 //! See calculator_e2e.rs for the full proposal → approval → activation → call flow.
 
-// mod calculator_e2e;
+mod calculator_e2e;
 mod helpers;
 
 use crate::config::KernelConfig;
