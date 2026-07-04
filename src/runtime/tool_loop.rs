@@ -316,6 +316,10 @@ mod tool_loop_tests;
 mod tool_loop_extra_tests;
 
 #[cfg(test)]
+#[path = "tests/failure_dispatch_tests.rs"]
+mod failure_dispatch_tests;
+
+#[cfg(test)]
 #[path = "blank_reply_tests.rs"]
 mod blank_reply_tests;
 
