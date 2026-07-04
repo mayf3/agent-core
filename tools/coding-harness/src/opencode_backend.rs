@@ -108,6 +108,7 @@ pub(super) fn run_opencode(
     task_id: &str,
     workspace_root: &str,
     objective: &str,
+    acceptance_criteria: &str,
     model: &str,
     cancel_flag: Option<Arc<AtomicBool>>,
 ) -> Result<TaskOutput, String> {
@@ -117,7 +118,7 @@ pub(super) fn run_opencode(
     } else {
         model
     };
-    let prompt = build_prompt(objective);
+    let prompt = build_prompt(objective, acceptance_criteria);
     let ws_root = workspace_root.to_string();
 
     let mut cmd = std::process::Command::new(&opencode_path);
@@ -128,7 +129,6 @@ pub(super) fn run_opencode(
         .arg("json")
         .arg("--dir")
         .arg(&ws_root)
-        .arg("--dangerously-skip-permissions")
         .arg(&prompt);
 
     cmd.env_clear();
@@ -295,9 +295,18 @@ fn find_opencode() -> Result<String, String> {
     }
 }
 
-fn build_prompt(objective: &str) -> String {
+fn build_prompt(objective: &str, acceptance_criteria: &str) -> String {
+    let criteria_section = if acceptance_criteria.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "Acceptance criteria\n\
+             {acceptance_criteria}\n\n"
+        )
+    };
     format!(
         "Objective\n{objective}\n\n\
+         {criteria_section}\
          Workspace boundary\n\
          - You may ONLY modify files within the current workspace directory.\n\
          - You MUST NOT access files outside the workspace.\n\
@@ -441,5 +450,47 @@ mod tests {
                 "permission value must be allow/deny/ask, got: {val}"
             );
         }
+    }
+
+    #[test]
+    fn prompt_includes_acceptance_criteria() {
+        let prompt = build_prompt("do something", "must pass test X\nmust not crash");
+        assert!(
+            prompt.contains("Acceptance criteria"),
+            "prompt must include Acceptance criteria header"
+        );
+        assert!(
+            prompt.contains("must pass test X"),
+            "prompt must include first criterion"
+        );
+        assert!(
+            prompt.contains("must not crash"),
+            "prompt must include second criterion"
+        );
+        assert!(
+            prompt.contains("do something"),
+            "prompt must include objective"
+        );
+        assert!(
+            prompt.contains("Workspace boundary"),
+            "prompt must include workspace boundary"
+        );
+    }
+
+    #[test]
+    fn prompt_omits_acceptance_criteria_when_empty() {
+        let prompt = build_prompt("do something", "");
+        assert!(
+            !prompt.contains("Acceptance criteria"),
+            "empty criteria should not produce header"
+        );
+        assert!(
+            prompt.contains("do something"),
+            "objective must still be present"
+        );
+        assert!(
+            prompt.contains("Workspace boundary"),
+            "workspace boundary must still be present"
+        );
     }
 }
