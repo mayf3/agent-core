@@ -216,14 +216,14 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
         session: &Session,
         category: &'static str,
     ) -> Result<LlmOutput> {
-        let _ = journal.fail_run(&run.id);
-        let _ = journal.append_event(
+        journal.fail_run(&run.id)?;
+        journal.append_event(
             JournalEventKind::RunFailed,
             Some(&run.id),
             Some(&session.id),
             None,
             json!({ "run_id": run.id.0, "error_category": category }),
-        );
+        )?;
         Ok(LlmOutput {
             provider: "system".into(),
             model: "system".into(),
@@ -240,6 +240,8 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
     pub(super) fn reply_with_failure(
         &self,
         journal: &JournalStore,
+        gateway: &Gateway,
+        snapshot: &RegistrySnapshot,
         run: &Run,
         session: &Session,
         message_id: Option<String>,
@@ -249,7 +251,7 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
         let mut intent = self.reply_intent(run, session, text, message_id, chat_id);
         intent.idempotency_key = Some(format!("failure-reply:{}", run.id.0));
         let correlation_id = intent.invocation_id.0.clone();
-        let _ = journal.append_event(
+        journal.append_event(
             crate::domain::JournalEventKind::InvocationProposed,
             Some(&run.id),
             Some(&session.id),
@@ -258,38 +260,19 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
                 "operation": intent.operation,
                 "idempotency_key": intent.idempotency_key,
             }),
-        );
-        let reply_spec = crate::registry::snapshot::OperationSpec {
-            name: intent.operation.clone(),
-            risk: crate::registry::snapshot::Risk::Write,
-            description: "reply".into(),
-            parameters: serde_json::json!({"type":"object"}),
-            idempotent: true,
-            binding_kind: crate::registry::snapshot::BindingKind::Builtin,
-            binding_key: format!("builtin.{}", intent.operation),
-        };
-        if let Ok(approved) = crate::gateway::Gateway::new(self.config.clone()).approve_invocation(
-            intent,
-            run,
-            session,
-            &crate::registry::snapshot::RegistrySnapshot {
-                snapshot_id: "snap_failure_reply".to_string(),
-                created_at: chrono::Utc::now(),
-                operations: vec![reply_spec],
-            },
-        ) {
-            let _ = journal.append_event(
-                crate::domain::JournalEventKind::InvocationApproved,
-                Some(&run.id),
-                Some(&session.id),
-                Some(&correlation_id),
-                serde_json::json!({
-                    "decision_id": approved.decision_id,
-                    "operation": approved.intent().operation,
-                }),
-            );
-            let _ = journal.queue_outbox_dispatch(&approved, Some(&session.id));
-        }
+        )?;
+        let approved = gateway.approve_invocation(intent, run, session, snapshot)?;
+        journal.append_event(
+            crate::domain::JournalEventKind::InvocationApproved,
+            Some(&run.id),
+            Some(&session.id),
+            Some(&correlation_id),
+            serde_json::json!({
+                "decision_id": approved.decision_id,
+                "operation": approved.intent().operation,
+            }),
+        )?;
+        journal.queue_outbox_dispatch(&approved, Some(&session.id))?;
         Ok(super::RuntimeOutcome {
             run_id: run.id.clone(),
             session_id: session.id.clone(),
@@ -305,14 +288,14 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
         run: &Run,
         session: &Session,
     ) -> Result<LlmOutput> {
-        let _ = journal.fail_run(&run.id);
-        let _ = journal.append_event(
+        journal.fail_run(&run.id)?;
+        journal.append_event(
             JournalEventKind::RunFailed,
             Some(&run.id),
             Some(&session.id),
             None,
             json!({ "run_id": run.id.0, "error_category": "tool_followup_llm_failed" }),
-        );
+        )?;
         Ok(LlmOutput {
             provider: "system".into(),
             model: "system".into(),
