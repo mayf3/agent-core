@@ -7,8 +7,6 @@ use crate::runtime::tool_rejection::sanitize_operation_for_audit;
 use anyhow::Result;
 use serde_json::json;
 
-pub(crate) const MAX_TOOL_ROUNDS: usize = 2;
-
 /// Single tool-call MVP: only `tool_calls[0]` is parsed and executed per round.
 
 pub(crate) enum ToolCallOutcome {
@@ -28,6 +26,7 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
         mut llm: LlmOutput,
         snapshot: &RegistrySnapshot,
     ) -> Result<LlmOutput> {
+        let max_rounds = self.config.max_tool_rounds;
         let mut tool_index: usize = 0;
         // Pre-compute provider tools from the pinned snapshot — same list
         // for all LLM rounds of this Run.
@@ -42,7 +41,7 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
         // carried explicitly through LlmInput — never shared client state.
         let mut pending_turn: Option<ProviderToolTurn> = llm.provider_turn.take();
         let mut follow_ups: Vec<LlmFollowUp> = vec![];
-        for turn_index in 0..MAX_TOOL_ROUNDS {
+        for turn_index in 0..max_rounds {
             match llm.tool_call.clone() {
                 ToolCallResult::Absent => return Ok(llm),
                 ToolCallResult::Malformed(_reason) => {
@@ -136,13 +135,22 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
             }
         }
         if !llm.tool_call.is_absent() {
+            // Record the budget exhaustion fact.
+            let _ = journal.append_event(
+                JournalEventKind::ToolBudgetExhausted,
+                Some(&run.id),
+                Some(&session.id),
+                None,
+                json!({"run_id": run.id.0, "tool_rounds_used": tool_index, "max_tool_rounds": max_rounds}),
+            );
             llm.content = format!(
-                "{}\n\n[Reached tool-call limit ({MAX_TOOL_ROUNDS}). Using the best answer from the last round.]",
+                "{}\n\n本轮已达到工具执行上限（{} 轮），任务尚未全部完成。请发送「继续」以在下一 Run 中接着处理。",
                 if llm.content.trim().is_empty() {
-                    "I gathered information but couldn't finish within the tool-call limit."
+                    "本轮已达到工具执行上限，当前已完成部分工作。"
                 } else {
                     &llm.content
-                }
+                },
+                max_rounds,
             );
         }
         Ok(llm)
