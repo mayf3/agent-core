@@ -2,9 +2,11 @@ use super::super::Runtime;
 use super::tool_loop_tests::test_config;
 use crate::domain::*;
 use crate::gateway::Gateway;
+use crate::harness::control::{HarnessChangeAction, HarnessChangeIntent};
+use crate::harness::manifest::HarnessManifest;
 use crate::journal::JournalStore;
-use crate::llm::{LlmClient, LlmInput, LlmOutput, ToolCall, ToolCallResult};
-use serde_json::json;
+use crate::llm::{LlmClient, LlmFollowUp, LlmInput, LlmOutput, ToolCall, ToolCallResult};
+use serde_json::{json, Value};
 use std::sync::atomic::AtomicUsize;
 
 struct WhitespaceLlm {
@@ -474,7 +476,6 @@ fn outbox_failure_after_runfailed_returns_err() {
         result.is_err(),
         "deliver must return Err when outbox enqueue fails"
     );
-
     // RunFailed should still be recorded.
     let events = journal.events().unwrap();
     let failed: Vec<_> = events
