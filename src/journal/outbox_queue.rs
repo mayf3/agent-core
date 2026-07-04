@@ -5,9 +5,7 @@ use anyhow::{anyhow, bail, Result};
 use chrono::Utc;
 use rusqlite::{params, OptionalExtension};
 use serde_json::json;
-
 const TERMINAL_TRANSITION_ERROR: &str = "outbox_dispatch_terminal_transition_not_allowed";
-
 impl JournalStore {
     pub fn queue_outbox_dispatch(
         &self,
@@ -65,7 +63,6 @@ impl JournalStore {
         tx.commit()?;
         Ok(dispatch_id)
     }
-
     pub fn outbox_dispatch_status(
         &self,
         invocation_id: &InvocationId,
@@ -83,7 +80,6 @@ impl JournalStore {
             .optional()?;
         Ok(status.and_then(|s| OutboxDispatchStatus::parse_opt(&s)))
     }
-
     pub fn start_outbox_dispatch(
         &self,
         approved: &ApprovedInvocation,
@@ -122,7 +118,6 @@ impl JournalStore {
         tx.commit()?;
         Ok(())
     }
-
     pub fn succeed_outbox_dispatch(
         &self,
         receipt: &Receipt,
@@ -162,7 +157,6 @@ impl JournalStore {
                 "output_kind": "text",
             }),
         )?;
-
         // AssistantReplyDelivered — only for reply operations (stdout/feishu)
         // with a Succeeded receipt and known delivery text.
         if receipt.status == ReceiptStatus::Succeeded {
@@ -170,26 +164,35 @@ impl JournalStore {
                 self.maybe_record_assistant_reply(&tx, &receipt, run_id, session)?;
             }
         }
-
-        tx.execute(
-            "UPDATE runs SET status = ?1, updated_at = ?2 WHERE id = ?3",
-            params!["Completed", now.as_str(), run_id.0.as_str()],
-        )?;
-        append_event_tx(
-            &tx,
-            JournalEventKind::RunCompleted,
-            Some(run_id),
-            session_id,
-            Some(&receipt.invocation_id.0),
-            json!({
-                "status": "Completed",
-                "reason": "outbox_dispatch_succeeded",
-            }),
-        )?;
+        // Don't transition Failed runs to Completed (e.g. failure-reply outbox).
+        let current_status: Option<String> = tx
+            .query_row(
+                "SELECT status FROM runs WHERE id = ?1",
+                params![run_id.0.as_str()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let is_failed = matches!(current_status.as_deref(), Some("Failed"));
+        if !is_failed {
+            tx.execute(
+                "UPDATE runs SET status = ?1, updated_at = ?2 WHERE id = ?3",
+                params!["Completed", now.as_str(), run_id.0.as_str()],
+            )?;
+            append_event_tx(
+                &tx,
+                JournalEventKind::RunCompleted,
+                Some(run_id),
+                session_id,
+                Some(&receipt.invocation_id.0),
+                json!({
+                    "status": "Completed",
+                    "reason": "outbox_dispatch_succeeded",
+                }),
+            )?;
+        }
         tx.commit()?;
         Ok(())
     }
-
     /// Write AssistantReplyDelivered if the invocation is a reply operation
     /// (stdout.send_text, feishu.send_message) with a known text argument.
     /// Uses a UNIQUE constraint on invocation_id for idempotency.
@@ -452,7 +455,6 @@ impl JournalStore {
         tx.commit()?;
         Ok(())
     }
-
     pub fn mark_outbox_dead(
         &self,
         invocation_id: &InvocationId,
