@@ -453,8 +453,6 @@ fn duplicate_failure_reply_not_enqueued_twice() {
     // The idempotency key prevents duplicate outbox.
     assert!(oq2.len() == 1, "at most one outbox dispatch");
 }
-/// Error injection: InvocationProposed append failure.
-#[test]
 
 /// Error injection: queue_outbox_dispatch failure after RunFailed.
 #[test]
