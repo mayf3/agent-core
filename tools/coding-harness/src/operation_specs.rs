@@ -33,9 +33,11 @@ fn workspace_id_property(workspace_ids: &[String]) -> Value {
     } else {
         "授权 workspace 的 ID。".to_string()
     };
+    let ids: Vec<Value> = workspace_ids.iter().map(|id| json!(id)).collect();
     json!({
         "type": "string",
         "description": desc,
+        "enum": ids,
     })
 }
 
@@ -380,7 +382,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_id_description_contains_agent_dev() {
+    fn workspace_id_enum_contains_agent_dev() {
         let specs = all_specs(&["agent-dev".to_string()]);
         for spec in &specs {
             if spec.operation_name == "external.coding_task_status" {
@@ -390,18 +392,17 @@ mod tests {
                 .input_schema
                 .pointer("/properties/workspace_id")
                 .unwrap();
-            let desc = ws_prop.get("description").and_then(|d| d.as_str()).unwrap();
+            let enum_vals = ws_prop.get("enum").and_then(|e| e.as_array()).unwrap();
             assert!(
-                desc.contains("agent-dev"),
-                "{}: workspace_id description must mention agent-dev, got: {}",
-                spec.operation_name,
-                desc
+                enum_vals.contains(&json!("agent-dev")),
+                "{}: workspace_id enum must contain agent-dev",
+                spec.operation_name
             );
         }
     }
 
     #[test]
-    fn workspace_id_description_contains_multiple_ids() {
+    fn workspace_id_enum_contains_multiple_ids() {
         let ids = vec!["agent-dev".to_string(), "prod".to_string()];
         let specs = all_specs(&ids);
         let ws_prop = specs[0]
