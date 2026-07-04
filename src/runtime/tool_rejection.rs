@@ -142,8 +142,14 @@ pub fn validate_model_arguments(
     match spec.binding_kind {
         BindingKind::Builtin => validate_builtin_arguments(spec.name.as_str(), arguments),
         BindingKind::External => {
-            crate::registry::schema::validate_against_schema(&spec.parameters, arguments)
-                .map_err(|_| ToolRejection::InvalidArguments)
+            use crate::registry::schema::validate_against_schema_detailed;
+            match validate_against_schema_detailed(&spec.parameters, arguments) {
+                Ok(()) => Ok(()),
+                Err(issue) => {
+                    // Pass structured details via InvalidArgumentsWithDetails.
+                    Err(ToolRejection::InvalidArgumentsWithDetails(Box::new(issue)))
+                }
+            }
         }
     }
 }
