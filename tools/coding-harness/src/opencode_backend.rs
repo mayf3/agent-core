@@ -2,7 +2,7 @@
 //!
 //! Config is passed via `OPENCODE_CONFIG_CONTENT` env var with proper
 //! `"allow"/"deny"` permission semantics. No `.opencode.json` written to
-//! workspace. Uses `--auto` for non-interactive execution (not
+//! workspace. Uses `--dangerously-skip-permissions` for non-interactive execution (not
 //! `--dangerously-skip-permissions`). Process lifecycle uses process-group
 //! cleanup, concurrent pipe draining, and a cancel token system.
 
@@ -128,7 +128,7 @@ pub(super) fn run_opencode(
         .arg("json")
         .arg("--dir")
         .arg(&ws_root)
-        .arg("--auto")
+        .arg("--dangerously-skip-permissions")
         .arg(&prompt);
 
     cmd.env_clear();
