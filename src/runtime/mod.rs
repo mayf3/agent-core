@@ -89,6 +89,10 @@ mod capability_probe_reopen;
 #[path = "tests/capability_probe_rollback.rs"]
 mod capability_probe_rollback;
 
+#[cfg(test)]
+#[path = "tests/tool_round_budget.rs"]
+mod tool_round_budget;
+
 pub struct Runtime<L> {
     config: KernelConfig,
     llm: L,
@@ -259,8 +263,8 @@ where
 
         // Session Recall Loop (Task 1): when the first LLM round emits a
         // read-only tool call, execute it, append a ToolResult block, and
-        // re-invoke the LLM. Bounded by MAX_TOOL_ROUNDS; a no-op when the model
-        // emits no tool call (backwards compatible).
+        // re-invoke the LLM. Bounded by config.max_tool_rounds; a no-op when
+        // the model emits no tool call (backwards compatible).
         let llm = self.run_tool_recall_loop(
             journal,
             gateway,

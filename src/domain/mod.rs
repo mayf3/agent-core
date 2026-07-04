@@ -463,4 +463,8 @@ pub enum JournalEventKind {
     /// flags the row as corrupt since the re-serialized string won't match.
     /// See HANDOVER §10.
     Unknown,
+    /// The Run exhausted its configured tool-round budget. The Run completes
+    /// normally so the reply is delivered, but the user must start a new Run
+    /// to continue. payload: `run_id`, `tool_rounds_used`, `max_tool_rounds`
+    ToolBudgetExhausted,
 }
