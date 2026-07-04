@@ -16,6 +16,23 @@ fn err(c: &str) -> Value {
     json!({"protocol_version":"external-harness-v1","ok":false,"error_code":c})
 }
 
+fn structured_err(code: &str, missing: &[&str], available_ids: &[String]) -> Value {
+    let mut details = json!({});
+    if !missing.is_empty() {
+        details["missing_fields"] = json!(missing);
+    }
+    if !available_ids.is_empty() {
+        details["available_workspace_ids"] = json!(available_ids);
+    }
+    json!({
+        "protocol_version": "external-harness-v1",
+        "ok": false,
+        "error_code": code,
+        "retryable": true,
+        "details": details,
+    })
+}
+
 pub fn handle_propose(root: &Path, args: &Value, config: &CodingConfig) -> Value {
     let artifact_rel = args
         .get("artifact_path")
@@ -30,8 +47,21 @@ pub fn handle_propose(root: &Path, args: &Value, config: &CodingConfig) -> Value
         .and_then(Value::as_str)
         .unwrap_or("");
 
+    // Build available workspace IDs for structured error messages.
+    let ws_ids: Vec<String> = config.workspaces.keys().cloned().collect();
+
     if artifact_rel.is_empty() || manifest_rel.is_empty() || evidence_rel.is_empty() {
-        return err("missing_path");
+        let mut missing = Vec::new();
+        if artifact_rel.is_empty() {
+            missing.push("artifact_path");
+        }
+        if manifest_rel.is_empty() {
+            missing.push("manifest_path");
+        }
+        if evidence_rel.is_empty() {
+            missing.push("evidence_path");
+        }
+        return structured_err("missing_path", &missing, &ws_ids);
     }
 
     // Validate paths (reject absolute, .., symlink escape)

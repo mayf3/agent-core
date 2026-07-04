@@ -203,6 +203,7 @@ pub fn kcfg(artifact_root: &PathBuf) -> KernelConfig {
         primary_tool_name_indexed: false,
         harness_read_timeout_ms: 30_000,
         harness_artifact_root: artifact_root.clone(),
+        max_tool_rounds: 12,
         capability_submit_token: Some("test-submit-token".into()),
         capability_decision_token: Some("test-decision-token".into()),
     }

@@ -143,12 +143,15 @@ fn respond_error(stream: &mut TcpStream, status: u16, error_code: &str) {
 
 fn dispatch(config: &CodingConfig, operation: &str, args: &Value) -> Value {
     let is_task_op = operation == "external.coding_task_status";
+    let available_ids: Vec<String> = config.workspaces.keys().cloned().collect();
     let ws_id = if is_task_op {
         None
     } else {
         match args.get("workspace_id").and_then(Value::as_str) {
             Some(id) => Some(id.to_string()),
-            None => return err_value("missing_workspace_id"),
+            None => {
+                return structured_err("missing_workspace_id", &available_ids, &["workspace_id"])
+            }
         }
     };
 
@@ -186,7 +189,7 @@ fn dispatch(config: &CodingConfig, operation: &str, args: &Value) -> Value {
                 }
                 Some(r.clone())
             }
-            None => return err_value("unknown_workspace_id"),
+            None => return structured_err("unknown_workspace_id", &available_ids, &[]),
         }
     };
 
@@ -255,4 +258,22 @@ fn has_chunked(headers: &str) -> bool {
 
 fn err_value(code: &str) -> Value {
     json!({"protocol_version":"external-harness-v1","ok":false,"error_code":code})
+}
+
+/// Structured error with retryable hint and details for model recovery.
+fn structured_err(code: &str, available_ids: &[String], missing: &[&str]) -> Value {
+    let mut details = json!({});
+    if !missing.is_empty() {
+        details["missing_fields"] = json!(missing);
+    }
+    if !available_ids.is_empty() {
+        details["available_workspace_ids"] = json!(available_ids);
+    }
+    json!({
+        "protocol_version": "external-harness-v1",
+        "ok": false,
+        "error_code": code,
+        "retryable": true,
+        "details": details,
+    })
 }
