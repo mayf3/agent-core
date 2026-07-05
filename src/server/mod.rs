@@ -475,12 +475,9 @@ fn validate_capability_tokens(config: &KernelConfig) -> Result<()> {
 fn find_header_end(buffer: &[u8]) -> Option<usize> {
     buffer.windows(4).position(|window| window == b"\r\n\r\n")
 }
+#[rustfmt::skip]
 fn content_length(head: &str) -> usize {
-    head.lines()
-        .filter_map(|l| l.split_once(':'))
-        .find(|(n, _)| n.eq_ignore_ascii_case("content-length"))
-        .and_then(|(_, v)| v.trim().parse().ok())
-        .unwrap_or(0)
+    head.lines().filter_map(|l| l.split_once(':')).find(|(n, _)| n.eq_ignore_ascii_case("content-length")).and_then(|(_, v)| v.trim().parse().ok()).unwrap_or(0)
 }
 #[cfg(test)]
 #[path = "approval_endpoint_tests.rs"]
@@ -497,3 +494,5 @@ mod capability_routes_tests;
 #[cfg(test)]
 #[path = "harness_endpoint_tests.rs"]
 mod harness_endpoint_tests;
+#[cfg(test)]
+mod schema_upgrade_tests;
