@@ -13,7 +13,7 @@ use crate::registry::snapshot::{RegistrySnapshot, Risk};
 
 /// Typed, bounded reasons for rejecting a model tool call before capability
 /// execution. Messages never include provider input or infrastructure errors.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ToolRejection {
     #[error("Tool call rejected: unknown operation.")]
     UnknownOperation,
@@ -23,6 +23,10 @@ pub enum ToolRejection {
     MalformedArguments,
     #[error("Tool call rejected: invalid arguments.")]
     InvalidArguments,
+    /// Invalid arguments with recoverable details from schema validation.
+    /// The inner issue provides structured information for the model to self-correct.
+    #[error("Tool call rejected: invalid arguments with details.")]
+    InvalidArgumentsWithDetails(Box<crate::registry::schema::SchemaValidationIssue>),
     #[error("Tool call rejected: not permitted by policy.")]
     PolicyDenied,
     #[error("Tool call rejected: malformed tool call.")]
@@ -32,24 +36,26 @@ pub enum ToolRejection {
 }
 
 impl ToolRejection {
-    pub(crate) fn category(self) -> &'static str {
+    pub(crate) fn category(&self) -> &'static str {
         match self {
             Self::UnknownOperation => "unknown_operation",
             Self::OperationNotAllowed => "operation_not_allowed",
             Self::MalformedArguments => "malformed_arguments",
-            Self::InvalidArguments => "invalid_arguments",
+            Self::InvalidArguments | Self::InvalidArgumentsWithDetails(_) => "invalid_arguments",
             Self::PolicyDenied => "policy_denied",
             Self::MalformedToolCall => "malformed_tool_call",
             Self::InternalToolError => "internal_tool_error",
         }
     }
 
-    pub(crate) fn safe_message(self) -> &'static str {
+    pub(crate) fn safe_message(&self) -> &'static str {
         match self {
             Self::UnknownOperation => "Tool call rejected: unknown operation.",
             Self::OperationNotAllowed => "Tool call rejected: operation is not allowed.",
             Self::MalformedArguments => "Tool call rejected: malformed arguments.",
-            Self::InvalidArguments => "Tool call rejected: invalid arguments.",
+            Self::InvalidArguments | Self::InvalidArgumentsWithDetails(_) => {
+                "Tool call rejected: invalid arguments."
+            }
             Self::PolicyDenied => "Tool call rejected: not permitted by policy.",
             Self::MalformedToolCall => "Tool call rejected: malformed tool call.",
             Self::InternalToolError => "Tool call rejected: internal tool error.",
