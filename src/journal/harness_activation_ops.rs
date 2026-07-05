@@ -5,7 +5,7 @@
 use crate::domain::*;
 use crate::harness::control::{ApprovedHarnessChange, RegistryActivationResult};
 
-use crate::registry::snapshot::{BindingKind, OperationSpec, Risk};
+use crate::registry::snapshot::{BindingKind, OperationSpec};
 use anyhow::{anyhow, bail, Result};
 use chrono::Utc;
 use rusqlite::params;
@@ -43,9 +43,10 @@ impl super::JournalStore {
 
         // Build new spec list: existing ops + new external op.
         let mut new_specs: Vec<OperationSpec> = current_snap.operations.clone();
+        let risk = crate::domain::operation::coding_operation_risk(&manifest.operation_name);
         new_specs.push(OperationSpec {
             name: manifest.operation_name.clone(),
-            risk: Risk::ReadOnly,
+            risk,
             description: manifest.description.clone(),
             parameters: manifest.input_schema.clone(),
             idempotent: manifest.idempotent,

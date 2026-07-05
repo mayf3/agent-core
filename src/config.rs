@@ -81,6 +81,18 @@ pub struct KernelConfig {
     /// AGENT_CORE_MAX_TOOL_ROUNDS. A value outside the range causes a startup
     /// error (process exits with diagnostic).
     pub max_tool_rounds: usize,
+    /// The Feishu open_id of the user authorized to use coding harness
+    /// operations. When set, only private chats from this user receive
+    /// the seven `external.coding_*` capability grants. Other principals
+    /// (non-owner, group chats, CLI) do not receive coding grants.
+    /// Default empty (no owner configured → no coding grants granted).
+    /// Configured via AGENT_CORE_FEISHU_CODING_OWNER_ID.
+    pub feishu_coding_owner_id: Option<String>,
+    /// Maximum wall-clock time for the entire tool-call recall loop, in
+    /// milliseconds. When this timeout is exceeded, the loop stops and
+    /// emits a `ToolLoopWallClockExceeded` journal event. Default 300,000
+    /// (5 minutes). Configured via AGENT_CORE_TOOL_LOOP_TIMEOUT_MS.
+    pub tool_loop_timeout_ms: u64,
 }
 
 impl KernelConfig {
@@ -162,6 +174,8 @@ impl KernelConfig {
             harness_read_timeout_ms: env_u64("AGENT_CORE_HARNESS_READ_TIMEOUT_MS", 10_000),
             harness_artifact_root,
             max_tool_rounds: env_max_tool_rounds("AGENT_CORE_MAX_TOOL_ROUNDS", 12),
+            feishu_coding_owner_id: env_optional_string("AGENT_CORE_FEISHU_CODING_OWNER_ID"),
+            tool_loop_timeout_ms: env_u64("AGENT_CORE_TOOL_LOOP_TIMEOUT_MS", 300_000),
         }
     }
 }

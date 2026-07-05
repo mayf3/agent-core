@@ -354,9 +354,11 @@ pub fn handle_decision(
                 .all(|op| current_snap.lookup(op).is_none());
             if no_ops_exist {
                 // ── Standard create path ──
+                let risk =
+                    crate::domain::operation::coding_operation_risk(&manifest.operation_name);
                 let spec = crate::registry::snapshot::OperationSpec {
                     name: manifest.operation_name.clone(),
-                    risk: crate::registry::snapshot::Risk::ReadOnly,
+                    risk,
                     description: manifest.description.clone(),
                     parameters: manifest.input_schema.clone(),
                     idempotent: manifest.idempotent,
