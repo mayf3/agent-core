@@ -9,6 +9,7 @@ use agent_core_kernel::gateway::Gateway;
 use agent_core_kernel::journal::JournalStore;
 use anyhow::Result;
 use coding_harness::config::{CodingConfig, WorkspaceEntry, WorkspacePermission};
+use coding_harness::operation_specs;
 use serde_json::json;
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -91,17 +92,20 @@ fn calculator_vertical_e2e() -> Result<()> {
     let kc_local: &KernelConfig = kernel_config;
 
     // Register workspace.write and workspace.exec to real coding-harness.
-    for op in &[
+    let ws_ids = vec!["test".to_string()];
+    let specs = operation_specs::all_specs(&ws_ids);
+    for op_name in &[
         "external.coding_workspace_write",
         "external.coding_workspace_exec",
     ] {
+        let spec = specs.iter().find(|s| s.operation_name == *op_name).unwrap();
         register_and_enable(
             j_local,
             g_local,
             &ch_endpoint,
-            op,
-            json!({"type":"object"}),
-            json!({"type":"object"}),
+            op_name,
+            spec.input_schema.clone(),
+            spec.output_schema.clone(),
         )?;
     }
     let s0 = j_local.current_registry_snapshot_id()?;
@@ -118,6 +122,7 @@ fn calculator_vertical_e2e() -> Result<()> {
         "external.coding_workspace_write",
         json!({"workspace_id":"test","relative_path":"calc_server.rs","content":src,"mode":"replace"}),
     )?;
+    // Check receipt
     assert!(ws.join("calc_server.rs").is_file());
     assert_eq!(
         j_local.current_registry_snapshot_id()?,
@@ -191,13 +196,17 @@ fn calculator_vertical_e2e() -> Result<()> {
     assert!(ws.join("evidence.json").is_file());
 
     // Register coding_capability_propose to real coding-harness.
+    let prop_spec = specs
+        .iter()
+        .find(|s| s.operation_name == "external.coding_capability_propose")
+        .unwrap();
     register_and_enable(
         j_local,
         g_local,
         &ch_endpoint,
         "external.coding_capability_propose",
-        json!({"type":"object"}),
-        json!({"type":"object"}),
+        prop_spec.input_schema.clone(),
+        prop_spec.output_schema.clone(),
     )?;
     let s_prop = j_local.current_registry_snapshot_id()?;
 

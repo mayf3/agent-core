@@ -31,14 +31,69 @@ fn append_or_fatal(
             category: "journal_unwritable",
         })
 }
-fn rejected_result(rejection: ToolRejection) -> ToolCallOutcome {
-    ToolCallOutcome::ToolResult {
-        text: format!(
+fn rejected_result(
+    rejection: ToolRejection,
+    parameters: Option<&serde_json::Value>,
+) -> ToolCallOutcome {
+    let text = match &rejection {
+        ToolRejection::InvalidArgumentsWithDetails(issue) => {
+            use crate::registry::schema::SchemaValidationIssue;
+            let mut details = serde_json::json!({"retryable": true});
+            match issue.as_ref() {
+                SchemaValidationIssue::MissingRequired { fields } => {
+                    details["error_category"] = serde_json::json!("invalid_arguments");
+                    details["missing_fields"] = serde_json::json!(fields);
+                    // If workspace_id is missing, extract available IDs from pinned schema.
+                    if fields.contains(&"workspace_id".to_string()) {
+                        if let Some(params) = parameters {
+                            if let Some(ws_enum) = params
+                                .pointer("/properties/workspace_id/enum")
+                                .and_then(|v| v.as_array())
+                            {
+                                let ids: Vec<String> = ws_enum
+                                    .iter()
+                                    .filter_map(|v| v.as_str())
+                                    .map(String::from)
+                                    .collect();
+                                if !ids.is_empty() {
+                                    details["available_workspace_ids"] = serde_json::json!(ids);
+                                }
+                            }
+                        }
+                    }
+                }
+                SchemaValidationIssue::EnumMismatch { property, allowed } => {
+                    details["error_category"] = serde_json::json!("invalid_arguments");
+                    if let Some(p) = property {
+                        details["invalid_field"] = serde_json::json!(p);
+                    }
+                    details["allowed_values"] = serde_json::json!(allowed);
+                }
+                SchemaValidationIssue::UnexpectedProperty { property } => {
+                    details["error_category"] = serde_json::json!("invalid_arguments");
+                    details["unexpected_field"] = serde_json::json!(property);
+                }
+                _ => {
+                    details["error_category"] = serde_json::json!("invalid_arguments");
+                }
+            }
+            serde_json::to_string(&serde_json::json!({
+                "status": "rejected",
+                "error_category": "invalid_arguments",
+                "retryable": true,
+                "details": details,
+            }))
+            .unwrap_or_else(|_| {
+                format!("status: rejected\nerror_category: {}", rejection.category())
+            })
+        }
+        _ => format!(
             "status: rejected\nerror_category: {}\nmessage: {}",
             rejection.category(),
             rejection.safe_message()
         ),
-    }
+    };
+    ToolCallOutcome::ToolResult { text }
 }
 /// Typed dispatch error — maps to fixed error_category, no string matching.
 #[derive(Debug, Clone)]
@@ -229,7 +284,7 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
                 return Ok(fatal);
             }
         }
-        Ok(rejected_result(ToolRejection::MalformedToolCall))
+        Ok(rejected_result(ToolRejection::MalformedToolCall, None))
     }
     pub(crate) fn handle_inline_tool_call(
         &self,
@@ -287,14 +342,19 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
             }
         };
         if let Err(rejection) = validate_model_arguments(spec, &intent.arguments) {
-            return self.record_rejection(
+            // Use rejected_result directly with spec parameters so
+            // available_workspace_ids can be extracted from the pinned schema.
+            if let Some(fatal) = append_or_fatal(
                 journal,
+                JournalEventKind::ToolCallRejected,
                 run,
                 session,
-                &tool_call.id,
-                &audited_op,
-                rejection,
-            );
+                None,
+                json!({"operation": audited_op, "tool_call_id": tool_call.id, "error_category": rejection.category()}),
+            ) {
+                return Ok(fatal);
+            }
+            return Ok(rejected_result(rejection, Some(&spec.parameters)));
         }
         // Inject session_id for policy session-scope check. External harness
         // dispatch strips it before sending to the harness.
@@ -333,7 +393,7 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
                 ) {
                     return Ok(fatal);
                 }
-                return Ok(rejected_result(ToolRejection::PolicyDenied));
+                return Ok(rejected_result(ToolRejection::PolicyDenied, None));
             }
         };
         if let Some(fatal) = append_or_fatal(
@@ -382,6 +442,6 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
         ) {
             return Ok(fatal);
         }
-        Ok(rejected_result(rejection))
+        Ok(rejected_result(rejection, None))
     }
 }

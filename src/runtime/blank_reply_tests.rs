@@ -474,7 +474,6 @@ fn outbox_failure_after_runfailed_returns_err() {
         result.is_err(),
         "deliver must return Err when outbox enqueue fails"
     );
-
     // RunFailed should still be recorded.
     let events = journal.events().unwrap();
     let failed: Vec<_> = events
