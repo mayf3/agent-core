@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use uuid::Uuid;
 
 pub mod capability_change;
+pub mod coding_operations;
 pub mod operation;
 pub mod retry;
 pub mod status;

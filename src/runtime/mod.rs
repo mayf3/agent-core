@@ -8,6 +8,7 @@ use crate::registry::snapshot::RegistrySnapshot;
 use anyhow::{bail, Result};
 use chrono::Utc;
 use serde_json::json;
+mod coding_grants;
 pub mod outbox_dispatcher;
 mod tool_execution;
 mod tool_loop;
@@ -414,21 +415,10 @@ where
         })
     }
     /// Check whether the run principal is the configured Feishu coding owner
-    /// in a private-chat context (source=Feishu, subject matches the configured
-    /// open_id, chat_type is "p2p"). Only this combination receives the seven
-    /// `external.coding_*` capability grants.
+    /// in a private-chat context. Delegates to the standalone function in
+    /// `coding_grants` so the owner/grant logic lives in a single place.
     fn is_coding_owner(&self, principal: &RunPrincipal, chat_type: Option<&str>) -> bool {
-        let Some(ref owner_id) = self.config.feishu_coding_owner_id else {
-            return false;
-        };
-        if principal.source != PrincipalSource::Feishu {
-            return false;
-        }
-        // Group chat: deny even if the sender is the configured owner.
-        if chat_type != Some("p2p") {
-            return false;
-        }
-        matches!(&principal.subject, PrincipalSubject::FeishuOpenId(id) if id == owner_id)
+        coding_grants::is_coding_owner(&self.config, principal, chat_type)
     }
 
     fn create_run(
@@ -442,28 +432,7 @@ where
         let mut principal = event.principal.clone();
         let chat_type = event.chat_type.as_deref();
         let is_owner = self.is_coding_owner(&principal, chat_type);
-        // Add external (harness) grants from the pinned snapshot.
-        // Only the configured Feishu coding owner in a private chat receives
-        // the exact seven external.coding_* grants. Other principals get no
-        // coding harness access.
-        for op in &snapshot.operations {
-            if op.binding_kind != crate::registry::snapshot::BindingKind::External {
-                continue;
-            }
-            // Non-coding external operations (e.g. hotload_probe) are
-            // always granted for backward compatibility.
-            let is_coding_op =
-                crate::domain::operation::external::CODING_OPERATIONS.contains(&op.name.as_str());
-            if is_coding_op && !is_owner {
-                continue;
-            }
-            if !principal.grants.iter().any(|g| g.operation == op.name) {
-                principal.grants.push(CapabilityGrant {
-                    operation: op.name.clone(),
-                    scope: "current_session".to_string(),
-                });
-            }
-        }
+        coding_grants::augment_grants(&mut principal, snapshot, is_owner);
         Run {
             id: RunId::new(),
             session_id: session.id.clone(),
