@@ -115,12 +115,24 @@ pub(super) fn parse_tool_call(
             }
         }
     };
+    // Capture reasoning_content from the message level (DeepSeek thinking mode).
+    let reasoning_content = value
+        .pointer("/choices/0/message/reasoning_content")
+        .and_then(|v| {
+            if v.is_null() {
+                None
+            } else {
+                v.as_str().map(|s| s.to_string())
+            }
+        });
+
     let provider_turn = ProviderToolTurn {
         endpoint: choice,
         provider_tool_call_id: raw_id.to_string(),
         wire_name: raw_operation.to_string(),
         canonical_operation: operation.clone(),
         arguments_json: arguments_str.to_string(),
+        reasoning_content,
     };
     ParsedToolCall {
         tool_call_result: ToolCallResult::Valid(ToolCall {

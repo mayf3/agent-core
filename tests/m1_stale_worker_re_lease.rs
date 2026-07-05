@@ -320,6 +320,7 @@ fn connector_unknown_fields_are_not_persisted_in_journal() -> Result<()> {
         },
         dedupe_key: "__none__".into(),
         occurred_at: Utc::now(),
+        chat_type: None,
     };
     let granted_ops: Vec<String> = common::cli_principal()
         .grants

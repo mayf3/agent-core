@@ -9,7 +9,7 @@
 
 use crate::domain::{InvocationId, InvocationIntent, RunId};
 use crate::llm::ToolCall;
-use crate::registry::snapshot::{RegistrySnapshot, Risk};
+use crate::registry::snapshot::{BindingKind, RegistrySnapshot, Risk};
 
 /// Typed, bounded reasons for rejecting a model tool call before capability
 /// execution. Messages never include provider input or infrastructure errors.
@@ -67,8 +67,9 @@ impl ToolRejection {
 /// [`InvocationIntent`]. Returns a typed [`ToolRejection`] (without executing
 /// anything) when:
 /// - the operation is not in the provided registry snapshot (`UnknownOperation`);
-/// - the operation is `Risk::Write` (`OperationNotAllowed`) — the MVP
-///   restricts this path to `ReadOnly` only;
+/// - the operation is a builtin `Risk::Write` (`OperationNotAllowed`);
+///   external Write operations (e.g. coding-harness) are allowed when the
+///   principal holds a grant — the policy pipeline verifies the grant;
 /// - the arguments are not a JSON object (`MalformedArguments`).
 ///
 /// The idempotency key is scoped by trusted call position to make provider
@@ -95,7 +96,8 @@ pub fn validate_tool_call(
     let Some(spec) = snapshot.lookup(&call.operation) else {
         return Err(ToolRejection::UnknownOperation);
     };
-    if spec.risk != Risk::ReadOnly {
+    // Builtin Write operations are never callable by the model.
+    if spec.risk != Risk::ReadOnly && spec.binding_kind != BindingKind::External {
         return Err(ToolRejection::OperationNotAllowed);
     }
     if !call.arguments.is_object() {

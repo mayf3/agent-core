@@ -182,6 +182,67 @@ fn provider_turn_absent_when_no_tool_call() {
     assert!(parsed.provider_turn.is_none());
 }
 
+// === reasoning_content tests (DeepSeek thinking mode) ===
+
+fn response_with_reasoning(
+    tool_call: serde_json::Value,
+    reasoning_content: Option<&str>,
+) -> serde_json::Value {
+    let mut msg = json!({"tool_calls": [tool_call]});
+    if let Some(rc) = reasoning_content {
+        msg["reasoning_content"] = json!(rc);
+    }
+    json!({"choices": [{"message": msg}]})
+}
+
+#[test]
+fn reasoning_content_with_tool_call_is_captured() {
+    let value = response_with_reasoning(
+        json!({"id": "call_1", "function": {"name": "system.status", "arguments": "{}"}}),
+        Some("thinking step 1..."),
+    );
+    let parsed = parsing::parse_tool_call(&value, &passthrough(), EndpointChoice::Primary);
+    assert!(matches!(parsed.tool_call_result, ToolCallResult::Valid(_)));
+    let turn = parsed.provider_turn.expect("provider_turn present");
+    assert_eq!(
+        turn.reasoning_content,
+        Some("thinking step 1...".to_string())
+    );
+}
+
+#[test]
+fn reasoning_content_empty_string_is_preserved() {
+    let value = response_with_reasoning(
+        json!({"id": "call_2", "function": {"name": "system.status", "arguments": "{}"}}),
+        Some(""),
+    );
+    let parsed = parsing::parse_tool_call(&value, &passthrough(), EndpointChoice::Primary);
+    let turn = parsed.provider_turn.expect("provider_turn present");
+    assert_eq!(turn.reasoning_content, Some("".to_string()));
+}
+
+#[test]
+fn reasoning_content_absent_when_not_in_response() {
+    let value = response_with_reasoning(
+        json!({"id": "call_3", "function": {"name": "system.status", "arguments": "{}"}}),
+        None,
+    );
+    let parsed = parsing::parse_tool_call(&value, &passthrough(), EndpointChoice::Primary);
+    let turn = parsed.provider_turn.expect("provider_turn present");
+    assert_eq!(turn.reasoning_content, None);
+}
+
+#[test]
+fn reasoning_content_null_is_treated_as_absent() {
+    let value = json!({"choices": [{"message": {
+        "reasoning_content": null,
+        "tool_calls": [{"id": "call_4", "type": "function", "function": {"name": "system.status", "arguments": "{}"}}]
+    }}]});
+    let parsed = parsing::parse_tool_call(&value, &passthrough(), EndpointChoice::Primary);
+    let turn = parsed.provider_turn.expect("provider_turn present");
+    assert_eq!(turn.reasoning_content, None);
+}
+
 #[test]
 fn oversized_provider_id_is_malformed() {
     let huge_id = "x".repeat(300);

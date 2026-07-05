@@ -56,6 +56,7 @@ impl LlmClient for SingleToolLlm {
                     wire_name: tc["operation"].as_str().unwrap_or("").to_string(),
                     canonical_operation: tc["operation"].as_str().unwrap_or("").to_string(),
                     arguments_json: tc["arguments"].to_string(),
+                    reasoning_content: None,
                 }),
             })
         } else {
@@ -154,6 +155,7 @@ pub fn make_event(
         },
         dedupe_key: format!("{source}:{}", envelope.external_event_id),
         occurred_at: envelope.received_at,
+        chat_type: None,
     };
     j.accept_ingress_with_worker_job(
         &event,
@@ -184,6 +186,7 @@ pub fn kcfg(artifact_root: &PathBuf) -> KernelConfig {
         ipc_token: "test-token".to_string(),
         feishu_allowed_open_ids: vec![],
         feishu_allowed_chat_ids: vec![],
+        feishu_coding_owner_id: None,
         feishu_require_group_mention: true,
         openai_base_url: "https://example.invalid/v1".to_string(),
         openai_api_key: String::new(),
@@ -204,6 +207,7 @@ pub fn kcfg(artifact_root: &PathBuf) -> KernelConfig {
         harness_read_timeout_ms: 30_000,
         harness_artifact_root: artifact_root.clone(),
         max_tool_rounds: 12,
+        tool_loop_timeout_ms: 300_000,
         capability_submit_token: Some("test-submit-token".into()),
         capability_decision_token: Some("test-decision-token".into()),
     }

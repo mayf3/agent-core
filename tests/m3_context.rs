@@ -185,6 +185,7 @@ fn validated_event(event_id: &str, text: &str) -> ValidatedEvent {
         },
         dedupe_key: "feishu:message:om_current".to_string(),
         occurred_at: Utc::now(),
+        chat_type: Some("p2p".to_string()),
     }
 }
 
@@ -199,6 +200,7 @@ fn test_config(root_dir: PathBuf) -> KernelConfig {
         ipc_token: "test-token".to_string(),
         feishu_allowed_open_ids: vec![],
         feishu_allowed_chat_ids: vec![],
+        feishu_coding_owner_id: None,
         feishu_require_group_mention: true,
         openai_base_url: "https://example.invalid/v1".to_string(),
         openai_api_key: String::new(),
@@ -219,6 +221,7 @@ fn test_config(root_dir: PathBuf) -> KernelConfig {
         harness_read_timeout_ms: 10_000,
         harness_artifact_root: std::env::temp_dir().join(format!("ha_root_{}", std::process::id())),
         max_tool_rounds: 12,
+        tool_loop_timeout_ms: 300_000,
         capability_submit_token: None,
         capability_decision_token: None,
     }

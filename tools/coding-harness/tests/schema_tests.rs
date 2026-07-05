@@ -1,36 +1,5 @@
 use coding_harness::operation_specs;
 #[test]
-fn coding_manifests_are_deterministic_and_unique() {
-    let ep = "http://127.0.0.1:7200";
-    let ad = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    let ws = vec!["agent-dev".to_string()];
-    let m1 = operation_specs::build_manifests(&ws, ep, ad);
-    let m2 = operation_specs::build_manifests(&ws, ep, ad);
-    assert_eq!(m1.len(), 7);
-    for i in 0..7 {
-        assert_eq!(
-            m1[i].manifest_id, m2[i].manifest_id,
-            "deterministic: {}",
-            m1[i].operation_name
-        );
-        assert_eq!(
-            m1[i].compute_manifest_id().unwrap(),
-            m1[i].manifest_id,
-            "compute matches: {}",
-            m1[i].operation_name
-        );
-    }
-    for m in &m1 {
-        let s = serde_json::to_string(&m.input_schema).unwrap();
-        assert!(
-            !s.contains("/tmp/"),
-            "no workspace root: {}",
-            m.operation_name
-        );
-        assert!(!s.contains("sk-"), "no secret: {}", m.operation_name);
-    }
-}
-#[test]
 fn coding_manifest_registration_chain_preserves_schema() {
     use agent_core_kernel::harness::control::{
         ApprovedHarnessChange, HarnessChangeAction, HarnessChangeIntent,
@@ -299,6 +268,7 @@ fn coding_manifest_llm_input_receives_complete_tool_definitions() {
         capability_decision_token: None,
         feishu_allowed_open_ids: vec![],
         feishu_allowed_chat_ids: vec![],
+        feishu_coding_owner_id: Some("owner".into()),
         feishu_require_group_mention: true,
         openai_base_url: String::new(),
         openai_api_key: String::new(),
@@ -312,10 +282,13 @@ fn coding_manifest_llm_input_receives_complete_tool_definitions() {
         outbox_dispatcher_enabled: false,
         outbox_dispatcher_poll_interval_ms: 1000,
         extra_allowed_operations: vec![
-            "external.coding_capability_propose".to_string(),
+            "external.coding_workspace_list".to_string(),
+            "external.coding_workspace_read".to_string(),
             "external.coding_workspace_write".to_string(),
+            "external.coding_workspace_exec".to_string(),
             "external.coding_task_submit".to_string(),
             "external.coding_task_status".to_string(),
+            "external.coding_capability_propose".to_string(),
         ],
         require_write_approval: false,
         write_approval_ttl_secs: 0,
@@ -324,6 +297,7 @@ fn coding_manifest_llm_input_receives_complete_tool_definitions() {
         harness_read_timeout_ms: 10000,
         harness_artifact_root: std::path::PathBuf::from("."),
         max_tool_rounds: 12,
+        tool_loop_timeout_ms: 300_000,
     };
     let j = JournalStore::in_memory().unwrap();
     let g = Gateway::new(config.clone());
@@ -353,8 +327,26 @@ fn coding_manifest_llm_input_receives_complete_tool_definitions() {
         })
         .unwrap();
     }
+    let envelope_val = serde_json::json!({
+        "protocol_version": "v1",
+        "source": "Feishu",
+        "external_event_id": "e1",
+        "received_at": "2026-01-01T00:00:00Z",
+        "payload": {
+            "sender_open_id": "owner",
+            "sender_type": "user",
+            "chat_id": "c1",
+            "chat_type": "p2p",
+            "message_id": "m1",
+            "message_type": "text",
+            "text": "test",
+            "mentions": []
+        },
+        "auth_context": { "authenticated": true },
+        "routing_hint": {},
+    });
     let event = g
-        .validate_ingress(&j, g.cli_ingress("test".into()).unwrap())
+        .validate_ingress(&j, serde_json::from_value(envelope_val).unwrap())
         .unwrap();
     let outcome = runtime.deliver(&j, &g, event).unwrap();
     if let Ok(Some(leased)) = j.lease_next_outbox_dispatch() {

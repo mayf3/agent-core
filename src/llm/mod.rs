@@ -85,6 +85,11 @@ pub struct ProviderToolTurn {
     pub wire_name: String,
     pub canonical_operation: String,
     pub arguments_json: String,
+    /// The `reasoning_content` field from the provider response, if present.
+    /// DeepSeek-style thinking models return this alongside tool_calls.
+    /// Must be echoed back verbatim in the follow-up assistant message.
+    /// `None` means the field was absent; `Some("")` means it was present but empty.
+    pub reasoning_content: Option<String>,
 }
 
 /// A structured follow-up carried Run-locally through LlmInput: the provider
@@ -253,17 +258,25 @@ impl OpenAiCompatibleLlm {
         // Accumulated tool transcript: all prior rounds appended in order.
         for fu in &input.follow_ups {
             let turn = &fu.provider_turn;
-            messages.push(json!({
-                "role": "assistant",
-                "tool_calls": [{
+            // Build assistant message with tool_calls and optional reasoning_content.
+            let mut assistant = serde_json::Map::new();
+            assistant.insert("role".to_string(), json!("assistant"));
+            // DeepSeek thinking-mode: echo back reasoning_content if present.
+            if let Some(ref rc) = turn.reasoning_content {
+                assistant.insert("reasoning_content".to_string(), json!(rc));
+            }
+            assistant.insert(
+                "tool_calls".to_string(),
+                json!([{
                     "id": turn.provider_tool_call_id,
                     "type": "function",
                     "function": {
                         "name": turn.wire_name,
                         "arguments": turn.arguments_json,
                     }
-                }]
-            }));
+                }]),
+            );
+            messages.push(serde_json::Value::Object(assistant));
             messages.push(json!({
                 "role": "tool",
                 "tool_call_id": turn.provider_tool_call_id,

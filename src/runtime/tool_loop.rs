@@ -6,6 +6,7 @@ use crate::registry::snapshot::RegistrySnapshot;
 use crate::runtime::tool_rejection::sanitize_operation_for_audit;
 use anyhow::Result;
 use serde_json::json;
+use std::time::Instant;
 
 /// Static user-facing message when the LLM fails during processing.
 /// NEVER includes internal error categories, stack traces, or provider details.
@@ -36,6 +37,8 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
         snapshot: &RegistrySnapshot,
     ) -> Result<LlmOutput> {
         let max_rounds = self.config.max_tool_rounds;
+        let timeout_ms = self.config.tool_loop_timeout_ms;
+        let start = Instant::now();
         let mut tool_index: usize = 0;
         // Pre-compute provider tools from the pinned snapshot — same list
         // for all LLM rounds of this Run.
@@ -50,10 +53,15 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
         // carried explicitly through LlmInput — never shared client state.
         let mut pending_turn: Option<ProviderToolTurn> = llm.provider_turn.take();
         let mut follow_ups: Vec<LlmFollowUp> = vec![];
+        // Duplicate tool-call detection: tracks the last Valid tool call's
+        // (operation, canonicalized-arguments) pair. Reset on Malformed or
+        // Absent so only consecutive Valid calls trigger the check.
+        let mut prev_tool_key: Option<(String, String)> = None;
         for turn_index in 0..max_rounds {
             match llm.tool_call.clone() {
                 ToolCallResult::Absent => return Ok(llm),
                 ToolCallResult::Malformed(_reason) => {
+                    prev_tool_key = None;
                     let this_tool = tool_index;
                     tool_index += 1;
                     let outcome = self
@@ -76,6 +84,12 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
                             if let Some(fu) = fu {
                                 follow_ups.push(fu);
                             }
+                            // Wall-clock timeout: stop before the next LLM call.
+                            if Self::check_wall_clock_timeout(
+                                start, timeout_ms, journal, run, session, &mut llm,
+                            )? {
+                                return Ok(llm);
+                            }
                             llm = self.complete_after_tool_result(
                                 journal,
                                 run,
@@ -94,6 +108,39 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
                     }
                 }
                 ToolCallResult::Valid(tool_call) => {
+                    // ----- Duplicate tool-call detection -----
+                    let canonicalized = canonicalize_args_json(&tool_call.arguments);
+                    let is_dup = is_mutating_coding_op(&tool_call.operation)
+                        && prev_tool_key
+                            .as_ref()
+                            .map(|(op, args)| op == &tool_call.operation && args == &canonicalized)
+                            .unwrap_or(false);
+                    if is_dup {
+                        let _ = journal.append_event(
+                            JournalEventKind::ToolLoopDetected,
+                            Some(&run.id),
+                            Some(&session.id),
+                            None,
+                            json!({
+                                "run_id": run.id.0,
+                                "operation": tool_call.operation,
+                                "turn_index": turn_index,
+                            }),
+                        );
+                        llm.content = format!(
+                            "{}\n\n检测到重复工具调用（{}），已自动停止。请发送「继续」以在下一 Run 中接着处理。",
+                            if llm.content.trim().is_empty() {
+                                "检测到重复工具调用，已自动停止。"
+                            } else {
+                                &llm.content
+                            },
+                            tool_call.operation,
+                        );
+                        return Ok(llm);
+                    }
+                    prev_tool_key = Some((tool_call.operation.clone(), canonicalized));
+                    // ----- End duplicate detection -----
+
                     let this_tool = tool_index;
                     tool_index += 1;
                     let outcome = self.handle_inline_tool_call(
@@ -124,6 +171,12 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
                             });
                             if let Some(fu) = fu {
                                 follow_ups.push(fu);
+                            }
+                            // Wall-clock timeout: stop before the next LLM call.
+                            if Self::check_wall_clock_timeout(
+                                start, timeout_ms, journal, run, session, &mut llm,
+                            )? {
+                                return Ok(llm);
                             }
                             llm = self.complete_after_tool_result(
                                 journal,
@@ -163,6 +216,39 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
             );
         }
         Ok(llm)
+    }
+
+    /// Check wall-clock timeout before issuing another LLM completion.
+    /// Returns `true` if timed out (event already written, llm.content updated).
+    fn check_wall_clock_timeout(
+        start: Instant,
+        timeout_ms: u64,
+        journal: &JournalStore,
+        run: &Run,
+        session: &Session,
+        llm: &mut LlmOutput,
+    ) -> Result<bool> {
+        let elapsed_ms = start.elapsed().as_millis() as u64;
+        if elapsed_ms < timeout_ms {
+            return Ok(false);
+        }
+        let _ = journal.append_event(
+            JournalEventKind::ToolLoopWallClockExceeded,
+            Some(&run.id),
+            Some(&session.id),
+            None,
+            json!({"run_id": run.id.0, "elapsed_ms": elapsed_ms, "timeout_ms": timeout_ms}),
+        );
+        llm.content = format!(
+            "{}\n\n本轮已超过工具执行时间限制（{} ms），任务尚未全部完成。请发送「继续」以在下一 Run 中接着处理。",
+            if llm.content.trim().is_empty() {
+                "本轮已超过工具执行时间限制。"
+            } else {
+                &llm.content
+            },
+            timeout_ms,
+        );
+        Ok(true)
     }
 
     fn complete_after_tool_result(
@@ -307,6 +393,47 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Free-standing helpers (no Runtime receiver)
+// ---------------------------------------------------------------------------
+
+/// Returns true when `operation` is in the coding-harness mutating set for
+/// which duplicate detection applies. Polling operations like
+/// `external.coding_task_status` are excluded.
+fn is_mutating_coding_op(operation: &str) -> bool {
+    matches!(
+        operation,
+        "external.coding_workspace_write"
+            | "external.coding_workspace_exec"
+            | "external.coding_task_submit"
+            | "external.coding_capability_propose"
+    )
+}
+
+/// Produce a deterministic, JSON-key-sorted string from a `serde_json::Value`.
+/// Used to canonicalize tool-call arguments so that semantically identical
+/// argument sets (differing only in key ordering) produce the same digest.
+fn canonicalize_args_json(val: &serde_json::Value) -> String {
+    fn sort_keys(v: &serde_json::Value) -> serde_json::Value {
+        match v {
+            serde_json::Value::Object(map) => {
+                let mut keys: Vec<&String> = map.keys().collect();
+                keys.sort();
+                let mut new_map = serde_json::Map::new();
+                for k in keys {
+                    new_map.insert(k.clone(), sort_keys(&map[k]));
+                }
+                serde_json::Value::Object(new_map)
+            }
+            serde_json::Value::Array(arr) => {
+                serde_json::Value::Array(arr.iter().map(sort_keys).collect())
+            }
+            other => other.clone(),
+        }
+    }
+    serde_json::to_string(&sort_keys(val)).unwrap_or_default()
+}
+
 #[cfg(test)]
 #[path = "tool_loop_tests.rs"]
 mod tool_loop_tests;
@@ -315,7 +442,6 @@ mod tool_loop_tests;
 #[path = "tool_loop_extra_tests.rs"]
 mod tool_loop_extra_tests;
 
-#[cfg(test)]
 #[cfg(test)]
 #[path = "tests/tool_schema_recovery_tests.rs"]
 mod tool_schema_recovery_tests;

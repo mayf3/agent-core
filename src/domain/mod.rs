@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use uuid::Uuid;
 
 pub mod capability_change;
+pub mod coding_operations;
 pub mod operation;
 pub mod retry;
 pub mod status;
@@ -94,7 +95,7 @@ pub enum PrincipalSubject {
     FeishuOpenId(String),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PrincipalSource {
     Cli,
     Feishu,
@@ -185,6 +186,10 @@ pub struct ValidatedEvent {
     pub payload: RuntimeEventPayload,
     pub dedupe_key: String,
     pub occurred_at: DateTime<Utc>,
+    /// The chat type for Feishu events ("p2p" for private chat, "group" for
+    /// group chat). None for non-Feishu events. Used for owner-scoped coding
+    /// permission checks: only p2p from the configured owner gets coding grants.
+    pub chat_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -467,4 +472,13 @@ pub enum JournalEventKind {
     /// normally so the reply is delivered, but the user must start a new Run
     /// to continue. payload: `run_id`, `tool_rounds_used`, `max_tool_rounds`
     ToolBudgetExhausted,
+    /// The Run exceeded the wall-clock timeout for the tool recall loop.
+    /// Written before the next LLM completion call when elapsed >=
+    /// `config.tool_loop_timeout_ms`. payload: `run_id`, `elapsed_ms`,
+    /// `timeout_ms`
+    ToolLoopWallClockExceeded,
+    /// The LLM emitted the same valid tool call (same operation + canonicalized
+    /// arguments) consecutively, indicating a loop. Only applies to the coding
+    /// harness mutating set. payload: `run_id`, `operation`, `turn_index`
+    ToolLoopDetected,
 }

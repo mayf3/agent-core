@@ -8,6 +8,7 @@ use crate::registry::snapshot::RegistrySnapshot;
 use anyhow::{bail, Result};
 use chrono::Utc;
 use serde_json::json;
+mod coding_grants;
 pub mod outbox_dispatcher;
 mod tool_execution;
 mod tool_loop;
@@ -413,6 +414,13 @@ where
             output: reply,
         })
     }
+    /// Check whether the run principal is the configured Feishu coding owner
+    /// in a private-chat context. Delegates to the standalone function in
+    /// `coding_grants` so the owner/grant logic lives in a single place.
+    fn is_coding_owner(&self, principal: &RunPrincipal, chat_type: Option<&str>) -> bool {
+        coding_grants::is_coding_owner(&self.config, principal, chat_type)
+    }
+
     fn create_run(
         &self,
         session: &Session,
@@ -422,21 +430,9 @@ where
     ) -> Run {
         let now = Utc::now();
         let mut principal = event.principal.clone();
-        // Add external (harness) grants from the pinned snapshot.
-        // These are ReadOnly operations with BindingKind::External in the
-        // snapshot that this Run is pinned to. Existing grants from the
-        // validated ingress event are preserved.
-        for op in &snapshot.operations {
-            if op.risk == crate::registry::snapshot::Risk::ReadOnly
-                && op.binding_kind == crate::registry::snapshot::BindingKind::External
-                && !principal.grants.iter().any(|g| g.operation == op.name)
-            {
-                principal.grants.push(CapabilityGrant {
-                    operation: op.name.clone(),
-                    scope: "current_session".to_string(),
-                });
-            }
-        }
+        let chat_type = event.chat_type.as_deref();
+        let is_owner = self.is_coding_owner(&principal, chat_type);
+        coding_grants::augment_grants(&mut principal, snapshot, is_owner);
         Run {
             id: RunId::new(),
             session_id: session.id.clone(),
