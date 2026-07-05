@@ -6,7 +6,7 @@
 use crate::domain::capability_change::*;
 use crate::domain::*;
 use crate::harness::manifest::HarnessManifest;
-use crate::registry::snapshot::{compute_snapshot_id, OperationSpec as SnapSpec, RegistrySnapshot};
+use crate::registry::snapshot::{compute_snapshot_id, OperationSpec as SnapSpec};
 use anyhow::{anyhow, bail, Result};
 use chrono::Utc;
 use rusqlite::{params, Transaction, TransactionBehavior};
