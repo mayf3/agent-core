@@ -9,7 +9,7 @@ fn fresh_database_is_stamped_with_current_schema_version() -> Result<()> {
     let journal = JournalStore::in_memory()?;
     assert_eq!(
         journal.schema_version()?,
-        4,
+        5,
         "a fresh database must be stamped with the current schema version"
     );
     Ok(())
@@ -23,7 +23,7 @@ fn existing_at_version_database_reopens_cleanly() -> Result<()> {
         let _journal = JournalStore::open(&db_path)?;
     }
     let journal = JournalStore::open(&db_path)?;
-    assert_eq!(journal.schema_version()?, 4);
+    assert_eq!(journal.schema_version()?, 5);
     std::fs::remove_file(&db_path).ok();
     Ok(())
 }

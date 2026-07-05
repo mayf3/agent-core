@@ -382,103 +382,16 @@ pub fn handle_decision(
             }
             if all_ops_exist {
                 // ── Schema-only upgrade path ──
-                let expected_snap =
-                    journal.load_registry_snapshot(&proposal.expected_active_snapshot_id)?;
-                for op in &proposal.requested_operations {
-                    let old_spec = expected_snap.lookup(op).ok_or_else(|| {
-                        CapabilityRouteError::Conflict(format!("expected_op_not_found:{op}"))
-                    })?;
-                    let current_spec = current_snap.lookup(op).ok_or_else(|| {
-                        CapabilityRouteError::Conflict(format!("current_op_not_found:{op}"))
-                    })?;
-                    // Must be an External operation.
-                    if old_spec.binding_kind != crate::registry::snapshot::BindingKind::External {
-                        return Err(CapabilityRouteError::InvalidRequest(
-                            "operation_upgrade_not_schema_only:non_external".into(),
-                        )
-                        .into());
-                    }
-                    // Artifact must match (schema-only means no binary change).
-                    if manifest.artifact_digest != proposal.artifact_digest {
-                        return Err(CapabilityRouteError::InvalidRequest(
-                            "operation_upgrade_not_schema_only:artifact_changed".into(),
-                        )
-                        .into());
-                    }
-                    // The old spec's artifact_digest must match too (loaded via manifest).
-                    if old_spec.binding_key.is_empty() {
-                        return Err(CapabilityRouteError::InvalidRequest(
-                            "operation_upgrade_not_schema_only:no_old_manifest".into(),
-                        )
-                        .into());
-                    }
-                    // Load old manifest to verify artifact/endpoint/harness match.
-                    let old_manifest_id = &old_spec.binding_key;
-                    let old_manifest = journal
-                        .load_harness_manifest(old_manifest_id)?
-                        .ok_or_else(|| anyhow!("old_manifest_not_found:{old_manifest_id}"))?;
-                    if old_manifest.harness_id != manifest.harness_id {
-                        return Err(CapabilityRouteError::InvalidRequest(
-                            "operation_upgrade_not_schema_only:harness_changed".into(),
-                        )
-                        .into());
-                    }
-                    if old_manifest.endpoint != manifest.endpoint {
-                        return Err(CapabilityRouteError::InvalidRequest(
-                            "operation_upgrade_not_schema_only:endpoint_changed".into(),
-                        )
-                        .into());
-                    }
-                    if old_manifest.protocol_version != manifest.protocol_version {
-                        return Err(CapabilityRouteError::InvalidRequest(
-                            "operation_upgrade_not_schema_only:protocol_changed".into(),
-                        )
-                        .into());
-                    }
-                    if old_manifest.idempotent != manifest.idempotent {
-                        return Err(CapabilityRouteError::InvalidRequest(
-                            "operation_upgrade_not_schema_only:idempotent_changed".into(),
-                        )
-                        .into());
-                    }
-                    // Risk must be preserved.
-                    if current_spec.risk != old_spec.risk {
-                        return Err(CapabilityRouteError::InvalidRequest(
-                            "operation_upgrade_not_schema_only:risk_changed".into(),
-                        )
-                        .into());
-                    }
-                }
-                // Replace the target operation specs with new ones.
-                let mut new_specs: Vec<crate::registry::snapshot::OperationSpec> =
-                    current_snap.operations.iter().cloned().collect();
-                for op in &proposal.requested_operations {
-                    let old_spec = expected_snap.lookup(op).unwrap();
-                    if let Some(pos) = new_specs.iter().position(|s| s.name == *op) {
-                        new_specs[pos] = crate::registry::snapshot::OperationSpec {
-                            name: manifest.operation_name.clone(),
-                            risk: old_spec.risk,
-                            description: manifest.description.clone(),
-                            parameters: manifest.input_schema.clone(),
-                            idempotent: manifest.idempotent,
-                            binding_kind: crate::registry::snapshot::BindingKind::External,
-                            binding_key: manifest.manifest_id.clone(),
-                        };
-                    }
-                }
                 let decision_id = format!("schema_upgrade:{}", proposal_id);
                 let new_snapshot_id = journal.activate_schema_upgrade_atomic(
                     &proposal,
                     principal,
-                    new_specs,
-                    &proposal.expected_active_snapshot_id,
                     &decision_id,
-                    Some(&manifest),
+                    &manifest,
                     config_agent_id,
-                    &expected_snap,
                 )?;
                 return Ok(json!({"proposal_id": proposal_id, "status": "Activated",
-                    "previous_snapshot_id": &current_snap_id,
+                    "previous_snapshot_id": proposal.expected_active_snapshot_id,
                     "activated_snapshot_id": new_snapshot_id}));
             }
             // Mixed: some exist, some don't — not allowed.

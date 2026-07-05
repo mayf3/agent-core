@@ -174,58 +174,34 @@ impl super::JournalStore {
     }
 
     /// Atomically activate a schema-only upgrade for an existing External
-    /// operation.  Compared to `activate_proposal_atomic`, this function:
-    ///
-    /// - Does NOT require `current_snapshot_id == expected_snapshot_id`.
-    /// - Instead loads the expected snapshot, looks up the target operation,
-    ///   and verifies it has NOT changed in the current active snapshot
-    ///   (per-operation CAS).
-    /// - Only permits changes to `manifest_id`, `description`, `input_schema`,
-    ///   and `output_schema`.  Artifact, endpoint, harness, protocol, and
-    ///   idempotent must remain identical.
-    /// - Returns the new snapshot ID on success.
+    /// operation.  All authoritative data is read inside the transaction.
+    /// `manifest` is the NEW manifest (immutable, inserted alongside the old).
+    /// Only schema/description changes are permitted; artifact/endpoint/harness/
+    /// protocol/idempotent must match the old manifest.
     pub fn activate_schema_upgrade_atomic(
         &self,
         proposal: &CapabilityChangeProposal,
         principal: &str,
-        new_operations: Vec<SnapSpec>,
-        _expected_snapshot_id: &str,
         decision_id: &str,
-        manifest: Option<&HarnessManifest>,
+        manifest: &HarnessManifest,
         expected_agent_id: &AgentId,
-        expected_snapshot: &RegistrySnapshot,
     ) -> Result<String> {
         let mut conn = self.conn.lock().map_err(|_| anyhow!("mutex poisoned"))?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
-        // 0. Register the harness manifest inside the transaction (if provided).
-        //    For schema upgrades, first remove the old manifest row (by
-        //    operation_name) so the UNIQUE(operation_name) constraint does not
-        //    block the new manifest registration.
-        if let Some(m) = manifest {
-            tx.execute(
-                "DELETE FROM harness_manifests WHERE operation_name = ?1",
-                params![m.operation_name],
-            )?;
-            self.register_harness_manifest_replace_tx(&tx, m)
-                .map_err(|e| anyhow!("manifest_registration_failed:{e}"))?;
-        }
-
-        // 1. Verify proposal is still PendingApproval and re-read authoritative
-        //    fields from the database.
-        let expiry_and_status: (String, String, String) = tx
+        // 1. Verify proposal is still PendingApproval, re-read authoritative fields.
+        let expiry_and_status: (String, String, String, String) = tx
             .query_row(
-                "SELECT status, expires_at, target_agent_id FROM capability_change_proposals WHERE proposal_id = ?1",
+                "SELECT status, expires_at, target_agent_id, expected_active_snapshot_id
+                 FROM capability_change_proposals WHERE proposal_id = ?1",
                 params![proposal.proposal_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .map_err(|_| anyhow!("proposal_not_found"))?;
-        let (cur_status, db_expires_at, db_target_agent_id) = expiry_and_status;
+        let (cur_status, db_expires_at, db_target_agent_id, expected_snap_id) = expiry_and_status;
         if cur_status != "PendingApproval" {
             bail!("proposal_not_pending: {cur_status}");
         }
-
-        // 1a. Check expiry with the transaction's fresh timestamp.
         let decision_now = Utc::now();
         let persisted_expiry = chrono::DateTime::parse_from_rfc3339(&db_expires_at)
             .map_err(|_| anyhow!("invalid_persisted_expires_at"))?
@@ -233,13 +209,8 @@ impl super::JournalStore {
         if decision_now >= persisted_expiry {
             bail!("proposal_expired: stale_expiry_at_tx_time");
         }
-
-        // 1b. Verify target_agent_id matches the expected configured agent.
         if db_target_agent_id != expected_agent_id.0 {
-            bail!(
-                "target_agent_mismatch: has {db_target_agent_id} expected {}",
-                expected_agent_id.0
-            );
+            bail!("target_agent_mismatch");
         }
 
         // 2. Get current registry state.
@@ -251,34 +222,76 @@ impl super::JournalStore {
             )
             .map_err(|_| anyhow!("registry_state_not_found"))?;
 
-        // 3. Load the current snapshot within the transaction and verify the
-        //    TARGET operation has NOT changed since the expected snapshot.
+        // 3. Load expected snapshot and current snapshot from DB.
+        let expected_snap = Self::load_snapshot_from_conn(&tx, &expected_snap_id)?;
         let current_snap = Self::load_snapshot_from_conn(&tx, &db_snap)?;
-        for op_spec in &new_operations {
-            let old_spec = expected_snapshot
-                .lookup(&op_spec.name)
-                .ok_or_else(|| anyhow!("expected_op_not_found:{}", op_spec.name))?;
-            let current_spec = current_snap
-                .lookup(&op_spec.name)
-                .ok_or_else(|| anyhow!("current_op_not_found:{}", op_spec.name))?;
-            if old_spec != current_spec {
-                bail!("target_operation_changed:{}", op_spec.name);
-            }
-        }
-        for op_spec in &new_operations {
-            let old_spec = expected_snapshot
-                .lookup(&op_spec.name)
-                .ok_or_else(|| anyhow!("expected_op_not_found:{}", op_spec.name))?;
-            let current_spec = current_snap
-                .lookup(&op_spec.name)
-                .ok_or_else(|| anyhow!("current_op_not_found:{}", op_spec.name))?;
-            // The operation must not have been modified since the expected snapshot.
-            if old_spec != current_spec {
-                bail!("target_operation_changed:{}", op_spec.name);
-            }
+
+        // 4. For each requested operation, verify schema-only upgrade conditions.
+        let op_name = &manifest.operation_name;
+        let old_expected_spec = expected_snap
+            .lookup(op_name)
+            .ok_or_else(|| anyhow!("expected_op_not_found:{op_name}"))?;
+        let old_current_spec = current_snap
+            .lookup(op_name)
+            .ok_or_else(|| anyhow!("current_op_not_found:{op_name}"))?;
+
+        // 4a. Per-operation CAS: target unchanged since expected snapshot.
+        if old_expected_spec != old_current_spec {
+            bail!("target_operation_changed:{op_name}");
         }
 
-        // 4. Create the new RegistrySnapshot from the provided operations.
+        // 4b. Must be External.
+        if old_expected_spec.binding_kind != crate::registry::snapshot::BindingKind::External {
+            bail!("operation_upgrade_not_schema_only:non_external:{op_name}");
+        }
+
+        // 4c. Load old manifest from DB by its binding_key.
+        let old_manifest_id = &old_expected_spec.binding_key;
+        let old_manifest = self
+            .load_harness_manifest_in_tx(&tx, old_manifest_id)?
+            .ok_or_else(|| anyhow!("old_manifest_not_found:{old_manifest_id}"))?;
+
+        // 4d. Strict schema-only comparison between old and new manifest.
+        if old_manifest.operation_name != manifest.operation_name {
+            bail!("operation_upgrade_not_schema_only:name_changed:{op_name}");
+        }
+        if old_manifest.harness_id != manifest.harness_id {
+            bail!("operation_upgrade_not_schema_only:harness_changed:{op_name}");
+        }
+        if old_manifest.artifact_digest != manifest.artifact_digest {
+            bail!("operation_upgrade_not_schema_only:artifact_changed:{op_name}");
+        }
+        if old_manifest.endpoint != manifest.endpoint {
+            bail!("operation_upgrade_not_schema_only:endpoint_changed:{op_name}");
+        }
+        if old_manifest.protocol_version != manifest.protocol_version {
+            bail!("operation_upgrade_not_schema_only:protocol_changed:{op_name}");
+        }
+        if old_manifest.idempotent != manifest.idempotent {
+            bail!("operation_upgrade_not_schema_only:idempotent_changed:{op_name}");
+        }
+
+        // 5. Insert the new manifest (old one is preserved since migration
+        //    0005 removed the UNIQUE(operation_name) constraint).
+        self.register_harness_manifest_replace_tx(&tx, manifest)
+            .map_err(|e| anyhow!("manifest_registration_failed:{e}"))?;
+
+        // 6. Build new operation list: replace the target spec with upgraded one.
+        let new_spec = SnapSpec {
+            name: op_name.clone(),
+            risk: old_expected_spec.risk,
+            description: manifest.description.clone(),
+            parameters: manifest.input_schema.clone(),
+            idempotent: manifest.idempotent,
+            binding_kind: crate::registry::snapshot::BindingKind::External,
+            binding_key: manifest.manifest_id.clone(),
+        };
+        let mut new_operations: Vec<SnapSpec> = current_snap.operations.iter().cloned().collect();
+        if let Some(pos) = new_operations.iter().position(|s| s.name == *op_name) {
+            new_operations[pos] = new_spec;
+        }
+
+        // 7. Create the new RegistrySnapshot.
         let snapshot_id = compute_snapshot_id(&new_operations)?;
         let created_at = Utc::now().to_rfc3339();
         tx.execute(
@@ -299,7 +312,7 @@ impl super::JournalStore {
             )?;
         }
 
-        // 5. CAS update registry_state.
+        // 8. CAS update registry_state.
         let new_version = db_ver + 1;
         let changed = tx.execute(
             "UPDATE registry_state SET active_snapshot_id = ?1, version = ?2, updated_at = ?3
@@ -310,25 +323,27 @@ impl super::JournalStore {
             bail!("registry_activation_conflict");
         }
 
-        // 6. Update proposal to Activated.
+        // 9. Update proposal to Activated.
         tx.execute(
             "UPDATE capability_change_proposals SET status = 'Activated',
              decided_at = ?1, decided_by = ?2, decision_reason = ?3,
-             activated_snapshot_id = ?4
-             WHERE proposal_id = ?5",
+             activated_snapshot_id = ?4 WHERE proposal_id = ?5",
             params![
                 Utc::now().to_rfc3339(),
                 principal,
-                "activated",
+                "schema_upgrade",
                 &snapshot_id,
                 proposal.proposal_id
             ],
         )?;
 
-        // 7. Write RegistrySnapshotActivated with schema_upgrade action.
+        // 10. Write events with full payload.
         let snap_payload = json!({
-            "action": "schema_upgrade", "previous_snapshot_id": &db_snap,
-            "new_snapshot_id": &snapshot_id, "decision_id": decision_id,
+            "action": "schema_upgrade", "proposal_id": proposal.proposal_id,
+            "operation_name": op_name, "old_manifest_id": old_manifest_id,
+            "new_manifest_id": manifest.manifest_id,
+            "previous_snapshot_id": &db_snap, "new_snapshot_id": &snapshot_id,
+            "decision_id": decision_id,
         });
         append_journal_tx(
             &tx,
@@ -339,10 +354,11 @@ impl super::JournalStore {
             &snap_payload,
         )?;
 
-        // 8. Write CapabilityChangeActivated.
         let cap_payload = json!({
             "proposal_id": proposal.proposal_id, "decided_by": principal,
             "previous_snapshot_id": &db_snap, "new_snapshot_id": &snapshot_id,
+            "operation_name": op_name, "old_manifest_id": old_manifest_id,
+            "new_manifest_id": manifest.manifest_id,
         });
         append_journal_tx(
             &tx,
@@ -355,10 +371,7 @@ impl super::JournalStore {
 
         tx.commit()?;
         drop(conn);
-
-        // 9. Update in-memory registry cache.
         *self.current_snapshot_id.lock().unwrap() = Some(snapshot_id.clone());
-
         Ok(snapshot_id)
     }
 }

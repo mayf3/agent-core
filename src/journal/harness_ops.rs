@@ -335,7 +335,22 @@ impl super::JournalStore {
             .conn
             .lock()
             .map_err(|_| anyhow!("journal mutex poisoned"))?;
+        Self::load_harness_manifest_from_conn(&conn, manifest_id)
+    }
 
+    /// Load a harness manifest inside an existing transaction.
+    pub(crate) fn load_harness_manifest_in_tx(
+        &self,
+        tx: &Transaction<'_>,
+        manifest_id: &str,
+    ) -> Result<Option<HarnessManifest>> {
+        Self::load_harness_manifest_from_conn(tx, manifest_id)
+    }
+
+    fn load_harness_manifest_from_conn(
+        conn: &rusqlite::Connection,
+        manifest_id: &str,
+    ) -> Result<Option<HarnessManifest>> {
         let row: Option<(
             String,
             String,
