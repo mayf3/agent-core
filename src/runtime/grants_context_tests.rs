@@ -147,6 +147,7 @@ mod grants_context_tests {
             },
             dedupe_key: format!("dedupe-{}", uuid::Uuid::new_v4()),
             occurred_at: chrono::Utc::now(),
+            chat_type: None,
         }
     }
     fn test_config() -> KernelConfig {
@@ -212,7 +213,7 @@ mod grants_context_tests {
             cat.contains("system.status"),
             "granted system.status must be listed: {cat}"
         );
-        // Write ops never listed even when granted.
+        // Builtin Write ops are never listed even when granted.
         assert!(!cat.contains("feishu.send_message"));
         assert!(!cat.contains("stdout.send_text"));
     }

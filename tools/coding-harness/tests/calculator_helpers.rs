@@ -56,6 +56,7 @@ impl LlmClient for SingleToolLlm {
                     wire_name: tc["operation"].as_str().unwrap_or("").to_string(),
                     canonical_operation: tc["operation"].as_str().unwrap_or("").to_string(),
                     arguments_json: tc["arguments"].to_string(),
+                    reasoning_content: None,
                 }),
             })
         } else {
@@ -184,6 +185,7 @@ pub fn kcfg(artifact_root: &PathBuf) -> KernelConfig {
         ipc_token: "test-token".to_string(),
         feishu_allowed_open_ids: vec![],
         feishu_allowed_chat_ids: vec![],
+        feishu_coding_owner_id: None,
         feishu_require_group_mention: true,
         openai_base_url: "https://example.invalid/v1".to_string(),
         openai_api_key: String::new(),
