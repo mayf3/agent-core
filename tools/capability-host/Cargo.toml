@@ -13,5 +13,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 
+[[bin]]
+name = "calculator-artifact"
+path = "src/bin/calculator.rs"
+
 [dev-dependencies]
 ureq = { version = "3.3.0", features = ["json"] }
