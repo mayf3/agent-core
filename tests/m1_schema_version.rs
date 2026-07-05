@@ -32,13 +32,13 @@ fn existing_at_version_database_reopens_cleanly() -> Result<()> {
 #[test]
 fn newer_schema_version_is_rejected_cleanly() -> Result<()> {
     let db_path = unique_temp_path();
-    // Pre-stamp as version 5 (newer than kernel's CURRENT_SCHEMA_VERSION of 4).
+    // Pre-stamp as version 6 (newer than kernel's CURRENT_SCHEMA_VERSION of 5).
     {
         let conn = Connection::open(&db_path)?;
         conn.execute_batch(include_str!("../migrations/0001_init.sql"))?;
-        conn.pragma_update(None, "user_version", 5)?;
+        conn.pragma_update(None, "user_version", 6)?;
     }
-    // Opening with the kernel (whose CURRENT_SCHEMA_VERSION is 4) must fail.
+    // Opening with the kernel (whose CURRENT_SCHEMA_VERSION is 5) must fail.
     let message = match JournalStore::open(&db_path) {
         Ok(_) => panic!("a newer-than-supported schema version must be rejected at startup"),
         Err(error) => error.to_string(),
@@ -76,7 +76,7 @@ fn migration_v3_to_v4_creates_proposals_table() -> Result<()> {
     // Verify version is 4 and proposals table exists.
     {
         let journal = JournalStore::open(&db_path)?;
-        assert_eq!(journal.schema_version()?, 4);
+        assert_eq!(journal.schema_version()?, 5);
         let conn = rusqlite::Connection::open(&db_path)?;
         let has_table: bool = conn.query_row(
             "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='capability_change_proposals'",
@@ -84,7 +84,7 @@ fn migration_v3_to_v4_creates_proposals_table() -> Result<()> {
         )?;
         assert!(
             has_table,
-            "capability_change_proposals table must exist after v3→v4 migration"
+            "capability_change_proposals table must exist after v3→v5 migration"
         );
     }
     // Verify we can INSERT and SELECT.
