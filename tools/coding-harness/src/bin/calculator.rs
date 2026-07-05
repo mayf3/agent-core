@@ -17,26 +17,44 @@ fn main() {
     let request: serde_json::Value = match serde_json::from_str(&input) {
         Ok(v) => v,
         Err(_) => {
-            let resp = r#"{"ok":false,"error":{"code":"malformed_request","message":"invalid JSON"}}"#;
+            let resp =
+                r#"{"ok":false,"error":{"code":"malformed_request","message":"invalid JSON"}}"#;
             let _ = writeln!(std::io::stdout(), "{resp}");
             std::process::exit(0);
         }
     };
 
-    let proto = request.get("protocol_version")
-        .and_then(|v| v.as_str()).unwrap_or("");
+    let proto = request
+        .get("protocol_version")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     if proto != "process-harness-v1" {
-        let _ = writeln!(std::io::stdout(), r#"{{"ok":false,"error":{{"code":"unsupported_protocol"}}}}"#);
+        let _ = writeln!(
+            std::io::stdout(),
+            r#"{{"ok":false,"error":{{"code":"unsupported_protocol"}}}}"#
+        );
         std::process::exit(0);
     }
 
     let args = request.get("arguments");
-    let op = args.and_then(|a| a.get("operation")).and_then(|v| v.as_str()).unwrap_or("");
-    let a_val = args.and_then(|a| a.get("a")).and_then(|v| v.as_f64()).unwrap_or(f64::NAN);
-    let b_val = args.and_then(|a| a.get("b")).and_then(|v| v.as_f64()).unwrap_or(f64::NAN);
+    let op = args
+        .and_then(|a| a.get("operation"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let a_val = args
+        .and_then(|a| a.get("a"))
+        .and_then(|v| v.as_f64())
+        .unwrap_or(f64::NAN);
+    let b_val = args
+        .and_then(|a| a.get("b"))
+        .and_then(|v| v.as_f64())
+        .unwrap_or(f64::NAN);
 
     if a_val.is_nan() || b_val.is_nan() {
-        let _ = writeln!(std::io::stdout(), r#"{{"ok":false,"error":{{"code":"invalid_arguments"}}}}"#);
+        let _ = writeln!(
+            std::io::stdout(),
+            r#"{{"ok":false,"error":{{"code":"invalid_arguments"}}}}"#
+        );
         std::process::exit(0);
     }
 
@@ -46,13 +64,19 @@ fn main() {
         "multiply" => output(a_val * b_val),
         "divide" => {
             if b_val == 0.0 {
-                let _ = writeln!(std::io::stdout(), r#"{{"ok":false,"error":{{"code":"divide_by_zero","message":"division by zero"}}}}"#);
+                let _ = writeln!(
+                    std::io::stdout(),
+                    r#"{{"ok":false,"error":{{"code":"divide_by_zero","message":"division by zero"}}}}"#
+                );
             } else {
                 output(a_val / b_val);
             }
         }
         _ => {
-            let _ = writeln!(std::io::stdout(), r#"{{"ok":false,"error":{{"code":"unsupported_operation"}}}}"#);
+            let _ = writeln!(
+                std::io::stdout(),
+                r#"{{"ok":false,"error":{{"code":"unsupported_operation"}}}}"#
+            );
         }
     }
 }

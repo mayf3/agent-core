@@ -110,9 +110,7 @@ pub fn build_process_request(req: &HarnessRequest) -> ProcessRequest {
 
 /// Map the artifact's stdout response to an external-harness-v1 response body.
 /// Returns `(ok_bool, response_body_json)`.
-pub fn map_process_response(
-    stdout: &str,
-) -> (bool, serde_json::Value) {
+pub fn map_process_response(stdout: &str) -> (bool, serde_json::Value) {
     let parsed: ProcessSuccess = match serde_json::from_str(stdout) {
         Ok(p) => p,
         Err(_) => {

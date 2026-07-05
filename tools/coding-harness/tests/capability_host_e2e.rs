@@ -51,7 +51,9 @@ fn start_capability_host(artifact_root: &PathBuf) -> (u16, Arc<AtomicBool>) {
             max_stderr_bytes: 65536,
         };
         for stream in listener.incoming() {
-            if s.load(Ordering::SeqCst) { break; }
+            if s.load(Ordering::SeqCst) {
+                break;
+            }
             if let Ok(mut stream) = stream {
                 let response = handle_ch_request(&mut stream, &host_cfg);
                 let _ = stream.write_all(response.as_bytes());
@@ -71,16 +73,23 @@ fn handle_ch_request(
         return ch_500();
     }
     let parts: Vec<&str> = request_line.split_whitespace().collect();
-    if parts.len() < 2 { return ch_500(); }
+    if parts.len() < 2 {
+        return ch_500();
+    }
     let path = parts[1];
 
     let mut content_length: usize = 0;
     loop {
         let mut header = String::new();
-        if reader.read_line(&mut header).is_err() || header.trim().is_empty() { break; }
+        if reader.read_line(&mut header).is_err() || header.trim().is_empty() {
+            break;
+        }
         if header.to_ascii_lowercase().starts_with("content-length:") {
-            content_length = header.split(':').nth(1)
-                .and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+            content_length = header
+                .split(':')
+                .nth(1)
+                .and_then(|s| s.trim().parse().ok())
+                .unwrap_or(0);
         }
     }
 
@@ -106,7 +115,8 @@ fn handle_ch_request(
     };
 
     let artifact_path = match capability_host::artifact::resolve_artifact(
-        &config.artifact_root, &req.artifact_digest,
+        &config.artifact_root,
+        &req.artifact_digest,
     ) {
         Ok(p) => p,
         Err(_) => return ch_err("artifact_not_found"),
@@ -115,8 +125,11 @@ fn handle_ch_request(
     let process_req = capability_host::protocol::build_process_request(&req);
     let stdin_json = serde_json::to_string(&process_req).unwrap_or_default();
     let result = capability_host::process::run_artifact(
-        &artifact_path, &stdin_json, config.exec_timeout,
-        config.max_stdout_bytes, config.max_stderr_bytes,
+        &artifact_path,
+        &stdin_json,
+        config.exec_timeout,
+        config.max_stdout_bytes,
+        config.max_stderr_bytes,
     );
 
     match result {
@@ -128,8 +141,10 @@ fn handle_ch_request(
             if ok {
                 ch_200(&serde_json::to_string(&resp_body).unwrap_or_default())
             } else {
-                let ec = resp_body.get("error_code")
-                    .and_then(|v| v.as_str()).unwrap_or("artifact_failed");
+                let ec = resp_body
+                    .get("error_code")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("artifact_failed");
                 ch_err(ec)
             }
         }
@@ -141,7 +156,11 @@ fn handle_ch_request(
 }
 
 fn ch_200(body: &str) -> String {
-    format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body)
+    format!(
+        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    )
 }
 fn ch_500() -> String {
     "HTTP/1.1 500\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string()
@@ -163,7 +182,11 @@ fn e2e_capability_host_calculator_returns_42() {
 
     // 1. Store the calculator artifact in ContentStore.
     let calc_path = calculator_binary();
-    assert!(calc_path.exists(), "calculator binary not found at {:?}", calc_path);
+    assert!(
+        calc_path.exists(),
+        "calculator binary not found at {:?}",
+        calc_path
+    );
     let calc_bytes = std::fs::read(&calc_path).unwrap();
     let calc_digest = Sha256Digest::compute(&calc_bytes);
     {
@@ -207,54 +230,79 @@ fn e2e_capability_host_calculator_returns_42() {
     let manifest_id = manifest.compute_manifest_id().unwrap();
     manifest.manifest_id = manifest_id.clone();
     j.register_harness_manifest(&manifest).unwrap();
-    j.enable_harness(&g.approve_harness_change(HarnessChangeIntent {
-        action: HarnessChangeAction::Enable,
-        manifest_id: manifest_id.clone(),
-        expected_snapshot_id: j.current_registry_snapshot_id().unwrap(),
-        requested_by: "ipc_operator".into(),
-    }).unwrap()).unwrap();
+    j.enable_harness(
+        &g.approve_harness_change(HarnessChangeIntent {
+            action: HarnessChangeAction::Enable,
+            manifest_id: manifest_id.clone(),
+            expected_snapshot_id: j.current_registry_snapshot_id().unwrap(),
+            requested_by: "ipc_operator".into(),
+        })
+        .unwrap(),
+    )
+    .unwrap();
 
     // 4. Verify snapshot transition and operation is present.
     let snapshot_id = j.current_registry_snapshot_id().unwrap();
     let snap = j.load_registry_snapshot(&snapshot_id).unwrap();
-    let calc_spec = snap.lookup("external.calculator")
+    let calc_spec = snap
+        .lookup("external.calculator")
         .expect("external.calculator must be in active snapshot");
     assert_eq!(
         calc_spec.binding_kind,
         agent_core_kernel::registry::snapshot::BindingKind::External,
         "calculator should be external binding"
     );
-    assert_eq!(calc_spec.binding_key, manifest_id, "binding_key = manifest_id");
+    assert_eq!(
+        calc_spec.binding_key, manifest_id,
+        "binding_key = manifest_id"
+    );
 
     // 5. Dispatch a tool call for external.calculator(multiply,6,7) through
     //    the full Kernel Runtime::deliver pipeline.
-    let outcome = deliver_tool(&j, &g, &config, "external.calculator",
-        json!({"operation": "multiply", "a": 6, "b": 7}))
-        .expect("deliver_tool should succeed");
+    let outcome = deliver_tool(
+        &j,
+        &g,
+        &config,
+        "external.calculator",
+        json!({"operation": "multiply", "a": 6, "b": 7}),
+    )
+    .expect("deliver_tool should succeed");
 
     // 6. The outcome is the Run's reply text. The receipt is in the journal.
     let events = j.events().unwrap();
-    let receipts: Vec<_> = events.iter()
+    let receipts: Vec<_> = events
+        .iter()
         .filter(|e| e.kind == agent_core_kernel::domain::JournalEventKind::ReceiptReceived)
         .collect();
     assert_eq!(receipts.len(), 1, "exactly one ReceiptReceived event");
 
     let receipt = receipts[0];
-    let status = receipt.payload.get("status").and_then(|v| v.as_str()).unwrap_or("?");
+    let status = receipt
+        .payload
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("?");
     let output = receipt.payload.get("output").unwrap();
     eprintln!("Receipt status: {status}");
     eprintln!("Receipt output: {output}");
 
-    assert_eq!(status, "Succeeded", "Receipt should be Succeeded, got {status}: {output}");
+    assert_eq!(
+        status, "Succeeded",
+        "Receipt should be Succeeded, got {status}: {output}"
+    );
 
     // Verify result is 42.
-    let val = output.as_i64()
+    let val = output
+        .as_i64()
         .or_else(|| output.as_f64().map(|f| f as i64))
         .unwrap_or(-1);
     assert_eq!(val, 42, "multiply(6,7) should be 42, got {output}");
 
     // 7. Verify journal hash chain.
-    assert!(j.verify_hash_chain().unwrap(), "journal hash chain must be valid");
+    assert!(
+        j.verify_hash_chain().unwrap(),
+        "journal hash chain must be valid"
+    );
 
     // 8. Verify outcome is non-blank.
     assert!(!outcome.output.is_empty(), "outcome should not be empty");
