@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use std::thread;
 
 /// Result of executing an artifact subprocess.
-pub(crate) struct ProcessOutput {
+pub struct ProcessOutput {
     pub stdout: String,
     #[allow(dead_code)]
     pub stderr: String,
@@ -22,7 +22,7 @@ pub(crate) struct ProcessOutput {
 
 /// Errors from artifact execution.
 #[derive(Debug)]
-pub(crate) enum ProcessError {
+pub enum ProcessError {
     Timeout,
     IoError(String),
 }
@@ -43,7 +43,7 @@ impl std::fmt::Display for ProcessError {
 /// 3. Polls for completion up to timeout
 /// 4. Kills process group on timeout
 /// 5. Returns captured output
-pub(crate) fn run_artifact(
+pub fn run_artifact(
     artifact_path: &std::path::Path,
     stdin_json: &str,
     timeout: Duration,

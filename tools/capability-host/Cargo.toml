@@ -18,4 +18,5 @@ name = "calculator-artifact"
 path = "src/bin/calculator.rs"
 
 [dev-dependencies]
+agent-core-kernel = { path = "../.." }
 ureq = { version = "3.3.0", features = ["json"] }

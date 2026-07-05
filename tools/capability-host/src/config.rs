@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 /// Configuration for the Capability Host process.
-pub(crate) struct CapabilityHostConfig {
+pub struct CapabilityHostConfig {
     /// Listen address, e.g. "127.0.0.1:7300".
     pub listen_addr: String,
     /// Root directory of the content-addressed artifact store.
@@ -19,7 +19,7 @@ pub(crate) struct CapabilityHostConfig {
 }
 
 impl CapabilityHostConfig {
-    pub(crate) fn from_env() -> Result<Self, String> {
+    pub fn from_env() -> Result<Self, String> {
         let listen_addr = std::env::var("CAPABILITY_HOST_LISTEN_ADDR")
             .unwrap_or_else(|_| "127.0.0.1:7300".to_string());
 
