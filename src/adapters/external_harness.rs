@@ -39,14 +39,19 @@ pub fn execute_external_harness(
         manifest,
         invocation,
         &ExternalHarnessTransportConfig::default(),
+        "",
     )
 }
 
 /// Execute an external harness operation with configurable transport.
+/// The `registry_snapshot_id` is the Run's pinned snapshot (empty string if
+/// unavailable) — it is forwarded to the harness so the Capability Host can
+/// audit which snapshot selected this operation.
 pub fn execute_external_harness_with_config(
     manifest: &HarnessManifest,
     invocation: &ApprovedInvocation,
     config: &ExternalHarnessTransportConfig,
+    registry_snapshot_id: &str,
 ) -> Result<Receipt> {
     let invocation_id = invocation.intent().invocation_id.clone();
 
@@ -57,12 +62,18 @@ pub fn execute_external_harness_with_config(
         obj.remove("session_id");
     }
 
-    // Build request body WITHOUT internal fields.
+    // Build request body WITH authoritative manifest identity.
+    // manifest_id and artifact_digest come from the manifest (never from LLM
+    // arguments). registry_snapshot_id comes from the Run's pinned snapshot.
+    // Old external harnesses that ignore unknown fields continue to work.
     let request_body = serde_json::json!({
         "protocol_version": manifest.protocol_version,
         "invocation_id": invocation_id.0,
         "operation": manifest.operation_name,
         "arguments": clean_args,
+        "manifest_id": manifest.manifest_id,
+        "artifact_digest": manifest.artifact_digest,
+        "registry_snapshot_id": registry_snapshot_id,
     });
     let request_bytes = serde_json::to_vec(&request_body)?;
 

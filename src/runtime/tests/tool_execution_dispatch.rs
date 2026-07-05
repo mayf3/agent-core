@@ -79,6 +79,7 @@ fn retired_builtin_time_binding_returns_fail_closed_error() {
         &session,
         "test:retired:time",
         std::time::Duration::from_secs(1),
+        &run.registry_snapshot_id,
     );
     assert_eq!(
         run.registry_snapshot_id, legacy_snapshot_id,
