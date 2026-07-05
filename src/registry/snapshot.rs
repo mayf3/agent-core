@@ -41,10 +41,22 @@ pub struct OperationSpec {
 }
 
 impl OperationSpec {
-    /// The OpenAI-compatible tool definition for the provider. Returns `None`
-    /// for Write operations (they are never sent as tools).
+    /// Whether this operation should appear in provider-facing tool definitions
+    /// and the context tool catalog. ReadOnly operations are always included.
+    /// External Write operations (e.g. coding-harness operations) are included
+    /// so the model can call them when granted. Builtin Write operations are
+    /// excluded — they are system-level (e.g. `feishu.send_message`) and should
+    /// never appear in model-facing tools.
+    pub fn is_visible_to_provider(&self) -> bool {
+        match self.risk {
+            Risk::ReadOnly => true,
+            Risk::Write => self.binding_kind == BindingKind::External,
+        }
+    }
+
+    /// The OpenAI-compatible tool definition for the provider.
     pub fn provider_tool_definition(&self) -> Option<serde_json::Value> {
-        if self.risk != Risk::ReadOnly {
+        if !self.is_visible_to_provider() {
             return None;
         }
         Some(serde_json::json!({
@@ -83,23 +95,24 @@ impl RegistrySnapshot {
         self.operations.iter().find(|op| op.name == name)
     }
 
-    /// Provider tools for the granted operations, filtered to ReadOnly, in
-    /// snapshot order. This replaces the static `provider_tools_for_grants`.
+    /// Provider tools for the granted operations. ReadOnly operations and
+    /// external Write operations (e.g. coding-harness operations) that have
+    /// an explicit grant are included. Builtin Write operations are excluded.
     pub fn provider_tools_for_grants(&self, granted: &[String]) -> Vec<serde_json::Value> {
         self.operations
             .iter()
-            .filter(|op| op.risk == Risk::ReadOnly && granted.iter().any(|g| g == &op.name))
+            .filter(|op| granted.iter().any(|g| g == &op.name))
             .filter_map(|op| op.provider_tool_definition())
             .collect()
     }
 
     /// ToolCatalog text for the Context block, from this snapshot's granted
-    /// ReadOnly operations. Replaces the static `catalog_for_context_grants`.
+    /// operations. Uses the same inclusion rules as provider_tools_for_grants.
     pub fn catalog_for_context_grants(&self, granted: &[String]) -> String {
         let names: Vec<&str> = self
             .operations
             .iter()
-            .filter(|op| op.risk == Risk::ReadOnly && granted.iter().any(|g| g == &op.name))
+            .filter(|op| granted.iter().any(|g| g == &op.name) && op.is_visible_to_provider())
             .map(|op| op.name.as_str())
             .collect();
         if names.is_empty() {
@@ -170,6 +183,7 @@ pub fn test_snapshot() -> RegistrySnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn spec(name: &str, risk: Risk) -> OperationSpec {
         OperationSpec {
@@ -213,24 +227,39 @@ mod tests {
     }
 
     #[test]
-    fn provider_tools_filters_write_and_unknown() {
+    fn provider_tools_includes_external_write_but_not_builtin_write() {
         let snap = RegistrySnapshot {
             snapshot_id: "snap_test".into(),
             created_at: Utc::now(),
             operations: vec![
                 spec("system.status", Risk::ReadOnly),
                 spec("feishu.send_message", Risk::Write),
+                OperationSpec {
+                    name: "external.coding_workspace_write".into(),
+                    risk: Risk::Write,
+                    description: "Write".into(),
+                    parameters: json!({"type": "object"}),
+                    idempotent: false,
+                    binding_kind: BindingKind::External,
+                    binding_key: "external.key".into(),
+                },
             ],
         };
         let tools = snap.provider_tools_for_grants(&[
             "system.status".to_string(),
             "feishu.send_message".to_string(),
+            "external.coding_workspace_write".to_string(),
         ]);
-        assert_eq!(tools.len(), 1);
-        assert_eq!(
-            tools[0].pointer("/function/name").and_then(|v| v.as_str()),
-            Some("system.status")
-        );
+        // Builtin Write (feishu.send_message) is excluded; external Write
+        // (coding_workspace_write) is included.
+        assert_eq!(tools.len(), 2);
+        let names: Vec<&str> = tools
+            .iter()
+            .filter_map(|t| t.pointer("/function/name").and_then(|v| v.as_str()))
+            .collect();
+        assert!(names.contains(&"system.status"));
+        assert!(names.contains(&"external.coding_workspace_write"));
+        assert!(!names.contains(&"feishu.send_message"));
     }
 
     #[test]

@@ -138,6 +138,7 @@ impl crate::llm::LlmClient for ProbeLoopLlm {
                     provider_tool_call_id: "probe_call_1".into(),
                     wire_name: PROBE_OP.into(),
                     canonical_operation: PROBE_OP.into(),
+                    reasoning_content: None,
                     arguments_json: "{}".into(),
                 }),
             })

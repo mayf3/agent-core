@@ -152,6 +152,7 @@ impl Gateway {
             },
             dedupe_key: format!("{source}:{}", envelope.external_event_id),
             occurred_at: envelope.received_at,
+            chat_type: None,
         };
         journal.accept_ingress_with_worker_job(
             &event,
@@ -257,6 +258,7 @@ impl Gateway {
             },
             dedupe_key: format!("feishu:{dedupe_id}"),
             occurred_at: envelope.received_at,
+            chat_type: Some(chat_type.clone()),
         };
         journal.accept_ingress_with_worker_job(
             &event,
@@ -268,7 +270,7 @@ impl Gateway {
                 "event_id": event_id.0,
                 "sender_open_id": sender_open_id,
                 "chat_id": chat_id,
-                "chat_type": chat_type,
+                "chat_type": chat_type.clone(),
                 "conversation_key": conversation_key,
                 "message_id": message_id,
                 "message_type": message_type,
@@ -301,6 +303,7 @@ impl Gateway {
             },
             dedupe_key,
             occurred_at,
+            chat_type: None,
         })
     }
     fn recover_feishu_event(
@@ -313,6 +316,10 @@ impl Gateway {
         let sender_open_id = string_arg(payload, "sender_open_id")?;
         let chat_id = string_arg(payload, "chat_id")?;
         let conversation_key = string_arg(payload, "conversation_key")?;
+        let chat_type = payload
+            .get("chat_type")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
         Ok(ValidatedEvent {
             event_id,
             source: EventSource::Feishu,
@@ -339,6 +346,7 @@ impl Gateway {
             },
             dedupe_key,
             occurred_at,
+            chat_type,
         })
     }
     fn cli_principal(&self) -> RunPrincipal {

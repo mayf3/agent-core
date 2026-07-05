@@ -15,6 +15,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::{CapabilityGrant, ChannelKind};
 
+// Re-export coding operation names and risk classification so existing
+// import paths (crate::domain::operation::external::*, etc.) continue to work.
+pub use super::coding_operations::*;
+
 /// The risk classification of an operation. `Write` operations use the
 /// approval/dispatch boundary; catalogued `ReadOnly` operations may execute
 /// inline after the Gateway approves the current run's explicit grant.

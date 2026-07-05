@@ -49,6 +49,7 @@ impl crate::llm::LlmClient for BlockerLlm {
                     provider_tool_call_id: "cr".into(),
                     wire_name: "external.time_now".into(),
                     canonical_operation: "external.time_now".into(),
+                    reasoning_content: None,
                     arguments_json: "{}".into(),
                 }),
             })

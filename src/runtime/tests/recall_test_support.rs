@@ -52,8 +52,10 @@ pub(super) fn test_config() -> KernelConfig {
         harness_read_timeout_ms: 10_000,
         harness_artifact_root: std::env::temp_dir().join(format!("ha_root_{}", std::process::id())),
         max_tool_rounds: 12,
+        feishu_coding_owner_id: None,
         capability_submit_token: None,
         capability_decision_token: None,
+        tool_loop_timeout_ms: 300_000,
     }
 }
 
@@ -205,6 +207,7 @@ impl LlmClient for CapturingLlm {
                     provider_tool_call_id: self.provider_call_id.into(),
                     wire_name: "session.recall_recent".into(),
                     canonical_operation: "session.recall_recent".into(),
+                    reasoning_content: None,
                     arguments_json: "{}".into(),
                 }),
             })
@@ -297,4 +300,98 @@ pub(super) fn assert_strict_keys(item: &Value) {
         BTreeSet::from(["event_id", "role", "text"]),
         "recalled item must have exactly {{event_id, role, text}}; got {keys:?}"
     );
+}
+
+/// Shared outbox dispatch recovery test helper.
+pub(super) fn run_outbox_test(status: RunStatus, expected: &str, suffix: &str) {
+    let j = JournalStore::in_memory().unwrap();
+    let run_id = RunId::new();
+    let session_id = SessionId(format!("s_{suffix}"));
+    let inv_id = InvocationId(format!("reply:{suffix}"));
+    j.insert_run(&Run {
+        id: run_id.clone(),
+        session_id: session_id.clone(),
+        agent_id: AgentId("main".into()),
+        trigger_event_id: EventId::new(),
+        principal: RunPrincipal {
+            principal_id: PrincipalId("cli:local".into()),
+            subject: PrincipalSubject::LocalUser,
+            source: PrincipalSource::Cli,
+            grants: vec![],
+            requester_id: Some("cli:local".into()),
+        },
+        parent_run_id: None,
+        delegated_by: None,
+        status,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+        registry_snapshot_id: String::new(),
+    })
+    .unwrap();
+    if expected == "Failed" {
+        j.fail_run(&run_id).unwrap();
+    }
+    let approved = ApprovedInvocation::new(
+        InvocationIntent {
+            invocation_id: inv_id.clone(),
+            run_id: run_id.clone(),
+            operation: "stdout.send_text".into(),
+            arguments: json!({"session_id": session_id.0, "text": suffix}),
+            idempotency_key: Some(format!("reply:{suffix}")),
+        },
+        format!("decision_{suffix}"),
+    );
+    j.queue_outbox_dispatch(&approved, Some(&session_id))
+        .unwrap();
+    j.start_outbox_dispatch(&approved, Some(&session_id))
+        .unwrap();
+    j.succeed_outbox_dispatch(
+        &Receipt {
+            invocation_id: inv_id,
+            status: ReceiptStatus::Succeeded,
+            output: json!({"text": "delivered"}),
+            external_ref: None,
+            occurred_at: chrono::Utc::now(),
+        },
+        &run_id,
+        Some(&session_id),
+    )
+    .unwrap();
+    assert_eq!(j.run_status(&run_id).unwrap().as_deref(), Some(expected));
+    assert_eq!(
+        count_kind(&j.events().unwrap(), JournalEventKind::RunCompleted),
+        if expected == "Completed" { 1 } else { 0 }
+    );
+    assert!(j.verify_hash_chain().unwrap());
+}
+
+/// Process the next outbox dispatch, succeeding it unconditionally.
+pub(super) fn process_outbox(j: &JournalStore, run_id: &RunId) {
+    if let Ok(Some(leased)) = j.lease_next_outbox_dispatch() {
+        j.succeed_outbox_dispatch(
+            &Receipt {
+                invocation_id: leased.invocation_id,
+                status: ReceiptStatus::Succeeded,
+                output: json!({"text": "delivered"}),
+                external_ref: None,
+                occurred_at: chrono::Utc::now(),
+            },
+            run_id,
+            leased.session_id.as_ref(),
+        )
+        .unwrap();
+    }
+}
+
+pub(super) fn count_kind(events: &[JournalEvent], kind: JournalEventKind) -> usize {
+    events.iter().filter(|e| e.kind == kind).count()
+}
+
+#[test]
+fn successful_failure_reply_dispatch_preserves_failed_run() {
+    run_outbox_test(RunStatus::Failed, "Failed", "fail")
+}
+#[test]
+fn normal_success_dispatch_still_completes_run() {
+    run_outbox_test(RunStatus::Running, "Completed", "norm")
 }

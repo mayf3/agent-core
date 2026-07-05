@@ -81,6 +81,18 @@ pub struct KernelConfig {
     /// AGENT_CORE_MAX_TOOL_ROUNDS. A value outside the range causes a startup
     /// error (process exits with diagnostic).
     pub max_tool_rounds: usize,
+    /// The Feishu open_id of the user authorized to use coding harness
+    /// operations. When set, only private chats from this user receive
+    /// the seven `external.coding_*` capability grants. Other principals
+    /// (non-owner, group chats, CLI) do not receive coding grants.
+    /// Default empty (no owner configured → no coding grants granted).
+    /// Configured via AGENT_CORE_FEISHU_CODING_OWNER_ID.
+    pub feishu_coding_owner_id: Option<String>,
+    /// Maximum wall-clock time for the entire tool-call recall loop, in
+    /// milliseconds. When this timeout is exceeded, the loop stops and
+    /// emits a `ToolLoopWallClockExceeded` journal event. Default 300,000
+    /// (5 minutes). Configured via AGENT_CORE_TOOL_LOOP_TIMEOUT_MS.
+    pub tool_loop_timeout_ms: u64,
 }
 
 impl KernelConfig {
@@ -162,6 +174,11 @@ impl KernelConfig {
             harness_read_timeout_ms: env_u64("AGENT_CORE_HARNESS_READ_TIMEOUT_MS", 10_000),
             harness_artifact_root,
             max_tool_rounds: env_max_tool_rounds("AGENT_CORE_MAX_TOOL_ROUNDS", 12),
+            feishu_coding_owner_id: env_optional_string("AGENT_CORE_FEISHU_CODING_OWNER_ID"),
+            tool_loop_timeout_ms: env_tool_loop_timeout_ms(
+                "AGENT_CORE_TOOL_LOOP_TIMEOUT_MS",
+                300_000,
+            ),
         }
     }
 }
@@ -269,6 +286,47 @@ fn env_usize(key: &str, fallback: usize) -> usize {
         .unwrap_or(fallback)
 }
 
+/// Minimum allowed tool-loop wall-clock timeout in milliseconds.
+pub(crate) const TOOL_LOOP_TIMEOUT_MS_MIN: u64 = 1_000;
+/// Maximum allowed tool-loop wall-clock timeout in milliseconds (10 minutes).
+pub(crate) const TOOL_LOOP_TIMEOUT_MS_MAX: u64 = 600_000;
+
+/// Parse and validate a tool-loop timeout value. Pure function — no env access,
+/// no process exit — so it is testable in isolation. Returns a descriptive error
+/// for invalid inputs.
+pub(crate) fn parse_tool_loop_timeout_ms(raw: &str) -> Result<u64, String> {
+    let parsed: u64 = raw
+        .parse()
+        .map_err(|_| format!("not a valid integer, got {raw:?}"))?;
+    if parsed < TOOL_LOOP_TIMEOUT_MS_MIN {
+        return Err(format!(
+            "must be at least {}, got {parsed}",
+            TOOL_LOOP_TIMEOUT_MS_MIN
+        ));
+    }
+    if parsed > TOOL_LOOP_TIMEOUT_MS_MAX {
+        return Err(format!(
+            "must be at most {}, got {parsed}",
+            TOOL_LOOP_TIMEOUT_MS_MAX
+        ));
+    }
+    Ok(parsed)
+}
+
+fn env_tool_loop_timeout_ms(key: &str, fallback: u64) -> u64 {
+    let raw = match std::env::var(key) {
+        Ok(v) => v,
+        Err(_) => return fallback,
+    };
+    match parse_tool_loop_timeout_ms(&raw) {
+        Ok(v) => v,
+        Err(msg) => {
+            eprintln!("invalid_config: {key} {msg}");
+            std::process::exit(1);
+        }
+    }
+}
+
 fn env_max_tool_rounds(key: &str, fallback: usize) -> usize {
     let raw = match std::env::var(key) {
         Ok(v) => v,
@@ -299,4 +357,71 @@ fn unquote(value: &str) -> String {
         })
         .unwrap_or(value)
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_loop_timeout_uses_default_when_unset() {
+        // env_tool_loop_timeout_ms returns fallback when env var is not set.
+        // We cannot un-set an env var reliably in a multi-threaded test, so we
+        // test the pure function path: parse_tool_loop_timeout_ms is exercised
+        // in the other tests; env_tool_loop_timeout_ms fallback is exercised
+        // here by never setting the key.
+        let result = env_tool_loop_timeout_ms(
+            "AGENT_CORE_TOOL_LOOP_TIMEOUT_TEST_MUST_NOT_EXIST_12345",
+            300_000,
+        );
+        assert_eq!(result, 300_000);
+    }
+
+    #[test]
+    fn tool_loop_timeout_accepts_valid_value() {
+        let result = parse_tool_loop_timeout_ms("300000");
+        assert_eq!(result, Ok(300_000));
+    }
+
+    #[test]
+    fn tool_loop_timeout_accepts_minimum() {
+        let result = parse_tool_loop_timeout_ms("1000");
+        assert_eq!(result, Ok(1_000));
+    }
+
+    #[test]
+    fn tool_loop_timeout_accepts_maximum() {
+        let result = parse_tool_loop_timeout_ms("600000");
+        assert_eq!(result, Ok(600_000));
+    }
+
+    #[test]
+    fn tool_loop_timeout_rejects_non_numeric_value() {
+        let result = parse_tool_loop_timeout_ms("abc");
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(msg.contains("not a valid integer"), "msg: {msg}");
+    }
+
+    #[test]
+    fn tool_loop_timeout_rejects_zero() {
+        let result = parse_tool_loop_timeout_ms("0");
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(msg.contains("must be at least"), "msg: {msg}");
+    }
+
+    #[test]
+    fn tool_loop_timeout_rejects_above_maximum() {
+        let result = parse_tool_loop_timeout_ms("999999");
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(msg.contains("must be at most"), "msg: {msg}");
+    }
+
+    #[test]
+    fn tool_loop_timeout_accepts_default_value() {
+        let result = parse_tool_loop_timeout_ms("300000");
+        assert_eq!(result, Ok(300_000));
+    }
 }
