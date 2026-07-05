@@ -2,11 +2,9 @@ use super::super::Runtime;
 use super::tool_loop_tests::test_config;
 use crate::domain::*;
 use crate::gateway::Gateway;
-use crate::harness::control::{HarnessChangeAction, HarnessChangeIntent};
-use crate::harness::manifest::HarnessManifest;
 use crate::journal::JournalStore;
-use crate::llm::{LlmClient, LlmFollowUp, LlmInput, LlmOutput, ToolCall, ToolCallResult};
-use serde_json::{json, Value};
+use crate::llm::{LlmClient, LlmInput, LlmOutput, ToolCall, ToolCallResult};
+use serde_json::json;
 use std::sync::atomic::AtomicUsize;
 
 struct WhitespaceLlm {
