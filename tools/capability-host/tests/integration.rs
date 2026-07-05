@@ -18,7 +18,7 @@ fn calculator_binary() -> Option<PathBuf> {
     // Find the coding-harness target directory by walking up from current_exe.
     let exe = std::env::current_exe().ok()?;
     let mut p = exe.parent()?; // start one level up from the test binary
-    // Walk up until we find the "target" directory
+                               // Walk up until we find the "target" directory
     loop {
         let name = p.file_name()?;
         if name == "target" {
@@ -26,12 +26,21 @@ fn calculator_binary() -> Option<PathBuf> {
             // capability-host test is at: .../tools/capability-host/target/
             // Need: .../tools/coding-harness/target/
             // So: target -> capability-host -> tools -> workspace -> tools -> coding-harness -> target
-            let profile = if cfg!(debug_assertions) { "debug" } else { "release" };
+            let profile = if cfg!(debug_assertions) {
+                "debug"
+            } else {
+                "release"
+            };
             // Walk up from target to workspace root
             let mut ws = p.parent()?; // capability-host/
             ws = ws.parent()?; // tools/
             ws = ws.parent()?; // workspace root
-            let ch_target = ws.join("tools").join("coding-harness").join("target").join(profile).join("calculator-artifact");
+            let ch_target = ws
+                .join("tools")
+                .join("coding-harness")
+                .join("target")
+                .join(profile)
+                .join("calculator-artifact");
             if ch_target.exists() {
                 return Some(ch_target);
             }
@@ -63,7 +72,9 @@ fn start_capability_host(artifact_root: &PathBuf) -> (u16, Arc<AtomicBool>) {
             max_stderr_bytes: 65536,
         };
         for stream in listener.incoming() {
-            if s.load(Ordering::SeqCst) { break; }
+            if s.load(Ordering::SeqCst) {
+                break;
+            }
             if let Ok(mut stream) = stream {
                 let response = handle_request(&mut stream, &config);
                 let _ = stream.write_all(response.as_bytes());
@@ -73,22 +84,34 @@ fn start_capability_host(artifact_root: &PathBuf) -> (u16, Arc<AtomicBool>) {
     (port, shutdown)
 }
 
-fn handle_request(stream: &mut TcpStream, config: &capability_host::config::CapabilityHostConfig) -> String {
+fn handle_request(
+    stream: &mut TcpStream,
+    config: &capability_host::config::CapabilityHostConfig,
+) -> String {
     let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
     let mut request_line = String::new();
-    if reader.read_line(&mut request_line).is_err() { return http_500(); }
+    if reader.read_line(&mut request_line).is_err() {
+        return http_500();
+    }
     let parts: Vec<&str> = request_line.split_whitespace().collect();
-    if parts.len() < 2 { return http_500(); }
+    if parts.len() < 2 {
+        return http_500();
+    }
     let method = parts[0];
     let path = parts[1];
 
     let mut content_length: usize = 0;
     loop {
         let mut header = String::new();
-        if reader.read_line(&mut header).is_err() || header.trim().is_empty() { break; }
+        if reader.read_line(&mut header).is_err() || header.trim().is_empty() {
+            break;
+        }
         if header.to_ascii_lowercase().starts_with("content-length:") {
-            content_length = header.split(':').nth(1)
-                .and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+            content_length = header
+                .split(':')
+                .nth(1)
+                .and_then(|s| s.trim().parse().ok())
+                .unwrap_or(0);
         }
     }
 
@@ -119,7 +142,8 @@ fn execute_artifact(body: &str, config: &capability_host::config::CapabilityHost
     };
 
     let artifact_path = match capability_host::artifact::resolve_artifact(
-        &config.artifact_root, &req.artifact_digest,
+        &config.artifact_root,
+        &req.artifact_digest,
     ) {
         Ok(path) => path,
         Err(capability_host::artifact::ArtifactError::NotFound) => {
@@ -139,8 +163,11 @@ fn execute_artifact(body: &str, config: &capability_host::config::CapabilityHost
     let process_req = capability_host::protocol::build_process_request(&req);
     let stdin_json = serde_json::to_string(&process_req).unwrap_or_default();
     let result = capability_host::process::run_artifact(
-        &artifact_path, &stdin_json, config.exec_timeout,
-        config.max_stdout_bytes, config.max_stderr_bytes,
+        &artifact_path,
+        &stdin_json,
+        config.exec_timeout,
+        config.max_stdout_bytes,
+        config.max_stderr_bytes,
     );
 
     match result {
@@ -152,12 +179,16 @@ fn execute_artifact(body: &str, config: &capability_host::config::CapabilityHost
             if ok {
                 http_200(&serde_json::to_string(&resp_body).unwrap_or_default())
             } else {
-                let ec = resp_body.get("error_code")
-                    .and_then(|v| v.as_str()).unwrap_or("artifact_failed");
+                let ec = resp_body
+                    .get("error_code")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("artifact_failed");
                 harness_resp(false, ec)
             }
         }
-        Err(capability_host::process::ProcessError::Timeout) => harness_resp(false, "artifact_timeout"),
+        Err(capability_host::process::ProcessError::Timeout) => {
+            harness_resp(false, "artifact_timeout")
+        }
         Err(capability_host::process::ProcessError::IoError(msg)) => {
             harness_resp(false, &format!("artifact_exec_error:{msg}"))
         }
@@ -175,7 +206,11 @@ fn harness_resp(ok: bool, error_code: &str) -> String {
 }
 
 fn http_200(body: &str) -> String {
-    format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body)
+    format!(
+        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    )
 }
 fn http_404() -> String {
     http_200(r#"{"error":"not_found"}"#)
@@ -197,8 +232,11 @@ fn send_http(host: &str, port: u16, body: &str) -> (u16, String) {
     let mut response = String::new();
     stream.read_to_string(&mut response).unwrap();
     let status_line = response.lines().next().unwrap_or("");
-    let code: u16 = status_line.split_whitespace().nth(1)
-        .and_then(|s| s.parse().ok()).unwrap_or(0);
+    let code: u16 = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
     let json_body = response.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
     (code, json_body)
 }
@@ -207,7 +245,9 @@ fn store_artifact(artifact_root: &PathBuf, binary: &PathBuf) -> String {
     use agent_core_kernel::capabilities::store::{ContentStore, Sha256Digest};
     let bytes = std::fs::read(binary).unwrap();
     let digest = Sha256Digest::compute(&bytes);
-    ContentStore::new(artifact_root.clone()).store(&bytes).unwrap();
+    ContentStore::new(artifact_root.clone())
+        .store(&bytes)
+        .unwrap();
     digest.as_str().to_string()
 }
 
@@ -317,7 +357,12 @@ fn health_check_returns_ok() {
     let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).unwrap();
     stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
     stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
-    stream.write_all(format!("GET /health HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n").as_bytes()).unwrap();
+    stream
+        .write_all(
+            format!("GET /health HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
+        .unwrap();
     let mut response = String::new();
     stream.read_to_string(&mut response).unwrap();
     assert!(response.contains("200"), "expected 200: {response}");

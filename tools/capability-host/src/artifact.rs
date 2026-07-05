@@ -9,10 +9,7 @@ use std::path::{Path, PathBuf};
 
 /// Locate an artifact file by its digest and verify content integrity.
 /// Returns the path to the artifact binary on success.
-pub fn resolve_artifact(
-    artifact_root: &Path,
-    digest_str: &str,
-) -> Result<PathBuf, ArtifactError> {
+pub fn resolve_artifact(artifact_root: &Path, digest_str: &str) -> Result<PathBuf, ArtifactError> {
     // Parse the digest string ("sha256:<hex>").
     let digest = Sha256Digest::parse(digest_str).map_err(|_| ArtifactError::InvalidDigest)?;
 
@@ -22,9 +19,7 @@ pub fn resolve_artifact(
         let msg = e.to_string();
         if msg.contains("not found") || msg.contains("No such") || msg.contains("not_found") {
             ArtifactError::NotFound
-        } else if msg.contains("content mismatch")
-            || msg.contains("digest mismatch")
-        {
+        } else if msg.contains("content mismatch") || msg.contains("digest mismatch") {
             ArtifactError::DigestMismatch
         } else {
             ArtifactError::StoreError(e.to_string())
@@ -41,7 +36,8 @@ pub fn resolve_artifact(
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::write(&artifact_path, &bytes).map_err(|e| ArtifactError::StoreError(e.to_string()))?;
+        std::fs::write(&artifact_path, &bytes)
+            .map_err(|e| ArtifactError::StoreError(e.to_string()))?;
         std::fs::set_permissions(&artifact_path, std::fs::Permissions::from_mode(0o755))
             .map_err(|e| ArtifactError::StoreError(e.to_string()))?;
     }

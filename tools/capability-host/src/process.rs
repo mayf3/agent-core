@@ -9,8 +9,8 @@ use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 use std::thread;
+use std::time::{Duration, Instant};
 
 /// Result of executing an artifact subprocess.
 pub struct ProcessOutput {
@@ -71,13 +71,19 @@ pub fn run_artifact(
     let done = Arc::new(AtomicBool::new(false));
     let stdout_handle = {
         let done = done.clone();
-        let stdout = child.stdout.take().map(|r| Box::new(r) as Box<dyn Read + Send>);
+        let stdout = child
+            .stdout
+            .take()
+            .map(|r| Box::new(r) as Box<dyn Read + Send>);
         let max = max_stdout;
         thread::spawn(move || drain_pipe(stdout, max, done))
     };
     let stderr_handle = {
         let done = done.clone();
-        let stderr = child.stderr.take().map(|r| Box::new(r) as Box<dyn Read + Send>);
+        let stderr = child
+            .stderr
+            .take()
+            .map(|r| Box::new(r) as Box<dyn Read + Send>);
         let max = max_stderr;
         thread::spawn(move || drain_pipe(stderr, max, done))
     };

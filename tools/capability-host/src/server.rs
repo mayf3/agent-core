@@ -16,8 +16,7 @@ use crate::protocol;
 /// Start the Capability Host HTTP server.
 pub(crate) fn serve(config: CapabilityHostConfig) {
     let config = Arc::new(config);
-    let listener =
-        TcpListener::bind(&config.listen_addr).expect("capability host: bind failed");
+    let listener = TcpListener::bind(&config.listen_addr).expect("capability host: bind failed");
     eprintln!("capability host listening on {}", config.listen_addr);
 
     for stream in listener.incoming() {
@@ -43,7 +42,11 @@ fn handle(mut stream: TcpStream, config: &CapabilityHostConfig) {
     };
     let _ = stream.write_all(response.as_bytes());
     if let Some(addr) = peer {
-        eprintln!("capability host: {} -> {}", addr, response.lines().next().unwrap_or(""));
+        eprintln!(
+            "capability host: {} -> {}",
+            addr,
+            response.lines().next().unwrap_or("")
+        );
     }
 }
 
@@ -136,29 +139,11 @@ fn handle_execute(body: &str, config: &CapabilityHostConfig) -> String {
     // Resolve artifact by digest.
     let artifact_path = match resolve_artifact(&config.artifact_root, &req.artifact_digest) {
         Ok(path) => path,
-        Err(ArtifactError::NotFound) => {
-            return ok_json(
-                false,
-                "artifact_not_found",
-            )
-        }
-        Err(ArtifactError::InvalidDigest) => {
-            return ok_json(
-                false,
-                "artifact_digest_invalid",
-            )
-        }
-        Err(ArtifactError::DigestMismatch) => {
-            return ok_json(
-                false,
-                "artifact_digest_mismatch",
-            )
-        }
+        Err(ArtifactError::NotFound) => return ok_json(false, "artifact_not_found"),
+        Err(ArtifactError::InvalidDigest) => return ok_json(false, "artifact_digest_invalid"),
+        Err(ArtifactError::DigestMismatch) => return ok_json(false, "artifact_digest_mismatch"),
         Err(ArtifactError::StoreError(msg)) => {
-            return ok_json(
-                false,
-                &format!("artifact_store_error:{}", msg),
-            )
+            return ok_json(false, &format!("artifact_store_error:{}", msg))
         }
     };
 
@@ -191,19 +176,13 @@ fn handle_execute(body: &str, config: &CapabilityHostConfig) -> String {
 
             // Non-zero exit with ok response → artifact_failed.
             if output.exit_code != Some(0) {
-                return ok_json(
-                    false,
-                    "artifact_failed",
-                );
+                return ok_json(false, "artifact_failed");
             }
 
             ok_json_from_value(response_body_value)
         }
         Err(ProcessError::Timeout) => ok_json(false, "artifact_timeout"),
-        Err(ProcessError::IoError(msg)) => ok_json(
-            false,
-            &format!("artifact_exec_error:{}", msg),
-        ),
+        Err(ProcessError::IoError(msg)) => ok_json(false, &format!("artifact_exec_error:{}", msg)),
     }
 }
 
