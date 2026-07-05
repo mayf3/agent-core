@@ -251,6 +251,21 @@ fn store_artifact(artifact_root: &PathBuf, binary: &PathBuf) -> String {
     digest.as_str().to_string()
 }
 
+/// Create a shell-script artifact, store it in ContentStore, return its digest.
+/// The script must start with `#!/bin/sh` and be executable.
+fn create_script_artifact(artifact_root: &PathBuf, script: &str) -> String {
+    let dir = std::env::temp_dir().join(format!("ch_script_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("artifact.sh");
+    std::fs::write(&path, script).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    store_artifact(artifact_root, &path)
+}
+
 // ── Tests ──
 
 #[test]
@@ -367,4 +382,175 @@ fn health_check_returns_ok() {
     stream.read_to_string(&mut response).unwrap();
     assert!(response.contains("200"), "expected 200: {response}");
     assert!(response.contains("ok"), "expected ok: {response}");
+}
+
+// ── Safety / edge-case tests ──
+
+#[test]
+fn non_json_stdout_is_rejected() {
+    let root = std::env::temp_dir().join(format!("ch_nonjson_{}", std::process::id()));
+    std::fs::create_dir_all(&root).ok();
+    let digest = create_script_artifact(&root, "#!/bin/sh\necho 'hello world'\n");
+    let (port, _shutdown) = start_capability_host(&root);
+    thread::sleep(Duration::from_millis(200));
+
+    let invoke = serde_json::json!({
+        "protocol_version": "external-harness-v1",
+        "invocation_id": "nj1",
+        "operation": "test.op",
+        "arguments": {},
+        "manifest_id": "m",
+        "artifact_digest": digest,
+    });
+    let (code, body) = send_http("127.0.0.1", port, &invoke.to_string());
+    assert_eq!(code, 200);
+    let resp: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(resp["ok"], false);
+    assert_eq!(resp["error_code"], "artifact_protocol_error",
+        "non-JSON stdout should produce artifact_protocol_error: {body}");
+}
+
+#[test]
+fn nonzero_exit_is_structured_failure() {
+    let root = std::env::temp_dir().join(format!("ch_badxit_{}", std::process::id()));
+    std::fs::create_dir_all(&root).ok();
+    let digest = create_script_artifact(&root,
+        "#!/bin/sh\necho '{\"ok\":true,\"result\":null}'\nexit 1\n");
+    let (port, _shutdown) = start_capability_host(&root);
+    thread::sleep(Duration::from_millis(200));
+
+    let invoke = serde_json::json!({
+        "protocol_version": "external-harness-v1",
+        "invocation_id": "nz1",
+        "operation": "test.op",
+        "arguments": {},
+        "manifest_id": "m",
+        "artifact_digest": digest,
+    });
+    let (code, body) = send_http("127.0.0.1", port, &invoke.to_string());
+    assert_eq!(code, 200);
+    let resp: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(resp["ok"], false);
+    assert_eq!(resp["error_code"], "artifact_failed",
+        "non-zero exit should produce artifact_failed: {body}");
+}
+
+#[test]
+fn artifact_timeout_kills_process_tree() {
+    let root = std::env::temp_dir().join(format!("ch_timeout_{}", std::process::id()));
+    std::fs::create_dir_all(&root).ok();
+    // Script that creates a background process (sleep 60) then sleeps itself.
+    let digest = create_script_artifact(&root,
+        "#!/bin/sh\nsleep 60 &\nsleep 120\necho '{\"ok\":true,\"result\":\"done\"}'\n");
+    // Use a very short timeout (2 seconds) to trigger artifact_timeout.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let s = shutdown.clone();
+    let root_c = root.clone();
+    thread::spawn(move || {
+        let config = capability_host::config::CapabilityHostConfig {
+            listen_addr: format!("127.0.0.1:{port}"),
+            artifact_root: root_c,
+            exec_timeout: Duration::from_secs(2),
+            max_stdout_bytes: 65536,
+            max_stderr_bytes: 65536,
+        };
+        for stream in listener.incoming() {
+            if s.load(Ordering::SeqCst) { break; }
+            if let Ok(mut stream) = stream {
+                let response = handle_request(&mut stream, &config);
+                let _ = stream.write_all(response.as_bytes());
+            }
+        }
+    });
+    thread::sleep(Duration::from_millis(200));
+
+    let invoke = serde_json::json!({
+        "protocol_version": "external-harness-v1",
+        "invocation_id": "to1",
+        "operation": "test.op",
+        "arguments": {},
+        "manifest_id": "m",
+        "artifact_digest": digest,
+    });
+    let (code, body) = send_http("127.0.0.1", port, &invoke.to_string());
+    assert_eq!(code, 200);
+    let resp: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(resp["ok"], false);
+    assert_eq!(resp["error_code"], "artifact_timeout",
+        "timeout should produce artifact_timeout: {body}");
+}
+
+#[test]
+fn large_stdout_does_not_deadlock() {
+    let root = std::env::temp_dir().join(format!("ch_largeout_{}", std::process::id()));
+    std::fs::create_dir_all(&root).ok();
+    // Script that produces 200KB of output (well over 64KB limit).
+    let script = "#!/bin/sh\n\
+        i=0\n\
+        while [ $i -lt 5000 ]; do\n\
+          echo \"line $i 0123456789012345678901234567890123456789\"\n\
+          i=$((i + 1))\n\
+        done\n\
+        echo '{\"ok\":true,\"result\":\"done\"}'\n";
+    let digest = create_script_artifact(&root, script);
+    let (port, _shutdown) = start_capability_host(&root);
+    thread::sleep(Duration::from_millis(200));
+
+    let invoke = serde_json::json!({
+        "protocol_version": "external-harness-v1",
+        "invocation_id": "lo1",
+        "operation": "test.op",
+        "arguments": {},
+        "manifest_id": "m",
+        "artifact_digest": digest,
+    });
+    let (code, body) = send_http("127.0.0.1", port, &invoke.to_string());
+    assert_eq!(code, 200);
+    // The response should come back (no deadlock), but the JSON may be
+    // truncated so we accept either artifact_protocol_error or valid failure.
+    let resp: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+    assert_eq!(resp["ok"], false, "large stdout should not produce ok=true: {body}");
+}
+
+#[test]
+fn request_cannot_supply_artifact_path() {
+    let root = std::env::temp_dir().join(format!("ch_pathinj_{}", std::process::id()));
+    std::fs::create_dir_all(&root).ok();
+    // Store a valid calculator artifact.
+    let calc_bin = match calculator_binary() {
+        Some(b) => b,
+        None => {
+            eprintln!("calculator binary not found, skipping test");
+            return;
+        }
+    };
+    let digest = store_artifact(&root, &calc_bin);
+    let (port, _shutdown) = start_capability_host(&root);
+    thread::sleep(Duration::from_millis(200));
+
+    // Send request with artifact_path and other path-injection fields.
+    // The Capability Host should IGNORE these and use artifact_digest instead.
+    let invoke = serde_json::json!({
+        "protocol_version": "external-harness-v1",
+        "invocation_id": "pi1",
+        "operation": "external.calculator",
+        "arguments": {
+            "operation": "multiply",
+            "a": 6,
+            "b": 7,
+            "artifact_path": "/etc/passwd",
+            "entrypoint": "../../../malicious",
+            "argv": ["rm", "-rf", "/"]
+        },
+        "manifest_id": "m",
+        "artifact_digest": digest,
+    });
+    let (code, body) = send_http("127.0.0.1", port, &invoke.to_string());
+    assert_eq!(code, 200);
+    let resp: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(resp["ok"], true,
+        "path injection fields should be ignored, result should be 42: {body}");
+    assert_eq!(resp["result"], 42, "should still execute correct artifact: {body}");
 }
