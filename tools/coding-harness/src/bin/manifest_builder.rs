@@ -41,11 +41,7 @@ fn main() {
 
     for m in &manifests {
         let json = serde_json::to_string_pretty(m).expect("serialize manifest");
-        let _ = writeln!(
-            std::io::stderr(),
-            "{}: {}",
-            m.operation_name, m.manifest_id
-        );
+        let _ = writeln!(std::io::stderr(), "{}: {}", m.operation_name, m.manifest_id);
         println!("{}", json);
     }
 }

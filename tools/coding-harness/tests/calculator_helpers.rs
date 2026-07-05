@@ -155,6 +155,7 @@ pub fn make_event(
         },
         dedupe_key: format!("{source}:{}", envelope.external_event_id),
         occurred_at: envelope.received_at,
+        chat_type: None,
     };
     j.accept_ingress_with_worker_job(
         &event,
@@ -206,6 +207,7 @@ pub fn kcfg(artifact_root: &PathBuf) -> KernelConfig {
         harness_read_timeout_ms: 30_000,
         harness_artifact_root: artifact_root.clone(),
         max_tool_rounds: 12,
+        tool_loop_timeout_ms: 300_000,
         capability_submit_token: Some("test-submit-token".into()),
         capability_decision_token: Some("test-decision-token".into()),
     }

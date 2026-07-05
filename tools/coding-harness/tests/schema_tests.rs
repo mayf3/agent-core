@@ -328,6 +328,7 @@ fn coding_manifest_llm_input_receives_complete_tool_definitions() {
         harness_read_timeout_ms: 10000,
         harness_artifact_root: std::path::PathBuf::from("."),
         max_tool_rounds: 12,
+        tool_loop_timeout_ms: 300_000,
     };
     let j = JournalStore::in_memory().unwrap();
     let g = Gateway::new(config.clone());
@@ -376,10 +377,7 @@ fn coding_manifest_llm_input_receives_complete_tool_definitions() {
         "routing_hint": {},
     });
     let event = g
-        .validate_ingress(
-            &j,
-            serde_json::from_value(envelope_val).unwrap(),
-        )
+        .validate_ingress(&j, serde_json::from_value(envelope_val).unwrap())
         .unwrap();
     let outcome = runtime.deliver(&j, &g, event).unwrap();
     if let Ok(Some(leased)) = j.lease_next_outbox_dispatch() {
