@@ -10,7 +10,7 @@ use crate::domain::*;
 use crate::harness::manifest::HarnessManifest;
 use crate::journal::JournalStore;
 use crate::server::capability_routes::{handle_decision, handle_submit_proposal};
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use serde_json::json;
 
 // ── Manifest parser/validator decision tests ───────────────────────────────
@@ -338,9 +338,13 @@ fn decision_rejects_existing_operation_conflict() -> Result<()> {
     let s1 = journal.current_registry_snapshot_id()?;
     let v1 = registry_version(&journal);
 
-    // Second: a fresh proposal trying to activate the SAME operation.
+    // Save the old snapshot for expected_snapshot_id in the upgrade proposal.
+    let old_snapshot_id = s1.clone();
+
+    // Second: a valid schema-only upgrade proposal (same harness, endpoint,
+    // protocol, artifact — only description and schema change).
     let dir2 = std::env::temp_dir().join(format!(
-        "cap_conflict_{}_{}",
+        "cap_upgrade_{}_{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -349,19 +353,31 @@ fn decision_rejects_existing_operation_conflict() -> Result<()> {
     ));
     std::fs::create_dir_all(&dir2)?;
     let store2 = ContentStore::new(dir2.join("store"));
-    let artifact_digest = store2.store(b"#!/bin/sh\necho probe artifact v2\n")?;
-    let evidence_digest = store2.store(br#"{"attestation":"test-build-v2"}"#)?;
+    // Use the SAME artifact digest from the first activation so the
+    // artifact_verification succeeds.
+    let old_manifest = journal
+        .load_harness_manifest(&setup1.manifest_id)?
+        .ok_or_else(|| anyhow!("old manifest not found"))?;
+    let artifact_digest = old_manifest.artifact_digest.clone();
+    // Store the same artifact content for verification.
+    let art_bytes = setup1
+        .store
+        .load(&crate::capabilities::store::Sha256Digest::parse(
+            &artifact_digest,
+        )?)?;
+    store2.store(&art_bytes)?;
+    let evidence_digest = store2.store(br#"{"attestation":"schema-upgrade-v2"}"#)?;
     let mut manifest2 = HarnessManifest {
         manifest_id: String::new(),
-        harness_id: "capability_probe_harness_v2".into(),
-        artifact_digest: artifact_digest.as_str().into(),
-        protocol_version: "external-harness-v1".into(),
-        endpoint: ENDPOINT.into(),
+        harness_id: old_manifest.harness_id.clone(),
+        artifact_digest: artifact_digest.clone(),
+        protocol_version: old_manifest.protocol_version.clone(),
+        endpoint: old_manifest.endpoint.clone(),
         operation_name: PROBE_OP.into(),
-        description: "Capability probe v2.".into(),
-        input_schema: json!({"type":"object","properties":{},"required":[],"additionalProperties":false}),
+        description: "Capability probe v2 (schema only).".into(),
+        input_schema: json!({"type":"object","properties":{"new_field":{"type":"string"}},"required":["new_field"],"additionalProperties":false}),
         output_schema: json!({"type":"object","properties":{"status":{"type":"string"},"ok":{"type":"boolean"}},"required":["status","ok"],"additionalProperties":false}),
-        idempotent: true,
+        idempotent: old_manifest.idempotent,
         created_at: chrono::Utc::now(),
     };
     manifest2.manifest_id = manifest2.compute_manifest_id()?;
@@ -370,11 +386,11 @@ fn decision_rejects_existing_operation_conflict() -> Result<()> {
 
     let body2 = json!({
         "target_agent_id": "main",
-        "artifact_ref": "a", "artifact_digest": artifact_digest.as_str(),
+        "artifact_ref": "a", "artifact_digest": artifact_digest,
         "manifest_ref": "m", "manifest_digest": manifest_digest.as_str(),
         "evidence_ref": "e", "evidence_digest": evidence_digest.as_str(),
         "requested_operations": [PROBE_OP],
-        "risk_summary": "conflicting probe",
+        "risk_summary": "schema upgrade probe",
     });
     let resp2 = handle_submit_proposal(
         &journal,
@@ -383,14 +399,18 @@ fn decision_rejects_existing_operation_conflict() -> Result<()> {
         "capability_submitter",
         &crate::domain::AgentId("main".to_string()),
     )?;
+
+    // The proposal must use the OLD snapshot_id so expected_snapshot works.
     let pid2 = resp2.proposal_id;
 
     let dec2 = json!({
         "decision": "approved",
-        "artifact_digest": artifact_digest.as_str(),
+        "artifact_digest": artifact_digest,
         "manifest_digest": manifest_digest.as_str(),
     });
-    let err = handle_decision(
+
+    // Schema-only upgrade should succeed.
+    let upgrade_result = handle_decision(
         &journal,
         &gw,
         &store2,
@@ -398,14 +418,78 @@ fn decision_rejects_existing_operation_conflict() -> Result<()> {
         &dec2,
         "approval_workflow",
         &crate::domain::AgentId("main".to_string()),
+    )?;
+    let new_snap_id = upgrade_result["activated_snapshot_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(new_snap_id, old_snapshot_id, "snapshot must change");
+    let new_snap = journal.load_registry_snapshot(&new_snap_id)?;
+    let upgraded = new_snap.lookup(PROBE_OP).unwrap();
+    assert_eq!(
+        upgraded.binding_key, manifest2.manifest_id,
+        "binding_key must be new manifest_id"
+    );
+    assert_eq!(registry_version(&journal), v1 + 1);
+
+    // 3. Endpoint change must be rejected.
+    let dir3 = std::env::temp_dir().join(format!(
+        "cap_upgrade_bad_endpoint_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir3)?;
+    let store3 = ContentStore::new(dir3.join("store"));
+    store3.store(&art_bytes)?;
+    let ev3 = store3.store(br#"{"attestation":"bad-endpoint"}"#)?;
+    let mut manifest3 = manifest2.clone();
+    manifest3.endpoint = "http://127.0.0.1:9999".into();
+    manifest3.manifest_id = manifest3.compute_manifest_id()?;
+    let m3_bytes = serde_json::to_vec(&manifest3)?;
+    let md3 = store3.store(&m3_bytes)?;
+    let body3 = json!({
+        "target_agent_id": "main", "artifact_ref": "a",
+        "artifact_digest": artifact_digest,
+        "manifest_ref": "m", "manifest_digest": md3.as_str(),
+        "evidence_ref": "e", "evidence_digest": ev3.as_str(),
+        "requested_operations": [PROBE_OP], "risk_summary": "bad endpoint",
+    });
+    let resp3 = handle_submit_proposal(
+        &journal,
+        &gw,
+        &body3,
+        "capability_submitter",
+        &crate::domain::AgentId("main".to_string()),
+    )?;
+    let pid3 = resp3.proposal_id;
+    let dec3 = json!({
+        "decision": "approved",
+        "artifact_digest": artifact_digest,
+        "manifest_digest": md3.as_str(),
+    });
+    let err = handle_decision(
+        &journal,
+        &gw,
+        &store3,
+        &pid3,
+        &dec3,
+        "approval_workflow",
+        &crate::domain::AgentId("main".to_string()),
     )
     .unwrap_err()
     .to_string();
-    assert!(err.contains("existing_operation_conflict"), "got: {err}");
+    assert!(
+        err.contains("endpoint_changed"),
+        "expected endpoint rejection, got: {err}"
+    );
 
-    assert_eq!(journal.current_registry_snapshot_id()?, s1);
-    assert_eq!(registry_version(&journal), v1);
-    let p2 = journal.load_proposal(&pid2)?.unwrap();
-    assert_eq!(p2.status, ProposalStatus::PendingApproval);
+    // Snapshot should still be S2 (from the successful upgrade), not advanced.
+    assert_eq!(journal.current_registry_snapshot_id()?, new_snap_id);
+    assert_eq!(registry_version(&journal), v1 + 1);
+    let p3 = journal.load_proposal(&pid3)?.unwrap();
+    assert_eq!(p3.status, ProposalStatus::PendingApproval);
     Ok(())
 }

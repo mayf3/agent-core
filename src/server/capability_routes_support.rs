@@ -18,6 +18,7 @@ pub(super) struct ProposalSetup {
     pub(super) artifact_digest: String,
     pub(super) manifest_digest: String,
     pub(super) evidence_digest: String,
+    pub(super) manifest_id: String,
     pub(super) body: Value,
 }
 
@@ -65,6 +66,7 @@ impl ProposalSetup {
         let manifest_digest = store.store(&manifest_bytes)?;
 
         let requested = requested_ops.unwrap_or_else(|| vec![op_name.to_string()]);
+        let mid = manifest.manifest_id.clone();
         let body = json!({
             "target_agent_id": "main",
             "artifact_ref": "artifact.bin",
@@ -82,6 +84,7 @@ impl ProposalSetup {
             artifact_digest: artifact_digest.as_str().to_string(),
             manifest_digest: manifest_digest.as_str().to_string(),
             evidence_digest: evidence_digest.as_str().to_string(),
+            manifest_id: mid,
             body,
         })
     }

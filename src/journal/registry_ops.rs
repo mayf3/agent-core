@@ -353,7 +353,7 @@ impl super::JournalStore {
         let snap = Self::load_snapshot_from_conn(&conn, snapshot_id)?;
         Ok(Arc::new(snap))
     }
-    fn load_snapshot_from_conn(
+    pub(crate) fn load_snapshot_from_conn(
         conn: &rusqlite::Connection,
         snapshot_id: &str,
     ) -> Result<RegistrySnapshot> {
