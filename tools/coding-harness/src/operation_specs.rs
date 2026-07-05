@@ -286,6 +286,35 @@ pub fn all_specs(workspace_ids: &[String]) -> Vec<OperationSpec> {
     ]
 }
 
+/// Build a complete `HarnessManifest` for each canonical spec.
+pub fn build_manifests(
+    workspace_ids: &[String],
+    endpoint: &str,
+    artifact_digest: &str,
+) -> Vec<agent_core_kernel::harness::manifest::HarnessManifest> {
+    let specs = all_specs(workspace_ids);
+    specs.iter().map(|spec| {
+        let mut m = agent_core_kernel::harness::manifest::HarnessManifest {
+            manifest_id: String::new(),
+            harness_id: "coding-harness-v0".to_string(),
+            artifact_digest: artifact_digest.to_string(),
+            protocol_version: "external-harness-v1".to_string(),
+            endpoint: endpoint.to_string(),
+            operation_name: spec.operation_name.to_string(),
+            description: spec.description.to_string(),
+            input_schema: spec.input_schema.clone(),
+            output_schema: spec.output_schema.clone(),
+            idempotent: true,
+            created_at: chrono::Utc::now(),
+        };
+        if let Ok(id) = m.compute_manifest_id() {
+            m.manifest_id = id;
+        }
+        m
+    }).collect()
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,42 +322,20 @@ mod tests {
     #[test]
     fn all_coding_operations_have_nontrivial_input_schema() {
         let specs = all_specs(&["agent-dev".to_string()]);
-        assert_eq!(specs.len(), 7, "exactly 7 coding operations");
+        assert_eq!(specs.len(), 7);
         for spec in &specs {
             let obj = spec.input_schema.as_object().unwrap();
-            // Must have properties
-            let props = obj.get("properties").and_then(|p| p.as_object());
-            assert!(
-                props.is_some() && !props.unwrap().is_empty(),
-                "{}: properties must be non-empty",
-                spec.operation_name
-            );
-            // Must have description
-            assert!(
-                !spec.description.is_empty(),
-                "{}: description must be non-empty",
-                spec.operation_name
-            );
-            // Must have required
-            let required = obj.get("required").and_then(|r| r.as_array());
-            assert!(
-                required.is_some() && !required.unwrap().is_empty(),
-                "{}: required must be non-empty",
-                spec.operation_name
-            );
-            // additionalProperties restriction is intentionally not set (runtime injects session_id)
-            // Operations that need workspace must include workspace_id
+            assert!(obj.get("properties").and_then(|p| p.as_object()).is_some_and(|p| !p.is_empty()),
+                "{}: properties must be non-empty", spec.operation_name);
+            assert!(!spec.description.is_empty(), "{}: description must be non-empty", spec.operation_name);
+            let required: Vec<&str> = obj.get("required").unwrap().as_array().unwrap().iter()
+                .filter_map(|v| v.as_str()).collect();
+            assert!(!required.is_empty(), "{}: required must be non-empty", spec.operation_name);
             if spec.operation_name != "external.coding_task_status" {
-                let req_strs: Vec<&str> = required
-                    .unwrap()
-                    .iter()
-                    .filter_map(|v| v.as_str())
-                    .collect();
-                assert!(
-                    req_strs.contains(&"workspace_id"),
-                    "{}: must require workspace_id",
-                    spec.operation_name
-                );
+                assert!(required.contains(&"workspace_id"), "{}: must require workspace_id", spec.operation_name);
+                let ws = spec.input_schema.pointer("/properties/workspace_id").unwrap();
+                let ev = ws.get("enum").and_then(|e| e.as_array()).unwrap();
+                assert!(ev.contains(&json!("agent-dev")), "{}: enum must contain agent-dev", spec.operation_name);
             }
         }
     }
@@ -336,45 +343,19 @@ mod tests {
     #[test]
     fn task_status_does_not_require_workspace_id() {
         let specs = all_specs(&["agent-dev".to_string()]);
-        let ts = specs
-            .iter()
-            .find(|s| s.operation_name == "external.coding_task_status")
-            .unwrap();
-        let obj = ts.input_schema.as_object().unwrap();
-        let required: Vec<&str> = obj
-            .get("required")
-            .unwrap()
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|v| v.as_str())
-            .collect();
-        assert!(
-            !required.contains(&"workspace_id"),
-            "task.status must NOT require workspace_id"
-        );
-        assert!(
-            required.contains(&"task_id"),
-            "task.status must require task_id"
-        );
+        let ts = specs.iter().find(|s| s.operation_name == "external.coding_task_status").unwrap();
+        let required: Vec<&str> = ts.input_schema.get("required").unwrap().as_array().unwrap().iter()
+            .filter_map(|v| v.as_str()).collect();
+        assert!(!required.contains(&"workspace_id"));
+        assert!(required.contains(&"task_id"));
     }
 
     #[test]
     fn capability_propose_schema_is_complete() {
         let specs = all_specs(&["agent-dev".to_string()]);
-        let cp = specs
-            .iter()
-            .find(|s| s.operation_name == "external.coding_capability_propose")
-            .unwrap();
-        let obj = cp.input_schema.as_object().unwrap();
-        let required: Vec<&str> = obj
-            .get("required")
-            .unwrap()
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|v| v.as_str())
-            .collect();
+        let cp = specs.iter().find(|s| s.operation_name == "external.coding_capability_propose").unwrap();
+        let required: Vec<&str> = cp.input_schema.get("required").unwrap().as_array().unwrap().iter()
+            .filter_map(|v| v.as_str()).collect();
         assert!(required.contains(&"workspace_id"));
         assert!(required.contains(&"artifact_path"));
         assert!(required.contains(&"manifest_path"));
@@ -382,51 +363,118 @@ mod tests {
     }
 
     #[test]
-    fn workspace_id_enum_contains_agent_dev() {
-        let specs = all_specs(&["agent-dev".to_string()]);
-        for spec in &specs {
-            if spec.operation_name == "external.coding_task_status" {
-                continue;
-            }
-            let ws_prop = spec
-                .input_schema
-                .pointer("/properties/workspace_id")
-                .unwrap();
-            let enum_vals = ws_prop.get("enum").and_then(|e| e.as_array()).unwrap();
-            assert!(
-                enum_vals.contains(&json!("agent-dev")),
-                "{}: workspace_id enum must contain agent-dev",
-                spec.operation_name
-            );
-        }
-    }
-
-    #[test]
     fn workspace_id_enum_contains_multiple_ids() {
         let ids = vec!["agent-dev".to_string(), "prod".to_string()];
         let specs = all_specs(&ids);
-        let ws_prop = specs[0]
-            .input_schema
-            .pointer("/properties/workspace_id")
-            .unwrap();
+        let ws_prop = specs[0].input_schema.pointer("/properties/workspace_id").unwrap();
         let desc = ws_prop.get("description").and_then(|d| d.as_str()).unwrap();
-        assert!(
-            desc.contains("agent-dev"),
-            "desc must contain agent-dev, got: {desc}"
-        );
-        assert!(desc.contains("prod"), "desc must contain prod, got: {desc}");
+        assert!(desc.contains("agent-dev") && desc.contains("prod"), "desc: {desc}");
     }
 
     #[test]
     fn no_operation_uses_generic_object_schema() {
-        let specs = all_specs(&["test".to_string()]);
-        for spec in &specs {
-            let s = serde_json::to_string(&spec.input_schema).unwrap();
-            assert_ne!(
-                s, r#"{"type":"object"}"#,
-                "{}: must not use generic object schema",
-                spec.operation_name
-            );
+        for spec in &all_specs(&["test".to_string()]) {
+            assert_ne!(serde_json::to_string(&spec.input_schema).unwrap(), r#"{"type":"object"}"#,
+                "{}: must not use generic object schema", spec.operation_name);
         }
+    }
+
+    #[test]
+    fn coding_manifests_are_deterministic_and_unique() {
+        let ws = vec!["agent-dev".to_string()];
+        let ep = "http://127.0.0.1:7200";
+        let ad = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let m1 = build_manifests(&ws, ep, ad);
+        let m2 = build_manifests(&ws, ep, ad);
+        assert_eq!(m1.len(), 7);
+        for i in 0..7 {
+            assert_eq!(m1[i].manifest_id, m2[i].manifest_id,
+                "deterministic: {}", m1[i].operation_name);
+            let recomputed = m1[i].compute_manifest_id().unwrap();
+            assert_eq!(recomputed, m1[i].manifest_id,
+                "compute_manifest_id matches stored: {}", m1[i].operation_name);
+        }
+        let mut names: Vec<&str> = m1.iter().map(|m| m.operation_name.as_str()).collect();
+        names.sort(); names.dedup();
+        assert_eq!(names.len(), 7);
+        let mut mids: Vec<&str> = m1.iter().map(|m| m.manifest_id.as_str()).collect();
+        mids.sort(); mids.dedup();
+        assert_eq!(mids.len(), 7);
+        for m in &m1 {
+            let s = serde_json::to_string(&m.input_schema).unwrap();
+            assert!(!s.contains("/tmp/"), "no workspace root in {}", m.operation_name);
+            assert!(!s.contains("sk-"), "no secret in {}", m.operation_name);
+        }
+        eprintln!("=== Deterministic manifest IDs (workspace_ids=[agent-dev], endpoint={ep}) ===");
+        for m in &m1 { eprintln!("  {}: {}", m.operation_name, m.manifest_id); }
+    }
+
+    #[test]
+    fn coding_manifest_registration_chain_preserves_schema() {
+        use agent_core_kernel::gateway::Gateway;
+        use agent_core_kernel::harness::control::{HarnessChangeAction, HarnessChangeIntent};
+        use agent_core_kernel::journal::JournalStore;
+
+        let j = JournalStore::in_memory().unwrap();
+        let g = Gateway::new(agent_core_kernel::config::KernelConfig {
+            db_path: std::path::PathBuf::from(":memory:"), data_dir: std::path::PathBuf::from("."),
+            agent_id: agent_core_kernel::domain::AgentId("main".into()), root_dir: std::path::PathBuf::from("."),
+            kernel_port: 4130, connector_execute_url: String::new(), ipc_token: "test".into(),
+            capability_submit_token: None, capability_decision_token: None,
+            feishu_allowed_open_ids: vec![], feishu_allowed_chat_ids: vec![],
+            feishu_require_group_mention: true, openai_base_url: String::new(), openai_api_key: String::new(),
+            model: String::new(), fallback_openai_base_url: String::new(),
+            fallback_openai_api_key: String::new(), fallback_model: String::new(),
+            model_timeout_ms: 5000, context_recent_messages: 10, context_max_block_chars: 10000,
+            outbox_dispatcher_enabled: false, outbox_dispatcher_poll_interval_ms: 1000,
+            extra_allowed_operations: vec![], require_write_approval: false, write_approval_ttl_secs: 0,
+            fallback_tool_name_indexed: false, primary_tool_name_indexed: false,
+            harness_read_timeout_ms: 10000, harness_artifact_root: std::path::PathBuf::from("."),
+            max_tool_rounds: 12,
+        });
+        let manifests = build_manifests(&vec!["agent-dev".to_string(), "prod".to_string()],
+            "http://127.0.0.1:7200", "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        for mut m in manifests {
+            let mid = m.compute_manifest_id().unwrap();
+            m.manifest_id = mid.clone();
+            j.register_harness_manifest(&m).unwrap();
+            j.enable_harness(&g.approve_harness_change(HarnessChangeIntent {
+                action: HarnessChangeAction::Enable, manifest_id: mid.clone(),
+                expected_snapshot_id: j.current_registry_snapshot_id().unwrap(),
+                requested_by: "ipc_operator".into(),
+            }).unwrap()).unwrap();
+        }
+        let snap_id = j.current_registry_snapshot_id().unwrap();
+        let snap = j.load_registry_snapshot(&snap_id).unwrap();
+        let all_ops: Vec<String> = vec![
+            "external.coding_workspace_list".into(), "external.coding_workspace_read".into(),
+            "external.coding_workspace_write".into(), "external.coding_workspace_exec".into(),
+            "external.coding_task_submit".into(), "external.coding_task_status".into(),
+            "external.coding_capability_propose".into(),
+        ];
+        let tools = snap.provider_tools_for_grants(&all_ops);
+        assert_eq!(tools.len(), 7);
+
+        let cp = tools.iter().find(|t| t.get("function").and_then(|f| f.get("name")).and_then(|v| v.as_str()) == Some("external.coding_capability_propose")).unwrap();
+        let func = cp.get("function").unwrap();
+        assert!(!func.get("description").and_then(|v| v.as_str()).unwrap_or("").is_empty());
+        let params = func.get("parameters").unwrap();
+        let required: Vec<&str> = params.get("required").unwrap().as_array().unwrap().iter()
+            .filter_map(|v| v.as_str()).collect();
+        assert!(required.contains(&"workspace_id") && required.contains(&"artifact_path")
+            && required.contains(&"manifest_path") && required.contains(&"evidence_path"));
+        let ws_prop = params.pointer("/properties/workspace_id").unwrap();
+        let ev = ws_prop.get("enum").and_then(|v| v.as_array()).unwrap();
+        assert!(ev.contains(&serde_json::json!("agent-dev")) && ev.contains(&serde_json::json!("prod")));
+
+        let ts = tools.iter().find(|t| t.get("function").and_then(|f| f.get("name")).and_then(|v| v.as_str()) == Some("external.coding_task_status")).unwrap();
+        let ts_req: Vec<&str> = ts.get("function").unwrap().get("parameters").unwrap().get("required").unwrap().as_array().unwrap().iter()
+            .filter_map(|v| v.as_str()).collect();
+        assert!(ts_req.contains(&"task_id") && !ts_req.contains(&"workspace_id"));
+
+        for tool in &tools {
+            assert!(!tool.get("function").unwrap().get("description").and_then(|v| v.as_str()).unwrap_or("").is_empty());
+        }
+        assert!(j.verify_hash_chain().unwrap());
     }
 }
