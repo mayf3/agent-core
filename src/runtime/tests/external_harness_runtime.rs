@@ -41,8 +41,10 @@ pub(super) fn config() -> crate::config::KernelConfig {
         harness_read_timeout_ms: 10_000,
         harness_artifact_root: std::env::temp_dir().join(format!("ha_root_{}", std::process::id())),
         max_tool_rounds: 12,
+        feishu_coding_owner_id: None,
         capability_submit_token: None,
         capability_decision_token: None,
+        tool_loop_timeout_ms: 300_000,
     }
 }
 
@@ -182,6 +184,7 @@ impl crate::llm::LlmClient for CaptureToolsLlm {
                     provider_tool_call_id: "cr".into(),
                     wire_name: "external.time_now".into(),
                     canonical_operation: "external.time_now".into(),
+                    reasoning_content: None,
                     arguments_json: "{}".into(),
                 }),
             })

@@ -219,6 +219,7 @@ pub fn test_config() -> KernelConfig {
         ipc_token: "test-token".to_string(),
         feishu_allowed_open_ids: vec![],
         feishu_allowed_chat_ids: vec![],
+        feishu_coding_owner_id: None,
         feishu_require_group_mention: true,
         openai_base_url: "https://example.invalid/v1".to_string(),
         openai_api_key: String::new(),
@@ -245,6 +246,7 @@ pub fn test_config() -> KernelConfig {
         max_tool_rounds: 12,
         capability_submit_token: None,
         capability_decision_token: None,
+        tool_loop_timeout_ms: 300_000,
     }
 }
 

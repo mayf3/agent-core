@@ -1,5 +1,5 @@
+use super::super::recall_test_support::{feishu_envelope, test_config};
 use super::super::Runtime;
-use super::tool_loop_tests::test_config;
 use crate::domain::*;
 use crate::gateway::Gateway;
 use crate::harness::control::{HarnessChangeAction, HarnessChangeIntent};
@@ -179,6 +179,7 @@ fn missing_workspace_id_is_repaired_within_same_run() {
     });
     thread::sleep(Duration::from_millis(50));
     let mut config = test_config();
+    config.feishu_coding_owner_id = Some("owner".into());
     config.max_tool_rounds = 5;
     let j = JournalStore::in_memory().unwrap();
     let g = Gateway::new(config.clone());
@@ -204,7 +205,11 @@ fn missing_workspace_id_is_repaired_within_same_run() {
         &harness_endpoint,
     );
     let event = g
-        .validate_ingress(&j, g.cli_ingress("propose it".into()).unwrap())
+        .validate_ingress(
+            &j,
+            serde_json::from_value(feishu_envelope("e2", "m2", "owner", "c2", "propose it"))
+                .unwrap(),
+        )
         .unwrap();
     let outcome = runtime.deliver(&j, &g, event).unwrap();
     process_outbox(&j, &outcome.run_id);
@@ -341,11 +346,13 @@ impl LlmClient for SchemaFidelityLlm {
 }
 #[test]
 fn coding_manifest_schema_reaches_llm_tool_definition_intact() {
+    let mut cfg = test_config();
+    cfg.feishu_coding_owner_id = Some("owner".into());
     let j = JournalStore::in_memory().unwrap();
-    let g = Gateway::new(test_config());
+    let g = Gateway::new(cfg.clone());
     let store = Arc::new(std::sync::Mutex::new(Vec::new()));
     let runtime = Runtime::new(
-        test_config(),
+        cfg,
         SchemaFidelityLlm {
             captured_tools: store.clone(),
         },
@@ -379,7 +386,10 @@ fn coding_manifest_schema_reaches_llm_tool_definition_intact() {
     )
     .unwrap();
     let event = g
-        .validate_ingress(&j, g.cli_ingress("test".into()).unwrap())
+        .validate_ingress(
+            &j,
+            serde_json::from_value(feishu_envelope("e1", "m1", "owner", "c1", "test")).unwrap(),
+        )
         .unwrap();
     let outcome = runtime.deliver(&j, &g, event).unwrap();
     process_outbox(&j, &outcome.run_id);

@@ -299,6 +299,7 @@ fn coding_manifest_llm_input_receives_complete_tool_definitions() {
         capability_decision_token: None,
         feishu_allowed_open_ids: vec![],
         feishu_allowed_chat_ids: vec![],
+        feishu_coding_owner_id: Some("owner".into()),
         feishu_require_group_mention: true,
         openai_base_url: String::new(),
         openai_api_key: String::new(),
@@ -312,10 +313,13 @@ fn coding_manifest_llm_input_receives_complete_tool_definitions() {
         outbox_dispatcher_enabled: false,
         outbox_dispatcher_poll_interval_ms: 1000,
         extra_allowed_operations: vec![
-            "external.coding_capability_propose".to_string(),
+            "external.coding_workspace_list".to_string(),
+            "external.coding_workspace_read".to_string(),
             "external.coding_workspace_write".to_string(),
+            "external.coding_workspace_exec".to_string(),
             "external.coding_task_submit".to_string(),
             "external.coding_task_status".to_string(),
+            "external.coding_capability_propose".to_string(),
         ],
         require_write_approval: false,
         write_approval_ttl_secs: 0,
@@ -353,8 +357,29 @@ fn coding_manifest_llm_input_receives_complete_tool_definitions() {
         })
         .unwrap();
     }
+    let envelope_val = serde_json::json!({
+        "protocol_version": "v1",
+        "source": "Feishu",
+        "external_event_id": "e1",
+        "received_at": "2026-01-01T00:00:00Z",
+        "payload": {
+            "sender_open_id": "owner",
+            "sender_type": "user",
+            "chat_id": "c1",
+            "chat_type": "p2p",
+            "message_id": "m1",
+            "message_type": "text",
+            "text": "test",
+            "mentions": []
+        },
+        "auth_context": { "authenticated": true },
+        "routing_hint": {},
+    });
     let event = g
-        .validate_ingress(&j, g.cli_ingress("test".into()).unwrap())
+        .validate_ingress(
+            &j,
+            serde_json::from_value(envelope_val).unwrap(),
+        )
         .unwrap();
     let outcome = runtime.deliver(&j, &g, event).unwrap();
     if let Ok(Some(leased)) = j.lease_next_outbox_dispatch() {
