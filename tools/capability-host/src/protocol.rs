@@ -10,7 +10,7 @@ use serde_json::Value;
 
 /// Request body sent to the artifact's stdin.
 #[derive(Debug, Serialize)]
-pub(crate) struct ProcessRequest {
+pub struct ProcessRequest {
     pub protocol_version: String,
     pub operation_name: String,
     pub invocation_id: String,
@@ -37,7 +37,7 @@ pub(crate) struct ProcessError {
 
 /// Parse the external-harness-v1 request body from the Kernel.
 /// Returns the fields needed to execute the artifact.
-pub(crate) struct HarnessRequest {
+pub struct HarnessRequest {
     #[allow(dead_code)]
     pub protocol_version: String,
     pub operation_name: String,
@@ -50,13 +50,13 @@ pub(crate) struct HarnessRequest {
 }
 
 /// Parse and validate an incoming external-harness-v1 request.
-pub(crate) fn parse_harness_request(body: &Value) -> Result<HarnessRequest, String> {
+pub fn parse_harness_request(body: &Value) -> Result<HarnessRequest, String> {
     let protocol_version = body
         .get("protocol_version")
         .and_then(Value::as_str)
         .unwrap_or("");
     if protocol_version != "external-harness-v1" {
-        return Err(format!("unsupported protocol: {protocol_version:?}"));
+        return Err(format!("unsupported_protocol"));
     }
 
     let manifest_id = body
@@ -71,7 +71,7 @@ pub(crate) fn parse_harness_request(body: &Value) -> Result<HarnessRequest, Stri
         .to_string();
 
     if manifest_id.is_empty() || artifact_digest.is_empty() {
-        return Err("invocation missing manifest_id or artifact_digest".to_string());
+        return Err("missing_manifest_identity".to_string());
     }
 
     let operation_name = body
@@ -99,7 +99,7 @@ pub(crate) fn parse_harness_request(body: &Value) -> Result<HarnessRequest, Stri
 }
 
 /// Build a process-harness-v1 stdin payload for the artifact.
-pub(crate) fn build_process_request(req: &HarnessRequest) -> ProcessRequest {
+pub fn build_process_request(req: &HarnessRequest) -> ProcessRequest {
     ProcessRequest {
         protocol_version: "process-harness-v1".to_string(),
         operation_name: req.operation_name.clone(),
@@ -110,7 +110,7 @@ pub(crate) fn build_process_request(req: &HarnessRequest) -> ProcessRequest {
 
 /// Map the artifact's stdout response to an external-harness-v1 response body.
 /// Returns `(ok_bool, response_body_json)`.
-pub(crate) fn map_process_response(
+pub fn map_process_response(
     stdout: &str,
 ) -> (bool, serde_json::Value) {
     let parsed: ProcessSuccess = match serde_json::from_str(stdout) {

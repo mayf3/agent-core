@@ -1,0 +1,7 @@
+//! Capability Host library — used by integration tests and the binary.
+#![allow(dead_code)]
+
+pub mod artifact;
+pub mod config;
+pub mod process;
+pub mod protocol;

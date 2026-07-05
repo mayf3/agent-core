@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 /// Locate an artifact file by its digest and verify content integrity.
 /// Returns the path to the artifact binary on success.
-pub(crate) fn resolve_artifact(
+pub fn resolve_artifact(
     artifact_root: &Path,
     digest_str: &str,
 ) -> Result<PathBuf, ArtifactError> {
@@ -19,10 +19,11 @@ pub(crate) fn resolve_artifact(
     // Use the ContentStore to load and verify.
     let store = ContentStore::new(artifact_root.to_path_buf());
     let bytes = store.load(&digest).map_err(|e| {
-        if e.to_string().contains("not found") || e.to_string().contains("No such") {
+        let msg = e.to_string();
+        if msg.contains("not found") || msg.contains("No such") || msg.contains("not_found") {
             ArtifactError::NotFound
-        } else if e.to_string().contains("content mismatch")
-            || e.to_string().contains("digest mismatch")
+        } else if msg.contains("content mismatch")
+            || msg.contains("digest mismatch")
         {
             ArtifactError::DigestMismatch
         } else {
@@ -55,7 +56,7 @@ pub(crate) fn resolve_artifact(
 
 /// Errors from artifact resolution.
 #[derive(Debug)]
-pub(crate) enum ArtifactError {
+pub enum ArtifactError {
     InvalidDigest,
     NotFound,
     DigestMismatch,
