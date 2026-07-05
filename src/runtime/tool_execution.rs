@@ -128,6 +128,7 @@ pub(crate) fn dispatch_builtin_binding(
     session: &Session,
     correlation_id: &str,
     harness_read_timeout: Duration,
+    registry_snapshot_id: &str,
 ) -> ToolCallOutcome {
     let receipt_result: Result<Receipt> = match spec.binding_key.as_str() {
         "builtin.session_recall_recent" => {
@@ -169,6 +170,7 @@ pub(crate) fn dispatch_builtin_binding(
                             &manifest,
                             approved,
                             &transport_config,
+                            registry_snapshot_id,
                         )
                     }
                     Ok(None) => Err(anyhow::anyhow!(
@@ -417,6 +419,7 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
             session,
             &correlation_id,
             Duration::from_millis(self.config.harness_read_timeout_ms),
+            &snapshot.snapshot_id,
         ));
     }
     fn record_rejection(

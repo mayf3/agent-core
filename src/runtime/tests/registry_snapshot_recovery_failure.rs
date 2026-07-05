@@ -313,6 +313,7 @@ fn f_restart_recovery_preserves_snapshot_binding() -> Result<()> {
             &session,
             &correlation_id,
             std::time::Duration::from_millis(10_000),
+            &run.registry_snapshot_id,
         );
         let out_text = match &outcome {
             crate::runtime::tool_loop::ToolCallOutcome::ToolResult { text } => text.clone(),
