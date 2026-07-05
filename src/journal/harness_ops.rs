@@ -261,6 +261,34 @@ impl super::JournalStore {
             bail!("manifest_operation_conflict: operation {} already registered by manifest {existing_mid}", manifest.operation_name);
         }
 
+        let mid = self.insert_manifest_row_tx(tx, manifest, content_digest)?;
+        Ok(mid)
+    }
+
+    /// Register a harness manifest INSIDE a transaction, SKIPPING the
+    /// operation-name uniqueness check.  Used ONLY during schema-only upgrades
+    /// where the operation already has a manifest and we are registering a
+    /// replacement.  The caller MUST ensure the operation's old manifest is
+    /// being replaced (not a duplicate create).
+    pub(crate) fn register_harness_manifest_replace_tx(
+        &self,
+        tx: &Transaction<'_>,
+        manifest: &HarnessManifest,
+    ) -> Result<String> {
+        let content_digest = manifest.compute_manifest_id()?;
+        let mid = self.insert_manifest_row_tx(tx, manifest, content_digest)?;
+        Ok(mid)
+    }
+
+    /// Shared manifest INSERT + event.  Does NOT check operation-name
+    /// uniqueness — the caller decides whether that guard is needed.
+    fn insert_manifest_row_tx(
+        &self,
+        tx: &Transaction<'_>,
+        manifest: &HarnessManifest,
+        content_digest: String,
+    ) -> Result<String> {
+        let manifest_id = &manifest.manifest_id;
         tx.execute(
             "INSERT INTO harness_manifests
              (manifest_id, harness_id, artifact_digest, protocol_version, endpoint,
@@ -307,7 +335,22 @@ impl super::JournalStore {
             .conn
             .lock()
             .map_err(|_| anyhow!("journal mutex poisoned"))?;
+        Self::load_harness_manifest_from_conn(&conn, manifest_id)
+    }
 
+    /// Load a harness manifest inside an existing transaction.
+    pub(crate) fn load_harness_manifest_in_tx(
+        &self,
+        tx: &Transaction<'_>,
+        manifest_id: &str,
+    ) -> Result<Option<HarnessManifest>> {
+        Self::load_harness_manifest_from_conn(tx, manifest_id)
+    }
+
+    fn load_harness_manifest_from_conn(
+        conn: &rusqlite::Connection,
+        manifest_id: &str,
+    ) -> Result<Option<HarnessManifest>> {
         let row: Option<(
             String,
             String,
