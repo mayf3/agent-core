@@ -1,6 +1,5 @@
 //! Capability Change Proposal routes — submit, decision (approved/rejected).
 //! Decision atomically validates content and activates Registry Snapshot.
-
 use crate::capabilities::store::{ContentStore, Sha256Digest};
 use crate::domain::capability_change::*;
 use crate::domain::*;
@@ -9,10 +8,8 @@ use crate::journal::JournalStore;
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-
 pub const CAPABILITY_CHANGE_PROPOSE_GRANT: &str = "capability_change.propose";
 pub const CAPABILITY_CHANGE_DECIDE_GRANT: &str = "capability_change.decide";
-
 /// Typed error classification for capability route handlers. Each variant
 /// maps to a single stable HTTP status and a bounded safe error string.
 #[derive(Debug, Clone)]
@@ -25,7 +22,6 @@ pub enum CapabilityRouteError {
     Conflict(String),
     Internal(String),
 }
-
 impl CapabilityRouteError {
     pub fn http_status(&self) -> u16 {
         match self {
@@ -37,7 +33,6 @@ impl CapabilityRouteError {
             Self::Internal(_) => 500,
         }
     }
-
     pub fn safe_error(&self) -> &'static str {
         match self {
             Self::InvalidRequest(_) => "invalid_request",
@@ -49,7 +44,6 @@ impl CapabilityRouteError {
             Self::Internal(_) => "internal_error",
         }
     }
-
     /// Include a safe bounded detail string for variants that carry one.
     pub fn detail(&self) -> Option<&str> {
         match self {
@@ -62,7 +56,6 @@ impl CapabilityRouteError {
         }
     }
 }
-
 impl std::fmt::Display for CapabilityRouteError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let tag = match self {
@@ -81,9 +74,7 @@ impl std::fmt::Display for CapabilityRouteError {
         Ok(())
     }
 }
-
 impl std::error::Error for CapabilityRouteError {}
-
 /// Sanitise a generic anyhow error — returns a fixed category string for HTTP Fixed category, no original text.
 /// 500 responses. NEVER includes original error text, SQL, paths, or tokens.
 /// The full error is logged server-side; only a stable category reaches the
@@ -91,7 +82,6 @@ impl std::error::Error for CapabilityRouteError {}
 pub fn sanitise_error(_err: &anyhow::Error) -> String {
     "internal_error".into()
 }
-
 /// Check that `bearer` matches the configured `expected` token. Returns
 /// `false` when the token is not configured (fail-closed).
 pub fn capability_token_matches(bearer: &str, expected: &Option<String>) -> bool {
@@ -100,7 +90,6 @@ pub fn capability_token_matches(bearer: &str, expected: &Option<String>) -> bool
         None => false,
     }
 }
-
 /// Map a `CapabilityRouteError` result into (status_code, body) for the HTTP
 /// response. Internal/unexpected errors return `Err` and are rendered as 500.
 pub fn map_capability_result(
@@ -122,7 +111,6 @@ pub fn map_capability_result(
         }
     }
 }
-
 #[derive(Deserialize)]
 pub struct SubmitProposalBody {
     pub target_agent_id: String,
@@ -135,7 +123,6 @@ pub struct SubmitProposalBody {
     pub requested_operations: Vec<String>,
     pub risk_summary: String,
 }
-
 #[derive(Serialize)]
 pub struct SubmitProposalResponse {
     pub proposal_id: String,
@@ -144,14 +131,12 @@ pub struct SubmitProposalResponse {
     pub requested_operations: Vec<String>,
     pub expires_at: String,
 }
-
 #[derive(Deserialize)]
 pub struct DecisionBody {
     pub decision: String,
     pub artifact_digest: String,
     pub manifest_digest: String,
 }
-
 pub fn handle_submit_proposal(
     journal: &JournalStore,
     _gateway: &Gateway,
@@ -161,7 +146,6 @@ pub fn handle_submit_proposal(
 ) -> Result<SubmitProposalResponse> {
     let input: SubmitProposalBody = serde_json::from_value(body.clone())
         .map_err(|e| CapabilityRouteError::InvalidRequest(format!("{e}")))?;
-
     // Validate target_agent_id matches the Kernel's configured agent before
     // persisting the proposal. This is re-checked inside the activation tx.
     if !AgentId(input.target_agent_id.clone())
@@ -213,7 +197,6 @@ pub fn handle_submit_proposal(
         expires_at: p.expires_at.to_rfc3339(),
     })
 }
-
 pub fn handle_decision(
     journal: &JournalStore,
     _gateway: &Gateway,
@@ -250,7 +233,6 @@ pub fn handle_decision(
     if input.manifest_digest != proposal.manifest_digest {
         return Err(CapabilityRouteError::InvalidRequest("manifest_digest_mismatch".into()).into());
     }
-
     match input.decision.as_str() {
         "approved" => {
             // 1. Verify active snapshot matches expected.
@@ -260,7 +242,6 @@ pub fn handle_decision(
                     CapabilityRouteError::Conflict("stale_expected_snapshot".into()).into(),
                 );
             }
-
             // 2. Parse digests and re-load + re-hash the three blobs from the
             //    content store. ContentStore::load verifies the digest against
             //    the freshly-read bytes (re-hashes), so any tampering fails here
@@ -280,7 +261,6 @@ pub fn handle_decision(
             let _evidence_bytes = store
                 .load(&ev_digest)
                 .map_err(|e| anyhow!("evidence_verification_failed:{e}"))?;
-
             // 3. Parse the manifest bytes using the EXISTING HarnessManifest
             //    parser (serde) and run the EXISTING full validator.
             //    validate_all() covers: endpoint loopback, operation_name
@@ -302,7 +282,6 @@ pub fn handle_decision(
                     CapabilityRouteError::InvalidRequest("manifest_id_mismatch".into()).into(),
                 );
             }
-
             // 4. Bind the manifest artifact_digest to the proposal artifact_digest.
             if manifest.artifact_digest != proposal.artifact_digest {
                 return Err(CapabilityRouteError::InvalidRequest(
@@ -310,7 +289,6 @@ pub fn handle_decision(
                 )
                 .into());
             }
-
             // 5. Extract the manifest operation set and require exact set
             //    equality with proposal.requested_operations. No missing,
             //    no extra, no duplicates (set semantics; order-independent).
@@ -347,7 +325,6 @@ pub fn handle_decision(
                 ))
                 .into());
             }
-
             // 6. Namespace + conflict guards. Only external.* is permitted;
             //    builtin.* and development.* are rejected. Empty/illegal names
             //    are caught by validate_operation_name above.
@@ -365,51 +342,150 @@ pub fn handle_decision(
                     .into());
                 }
             }
-
-            // 7. Reject activation if any requested operation already exists in
-            //    the current active snapshot (no silent overwrite).
+            // 7. Determine if this is a new operation or a schema-only upgrade.
             let current_snap = journal.load_registry_snapshot(&current_snap_id)?;
-            for op in &proposal.requested_operations {
-                if current_snap.lookup(op).is_some() {
-                    return Err(CapabilityRouteError::Conflict(format!(
-                        "existing_operation_conflict:{op}"
-                    ))
-                    .into());
-                }
+            let all_ops_exist = proposal
+                .requested_operations
+                .iter()
+                .all(|op| current_snap.lookup(op).is_some());
+            let no_ops_exist = proposal
+                .requested_operations
+                .iter()
+                .all(|op| current_snap.lookup(op).is_none());
+            if no_ops_exist {
+                // ── Standard create path ──
+                let spec = crate::registry::snapshot::OperationSpec {
+                    name: manifest.operation_name.clone(),
+                    risk: crate::registry::snapshot::Risk::ReadOnly,
+                    description: manifest.description.clone(),
+                    parameters: manifest.input_schema.clone(),
+                    idempotent: manifest.idempotent,
+                    binding_kind: crate::registry::snapshot::BindingKind::External,
+                    binding_key: manifest.manifest_id.clone(),
+                };
+                let mut new_specs: Vec<crate::registry::snapshot::OperationSpec> =
+                    current_snap.operations.iter().cloned().collect();
+                new_specs.push(spec);
+                let decision_id = format!("activation:{}", proposal_id);
+                let new_snapshot_id = journal.activate_proposal_atomic(
+                    &proposal,
+                    principal,
+                    new_specs,
+                    &proposal.expected_active_snapshot_id,
+                    &decision_id,
+                    Some(&manifest),
+                    config_agent_id,
+                )?;
+                return Ok(json!({"proposal_id": proposal_id, "status": "Activated",
+                    "previous_snapshot_id": proposal.expected_active_snapshot_id,
+                    "activated_snapshot_id": new_snapshot_id}));
             }
-
-            // 8. Build the new operation specs from the verified manifest and
-            //    activate atomically. Manifest registration, Registry Snapshot
-            //    creation, CAS state update, proposal status, and all journal
-            //    events happen INSIDE a single BEGIN IMMEDIATE transaction via
-            //    activate_proposal_atomic. Any failure rolls back everything —
-            //    no manifest row, no HarnessManifestRegistered event, no Snapshot,
-            //    no status change, no terminal events.
-            let mut new_specs: Vec<crate::registry::snapshot::OperationSpec> =
-                current_snap.operations.iter().cloned().collect();
-            new_specs.push(crate::registry::snapshot::OperationSpec {
-                name: manifest.operation_name.clone(),
-                risk: crate::registry::snapshot::Risk::ReadOnly,
-                description: manifest.description.clone(),
-                parameters: manifest.input_schema.clone(),
-                idempotent: manifest.idempotent,
-                binding_kind: crate::registry::snapshot::BindingKind::External,
-                binding_key: manifest.manifest_id.clone(),
-            });
-            let decision_id = format!("activation:{}", proposal_id);
-            let new_snapshot_id = journal.activate_proposal_atomic(
-                &proposal,
-                principal,
-                new_specs,
-                &proposal.expected_active_snapshot_id,
-                &decision_id,
-                Some(&manifest),
-                config_agent_id,
-            )?;
-
-            Ok(json!({"proposal_id": proposal_id, "status": "Activated",
-                      "previous_snapshot_id": proposal.expected_active_snapshot_id,
-                      "activated_snapshot_id": new_snapshot_id}))
+            if all_ops_exist {
+                // ── Schema-only upgrade path ──
+                let expected_snap =
+                    journal.load_registry_snapshot(&proposal.expected_active_snapshot_id)?;
+                for op in &proposal.requested_operations {
+                    let old_spec = expected_snap.lookup(op).ok_or_else(|| {
+                        CapabilityRouteError::Conflict(format!("expected_op_not_found:{op}"))
+                    })?;
+                    let current_spec = current_snap.lookup(op).ok_or_else(|| {
+                        CapabilityRouteError::Conflict(format!("current_op_not_found:{op}"))
+                    })?;
+                    // Must be an External operation.
+                    if old_spec.binding_kind != crate::registry::snapshot::BindingKind::External {
+                        return Err(CapabilityRouteError::InvalidRequest(
+                            "operation_upgrade_not_schema_only:non_external".into(),
+                        )
+                        .into());
+                    }
+                    // Artifact must match (schema-only means no binary change).
+                    if manifest.artifact_digest != proposal.artifact_digest {
+                        return Err(CapabilityRouteError::InvalidRequest(
+                            "operation_upgrade_not_schema_only:artifact_changed".into(),
+                        )
+                        .into());
+                    }
+                    // The old spec's artifact_digest must match too (loaded via manifest).
+                    if old_spec.binding_key.is_empty() {
+                        return Err(CapabilityRouteError::InvalidRequest(
+                            "operation_upgrade_not_schema_only:no_old_manifest".into(),
+                        )
+                        .into());
+                    }
+                    // Load old manifest to verify artifact/endpoint/harness match.
+                    let old_manifest_id = &old_spec.binding_key;
+                    let old_manifest = journal
+                        .load_harness_manifest(old_manifest_id)?
+                        .ok_or_else(|| anyhow!("old_manifest_not_found:{old_manifest_id}"))?;
+                    if old_manifest.harness_id != manifest.harness_id {
+                        return Err(CapabilityRouteError::InvalidRequest(
+                            "operation_upgrade_not_schema_only:harness_changed".into(),
+                        )
+                        .into());
+                    }
+                    if old_manifest.endpoint != manifest.endpoint {
+                        return Err(CapabilityRouteError::InvalidRequest(
+                            "operation_upgrade_not_schema_only:endpoint_changed".into(),
+                        )
+                        .into());
+                    }
+                    if old_manifest.protocol_version != manifest.protocol_version {
+                        return Err(CapabilityRouteError::InvalidRequest(
+                            "operation_upgrade_not_schema_only:protocol_changed".into(),
+                        )
+                        .into());
+                    }
+                    if old_manifest.idempotent != manifest.idempotent {
+                        return Err(CapabilityRouteError::InvalidRequest(
+                            "operation_upgrade_not_schema_only:idempotent_changed".into(),
+                        )
+                        .into());
+                    }
+                    // Risk must be preserved.
+                    if current_spec.risk != old_spec.risk {
+                        return Err(CapabilityRouteError::InvalidRequest(
+                            "operation_upgrade_not_schema_only:risk_changed".into(),
+                        )
+                        .into());
+                    }
+                }
+                // Replace the target operation specs with new ones.
+                let mut new_specs: Vec<crate::registry::snapshot::OperationSpec> =
+                    current_snap.operations.iter().cloned().collect();
+                for op in &proposal.requested_operations {
+                    let old_spec = expected_snap.lookup(op).unwrap();
+                    if let Some(pos) = new_specs.iter().position(|s| s.name == *op) {
+                        new_specs[pos] = crate::registry::snapshot::OperationSpec {
+                            name: manifest.operation_name.clone(),
+                            risk: old_spec.risk,
+                            description: manifest.description.clone(),
+                            parameters: manifest.input_schema.clone(),
+                            idempotent: manifest.idempotent,
+                            binding_kind: crate::registry::snapshot::BindingKind::External,
+                            binding_key: manifest.manifest_id.clone(),
+                        };
+                    }
+                }
+                let decision_id = format!("schema_upgrade:{}", proposal_id);
+                let new_snapshot_id = journal.activate_schema_upgrade_atomic(
+                    &proposal,
+                    principal,
+                    new_specs,
+                    &proposal.expected_active_snapshot_id,
+                    &decision_id,
+                    Some(&manifest),
+                    config_agent_id,
+                    &expected_snap,
+                )?;
+                return Ok(json!({"proposal_id": proposal_id, "status": "Activated",
+                    "previous_snapshot_id": &current_snap_id,
+                    "activated_snapshot_id": new_snapshot_id}));
+            }
+            // Mixed: some exist, some don't — not allowed.
+            return Err(CapabilityRouteError::Conflict(
+                "mixed_create_and_upgrade_not_supported".into(),
+            )
+            .into());
         }
         "rejected" => {
             journal.reject_proposal_atomic(proposal_id, principal, "rejected")?;
