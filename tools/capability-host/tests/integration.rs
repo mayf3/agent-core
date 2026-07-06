@@ -1,6 +1,6 @@
 //! Capability Host integration tests.
 mod common;
-use common::*;
+use common::{calculator_binary, send_http, start_capability_host, store_artifact};
 use serde_json::json;
 use std::io::{Read, Write};
 
@@ -31,9 +31,6 @@ fn tmpdir(label: &str) -> std::path::PathBuf {
     let d = std::env::temp_dir().join(format!("ch_{label}_{}", std::process::id()));
     std::fs::create_dir_all(&d).ok();
     d
-}
-fn json(s: &str) -> serde_json::Value {
-    serde_json::from_str(s).unwrap()
 }
 
 #[test]
