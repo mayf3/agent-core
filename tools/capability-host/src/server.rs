@@ -14,7 +14,7 @@ use crate::process::{run_artifact, ProcessError};
 use crate::protocol;
 
 /// Start the Capability Host HTTP server.
-pub(crate) fn serve(config: CapabilityHostConfig) {
+pub fn serve(config: CapabilityHostConfig) {
     let config = Arc::new(config);
     let listener = TcpListener::bind(&config.listen_addr).expect("capability host: bind failed");
     eprintln!("capability host listening on {}", config.listen_addr);
@@ -34,7 +34,7 @@ pub(crate) fn serve(config: CapabilityHostConfig) {
     }
 }
 
-fn handle(mut stream: TcpStream, config: &CapabilityHostConfig) {
+pub fn handle(mut stream: TcpStream, config: &CapabilityHostConfig) {
     let peer = stream.peer_addr().ok();
     let response = match read_http_request(&mut stream) {
         Ok((method, path, body)) => handle_request(method, path, &body, config),
@@ -96,7 +96,7 @@ fn read_http_request(stream: &mut TcpStream) -> Result<(String, String, String),
     Ok((method, path, body))
 }
 
-fn handle_request(
+pub(crate) fn handle_request(
     method: String,
     path: String,
     body: &str,
@@ -109,7 +109,7 @@ fn handle_request(
     }
 }
 
-fn handle_execute(body: &str, config: &CapabilityHostConfig) -> String {
+pub(crate) fn handle_execute(body: &str, config: &CapabilityHostConfig) -> String {
     // Parse incoming request body.
     let body_json: serde_json::Value = match serde_json::from_str(body) {
         Ok(v) => v,
@@ -200,7 +200,7 @@ fn http_response(status_code: u16, status_text: &str, body: &str) -> String {
 }
 
 /// Build an external-harness-v1 success/failure response.
-fn ok_json(ok: bool, error_code: &str) -> String {
+pub(crate) fn ok_json(ok: bool, error_code: &str) -> String {
     let body = if ok {
         format!(r#"{{"protocol_version":"external-harness-v1","ok":true,"result":null}}"#)
     } else {
@@ -211,7 +211,7 @@ fn ok_json(ok: bool, error_code: &str) -> String {
     http_response(200, "OK", &body)
 }
 
-fn ok_json_from_value(value: serde_json::Value) -> String {
+pub(crate) fn ok_json_from_value(value: serde_json::Value) -> String {
     let body = serde_json::to_string(&value).unwrap_or_default();
     http_response(200, "OK", &body)
 }

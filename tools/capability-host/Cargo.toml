@@ -13,6 +13,22 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 
+[[bin]]
+name = "fixture-non-json-stdout"
+path = "src/bin/fixture_non_json_stdout.rs"
+
+[[bin]]
+name = "fixture-nonzero-exit"
+path = "src/bin/fixture_nonzero_exit.rs"
+
+[[bin]]
+name = "fixture-timeout-tree"
+path = "src/bin/fixture_timeout_tree.rs"
+
+[[bin]]
+name = "fixture-large-stdout"
+path = "src/bin/fixture_large_stdout.rs"
+
 [dev-dependencies]
 agent-core-kernel = { path = "../.." }
 ureq = { version = "3.3.0", features = ["json"] }
