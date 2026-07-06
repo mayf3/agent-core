@@ -1,0 +1,34 @@
+[package]
+name = "capability-host"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+agent-core-kernel = { path = "../.." }
+anyhow = "1"
+chrono = "0.4"
+hex = "0.4"
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+
+[[bin]]
+name = "fixture-non-json-stdout"
+path = "src/bin/fixture_non_json_stdout.rs"
+
+[[bin]]
+name = "fixture-nonzero-exit"
+path = "src/bin/fixture_nonzero_exit.rs"
+
+[[bin]]
+name = "fixture-timeout-tree"
+path = "src/bin/fixture_timeout_tree.rs"
+
+[[bin]]
+name = "fixture-large-stdout"
+path = "src/bin/fixture_large_stdout.rs"
+
+[dev-dependencies]
+agent-core-kernel = { path = "../.." }
+ureq = { version = "3.3.0", features = ["json"] }
