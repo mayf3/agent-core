@@ -248,18 +248,10 @@ impl super::JournalStore {
             return Ok(manifest_id.clone());
         }
 
-        // Also check for duplicate operation_name using OptionalExtension.
-        let op_exists: Option<String> = tx
-            .query_row(
-                "SELECT manifest_id FROM harness_manifests WHERE operation_name = ?1",
-                params![&manifest.operation_name],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|e| anyhow::anyhow!("manifest_operation_lookup_failed:{e}"))?;
-        if let Some(existing_mid) = op_exists {
-            bail!("manifest_operation_conflict: operation {} already registered by manifest {existing_mid}", manifest.operation_name);
-        }
+        // Note: operation_name is intentionally NOT checked for uniqueness.
+        // The DB schema has no UNIQUE constraint on operation_name, allowing
+        // multiple manifests for the same operation.  This supports upgrading
+        // a capability to a new artifact while keeping old snapshots intact.
 
         let mid = self.insert_manifest_row_tx(tx, manifest, content_digest)?;
         Ok(mid)
