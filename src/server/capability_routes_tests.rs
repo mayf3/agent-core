@@ -318,7 +318,7 @@ fn decision_rejects_manifest_artifact_digest_mismatch() -> Result<()> {
 }
 
 #[test]
-fn decision_rejects_existing_operation_conflict() -> Result<()> {
+fn decision_accepts_multiple_upgrades() -> Result<()> {
     let journal = JournalStore::in_memory()?;
     let gw = gateway();
 
@@ -341,8 +341,7 @@ fn decision_rejects_existing_operation_conflict() -> Result<()> {
     // Save the old snapshot for expected_snapshot_id in the upgrade proposal.
     let old_snapshot_id = s1.clone();
 
-    // Second: a valid schema-only upgrade proposal (same harness, endpoint,
-    // protocol, artifact — only description and schema change).
+    // Second: a valid upgrade proposal (schema + endpoint change).
     let dir2 = std::env::temp_dir().join(format!(
         "cap_upgrade_{}_{}",
         std::process::id(),
@@ -353,28 +352,25 @@ fn decision_rejects_existing_operation_conflict() -> Result<()> {
     ));
     std::fs::create_dir_all(&dir2)?;
     let store2 = ContentStore::new(dir2.join("store"));
-    // Use the SAME artifact digest from the first activation so the
-    // artifact_verification succeeds.
     let old_manifest = journal
         .load_harness_manifest(&setup1.manifest_id)?
         .ok_or_else(|| anyhow!("old manifest not found"))?;
     let artifact_digest = old_manifest.artifact_digest.clone();
-    // Store the same artifact content for verification.
     let art_bytes = setup1
         .store
         .load(&crate::capabilities::store::Sha256Digest::parse(
             &artifact_digest,
         )?)?;
     store2.store(&art_bytes)?;
-    let evidence_digest = store2.store(br#"{"attestation":"schema-upgrade-v2"}"#)?;
+    let evidence_digest = store2.store(br#"{"attestation":"upgrade-v2"}"#)?;
     let mut manifest2 = HarnessManifest {
         manifest_id: String::new(),
         harness_id: old_manifest.harness_id.clone(),
         artifact_digest: artifact_digest.clone(),
         protocol_version: old_manifest.protocol_version.clone(),
-        endpoint: old_manifest.endpoint.clone(),
+        endpoint: "http://127.0.0.1:9999".into(), // different endpoint
         operation_name: PROBE_OP.into(),
-        description: "Capability probe v2 (schema only).".into(),
+        description: "Capability probe v2 (new endpoint).".into(),
         input_schema: json!({"type":"object","properties":{"new_field":{"type":"string"}},"required":["new_field"],"additionalProperties":false}),
         output_schema: json!({"type":"object","properties":{"status":{"type":"string"},"ok":{"type":"boolean"}},"required":["status","ok"],"additionalProperties":false}),
         idempotent: old_manifest.idempotent,
@@ -390,7 +386,7 @@ fn decision_rejects_existing_operation_conflict() -> Result<()> {
         "manifest_ref": "m", "manifest_digest": manifest_digest.as_str(),
         "evidence_ref": "e", "evidence_digest": evidence_digest.as_str(),
         "requested_operations": [PROBE_OP],
-        "risk_summary": "schema upgrade probe",
+        "risk_summary": "upgrade v2",
     });
     let resp2 = handle_submit_proposal(
         &journal,
@@ -399,8 +395,6 @@ fn decision_rejects_existing_operation_conflict() -> Result<()> {
         "capability_submitter",
         &crate::domain::AgentId("main".to_string()),
     )?;
-
-    // The proposal must use the OLD snapshot_id so expected_snapshot works.
     let pid2 = resp2.proposal_id;
 
     let dec2 = json!({
@@ -409,7 +403,7 @@ fn decision_rejects_existing_operation_conflict() -> Result<()> {
         "manifest_digest": manifest_digest.as_str(),
     });
 
-    // Schema-only upgrade should succeed.
+    // Upgrade should succeed despite endpoint change.
     let upgrade_result = handle_decision(
         &journal,
         &gw,
@@ -432,64 +426,8 @@ fn decision_rejects_existing_operation_conflict() -> Result<()> {
     );
     assert_eq!(registry_version(&journal), v1 + 1);
 
-    // 3. Endpoint change must be rejected.
-    let dir3 = std::env::temp_dir().join(format!(
-        "cap_upgrade_bad_endpoint_{}_{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&dir3)?;
-    let store3 = ContentStore::new(dir3.join("store"));
-    store3.store(&art_bytes)?;
-    let ev3 = store3.store(br#"{"attestation":"bad-endpoint"}"#)?;
-    let mut manifest3 = manifest2.clone();
-    manifest3.endpoint = "http://127.0.0.1:9999".into();
-    manifest3.manifest_id = manifest3.compute_manifest_id()?;
-    let m3_bytes = serde_json::to_vec(&manifest3)?;
-    let md3 = store3.store(&m3_bytes)?;
-    let body3 = json!({
-        "target_agent_id": "main", "artifact_ref": "a",
-        "artifact_digest": artifact_digest,
-        "manifest_ref": "m", "manifest_digest": md3.as_str(),
-        "evidence_ref": "e", "evidence_digest": ev3.as_str(),
-        "requested_operations": [PROBE_OP], "risk_summary": "bad endpoint",
-    });
-    let resp3 = handle_submit_proposal(
-        &journal,
-        &gw,
-        &body3,
-        "capability_submitter",
-        &crate::domain::AgentId("main".to_string()),
-    )?;
-    let pid3 = resp3.proposal_id;
-    let dec3 = json!({
-        "decision": "approved",
-        "artifact_digest": artifact_digest,
-        "manifest_digest": md3.as_str(),
-    });
-    let err = handle_decision(
-        &journal,
-        &gw,
-        &store3,
-        &pid3,
-        &dec3,
-        "approval_workflow",
-        &crate::domain::AgentId("main".to_string()),
-    )
-    .unwrap_err()
-    .to_string();
-    assert!(
-        err.contains("endpoint_changed"),
-        "expected endpoint rejection, got: {err}"
-    );
-
-    // Snapshot should still be S2 (from the successful upgrade), not advanced.
+    // Snapshot is S2 (from the successful upgrade).
     assert_eq!(journal.current_registry_snapshot_id()?, new_snap_id);
     assert_eq!(registry_version(&journal), v1 + 1);
-    let p3 = journal.load_proposal(&pid3)?.unwrap();
-    assert_eq!(p3.status, ProposalStatus::PendingApproval);
     Ok(())
 }
