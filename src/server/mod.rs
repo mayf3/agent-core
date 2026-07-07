@@ -151,8 +151,11 @@ fn handle_connection(
             )?,
         );
     }
-    // Non-health routes require POST /v1/
-    if request.method != "POST" || !request.path.starts_with("/v1/") {
+    // Non-health routes require POST /v1/ or GET /v1/capability-change-proposals/
+    const GET_CAP_PREFIX: &str = "/v1/capability-change-proposals/";
+    let method_allows = request.method == "POST"
+        || (request.method == "GET" && request.path.starts_with(GET_CAP_PREFIX));
+    if !method_allows || !request.path.starts_with("/v1/") {
         return write_json(stream, 404, json!({ "ok": false, "error": "not_found" }));
     }
     let path = request.path.as_str();
