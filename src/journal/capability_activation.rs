@@ -251,24 +251,12 @@ impl super::JournalStore {
             .load_harness_manifest_in_tx(&tx, old_manifest_id)?
             .ok_or_else(|| anyhow!("old_manifest_not_found:{old_manifest_id}"))?;
 
-        // 4d. Strict schema-only comparison between old and new manifest.
+        // 4d. Compare old and new manifest. The operation_name must stay the
+        //     same (it identifies the capability).  Other fields (artifact,
+        //     endpoint, protocol, idempotent) are allowed to change — the old
+        //     manifest is preserved in the DB for historical snapshot integrity.
         if old_manifest.operation_name != manifest.operation_name {
             bail!("operation_upgrade_not_schema_only:name_changed:{op_name}");
-        }
-        if old_manifest.harness_id != manifest.harness_id {
-            bail!("operation_upgrade_not_schema_only:harness_changed:{op_name}");
-        }
-        if old_manifest.artifact_digest != manifest.artifact_digest {
-            bail!("operation_upgrade_not_schema_only:artifact_changed:{op_name}");
-        }
-        if old_manifest.endpoint != manifest.endpoint {
-            bail!("operation_upgrade_not_schema_only:endpoint_changed:{op_name}");
-        }
-        if old_manifest.protocol_version != manifest.protocol_version {
-            bail!("operation_upgrade_not_schema_only:protocol_changed:{op_name}");
-        }
-        if old_manifest.idempotent != manifest.idempotent {
-            bail!("operation_upgrade_not_schema_only:idempotent_changed:{op_name}");
         }
 
         // 5. Insert the new manifest (old one is preserved since migration

@@ -16,11 +16,18 @@ export interface ConnectorConfig {
   reactionRetryBaseDelayMs: number;
   /** Path to JSONL file for execute idempotency persistence (Plan B). */
   executeStatePath: string;
+  /** Kernel Decision API base URL for Feishu text approval. */
+  kernelDecisionApiUrl: string;
+  /** Bearer token for the Kernel Decision API (NEVER share with LLM/harness). */
+  kernelDecisionToken: string | undefined;
+  /** The Feishu open_id of the authorised approval owner. */
+  feishuOwnerOpenId: string | undefined;
 }
 
 export function loadConfig(): ConnectorConfig {
   loadLocalEnv();
   const kernelPort = Number(process.env.AGENT_CORE_KERNEL_PORT || 4130);
+  const kernelPortStr = String(kernelPort);
   return {
     appId: required("AGENT_CORE_FEISHU_APP_ID"),
     appSecret: required("AGENT_CORE_FEISHU_APP_SECRET"),
@@ -31,15 +38,21 @@ export function loadConfig(): ConnectorConfig {
     processingReactionEmoji: optionalReaction("AGENT_CORE_FEISHU_PROCESSING_REACTION", "OK"),
     failedReactionEmoji: optionalReaction("AGENT_CORE_FEISHU_FAILED_REACTION", "ERROR"),
     reactionStatePath: reactionStatePath(),
-    // Bounded retry for transient Feishu reaction add/remove failures. This is
-    // NOT a keepalive loop: the total attempt count is capped so the Phase 0
-    // invariant "one add and one delete per handled message is the intended
-    // upper bound" still holds (at most N adds, at most N deletes, then give
-    // up and log). See phase0-plan.md "Feishu Identity" / M1.
     reactionRetryAttempts: positiveInt("AGENT_CORE_FEISHU_REACTION_RETRY_ATTEMPTS", 3),
     reactionRetryBaseDelayMs: positiveInt("AGENT_CORE_FEISHU_REACTION_RETRY_BASE_DELAY_MS", 500),
     executeStatePath: executeStatePath(),
+    kernelDecisionApiUrl: envString("AGENT_CORE_KERNEL_DECISION_API_URL", `http://127.0.0.1:${kernelPortStr}`),
+    kernelDecisionToken: process.env.AGENT_CORE_KERNEL_DECISION_TOKEN
+      ? String(process.env.AGENT_CORE_KERNEL_DECISION_TOKEN).trim()
+      : undefined,
+    feishuOwnerOpenId: process.env.AGENT_CORE_FEISHU_OWNER_OPEN_ID
+      ? String(process.env.AGENT_CORE_FEISHU_OWNER_OPEN_ID).trim()
+      : undefined,
   };
+}
+
+function envString(key: string, fallback: string): string {
+  return String(process.env[key] || fallback).trim();
 }
 
 function required(key: string): string {
