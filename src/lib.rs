@@ -6,6 +6,7 @@ pub mod data_dir;
 pub mod domain;
 pub mod gateway;
 pub mod harness;
+pub mod hook;
 pub mod journal;
 pub mod llm;
 pub mod registry;
