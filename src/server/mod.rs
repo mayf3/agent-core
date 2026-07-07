@@ -29,8 +29,6 @@ pub fn serve(config: KernelConfig) -> Result<()> {
         bail!("AGENT_CORE_IPC_TOKEN is required for serve");
     }
     // Validate capability tokens: if configured, they must be distinct from
-    // each other and from the legacy IPC token. Failure exits before any
-    // listener starts — no HTTP request can observe a collision.
     validate_capability_tokens(&config)?;
     let listener = TcpListener::bind(("127.0.0.1", config.kernel_port))?;
     println!(
@@ -42,13 +40,11 @@ pub fn serve(config: KernelConfig) -> Result<()> {
     install_shutdown_handler(&running)?;
     let journal = Arc::new(JournalStore::open(&config.db_path)?);
     // Initialize the registry (creates baseline snapshot, sets current,
-    // backfills old Runs). This must succeed — without a registry, no Run
     journal.initialize_registry()?;
     let recovered = journal.recover_unknown_invocations()?;
     if recovered > 0 {
         println!("agent-core recovered {recovered} unknown invocation(s)");
     }
-    // operator-configured TTL. No-op unless both require_write_approval and a
     if config.require_write_approval && config.write_approval_ttl_secs > 0 {
         let expired = journal.expire_stale_approvals(config.write_approval_ttl_secs)?;
         if expired > 0 {
@@ -160,7 +156,6 @@ fn handle_connection(
     }
     let path = request.path.as_str();
     let bearer = request.bearer_token.as_deref().unwrap_or("");
-    // Try capability-specific routes first (extracted for structure gate).
     if capability_http::try_handle_capability_request(
         stream,
         path,
@@ -485,6 +480,9 @@ fn content_length(head: &str) -> usize {
 #[cfg(test)]
 #[path = "approval_endpoint_tests.rs"]
 mod approval_endpoint_tests;
+#[cfg(test)]
+#[path = "capability_routes_get_proposal_tests.rs"]
+mod capability_routes_get_proposal_tests;
 #[cfg(test)]
 #[path = "capability_routes_negative_tests.rs"]
 mod capability_routes_negative_tests;
