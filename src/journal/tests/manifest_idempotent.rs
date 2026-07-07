@@ -122,6 +122,72 @@ fn corrupted_persisted_schema_is_rejected() -> Result<()> {
     Ok(())
 }
 
+// ── register_harness_manifest_replace_tx tests ─────────────────────────
+
+#[test]
+fn replace_tx_idempotent_same_manifest_id_and_digest() -> Result<()> {
+    // Call register_harness_manifest_replace_tx twice with the same manifest.
+    // The second call must idempotently return without a PRIMARY KEY conflict.
+    let j = JournalStore::in_memory()?;
+    let mut m = valid_manifest();
+    m.manifest_id = m.compute_manifest_id()?;
+
+    let mut conn = j.conn.lock().unwrap();
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+
+    // First call: manifest not yet in DB → INSERT.
+    let id1 = j.register_harness_manifest_replace_tx(&tx, &m)?;
+    assert_eq!(id1, m.manifest_id, "first call must return manifest_id");
+
+    // Second call: manifest already exists, canonical_digest matches → idempotent return.
+    let id2 = j.register_harness_manifest_replace_tx(&tx, &m)?;
+    assert_eq!(
+        id2, m.manifest_id,
+        "second call must idempotently return same manifest_id"
+    );
+
+    drop(tx);
+    drop(conn);
+    Ok(())
+}
+
+#[test]
+fn replace_tx_rejects_canonical_digest_mismatch() -> Result<()> {
+    // Insert a manifest via register_harness_manifest_replace_tx, then
+    // corrupt its canonical_digest in the DB. A second call with the same
+    // manifest must bail with manifest_reuse_conflict (no silent overwrite).
+    let j = JournalStore::in_memory()?;
+    let mut m = valid_manifest();
+    m.manifest_id = m.compute_manifest_id()?;
+
+    let mut conn = j.conn.lock().unwrap();
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+
+    // First call: INSERT the manifest.
+    j.register_harness_manifest_replace_tx(&tx, &m)?;
+
+    // Corrupt the stored canonical_digest to simulate same manifest_id,
+    // different content.
+    tx.execute(
+        "UPDATE harness_manifests SET canonical_digest = 'sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff' WHERE manifest_id = ?1",
+        params![m.manifest_id],
+    )?;
+
+    // Second call: canonical_digest mismatch must be rejected.
+    let err = j
+        .register_harness_manifest_replace_tx(&tx, &m)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("manifest_reuse_conflict"),
+        "expected manifest_reuse_conflict; got: {err}"
+    );
+
+    drop(tx);
+    drop(conn);
+    Ok(())
+}
+
 #[test]
 fn manifest_lookup_error_is_not_treated_as_not_found() -> Result<()> {
     let j = JournalStore::in_memory()?;

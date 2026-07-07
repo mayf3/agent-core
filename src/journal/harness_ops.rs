@@ -268,6 +268,35 @@ impl super::JournalStore {
         manifest: &HarnessManifest,
     ) -> Result<String> {
         let content_digest = manifest.compute_manifest_id()?;
+        let manifest_id = &manifest.manifest_id;
+
+        // Check if a manifest with this ID already exists.  During an upgrade
+        // the same manifest_id may have been registered by a prior activation;
+        // if the canonical_digest matches we can reuse it idempotently (the
+        // structural content is identical despite a different created_at).
+        use rusqlite::OptionalExtension;
+        let existing_digest: Option<String> = tx
+            .query_row(
+                "SELECT canonical_digest FROM harness_manifests WHERE manifest_id = ?1",
+                params![manifest_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| anyhow!("manifest_reuse_lookup_failed:{e}"))?;
+
+        if let Some(stored_digest) = existing_digest {
+            if stored_digest == content_digest {
+                // Same canonical content — safe idempotent reuse.
+                return Ok(manifest_id.clone());
+            }
+            // Canonical digest differs — the caller is attempting to replace
+            // a manifest with different content under the same ID.  This is
+            // not allowed; a new manifest must have a new manifest_id.
+            bail!(
+                "manifest_reuse_conflict: {manifest_id} stored digest {stored_digest} != {content_digest}"
+            );
+        }
+
         let mid = self.insert_manifest_row_tx(tx, manifest, content_digest)?;
         Ok(mid)
     }
