@@ -1,9 +1,7 @@
-//! Schema-upgrade validation rejection tests. Each test exercises ONE
-//! disallowed change through the real `handle_decision` path and asserts the
-//! full fail-closed invariant set: proposal stays PendingApproval, active
-//! snapshot unchanged, registry version unchanged, no successful
-//! RegistrySnapshotActivated(schema_upgrade), no partial writes, stable
-//! error category.
+//! Schema-upgrade validation tests. Each test exercises ONE field change
+//! through the real `handle_decision` path.  Field changes that were
+//! previously blocked (e.g. endpoint, harness_id, idempotent) are now
+//! allowed because an upgrade may replace the full manifest.
 
 use super::super::capability_routes_support::*;
 use crate::capabilities::store::Sha256Digest;
@@ -110,12 +108,55 @@ where
     Ok(())
 }
 
-// ── 5.1 endpoint changed ───────────────────────────────────────────────────
+/// Assert that a schema-upgrade decision SUCCEEDS — the proposal is Activated
+/// and a new snapshot is created.  Used for field changes that are now allowed.
+fn assert_upgraded<F>(target: UpgradeTarget, build_upgrade: F) -> Result<()>
+where
+    F: FnOnce(&HarnessManifest, &[u8]) -> Result<SchemaUpgradeSetup>,
+{
+    let UpgradeTarget {
+        journal,
+        old_manifest,
+        artifact_bytes,
+        active_snapshot,
+        ..
+    } = target;
+    let gw = gateway();
+    let up = build_upgrade(&old_manifest, &artifact_bytes)?;
+    let pid = up.submit(&journal, &gw)?;
+
+    let result = handle_decision(
+        &journal,
+        &gw,
+        &up.store,
+        &pid,
+        &up.approved_body(),
+        "approval_workflow",
+        &AgentId("main".to_string()),
+    )?;
+    assert_eq!(result["status"], "Activated");
+    assert_ne!(result["activated_snapshot_id"], active_snapshot);
+
+    // Proposal is Activated.
+    let p = journal.load_proposal(&pid)?.unwrap();
+    assert_eq!(p.status, ProposalStatus::Activated);
+
+    // New snapshot exists and is active.
+    let new_active = journal.current_registry_snapshot_id()?;
+    assert_ne!(new_active, active_snapshot);
+    assert_eq!(p.activated_snapshot_id, Some(new_active.clone()));
+
+    // Hash chain still valid.
+    assert!(journal.verify_hash_chain()?);
+    Ok(())
+}
+
+// ── 5.1 endpoint changed (now allowed) ─────────────────────────────
 
 #[test]
-fn schema_upgrade_rejects_endpoint_change() -> Result<()> {
+fn schema_upgrade_allows_endpoint_change() -> Result<()> {
     let target = upgrade_target()?;
-    assert_rejected(target, &["endpoint_changed"], |old, art| {
+    assert_upgraded(target, |old, art| {
         SchemaUpgradeSetup::build(
             old,
             art,
@@ -123,7 +164,6 @@ fn schema_upgrade_rejects_endpoint_change() -> Result<()> {
             None,
             None,
             Some(&|m: &mut HarnessManifest| {
-                // Loopback + explicit port, but DIFFERENT from the original.
                 m.endpoint = "http://127.0.0.1:19000/probe".into();
             }),
         )
@@ -164,12 +204,12 @@ fn schema_upgrade_rejects_artifact_digest_change() -> Result<()> {
     )
 }
 
-// ── 5.3 harness_id changed ─────────────────────────────────────────────────
+// ── 5.3 harness_id changed (now allowed) ──────────────────────────────
 
 #[test]
-fn schema_upgrade_rejects_harness_id_change() -> Result<()> {
+fn schema_upgrade_allows_harness_id_change() -> Result<()> {
     let target = upgrade_target()?;
-    assert_rejected(target, &["harness_changed"], |old, art| {
+    assert_upgraded(target, |old, art| {
         SchemaUpgradeSetup::build(
             old,
             art,
@@ -214,12 +254,12 @@ fn schema_upgrade_rejects_protocol_version_change() -> Result<()> {
     )
 }
 
-// ── 5.5 idempotent changed ─────────────────────────────────────────────────
+// ── 5.5 idempotent changed (now allowed) ─────────────────────────
 
 #[test]
-fn schema_upgrade_rejects_idempotent_change() -> Result<()> {
+fn schema_upgrade_allows_idempotent_change() -> Result<()> {
     let target = upgrade_target()?;
-    assert_rejected(target, &["idempotent_changed"], |old, art| {
+    assert_upgraded(target, |old, art| {
         SchemaUpgradeSetup::build(
             old,
             art,
@@ -227,7 +267,6 @@ fn schema_upgrade_rejects_idempotent_change() -> Result<()> {
             None,
             None,
             Some(&|m: &mut HarnessManifest| {
-                // Old manifest is idempotent=true; flip to false.
                 m.idempotent = !old.idempotent;
             }),
         )
