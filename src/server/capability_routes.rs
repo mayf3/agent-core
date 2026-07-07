@@ -409,3 +409,42 @@ pub fn handle_decision(
         _ => return Err(CapabilityRouteError::InvalidRequest("invalid_decision".into()).into()),
     }
 }
+
+/// Handle a read-only GET request for a capability change proposal.
+/// Returns the proposal's authoritative fields needed by the Feishu approval
+/// adapter (artifact_digest, manifest_digest, manifest_ref as manifest_id,
+/// operation_name, status, endpoint).
+///
+/// The `manifest_ref` stored on the proposal is returned as `manifest_id`;
+/// callers that need the full manifest should use the `load_harness_manifest`
+/// journal method.
+pub fn handle_get_proposal(
+    journal: &JournalStore,
+    _store: &ContentStore,
+    proposal_id: &str,
+) -> Result<Value> {
+    let proposal = journal
+        .load_proposal(proposal_id)?
+        .ok_or_else(|| CapabilityRouteError::NotFound("proposal_not_found".into()))?;
+
+    // Try to load manifest for endpoint info (best-effort).
+    let manifest_id = proposal.manifest_ref.clone();
+    let manifest_info = journal.load_harness_manifest(&manifest_id).ok().flatten();
+
+    let resp = json!({
+        "proposal_id": proposal.proposal_id,
+        "status": proposal.status,
+        "operation_name": proposal.requested_operations.first().unwrap_or(&"".to_string()),
+        "manifest_id": manifest_id,
+        "artifact_digest": proposal.artifact_digest,
+        "manifest_digest": proposal.manifest_digest,
+        "risk": proposal.risk_summary,
+        "endpoint": manifest_info.as_ref().map_or("", |m| m.endpoint.as_str()),
+        "expected_active_snapshot_id": proposal.expected_active_snapshot_id,
+        "created_at": proposal.created_at.to_rfc3339(),
+        "expires_at": proposal.expires_at.to_rfc3339(),
+        "decided_at": proposal.decided_at.map(|d| d.to_rfc3339()),
+        "decision_reason": proposal.decision_reason,
+    });
+    Ok(resp)
+}

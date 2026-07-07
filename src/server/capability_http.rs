@@ -100,6 +100,40 @@ pub(crate) fn try_handle_capability_request(
         return write_response(stream, status, resp_body).map(|_| true);
     }
 
+    // GET /v1/capability-change-proposals/{proposal_id} — read-only proposal query.
+    // Uses the decision token (or submit token) for authorisation so that the
+    // Feishu approval adapter can fetch digests before calling the decision API.
+    if let Some(pid) = path.strip_prefix("/v1/capability-change-proposals/") {
+        if pid.is_empty() || pid.contains('/') {
+            return Ok(false);
+        }
+        let authed = crate::server::capability_routes::capability_token_matches(
+            bearer,
+            &config.capability_decision_token,
+        ) || crate::server::capability_routes::capability_token_matches(
+            bearer,
+            &config.capability_submit_token,
+        );
+        if !authed {
+            let err = if config.capability_decision_token.is_none()
+                && config.capability_submit_token.is_none()
+            {
+                "capability_auth_not_configured"
+            } else {
+                "unauthorized"
+            };
+            return write_response(stream, 401, json!({"error": err})).map(|_| true);
+        }
+        let store = ContentStore::new(config.harness_artifact_root.clone());
+        let result = crate::server::capability_routes::handle_get_proposal(journal, &store, pid);
+        let (status, resp_body) =
+            match crate::server::capability_routes::map_capability_result(result) {
+                Ok(t) => t,
+                Err(e) => (500, json!({"ok": false, "error": e.to_string()})),
+            };
+        return write_response(stream, status, resp_body).map(|_| true);
+    }
+
     Ok(false)
 }
 
