@@ -13,17 +13,22 @@
 //! - Hooks are invoked at fixed lifecycle points; the Kernel never blindly
 //!   forwards every event to every hook.
 //!
-//! ## Current scope (Phase 1 — schema + config only)
+//! ## Current scope (Phase 1 — schema + config, Phase 2 — client + Runtime)
 //!
-//! This module provides only type definitions and configuration parsing.
-//! No runtime dispatch, no HTTP calls, no e2e hook execution — those are
-//! Phase 2+ concerns.
+//! Phase 1 (schema + config): types and configuration parsing, no dispatch.
+//! Phase 2 (this PR): HookClient trait + FakeHookClient + context.prepare
+//! integration in the Runtime, still no real HTTP.
 
+mod client;
 mod config;
 mod types;
 
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod context_tests;
+
+pub use client::*;
 pub use config::*;
 pub use types::*;

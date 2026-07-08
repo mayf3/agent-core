@@ -85,6 +85,17 @@ impl HookConfig {
     }
 }
 
+impl From<&HookConfig> for HookLimits {
+    fn from(cfg: &HookConfig) -> Self {
+        Self {
+            timeout_ms: cfg.timeout_ms,
+            max_request_bytes: cfg.max_request_bytes,
+            max_response_bytes: cfg.max_response_bytes,
+            max_fragments: cfg.max_fragments,
+        }
+    }
+}
+
 /// Root configuration for the hook registry.
 ///
 /// Serialised as `hook_registry.json` in the Kernel data directory.
