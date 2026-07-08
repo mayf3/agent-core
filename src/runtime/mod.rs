@@ -2,13 +2,14 @@ use crate::config::KernelConfig;
 use crate::context::ContextAssembler;
 use crate::domain::*;
 use crate::gateway::Gateway;
+use crate::hook::{HookClient, HookConfig};
 use crate::journal::JournalStore;
 use crate::llm::{LlmClient, LlmInput};
 use crate::registry::snapshot::RegistrySnapshot;
-use anyhow::{bail, Result};
-use chrono::Utc;
+use anyhow::Result;
 use serde_json::json;
 mod coding_grants;
+pub(crate) mod hook_call;
 pub mod outbox_dispatcher;
 mod tool_execution;
 mod tool_loop;
@@ -75,24 +76,35 @@ mod tool_round_budget;
 pub struct Runtime<L> {
     config: KernelConfig,
     llm: L,
+    hook_client: Option<Box<dyn HookClient>>,
+    hook_config: Option<HookConfig>,
 }
 pub struct RuntimeOutcome {
     pub run_id: RunId,
     pub session_id: SessionId,
     pub output: String,
 }
-pub fn session_spawn() -> Result<()> {
-    bail!("not_enabled:session.spawn")
-}
-pub fn run_yield() -> Result<()> {
-    bail!("not_enabled:run.yield")
-}
+use hook_call::ensure_nonblank_reply;
+pub use hook_call::{run_yield, session_spawn};
 impl<L> Runtime<L>
 where
     L: LlmClient + 'static,
 {
     pub fn new(config: KernelConfig, llm: L) -> Self {
-        Self { config, llm }
+        Self {
+            config,
+            llm,
+            hook_client: None,
+            hook_config: None,
+        }
+    }
+
+    /// Attach a hook client and config. When set, `context.prepare.v0` is
+    /// called before each initial LLM completion.
+    pub fn with_hook(mut self, client: Box<dyn HookClient>, config: HookConfig) -> Self {
+        self.hook_client = Some(client);
+        self.hook_config = Some(config);
+        self
     }
     /// Phase 2 M2d: decide whether an approved invocation is dispatched now or
     /// paused for human approval. ReadOnly ops queue immediately; Write ops
@@ -217,6 +229,52 @@ where
         // once here. All LLM rounds for this Run reuse the same tools list.
         let provider_tools = snapshot.provider_tools_for_grants(&granted_operations);
 
+        // ── context.prepare.v0 hook ──────────────────────────────────────
+        if let (Some(ref client), Some(ref hook_cfg)) = (&self.hook_client, &self.hook_config) {
+            if hook_cfg.enabled {
+                match crate::runtime::hook_call::call_context_prepare(
+                    &mut blocks,
+                    client.as_ref(),
+                    hook_cfg,
+                    journal,
+                    &run.id,
+                    &session.id,
+                    &self.config.agent_id.0,
+                    &run.principal.principal_id.0,
+                    &format!("{:?}", event.source),
+                    &text,
+                    self.config.context_max_block_chars,
+                )? {
+                    crate::runtime::hook_call::HookCallOutcome::Injected { .. } => {
+                        // Fragments injected successfully, Run continues.
+                    }
+                    crate::runtime::hook_call::HookCallOutcome::FailClosed { error } => {
+                        journal.fail_run(&run.id)?;
+                        journal.append_event(
+                            JournalEventKind::RunFailed,
+                            Some(&run.id),
+                            Some(&session.id),
+                            None,
+                            json!({ "run_id": run.id.0, "error_category": "hook_fail_closed" }),
+                        )?;
+                        return self.reply_with_failure(
+                            journal,
+                            gateway,
+                            &snapshot,
+                            &run,
+                            &session,
+                            message_id,
+                            chat_id,
+                            &format!("Hook context preparation failed: {error}"),
+                        );
+                    }
+                    crate::runtime::hook_call::HookCallOutcome::Skipped { .. } => {
+                        // Run continues without hook fragments.
+                    }
+                }
+            }
+        }
+
         // Phase 1: initial LLM call. On failure, record RunFailed and deliver
         // a static notification (never a silent Err).
         let first = match self.llm.complete(LlmInput {
@@ -323,172 +381,5 @@ where
             session_id: session.id,
             output: reply_text,
         })
-    }
-    pub fn deliver_echo(
-        &self,
-        journal: &JournalStore,
-        gateway: &Gateway,
-        event: ValidatedEvent,
-    ) -> Result<RuntimeOutcome> {
-        // `deliver_echo` never calls the LLM, so the tool-recall loop does not
-        // apply here — there is no model output to feed a tool result back to.
-        // The loop lives only in the model-driven path (`deliver`).
-        let session = journal.get_or_create_session(&event.session_target)?;
-        journal.append_event(
-            JournalEventKind::SessionReady,
-            None,
-            Some(&session.id),
-            Some(&event.event_id.0),
-            json!({
-                "session_id": session.id.0,
-                "agent_id": session.agent_id.0,
-                "channel": format!("{:?}", session.channel),
-                "conversation_key": session.conversation_key,
-            }),
-        )?;
-        // Blocker 2: snapshot_id must exist and be non-empty; failure prevents Run creation.
-        let snapshot_id = journal
-            .current_registry_snapshot_id()
-            .map_err(|e| anyhow::anyhow!("registry_snapshot_unavailable: {e}"))?;
-        if snapshot_id.is_empty() {
-            anyhow::bail!("registry_snapshot_invalid: snapshot ID is empty");
-        }
-        // Load the snapshot BEFORE creating the Run.
-        let snapshot = journal
-            .load_registry_snapshot(&snapshot_id)
-            .map_err(|e| anyhow::anyhow!("registry_snapshot_unavailable: {e}"))?;
-        let run = self.create_run(&session, &event, &snapshot_id, &snapshot);
-        journal.insert_run(&run)?;
-        journal.append_event(
-            JournalEventKind::RunStarted,
-            Some(&run.id),
-            Some(&session.id),
-            Some(&event.event_id.0),
-            json!({
-                "run_id": run.id.0,
-                "trigger_event_id": run.trigger_event_id.0,
-                "principal_id": run.principal.principal_id.0,
-            }),
-        )?;
-        let snap_for_gateway = snapshot;
-        let RuntimeEventPayload::UserMessage {
-            text,
-            message_id,
-            chat_id,
-        } = event.payload.clone();
-        let reply = format!("收到：{text}");
-        let intent = self.reply_intent(&run, &session, &reply, message_id, chat_id);
-        let correlation_id = intent.invocation_id.0.clone();
-        journal.append_event(
-            JournalEventKind::InvocationProposed,
-            Some(&run.id),
-            Some(&session.id),
-            Some(&correlation_id),
-            json!({
-                "operation": intent.operation,
-                "idempotency_key": intent.idempotency_key,
-            }),
-        )?;
-        let approved = gateway.approve_invocation(intent, &run, &session, &snap_for_gateway)?;
-        journal.append_event(
-            JournalEventKind::InvocationApproved,
-            Some(&run.id),
-            Some(&session.id),
-            Some(&correlation_id),
-            json!({
-                "decision_id": approved.decision_id,
-                "operation": approved.intent().operation,
-            }),
-        )?;
-        self.enqueue_or_pause(
-            journal,
-            &approved,
-            &run,
-            &session,
-            &correlation_id,
-            &snap_for_gateway,
-        )?;
-        Ok(RuntimeOutcome {
-            run_id: run.id,
-            session_id: session.id,
-            output: reply,
-        })
-    }
-    /// Check whether the run principal is the configured Feishu coding owner
-    /// in a private-chat context. Delegates to the standalone function in
-    /// `coding_grants` so the owner/grant logic lives in a single place.
-    fn is_coding_owner(&self, principal: &RunPrincipal, chat_type: Option<&str>) -> bool {
-        coding_grants::is_coding_owner(&self.config, principal, chat_type)
-    }
-
-    fn create_run(
-        &self,
-        session: &Session,
-        event: &ValidatedEvent,
-        snapshot_id: &str,
-        snapshot: &RegistrySnapshot,
-    ) -> Run {
-        let now = Utc::now();
-        let mut principal = event.principal.clone();
-        let chat_type = event.chat_type.as_deref();
-        let is_owner = self.is_coding_owner(&principal, chat_type);
-        coding_grants::augment_grants(&mut principal, snapshot, is_owner);
-        Run {
-            id: RunId::new(),
-            session_id: session.id.clone(),
-            agent_id: self.config.agent_id.clone(),
-            trigger_event_id: event.event_id.clone(),
-            principal,
-            parent_run_id: None,
-            delegated_by: None,
-            status: RunStatus::Running,
-            created_at: now,
-            updated_at: now,
-            registry_snapshot_id: snapshot_id.to_string(),
-        }
-    }
-    fn reply_intent(
-        &self,
-        run: &Run,
-        session: &Session,
-        text: &str,
-        message_id: Option<String>,
-        chat_id: Option<String>,
-    ) -> InvocationIntent {
-        if session.channel == ChannelKind::Feishu {
-            InvocationIntent {
-                invocation_id: InvocationId(format!("reply:{}", run.id.0)),
-                run_id: run.id.clone(),
-                operation: crate::domain::operation::FEISHU_SEND_MESSAGE.to_string(),
-                arguments: json!({
-                    "session_id": session.id.0,
-                    "message_id": message_id.unwrap_or_default(),
-                    "chat_id": chat_id.unwrap_or_default(),
-                    "text": text,
-                }),
-                idempotency_key: Some(format!("feishu-reply:{}", run.id.0)),
-            }
-        } else {
-            InvocationIntent {
-                invocation_id: InvocationId(format!("reply:{}", run.id.0)),
-                run_id: run.id.clone(),
-                operation: crate::domain::operation::STDOUT_SEND_TEXT.to_string(),
-                arguments: json!({
-                    "session_id": session.id.0,
-                    "text": text,
-                }),
-                idempotency_key: Some(format!("stdout-reply:{}", run.id.0)),
-            }
-        }
-    }
-}
-/// Return a non-blank reply string. If the model produced only whitespace
-/// content), substitute a fixed, minimal, generic message so the Outbox never
-/// receives a blank string. This is the single place reply text is synthesized.
-fn ensure_nonblank_reply(content: &str) -> String {
-    if content.trim().is_empty() {
-        "No reply was generated for this turn.".to_string()
-    } else {
-        content.to_string()
     }
 }

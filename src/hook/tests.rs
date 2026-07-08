@@ -401,3 +401,94 @@ fn context_fragment_security_constraints_are_present_in_type() {
     let back: ContextFragment = serde_json::from_str(&json).unwrap();
     assert_eq!(frag, back);
 }
+
+// ── HookClient tests ───────────────────────────────────────────────────
+
+#[test]
+fn fake_hook_client_empty() {
+    use crate::hook::client::FakeHookClient;
+    use crate::hook::HookClient;
+    let client = FakeHookClient::empty();
+    let req = crate::hook::client::ContextPrepareRequest {
+        hook: crate::hook::HookKind::ContextPrepareV0,
+        run_id: "r".into(),
+        session_id: "s".into(),
+        agent_id: "main".into(),
+        principal: "user".into(),
+        channel: "cli".into(),
+        user_text: "hello".into(),
+        context_budget_chars: 4000,
+    };
+    let cfg = crate::hook::HookConfig {
+        enabled: true,
+        kind: crate::hook::HookKind::ContextPrepareV0,
+        ..Default::default()
+    };
+    let resp = client.call_context_prepare(&req, &cfg).unwrap();
+    assert!(resp.fragments.is_empty());
+    assert!(resp.resource_refs.is_empty());
+}
+
+#[test]
+fn fake_hook_client_returns_fragments() {
+    use crate::hook::client::FakeHookClient;
+    use crate::hook::{
+        ContextFragment, ContextFragmentKind, FragmentPlacement, FragmentSensitivity, HookClient,
+    };
+    let frag = ContextFragment {
+        id: "f1".into(),
+        hook_id: "context.prepare.v0".into(),
+        kind: ContextFragmentKind::Instruction,
+        placement: FragmentPlacement::SystemAppend,
+        priority: 1,
+        content: "use the tool".into(),
+        source: "hook:test".into(),
+        ttl_secs: None,
+        estimated_tokens: 10,
+        sensitivity: FragmentSensitivity::Public,
+    };
+    let client = FakeHookClient::with_fragments(vec![frag]);
+    let req = crate::hook::client::ContextPrepareRequest {
+        hook: crate::hook::HookKind::ContextPrepareV0,
+        run_id: "r".into(),
+        session_id: "s".into(),
+        agent_id: "main".into(),
+        principal: "user".into(),
+        channel: "cli".into(),
+        user_text: "hello".into(),
+        context_budget_chars: 4000,
+    };
+    let cfg = crate::hook::HookConfig {
+        enabled: true,
+        kind: crate::hook::HookKind::ContextPrepareV0,
+        ..Default::default()
+    };
+    let resp = client.call_context_prepare(&req, &cfg).unwrap();
+    assert_eq!(resp.fragments.len(), 1);
+    assert_eq!(resp.fragments[0].content, "use the tool");
+}
+
+#[test]
+fn hook_client_is_object_safe() {
+    // Verify FakeHookClient can be used as Box<dyn HookClient>.
+    use crate::hook::client::FakeHookClient;
+    use crate::hook::HookClient;
+    let client: Box<dyn HookClient> = Box::new(FakeHookClient::empty());
+    let req = crate::hook::client::ContextPrepareRequest {
+        hook: crate::hook::HookKind::ContextPrepareV0,
+        run_id: "r".into(),
+        session_id: "s".into(),
+        agent_id: "main".into(),
+        principal: "user".into(),
+        channel: "cli".into(),
+        user_text: "test".into(),
+        context_budget_chars: 4000,
+    };
+    let cfg = crate::hook::HookConfig {
+        enabled: true,
+        kind: crate::hook::HookKind::ContextPrepareV0,
+        ..Default::default()
+    };
+    let resp = client.call_context_prepare(&req, &cfg).unwrap();
+    assert!(resp.fragments.is_empty());
+}

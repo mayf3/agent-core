@@ -222,7 +222,7 @@ pub struct ContextBlock {
     pub source_ref: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ContextBlockKind {
     RootSystem,
     RuntimeContract,
@@ -232,10 +232,14 @@ pub enum ContextBlockKind {
     ToolResult,
     ActiveSkill,
     RecentMessages,
+    /// Context fragment injected by external hooks (context.prepare.v0).
+    /// Placed before UserMessage — never enters the immutable system prompt.
+    /// The Kernel does not interpret the fragment's product-layer semantics.
+    HookFragment,
     UserMessage,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Compressibility {
     Never,
     DropWhole,
@@ -447,6 +451,11 @@ pub enum JournalEventKind {
     /// payload: `manifest_id`, `harness_id`, `artifact_digest`, `operation_name`, `protocol_version`
     /// correlation_id: manifest_id
     HarnessManifestRegistered,
+    /// External hook was called (context.prepare.v0 or other hook kinds).
+    /// payload: `hook`, `run_id`, `session_id`, `status`, `failure_mode`,
+    ///          `fragment_count`, `resource_ref_count`, `response_bytes`, `duration_ms`, `error_code`
+    /// correlation_id: run_id
+    HookCallRecorded,
     /// Registry snapshot was activated (enable/disable took effect).
     /// payload: `action`, `manifest_id`, `operation_name`, `previous_snapshot_id`, `new_snapshot_id`, `decision_id`
     /// correlation_id: decision_id
