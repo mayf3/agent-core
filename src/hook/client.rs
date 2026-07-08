@@ -37,7 +37,7 @@ pub struct ContextPrepareRequest {
 }
 
 /// Response from External Harness after context.prepare.v0.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextPrepareResponse {
     /// Dynamic context fragments to inject (validated against limits).
     pub fragments: Vec<ContextFragment>,
