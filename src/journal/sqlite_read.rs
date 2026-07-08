@@ -73,6 +73,7 @@ pub(crate) fn parse_kind(value: &str) -> JournalEventKind {
         "ApprovalDenied" => JournalEventKind::ApprovalDenied,
         "ApprovalExpired" => JournalEventKind::ApprovalExpired,
         "HarnessManifestRegistered" => JournalEventKind::HarnessManifestRegistered,
+        "HookCallRecorded" => JournalEventKind::HookCallRecorded,
         "RegistrySnapshotActivated" => JournalEventKind::RegistrySnapshotActivated,
         // Phase 2 capability-change-control-plane: proposal lifecycle kinds.
         "CapabilityChangeProposed" => JournalEventKind::CapabilityChangeProposed,
