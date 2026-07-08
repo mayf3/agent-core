@@ -21,6 +21,7 @@
 
 mod client;
 mod config;
+mod http_client;
 mod types;
 
 #[cfg(test)]
@@ -29,6 +30,10 @@ mod tests;
 #[cfg(test)]
 mod context_tests;
 
+#[cfg(test)]
+mod http_tests;
+
 pub use client::*;
 pub use config::*;
+pub use http_client::*;
 pub use types::*;
