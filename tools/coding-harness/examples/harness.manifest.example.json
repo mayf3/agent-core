@@ -1,0 +1,43 @@
+{
+  "schema_version": "harness-manifest-v0",
+  "harness_id": "context-markdown-harness",
+  "kind": "context.prepare.v0",
+  "owner": "local-owner",
+
+  "entrypoint": {
+    "command": "node server.ts",
+    "cwd": "."
+  },
+
+  "health": {
+    "url": "http://127.0.0.1:17400/health",
+    "expected_status": 200
+  },
+
+  "endpoint": {
+    "url": "http://127.0.0.1:17400/context.prepare.v0",
+    "local_only": true
+  },
+
+  "permissions": {
+    "read_paths": [
+      "~/.agent-core/workspace/default/SOUL.md",
+      "~/.agent-core/workspace/default/USER.md",
+      "~/.agent-core/workspace/default/project_facts.md"
+    ],
+    "network": [
+      "127.0.0.1"
+    ]
+  },
+
+  "smoke": {
+    "command": "npm test",
+    "manual_prompt": "请根据外部上下文回答 smoke word。",
+    "expected_observation": "LLM response reflects injected context fragment"
+  },
+
+  "rollback": {
+    "strategy": "restore_previous_hook_env_or_disable_hook",
+    "previous_endpoint_env": "AGENT_CORE_CONTEXT_PREPARE_HOOK_URL"
+  }
+}
