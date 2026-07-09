@@ -223,6 +223,7 @@ fn config() -> crate::config::KernelConfig {
         max_tool_rounds: 12,
         feishu_coding_owner_id: None,
         tool_loop_timeout_ms: 300_000,
+        context_prepare_hook: crate::hook::HookConfig::default(),
     }
 }
 
