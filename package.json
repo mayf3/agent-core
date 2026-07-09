@@ -11,7 +11,8 @@
     "check:structure": "node scripts/check-structure.mjs",
     "check:secrets": "node scripts/check-local-secret-leaks.mjs",
     "check:connector": "tsx --test connectors/feishu/src/*.test.ts && tsx -e \"Promise.all([import('./connectors/feishu/src/config.ts'), import('./connectors/feishu/src/kernel.ts'), import('./connectors/feishu/src/execute-server.ts'), import('./connectors/feishu/src/execute-store.ts'), import('./connectors/feishu/src/reactions.ts'), import('./connectors/feishu/src/reaction-store.ts'), import('./connectors/feishu/src/safe-logger.ts')]).then(() => console.log('connector modules ok'))\"",
-    "check:harnesses": "node --test --experimental-strip-types tools/audit-report/test/*.test.ts && node --test --experimental-strip-types tools/replay-eval/test/*.test.ts && node --test --experimental-strip-types tools/evolution-harness/test/*.test.ts",
+    "check:harnesses": "node --test --experimental-strip-types tools/audit-report/test/*.test.ts && node --test --experimental-strip-types tools/replay-eval/test/*.test.ts && node --test --experimental-strip-types tools/evolution-harness/test/*.test.ts && node --test --experimental-strip-types tools/context-harness/test/*.test.ts",
+    "context-harness": "node tools/context-harness/server.ts",
     "test": "cargo test"
   },
   "dependencies": {
