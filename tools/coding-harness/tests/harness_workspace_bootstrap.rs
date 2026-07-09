@@ -84,7 +84,28 @@ impl HarnessDevServer {
         std::thread::spawn(move || {
             coding_harness::server::serve(listener, config);
         });
-        std::thread::sleep(Duration::from_millis(100));
+
+        // Wait for the server to be ready by polling TCP connect.
+        // This is more reliable than a fixed sleep.
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            match TcpStream::connect_timeout(
+                &format!("127.0.0.1:{}", port).parse().unwrap(),
+                Duration::from_millis(50),
+            ) {
+                Ok(_) => break,
+                Err(e) => {
+                    if std::time::Instant::now() >= deadline {
+                        panic!(
+                            "server did not become ready within 2s on port {}: {}",
+                            port,
+                            e
+                        );
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+        }
 
         Self {
             port,

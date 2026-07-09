@@ -1,7 +1,7 @@
 {
   "workspaces": {
     "harness-dev": {
-      "root": "$HOME/.agent-core/harnesses",
+      "root": "/ABSOLUTE/PATH/TO/.agent-core/harnesses",
       "read": true,
       "write": true,
       "exec": true,
