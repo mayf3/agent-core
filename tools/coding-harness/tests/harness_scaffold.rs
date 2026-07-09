@@ -4,10 +4,24 @@
 //! validates harness IDs, refuses to overwrite existing directories,
 //! and that the generated Harness passes its own test suite.
 
-use std::path::PathBuf;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 // ── Helpers ──
+
+/// Unique temp directory name for a test.
+fn unique_temp_dir(label: &str) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "sc_test_{}_{}_{}",
+        label,
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ))
+}
 
 /// Path to the scaffold script, resolved relative to the crate root.
 fn script_path() -> PathBuf {
@@ -17,10 +31,20 @@ fn script_path() -> PathBuf {
 
 /// Run the scaffold script with the given args and return (exit_status, stdout, stderr).
 fn run_scaffold(args: &[&str]) -> (std::process::ExitStatus, String, String) {
-    let output = Command::new(script_path())
-        .args(args)
-        .output()
-        .expect("failed to execute scaffold script");
+    run_scaffold_in(args, None)
+}
+
+/// Run the scaffold script with an optional `current_dir`.
+fn run_scaffold_in(
+    args: &[&str],
+    cwd: Option<&Path>,
+) -> (std::process::ExitStatus, String, String) {
+    let mut cmd = Command::new(script_path());
+    cmd.args(args);
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
+    let output = cmd.output().expect("failed to execute scaffold script");
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -28,18 +52,11 @@ fn run_scaffold(args: &[&str]) -> (std::process::ExitStatus, String, String) {
     (output.status, stdout, stderr)
 }
 
-// ── Tests ──
+// ── Pre-existing tests ──
 
 #[test]
 fn scaffold_creates_expected_files() {
-    let root = std::env::temp_dir().join(format!(
-        "sc_test_expected_{}_{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-    ));
+    let root = unique_temp_dir("expected");
 
     let (status, stdout, stderr) = run_scaffold(&[
         "--root",
@@ -79,14 +96,7 @@ fn scaffold_creates_expected_files() {
 
 #[test]
 fn scaffold_rejects_invalid_harness_id() {
-    let root = std::env::temp_dir().join(format!(
-        "sc_test_invalid_{}_{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-    ));
+    let root = unique_temp_dir("invalid");
     std::fs::create_dir_all(&root).unwrap();
 
     // Uppercase ID should be rejected.
@@ -148,14 +158,7 @@ fn scaffold_rejects_invalid_harness_id() {
 
 #[test]
 fn scaffold_refuses_to_overwrite_existing_non_empty_dir() {
-    let root = std::env::temp_dir().join(format!(
-        "sc_test_overwrite_{}_{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-    ));
+    let root = unique_temp_dir("overwrite");
     let target = root.join("existing-harness");
     std::fs::create_dir_all(&target).unwrap();
     std::fs::write(target.join("existing-file.txt"), b"i exist").unwrap();
@@ -175,14 +178,7 @@ fn scaffold_refuses_to_overwrite_existing_non_empty_dir() {
 
 #[test]
 fn generated_harness_tests_pass() {
-    let root = std::env::temp_dir().join(format!(
-        "sc_test_npm_{}_{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-    ));
+    let root = unique_temp_dir("npm_test");
 
     let (status, stdout, stderr) = run_scaffold(&[
         "--root",
@@ -219,4 +215,94 @@ fn generated_harness_tests_pass() {
 
     // Clean up.
     let _ = std::fs::remove_dir_all(&root);
+}
+
+// ── New hardening tests ──
+
+#[test]
+fn scaffold_rejects_symlink_target_dir() {
+    let root = unique_temp_dir("symlink");
+
+    // Create a directory for the symlink target and a symlink where the harness would go.
+    let real_dir = root.join("real-target");
+    let symlink_target = root.join("evil-harness");
+    std::fs::create_dir_all(&real_dir).unwrap();
+    std::os::unix::fs::symlink(&real_dir, &symlink_target).unwrap();
+
+    let (status, _stdout, stderr) = run_scaffold(&[
+        "--root",
+        root.to_str().unwrap(),
+        "evil-harness",
+    ]);
+    assert!(!status.success(), "symlink target should be rejected");
+    assert!(stderr.contains("symlink"), "expected 'symlink' error");
+
+    // Clean up.
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn scaffold_fails_on_unwritable_root_or_target_parent() {
+    let root = unique_temp_dir("unwritable");
+    std::fs::create_dir_all(&root).unwrap();
+
+    // Make root directory read-only (remove all write bits).
+    let original_mode = {
+        let meta = std::fs::metadata(&root).unwrap();
+        meta.permissions().mode()
+    };
+    {
+        let mut perms = std::fs::metadata(&root).unwrap().permissions();
+        // Keep read + execute for owner; remove write bits.
+        perms.set_mode(original_mode & 0o555);
+        std::fs::set_permissions(&root, perms).unwrap();
+    }
+
+    let (status, _stdout, stderr) = run_scaffold(&[
+        "--root",
+        root.to_str().unwrap(),
+        "test-harness",
+    ]);
+    assert!(!status.success(), "should fail on unwritable root");
+    assert!(stderr.contains("not writable"), "expected 'not writable' error");
+
+    // Restore permissions so we can clean up.
+    {
+        let mut perms = std::fs::metadata(&root).unwrap().permissions();
+        perms.set_mode(original_mode | 0o200);
+        std::fs::set_permissions(&root, perms).unwrap();
+    }
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn scaffold_handles_relative_root_safely() {
+    // Run the scaffold inside a temp directory using a relative --root path.
+    // The script should resolve the relative path against its command CWD.
+    let tmp = unique_temp_dir("rel_root");
+    std::fs::create_dir_all(&tmp).unwrap();
+
+    let (status, stdout, stderr) = run_scaffold_in(
+        &["--root", "my-root", "rel-harness"],
+        Some(&tmp),
+    );
+    assert!(
+        status.success(),
+        "relative root should be handled safely:\nstdout:{stdout}\nstderr:{stderr}"
+    );
+
+    // Files should be at tmp/my-root/rel-harness/ after resolution.
+    let project_dir = tmp.join("my-root").join("rel-harness");
+    assert!(
+        project_dir.join("harness.manifest.json").exists(),
+        "harness.manifest.json not found at {project_dir:?}"
+    );
+    assert!(
+        project_dir.join("server.mjs").exists(),
+        "server.mjs not found at {project_dir:?}"
+    );
+
+    // Clean up.
+    let _ = std::fs::remove_dir_all(&tmp);
 }
