@@ -1,5 +1,6 @@
 use crate::data_dir::{copy_legacy_db_if_needed, default_data_dir, ensure_data_files, expand_home};
 use crate::domain::AgentId;
+use crate::hook::{HookConfig, HookEndpoint, HookFailureMode, HookKind};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
@@ -93,6 +94,8 @@ pub struct KernelConfig {
     /// emits a `ToolLoopWallClockExceeded` journal event. Default 300,000
     /// (5 minutes). Configured via AGENT_CORE_TOOL_LOOP_TIMEOUT_MS.
     pub tool_loop_timeout_ms: u64,
+    /// context.prepare.v0 hook config. Default disabled. Env: AGENT_CORE_CONTEXT_PREPARE_HOOK_*.
+    pub context_prepare_hook: HookConfig,
 }
 
 impl KernelConfig {
@@ -179,6 +182,16 @@ impl KernelConfig {
                 "AGENT_CORE_TOOL_LOOP_TIMEOUT_MS",
                 300_000,
             ),
+            context_prepare_hook: HookConfig {
+                enabled: env_bool("AGENT_CORE_CONTEXT_PREPARE_HOOK_ENABLED", false),
+                kind: HookKind::ContextPrepareV0,
+                endpoint: HookEndpoint {
+                    url: env_string("AGENT_CORE_CONTEXT_PREPARE_HOOK_URL", ""),
+                },
+                failure_mode: env_hook_failure_mode("AGENT_CORE_CONTEXT_PREPARE_HOOK_FAILURE_MODE"),
+                timeout_ms: env_u64("AGENT_CORE_CONTEXT_PREPARE_HOOK_TIMEOUT_MS", 5_000),
+                ..Default::default()
+            },
         }
     }
 }
@@ -346,6 +359,28 @@ fn env_max_tool_rounds(key: &str, fallback: usize) -> usize {
     parsed
 }
 
+/// Parse HookFailureMode from env value. Accepts fail_open/fail_closed/degrade/disabled.
+pub(crate) fn parse_hook_failure_mode_value(raw: &str) -> HookFailureMode {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "fail_open" => HookFailureMode::FailOpen,
+        "fail_closed" => HookFailureMode::FailClosed,
+        "degrade" => HookFailureMode::Degrade,
+        "disabled" => HookFailureMode::Disabled,
+        _ => {
+            eprintln!("invalid_hook_failure_mode: {raw:?}, falling back to disabled");
+            HookFailureMode::Disabled
+        }
+    }
+}
+
+fn env_hook_failure_mode(key: &str) -> HookFailureMode {
+    let raw = match std::env::var(key) {
+        Ok(v) => v,
+        Err(_) => return HookFailureMode::Disabled,
+    };
+    parse_hook_failure_mode_value(&raw)
+}
+
 fn unquote(value: &str) -> String {
     value
         .strip_prefix('"')
@@ -423,5 +458,37 @@ mod tests {
     fn tool_loop_timeout_accepts_default_value() {
         let result = parse_tool_loop_timeout_ms("300000");
         assert_eq!(result, Ok(300_000));
+    }
+
+    #[test]
+    fn hook_failure_mode_parse_all_modes() {
+        assert_eq!(
+            parse_hook_failure_mode_value("fail_open"),
+            HookFailureMode::FailOpen
+        );
+        assert_eq!(
+            parse_hook_failure_mode_value("fail_closed"),
+            HookFailureMode::FailClosed
+        );
+        assert_eq!(
+            parse_hook_failure_mode_value("degrade"),
+            HookFailureMode::Degrade
+        );
+        assert_eq!(
+            parse_hook_failure_mode_value("disabled"),
+            HookFailureMode::Disabled
+        );
+        assert_eq!(
+            parse_hook_failure_mode_value("garbage"),
+            HookFailureMode::Disabled
+        );
+        assert_eq!(
+            parse_hook_failure_mode_value("FAIL_OPEN"),
+            HookFailureMode::FailOpen
+        );
+        assert_eq!(
+            parse_hook_failure_mode_value("Fail_Closed"),
+            HookFailureMode::FailClosed
+        );
     }
 }
