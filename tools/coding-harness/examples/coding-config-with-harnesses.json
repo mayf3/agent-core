@@ -1,0 +1,13 @@
+{
+  "workspaces": {
+    "harness-dev": {
+      "root": "$HOME/.agent-core/harnesses",
+      "read": true,
+      "write": true,
+      "exec": true,
+      "opencode": true,
+      "network": true,
+      "shell": false
+    }
+  }
+}
