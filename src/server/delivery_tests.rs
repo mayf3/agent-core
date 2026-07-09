@@ -257,6 +257,7 @@ fn disabled_dispatcher_loop_returns_without_draining_outbox() -> Result<()> {
         capability_submit_token: None,
         capability_decision_token: None,
         tool_loop_timeout_ms: 300_000,
+        context_prepare_hook: crate::hook::HookConfig::default(),
     };
 
     let journal = Arc::new(JournalStore::in_memory()?);
@@ -432,6 +433,7 @@ fn disabled_test_config() -> KernelConfig {
         capability_submit_token: None,
         capability_decision_token: None,
         tool_loop_timeout_ms: 300_000,
+        context_prepare_hook: crate::hook::HookConfig::default(),
     }
 }
 

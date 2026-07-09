@@ -2,6 +2,7 @@ use crate::adapters::{HttpConnectorAdapter, InvocationAdapter};
 use crate::config::KernelConfig;
 use crate::domain::{EventId, JournalEventKind, ValidatedEvent};
 use crate::gateway::Gateway;
+use crate::hook::{HookClient, HttpHookClient};
 use crate::journal::JournalStore;
 use crate::llm::OpenAiCompatibleLlm;
 use crate::runtime::{outbox_dispatcher::dispatch_once, Runtime};
@@ -143,7 +144,11 @@ fn deliver_event(
     validated: ValidatedEvent,
 ) -> Result<()> {
     let llm: Box<dyn crate::llm::LlmClient> = Box::new(build_llm_from_config(&config));
-    let runtime = Runtime::new(config.clone(), llm);
+    let mut runtime = Runtime::new(config.clone(), llm);
+    if config.context_prepare_hook.enabled {
+        let hook_client: Box<dyn HookClient> = Box::new(HttpHookClient::new());
+        runtime = runtime.with_hook(hook_client, config.context_prepare_hook.clone());
+    }
     runtime.deliver(journal, gateway, validated)?;
     Ok(())
 }
@@ -172,6 +177,10 @@ fn short_id(value: &str) -> String {
 #[cfg(test)]
 #[path = "delivery_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "hook_wiring_tests.rs"]
+mod hook_wiring_tests;
 
 pub(crate) fn start_outbox_dispatcher_loop(
     config: KernelConfig,
