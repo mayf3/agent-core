@@ -76,6 +76,11 @@ Or use the provided script:
 source tools/coding-harness/scripts/init-harness-workspace.sh
 ```
 
+> **Note on the example JSON file**: The file `tools/coding-harness/examples/coding-config-with-harnesses.json`
+> uses an absolute-path placeholder (`/ABSOLUTE/PATH/TO/.agent-core/harnesses`). The Coding Harness
+> does **not** expand `$HOME` inside JSON. Replace this placeholder with your expanded home path,
+> for example `/Users/<you>/.agent-core/harnesses`.
+
 ### Step 3: Restart the Coding Harness
 
 ```bash
