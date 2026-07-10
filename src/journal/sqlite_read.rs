@@ -85,6 +85,7 @@ pub(crate) fn parse_kind(value: &str) -> JournalEventKind {
         "ToolLoopDetected" => JournalEventKind::ToolLoopDetected,
         "ExternalOperationGranted" => JournalEventKind::ExternalOperationGranted,
         "ExternalOperationRevoked" => JournalEventKind::ExternalOperationRevoked,
+        "HarnessChangeRequested" => JournalEventKind::HarnessChangeRequested,
         _ => JournalEventKind::Unknown,
     }
 }

@@ -4,6 +4,7 @@ pub mod capability_proposals;
 mod conversation;
 pub mod grant_ops;
 pub mod harness_activation_ops;
+mod harness_change_requests;
 pub mod harness_ops;
 mod hash_chain;
 mod outbox;
