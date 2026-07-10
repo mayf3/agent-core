@@ -107,6 +107,23 @@ pub(super) fn register_and_enable(
     Ok(mid)
 }
 
+/// Create a validated CLI ingress event with `external.time_now` pre-granted.
+/// Used by tests that need the grant but do not test the grant mechanism itself.
+pub(super) fn event_with_time_grant(
+    j: &crate::journal::JournalStore,
+    g: &crate::gateway::Gateway,
+) -> crate::domain::ValidatedEvent {
+    use crate::domain::CapabilityGrant;
+    let mut ev = g
+        .validate_ingress(j, g.cli_ingress("t?".into()).unwrap())
+        .unwrap();
+    ev.principal.grants.push(CapabilityGrant {
+        operation: "external.time_now".to_string(),
+        scope: "current_session".to_string(),
+    });
+    ev
+}
+
 pub(super) struct CaptureToolsLlm {
     pub(super) captured: Arc<Mutex<Vec<serde_json::Value>>>,
     pub(super) first: AtomicBool,
@@ -221,7 +238,7 @@ fn external_harness_tool_call_runs_end_to_end() -> Result<()> {
         first: AtomicBool::new(true),
     };
     let rt = super::Runtime::new(config(), llm);
-    let event = g.validate_ingress(&j, g.cli_ingress("t?".into())?)?;
+    let event = event_with_time_grant(&j, &g);
     let outcome = rt.deliver(&j, &g, event)?;
     assert!(!outcome.output.trim().is_empty());
 

@@ -11,6 +11,22 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use crate::domain::{CapabilityGrant, ValidatedEvent};
+
+fn event_with_time_grant(
+    j: &crate::journal::JournalStore,
+    g: &crate::gateway::Gateway,
+) -> ValidatedEvent {
+    let mut ev = g
+        .validate_ingress(j, g.cli_ingress("t?".into()).unwrap())
+        .unwrap();
+    ev.principal.grants.push(CapabilityGrant {
+        operation: "external.time_now".to_string(),
+        scope: "current_session".to_string(),
+    });
+    ev
+}
+
 fn config() -> crate::config::KernelConfig {
     crate::config::KernelConfig {
         db_path: std::path::PathBuf::from(":memory:"),
@@ -149,9 +165,7 @@ fn run_with_capture(
             first: AtomicBool::new(true),
         },
     );
-    let ev = g
-        .validate_ingress(j, g.cli_ingress("t?".into()).unwrap())
-        .unwrap();
+    let ev = event_with_time_grant(j, g);
     (rt.deliver(j, g, ev).unwrap(), captured)
 }
 
@@ -240,9 +254,7 @@ fn run_with_tool(
             first: AtomicBool::new(true),
         },
     );
-    let ev = g
-        .validate_ingress(j, g.cli_ingress("t?".into()).unwrap())
-        .unwrap();
+    let ev = event_with_time_grant(j, g);
     rt.deliver(j, g, ev).unwrap()
 }
 

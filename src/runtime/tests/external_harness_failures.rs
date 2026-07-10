@@ -4,7 +4,8 @@
 //! Reuses helpers from sibling module external_harness_runtime.
 
 use super::external_harness_runtime::{
-    config, harness_200, register_and_enable, start_responder, CaptureToolsLlm,
+    config, event_with_time_grant, harness_200, register_and_enable, start_responder,
+    CaptureToolsLlm,
 };
 use anyhow::Result;
 use serde_json::json;
@@ -81,7 +82,7 @@ fn harness_secret_fields_are_not_in_journal() -> Result<()> {
             first: AtomicBool::new(true),
         },
     )
-    .deliver(&j, &g, g.validate_ingress(&j, g.cli_ingress("t?".into())?)?)?;
+    .deliver(&j, &g, event_with_time_grant(&j, &g))?;
     let s = serde_json::to_string(&j.events()?).unwrap_or_default();
     for f in &[
         "SECRET_TOKEN_MARKER",
@@ -116,7 +117,7 @@ fn harness_secret_fields_five_layer_scan() -> Result<()> {
             first: AtomicBool::new(true),
         },
     )
-    .deliver(&j, &g, g.validate_ingress(&j, g.cli_ingress("t?".into())?)?)?;
+    .deliver(&j, &g, event_with_time_grant(&j, &g))?;
     let ev = j.events()?;
     let jt = serde_json::to_string(&ev).unwrap_or_default();
     for &m in SM {
@@ -169,7 +170,7 @@ fn harness_request_contains_no_internal_fields() -> Result<()> {
             first: AtomicBool::new(true),
         },
     )
-    .deliver(&j, &g, g.validate_ingress(&j, g.cli_ingress("t?".into())?)?)?;
+    .deliver(&j, &g, event_with_time_grant(&j, &g))?;
     let raw = captured.lock().unwrap();
     let bs = raw.find("\r\n\r\n").map(|i| i + 4).unwrap_or(0);
     let jb = &raw[bs..];
@@ -203,7 +204,7 @@ fn harness_extra_fields_in_result_cause_schema_violation() -> Result<()> {
             first: AtomicBool::new(true),
         },
     )
-    .deliver(&j, &g, g.validate_ingress(&j, g.cli_ingress("t?".into())?)?)?;
+    .deliver(&j, &g, event_with_time_grant(&j, &g))?;
     let r: Vec<_> = j
         .events()?
         .into_iter()
@@ -239,7 +240,7 @@ fn harness_ok_false_through_runtime_records_failed() -> Result<()> {
             first: AtomicBool::new(true),
         },
     )
-    .deliver(&j, &g, g.validate_ingress(&j, g.cli_ingress("t?".into())?)?)?;
+    .deliver(&j, &g, event_with_time_grant(&j, &g))?;
     let r: Vec<_> = j
         .events()?
         .into_iter()
@@ -270,7 +271,7 @@ fn external_harness_malformed_json_through_runtime_records_failed() -> Result<()
             first: AtomicBool::new(true),
         },
     )
-    .deliver(&j, &g, g.validate_ingress(&j, g.cli_ingress("t?".into())?)?)?;
+    .deliver(&j, &g, event_with_time_grant(&j, &g))?;
     let ev = j.events()?;
     let r: Vec<_> = ev
         .iter()
@@ -325,7 +326,7 @@ fn harness_fast_timeout_through_runtime_records_failed() -> Result<()> {
             first: AtomicBool::new(true),
         },
     )
-    .deliver(&j, &g, g.validate_ingress(&j, g.cli_ingress("t?".into())?)?)?;
+    .deliver(&j, &g, event_with_time_grant(&j, &g))?;
     let ev = j.events()?;
     let r: Vec<_> = ev
         .iter()
@@ -379,7 +380,7 @@ fn harness_non_2xx_through_runtime_records_failed_with_round2() -> Result<()> {
             first: AtomicBool::new(true),
         },
     )
-    .deliver(&j, &g, g.validate_ingress(&j, g.cli_ingress("t?".into())?)?)?;
+    .deliver(&j, &g, event_with_time_grant(&j, &g))?;
     let ev = j.events()?;
     let r: Vec<_> = ev
         .iter()
@@ -434,7 +435,7 @@ fn harness_timeout_through_runtime_records_failed() -> Result<()> {
             first: AtomicBool::new(true),
         },
     )
-    .deliver(&j, &g, g.validate_ingress(&j, g.cli_ingress("t?".into())?)?)?;
+    .deliver(&j, &g, event_with_time_grant(&j, &g))?;
     let r: Vec<_> = j
         .events()?
         .into_iter()

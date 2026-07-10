@@ -2,8 +2,8 @@
 //! All tests use real Runtime::deliver. Reuses helpers from sibling module.
 
 use super::external_harness_runtime::{
-    captured_follow_ups, captured_system, config, harness_200, register_and_enable,
-    start_responder, CaptureToolsLlm,
+    captured_follow_ups, captured_system, config, event_with_time_grant, harness_200,
+    register_and_enable, start_responder, CaptureToolsLlm,
 };
 use crate::harness::control::{HarnessChangeAction, HarnessChangeIntent};
 use crate::harness::manifest::HarnessManifest;
@@ -154,11 +154,7 @@ fn external_harness_enable_pins_only_future_runs() -> Result<()> {
             first: AtomicBool::new(true),
         },
     )
-    .deliver(
-        &*j,
-        &*g,
-        g.validate_ingress(&*j, g.cli_ingress("t?".into())?)?,
-    )?;
+    .deliver(&*j, &*g, event_with_time_grant(&*j, &*g))?;
     assert!(!ob.output.trim().is_empty());
     let run_b = j.run(&ob.run_id)?.unwrap();
     assert_eq!(
@@ -246,12 +242,7 @@ fn external_harness_disable_pins_only_future_runs() -> Result<()> {
                 first: AtomicBool::new(true),
             },
         )
-        .deliver(
-            &*j_b,
-            &*g_b,
-            g_b.validate_ingress(&*j_b, g_b.cli_ingress("t?".into())?)
-                .unwrap(),
-        )
+        .deliver(&*j_b, &*g_b, event_with_time_grant(&*j_b, &*g_b))
     });
     // Wait for harness responder to accept.
     let mut rg = bp.0.lock().unwrap();
