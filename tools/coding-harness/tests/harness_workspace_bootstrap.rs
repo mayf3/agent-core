@@ -98,8 +98,7 @@ impl HarnessDevServer {
                     if std::time::Instant::now() >= deadline {
                         panic!(
                             "server did not become ready within 2s on port {}: {}",
-                            port,
-                            e
+                            port, e
                         );
                     }
                     std::thread::sleep(Duration::from_millis(20));
