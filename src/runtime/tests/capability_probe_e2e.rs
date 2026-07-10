@@ -248,7 +248,11 @@ fn capability_probe_full_runtime_loop() -> Result<()> {
             first: AtomicBool::new(true),
         },
     );
-    let event = gateway.validate_ingress(&journal, gateway.cli_ingress("run probe".into())?)?;
+    let mut event = gateway.validate_ingress(&journal, gateway.cli_ingress("run probe".into())?)?;
+    event.principal.grants.push(CapabilityGrant {
+        operation: PROBE_OP.to_string(),
+        scope: "current_session".to_string(),
+    });
     let outcome = rt.deliver(&journal, &gateway, event)?;
     let run_id = outcome.run_id.clone();
     let session_id = outcome.session_id.clone();
