@@ -26,7 +26,9 @@ fn unique_temp_dir(label: &str) -> PathBuf {
 /// Path to the scaffold script, resolved relative to the crate root.
 fn script_path() -> PathBuf {
     let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    crate_dir.join("scripts").join("scaffold-context-harness.sh")
+    crate_dir
+        .join("scripts")
+        .join("scaffold-context-harness.sh")
 }
 
 /// Run the scaffold script with the given args and return (exit_status, stdout, stderr).
@@ -58,37 +60,55 @@ fn run_scaffold_in(
 fn scaffold_creates_expected_files() {
     let root = unique_temp_dir("expected");
 
-    let (status, stdout, stderr) = run_scaffold(&[
-        "--root",
-        root.to_str().unwrap(),
-        "my-test-harness",
-    ]);
-    assert!(status.success(), "scaffold failed:\nstdout:{stdout}\nstderr:{stderr}");
+    let (status, stdout, stderr) =
+        run_scaffold(&["--root", root.to_str().unwrap(), "my-test-harness"]);
+    assert!(
+        status.success(),
+        "scaffold failed:\nstdout:{stdout}\nstderr:{stderr}"
+    );
 
     let project_dir = root.join("my-test-harness");
 
     // Verify all expected files exist.
     assert!(project_dir.join("README.md").exists(), "README.md missing");
-    assert!(project_dir.join("package.json").exists(), "package.json missing");
-    assert!(project_dir.join("server.mjs").exists(), "server.mjs missing");
-    assert!(project_dir.join("harness.manifest.json").exists(), "harness.manifest.json missing");
-    assert!(project_dir.join("test").join("server.test.mjs").exists(), "test/server.test.mjs missing");
+    assert!(
+        project_dir.join("package.json").exists(),
+        "package.json missing"
+    );
+    assert!(
+        project_dir.join("server.mjs").exists(),
+        "server.mjs missing"
+    );
+    assert!(
+        project_dir.join("harness.manifest.json").exists(),
+        "harness.manifest.json missing"
+    );
+    assert!(
+        project_dir.join("test").join("server.test.mjs").exists(),
+        "test/server.test.mjs missing"
+    );
 
     // Verify harness.manifest.json contains the correct harness_id.
     let manifest_content = std::fs::read_to_string(project_dir.join("harness.manifest.json"))
         .expect("failed to read harness.manifest.json");
-    assert!(manifest_content.contains(r#""harness_id": "my-test-harness""#),
-        "manifest should contain harness_id 'my-test-harness'");
+    assert!(
+        manifest_content.contains(r#""harness_id": "my-test-harness""#),
+        "manifest should contain harness_id 'my-test-harness'"
+    );
 
     // Verify manifest kind.
-    assert!(manifest_content.contains(r#""kind": "context.prepare.v0""#),
-        "manifest should contain kind 'context.prepare.v0'");
+    assert!(
+        manifest_content.contains(r#""kind": "context.prepare.v0""#),
+        "manifest should contain kind 'context.prepare.v0'"
+    );
 
     // Verify smoke word present in server.mjs.
-    let server_content = std::fs::read_to_string(project_dir.join("server.mjs"))
-        .expect("failed to read server.mjs");
-    assert!(server_content.contains("EXTERNAL_HARNESS_SCAFFOLD_SMOKE_WORD: papaya"),
-        "server.mjs should contain the smoke word");
+    let server_content =
+        std::fs::read_to_string(project_dir.join("server.mjs")).expect("failed to read server.mjs");
+    assert!(
+        server_content.contains("EXTERNAL_HARNESS_SCAFFOLD_SMOKE_WORD: papaya"),
+        "server.mjs should contain the smoke word"
+    );
 
     // Clean up.
     let _ = std::fs::remove_dir_all(&root);
@@ -100,57 +120,54 @@ fn scaffold_rejects_invalid_harness_id() {
     std::fs::create_dir_all(&root).unwrap();
 
     // Uppercase ID should be rejected.
-    let (status, _stdout, stderr) = run_scaffold(&[
-        "--root",
-        root.to_str().unwrap(),
-        "INVALID_ID",
-    ]);
+    let (status, _stdout, stderr) = run_scaffold(&["--root", root.to_str().unwrap(), "INVALID_ID"]);
     assert!(!status.success(), "uppercase ID should be rejected");
-    assert!(stderr.contains("invalid harness_id"), "expected invalid harness_id error");
+    assert!(
+        stderr.contains("invalid harness_id"),
+        "expected invalid harness_id error"
+    );
 
     // ID with spaces should be rejected.
-    let (status, _stdout, stderr) = run_scaffold(&[
-        "--root",
-        root.to_str().unwrap(),
-        "my harness",
-    ]);
+    let (status, _stdout, stderr) = run_scaffold(&["--root", root.to_str().unwrap(), "my harness"]);
     assert!(!status.success(), "ID with spaces should be rejected");
-    assert!(stderr.contains("invalid harness_id"), "expected invalid harness_id error");
+    assert!(
+        stderr.contains("invalid harness_id"),
+        "expected invalid harness_id error"
+    );
 
     // ID with slashes should be rejected.
-    let (status, _stdout, stderr) = run_scaffold(&[
-        "--root",
-        root.to_str().unwrap(),
-        "a/b",
-    ]);
+    let (status, _stdout, stderr) = run_scaffold(&["--root", root.to_str().unwrap(), "a/b"]);
     assert!(!status.success(), "ID with slash should be rejected");
-    assert!(stderr.contains("invalid harness_id"), "expected invalid harness_id error");
+    assert!(
+        stderr.contains("invalid harness_id"),
+        "expected invalid harness_id error"
+    );
 
     // Empty ID should be rejected.
-    let (status, _stdout, _stderr) = run_scaffold(&[
-        "--root",
-        root.to_str().unwrap(),
-        "",
-    ]);
+    let (status, _stdout, _stderr) = run_scaffold(&["--root", root.to_str().unwrap(), ""]);
     assert!(!status.success(), "empty ID should be rejected");
 
     // ID starting with hyphen should be rejected.
-    let (status, _stdout, stderr) = run_scaffold(&[
-        "--root",
-        root.to_str().unwrap(),
-        "-bad",
-    ]);
-    assert!(!status.success(), "ID starting with hyphen should be rejected");
-    assert!(stderr.contains("invalid harness_id"), "expected invalid harness_id error");
+    let (status, _stdout, stderr) = run_scaffold(&["--root", root.to_str().unwrap(), "-bad"]);
+    assert!(
+        !status.success(),
+        "ID starting with hyphen should be rejected"
+    );
+    assert!(
+        stderr.contains("invalid harness_id"),
+        "expected invalid harness_id error"
+    );
 
     // ID ending with hyphen should be rejected.
-    let (status, _stdout, stderr) = run_scaffold(&[
-        "--root",
-        root.to_str().unwrap(),
-        "bad-",
-    ]);
-    assert!(!status.success(), "ID ending with hyphen should be rejected");
-    assert!(stderr.contains("invalid harness_id"), "expected invalid harness_id error");
+    let (status, _stdout, stderr) = run_scaffold(&["--root", root.to_str().unwrap(), "bad-"]);
+    assert!(
+        !status.success(),
+        "ID ending with hyphen should be rejected"
+    );
+    assert!(
+        stderr.contains("invalid harness_id"),
+        "expected invalid harness_id error"
+    );
 
     // Clean up.
     let _ = std::fs::remove_dir_all(&root);
@@ -163,13 +180,16 @@ fn scaffold_refuses_to_overwrite_existing_non_empty_dir() {
     std::fs::create_dir_all(&target).unwrap();
     std::fs::write(target.join("existing-file.txt"), b"i exist").unwrap();
 
-    let (status, _stdout, stderr) = run_scaffold(&[
-        "--root",
-        root.to_str().unwrap(),
-        "existing-harness",
-    ]);
-    assert!(!status.success(), "should refuse to overwrite non-empty dir");
-    assert!(stderr.contains("already exists"), "expected 'already exists' error");
+    let (status, _stdout, stderr) =
+        run_scaffold(&["--root", root.to_str().unwrap(), "existing-harness"]);
+    assert!(
+        !status.success(),
+        "should refuse to overwrite non-empty dir"
+    );
+    assert!(
+        stderr.contains("already exists"),
+        "expected 'already exists' error"
+    );
     assert!(stderr.contains("not empty"), "expected 'not empty' error");
 
     // Clean up.
@@ -180,12 +200,12 @@ fn scaffold_refuses_to_overwrite_existing_non_empty_dir() {
 fn generated_harness_tests_pass() {
     let root = unique_temp_dir("npm_test");
 
-    let (status, stdout, stderr) = run_scaffold(&[
-        "--root",
-        root.to_str().unwrap(),
-        "test-harness-smoke",
-    ]);
-    assert!(status.success(), "scaffold failed:\nstdout:{stdout}\nstderr:{stderr}");
+    let (status, stdout, stderr) =
+        run_scaffold(&["--root", root.to_str().unwrap(), "test-harness-smoke"]);
+    assert!(
+        status.success(),
+        "scaffold failed:\nstdout:{stdout}\nstderr:{stderr}"
+    );
 
     // Run npm test in the generated directory.
     let project_dir = root.join("test-harness-smoke");
@@ -229,11 +249,8 @@ fn scaffold_rejects_symlink_target_dir() {
     std::fs::create_dir_all(&real_dir).unwrap();
     std::os::unix::fs::symlink(&real_dir, &symlink_target).unwrap();
 
-    let (status, _stdout, stderr) = run_scaffold(&[
-        "--root",
-        root.to_str().unwrap(),
-        "evil-harness",
-    ]);
+    let (status, _stdout, stderr) =
+        run_scaffold(&["--root", root.to_str().unwrap(), "evil-harness"]);
     assert!(!status.success(), "symlink target should be rejected");
     assert!(stderr.contains("symlink"), "expected 'symlink' error");
 
@@ -258,13 +275,13 @@ fn scaffold_fails_on_unwritable_root_or_target_parent() {
         std::fs::set_permissions(&root, perms).unwrap();
     }
 
-    let (status, _stdout, stderr) = run_scaffold(&[
-        "--root",
-        root.to_str().unwrap(),
-        "test-harness",
-    ]);
+    let (status, _stdout, stderr) =
+        run_scaffold(&["--root", root.to_str().unwrap(), "test-harness"]);
     assert!(!status.success(), "should fail on unwritable root");
-    assert!(stderr.contains("not writable"), "expected 'not writable' error");
+    assert!(
+        stderr.contains("not writable"),
+        "expected 'not writable' error"
+    );
 
     // Restore permissions so we can clean up.
     {
@@ -283,10 +300,8 @@ fn scaffold_handles_relative_root_safely() {
     let tmp = unique_temp_dir("rel_root");
     std::fs::create_dir_all(&tmp).unwrap();
 
-    let (status, stdout, stderr) = run_scaffold_in(
-        &["--root", "my-root", "rel-harness"],
-        Some(&tmp),
-    );
+    let (status, stdout, stderr) =
+        run_scaffold_in(&["--root", "my-root", "rel-harness"], Some(&tmp));
     assert!(
         status.success(),
         "relative root should be handled safely:\nstdout:{stdout}\nstderr:{stderr}"
