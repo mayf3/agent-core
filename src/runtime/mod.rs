@@ -179,7 +179,7 @@ where
         let snapshot = journal
             .load_registry_snapshot(&snapshot_id)
             .map_err(|e| anyhow::anyhow!("registry_snapshot_unavailable: {e}"))?;
-        let run = self.create_run(&session, &event, &snapshot_id, &snapshot);
+        let run = self.create_run(journal, &session, &event, &snapshot_id, &snapshot);
         journal.insert_run(&run)?;
         journal.append_event(
             JournalEventKind::RunStarted,
