@@ -467,6 +467,12 @@ pub enum JournalEventKind {
     CapabilityChangeActivated,
     CapabilityChangeActivationFailed,
     CapabilityChangeExpired,
+    /// External operation grant lifecycle events.
+    /// payload: `grant_id`, `operation`, `grantee_principal_id`, `channel`,
+    ///          `scope`, `risk`, `snapshot_id`
+    ExternalOperationGranted,
+    /// payload: `grant_id`, `operation`
+    ExternalOperationRevoked,
     /// Sentinel produced by `parse_kind`/`row_to_event` when the stored
     /// `kind` text does not match any known variant. The kernel never writes
     /// `Unknown` — observing it at read time indicates either external

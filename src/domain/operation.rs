@@ -297,7 +297,27 @@ pub fn catalog_for_context() -> String {
             format!("{} (risk: {}) — {}", spec.name, risk, desc)
         })
         .collect::<Vec<_>>()
-        .join("\n")
+            .join("\n")
+}
+
+/// An explicit external operation grant loaded from the journal. Used when
+/// augmenting principal grants during Run creation. Defined here so it is
+/// re-exported through `crate::domain::*`.
+///
+/// `conversation_kind` distinguishes Feishu p2p ("p2p"), Feishu group
+/// ("group"), and CLI ("cli") so that grants are not shared across
+/// conversation boundaries.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExternalOperationGrant {
+    pub grant_id: String,
+    pub operation: String,
+    pub grantee_principal_id: String,
+    pub channel: String,
+    pub conversation_kind: String,
+    pub scope: String,
+    pub risk: String,
+    pub snapshot_id: String,
+    pub status: String,
 }
 
 #[cfg(test)]

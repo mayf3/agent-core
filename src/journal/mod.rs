@@ -2,6 +2,7 @@ mod approval;
 pub mod capability_activation;
 pub mod capability_proposals;
 mod conversation;
+pub mod grant_ops;
 pub mod harness_activation_ops;
 pub mod harness_ops;
 mod hash_chain;
@@ -29,5 +30,13 @@ mod manifest_idempotent;
 #[cfg(test)]
 #[path = "tests/capability_concurrency.rs"]
 mod capability_concurrency;
+
+#[cfg(test)]
+#[path = "tests/grant_ops.rs"]
+mod grant_ops_tests;
+
+#[cfg(test)]
+#[path = "tests/grant_ops_lifecycle.rs"]
+mod grant_ops_lifecycle_tests;
 
 pub use sqlite::JournalStore;
