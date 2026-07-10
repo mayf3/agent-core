@@ -6,6 +6,7 @@ mod capability_http;
 pub mod capability_routes;
 mod delivery;
 mod dispatcher_metrics;
+mod harness_change_request;
 pub mod harness_routes;
 use anyhow::{bail, Result};
 #[cfg(test)]
@@ -195,6 +196,29 @@ fn handle_connection(
             stream,
             harness_routes::handle_disable(&gateway, &journal, &body),
         )
+    } else if path == "/v1/harness-change-requests" {
+        let body: Value = serde_json::from_slice(&request.body)?;
+        match harness_change_request::handle(&journal, &gateway, config, &body) {
+            Ok(j) => write_json(stream, 200, j),
+            Err(e) => {
+                let cat = harness_change_request::sanitise_hcr_error(&e);
+                let (c, msg) = match cat {
+                    harness_change_request::ERR_INVALID_HARNESS_ID
+                    | harness_change_request::ERR_EMPTY_HARNESS_REQUIREMENT
+                    | harness_change_request::ERR_INVALID_SOURCE_MESSAGE_ID => (400, cat),
+                    harness_change_request::ERR_OWNER_REQUIRED
+                    | harness_change_request::ERR_P2P_REQUIRED
+                    | harness_change_request::ERR_CHANNEL_REQUIRED => (403, cat),
+                    harness_change_request::ERR_SESSION_NOT_FOUND => (404, cat),
+                    harness_change_request::ERR_CONFLICT => (409, cat),
+                    _ => {
+                        eprintln!("HCR internal error: {:?}", e);
+                        (500, harness_change_request::ERR_INTERNAL)
+                    }
+                };
+                write_json(stream, c, json!({"ok":false,"error":msg}))
+            }
+        }
     } else {
         write_json(stream, 404, json!({ "ok": false, "error": "not_found" }))
     }

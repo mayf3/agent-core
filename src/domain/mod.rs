@@ -33,6 +33,27 @@ id_type!(EventId, "event");
 id_type!(InvocationId, "invocation");
 id_type!(PrincipalId, "principal");
 
+/// A durable HarnessChangeRequest record, stored in the
+/// `harness_change_requests` table. Created by PR4A1 without a Run;
+/// PR4A2 consumes pending requests and creates Runs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HarnessChangeRequest {
+    pub request_id: String,
+    pub source: String,
+    pub source_message_id: String,
+    pub session_id: String,
+    pub principal_id: String,
+    pub channel: String,
+    pub chat_type: String,
+    pub harness_id: String,
+    pub requirement: String,
+    pub status: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub run_id: Option<String>,
+    pub error_code: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Agent {
     pub id: AgentId,
@@ -234,8 +255,9 @@ pub enum ContextBlockKind {
     RecentMessages,
     /// Context fragment injected by external hooks (context.prepare.v0).
     /// Placed before UserMessage — never enters the immutable system prompt.
-    /// The Kernel does not interpret the fragment's product-layer semantics.
     HookFragment,
+    /// HCR instructions for external harness creation.
+    HarnessChangeRequest,
     UserMessage,
 }
 
@@ -483,6 +505,11 @@ pub enum JournalEventKind {
     /// flags the row as corrupt since the re-serialized string won't match.
     /// See HANDOVER §10.
     Unknown,
+    /// A HarnessChangeRequest was received, authorized, validated, and persisted.
+    /// payload: `request_id`, `source`, `source_message_id`, `harness_id`, `requirement`,
+    ///          `principal_id`, `channel`, `chat_type`, `session_id`, `status`
+    /// correlation_id: request_id
+    HarnessChangeRequested,
     /// The Run exhausted its configured tool-round budget. The Run completes
     /// normally so the reply is delivered, but the user must start a new Run
     /// to continue. payload: `run_id`, `tool_rounds_used`, `max_tool_rounds`
