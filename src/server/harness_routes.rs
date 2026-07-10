@@ -12,6 +12,7 @@ use anyhow::Result;
 use chrono::Utc;
 use serde::Deserialize;
 use serde_json::json;
+use std::net::TcpStream;
 
 /// Narrow, typed error classification for harness route handlers.
 /// Each variant maps to a single stable HTTP status and a bounded
@@ -212,4 +213,36 @@ pub fn handle_disable(
         "active_snapshot_id": result.active_snapshot_id,
         "changed": result.changed,
     }))?)
+}
+
+/// Map a `Result<String>` from a harness route handler to an HTTP response
+/// on the given stream. Uses typed `HarnessRouteError` when available and
+/// falls back to stable string prefix matching for legacy error patterns.
+pub fn handle_harness_result(stream: &mut TcpStream, result: Result<String>) -> Result<()> {
+    match result {
+        Ok(body) => super::write_json(stream, 200, serde_json::from_str(&body)?),
+        Err(e) => {
+            let (status, safe_msg) = if let Some(hr_err) = e.downcast_ref::<HarnessRouteError>() {
+                (hr_err.http_status(), hr_err.safe_error())
+            } else {
+                let msg = e.to_string();
+                if msg.starts_with("invalid_manifest") || msg.starts_with("invalid_request") {
+                    (400, "invalid_request")
+                } else if msg.starts_with("unauthorized") {
+                    (401, "unauthorized")
+                } else if msg.starts_with("manifest_not_found") {
+                    (404, "not_found")
+                } else if msg.starts_with("snapshot_conflict")
+                    || msg.starts_with("operation_conflict")
+                {
+                    (409, "conflict")
+                } else if msg.starts_with("invalid_") {
+                    (400, "invalid_request")
+                } else {
+                    (500, "internal_error")
+                }
+            };
+            super::write_json(stream, status, json!({ "ok": false, "error": safe_msg }))
+        }
+    }
 }

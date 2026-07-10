@@ -6,9 +6,13 @@ use uuid::Uuid;
 
 pub mod capability_change;
 pub mod coding_operations;
+pub mod context_block;
+pub mod harness_change_request;
 pub mod operation;
 pub mod retry;
 pub mod status;
+pub use context_block::*;
+pub use harness_change_request::*;
 pub use operation::*;
 pub use retry::*;
 pub use status::*;
@@ -32,27 +36,6 @@ id_type!(RunId, "run");
 id_type!(EventId, "event");
 id_type!(InvocationId, "invocation");
 id_type!(PrincipalId, "principal");
-
-/// A durable HarnessChangeRequest record, stored in the
-/// `harness_change_requests` table. Created by PR4A1 without a Run;
-/// PR4A2 consumes pending requests and creates Runs.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HarnessChangeRequest {
-    pub request_id: String,
-    pub source: String,
-    pub source_message_id: String,
-    pub session_id: String,
-    pub principal_id: String,
-    pub channel: String,
-    pub chat_type: String,
-    pub harness_id: String,
-    pub requirement: String,
-    pub status: String,
-    pub created_at: String,
-    pub updated_at: String,
-    pub run_id: Option<String>,
-    pub error_code: Option<String>,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Agent {
@@ -233,40 +216,6 @@ pub enum RuntimeEventPayload {
         message_id: Option<String>,
         chat_id: Option<String>,
     },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ContextBlock {
-    pub kind: ContextBlockKind,
-    pub content: String,
-    pub compressibility: Compressibility,
-    pub source_ref: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum ContextBlockKind {
-    RootSystem,
-    RuntimeContract,
-    AgentProfile,
-    SkillCatalog,
-    ToolCatalog,
-    ToolResult,
-    ActiveSkill,
-    RecentMessages,
-    /// Context fragment injected by external hooks (context.prepare.v0).
-    /// Placed before UserMessage — never enters the immutable system prompt.
-    HookFragment,
-    /// HCR instructions for external harness creation.
-    HarnessChangeRequest,
-    UserMessage,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum Compressibility {
-    Never,
-    DropWhole,
-    Summarizable,
-    Truncate,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
