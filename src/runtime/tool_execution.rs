@@ -412,10 +412,15 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
             return Ok(fatal);
         }
 
-        // HCR mode: revalidate context, enforce operation allowlist, and
-        // validate workspace.
+        // HCR mode: per-dispatch revalidation (principal, channel,
+        // conversation, owner, HCR state, claim, harness, workspace) +
+        // operation allowlist + workspace validation.
         if matches!(run.mode, RunMode::Hcr { .. }) {
-            if let Err(_) = crate::hcr::revalidate::revalidate_hcr_context(journal, run) {
+            let is_owner =
+                super::coding_grants::is_coding_owner(&self.config, &run.principal, Some("p2p"));
+            if let Err(_) = crate::hcr::revalidate::revalidate_hcr_dispatch_context(
+                journal, run, session, is_owner,
+            ) {
                 return Ok(rejected_result(
                     crate::gateway::ToolRejection::PolicyDenied,
                     None,
