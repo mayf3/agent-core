@@ -355,7 +355,8 @@ pub fn handle_decision(
             if no_ops_exist {
                 // ── Standard create path ──
                 let risk =
-                    crate::domain::operation::coding_operation_risk(&manifest.operation_name);
+                    crate::domain::operation::coding_operation_risk(&manifest.operation_name)
+                        .unwrap_or(crate::registry::snapshot::Risk::Write);
                 let spec = crate::registry::snapshot::OperationSpec {
                     name: manifest.operation_name.clone(),
                     risk,

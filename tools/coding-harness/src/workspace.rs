@@ -1,7 +1,10 @@
 use crate::config::WorkspacePermission;
+use crate::hcr::executor;
+use crate::hcr::profile::HcrProfile;
 use crate::paths::{resolve_path, resolve_path_unchecked, validate_relative};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -287,6 +290,38 @@ pub fn handle_exec(root: &Path, args: &Value, perm: &WorkspacePermission) -> Val
         "timed_out": timed_out, "stdout_truncated": stdout_all.len() > max_output, "stderr_truncated": stderr_all.len() > max_output,
         "stdout_bytes": stdout_all.len(), "stderr_bytes": stderr_all.len()}),
     )
+}
+
+/// Handle an HCR execution request using the profile-based security model.
+///
+/// This is the external entry point called from the dispatch layer after
+/// token and profile validation. It translates the JSON request arguments
+/// into the executor's `execute()` call and returns the structured result.
+pub fn handle_hcr_exec(root: &Path, args: &Value, profile: &HcrProfile) -> Value {
+    let command_name = match args.get("command").and_then(Value::as_str) {
+        Some(c) if !c.is_empty() => c,
+        _ => {
+            return json!({
+                "protocol_version": "external-harness-v1",
+                "ok": false,
+                "error_code": "HCR_MISSING_COMMAND",
+            });
+        }
+    };
+
+    // Parse command parameters from the request
+    let params: HashMap<String, String> = args
+        .get("params")
+        .and_then(Value::as_object)
+        .map(|obj| {
+            obj.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let result = executor::execute(profile, command_name, &params, root);
+    result.to_json()
 }
 
 fn drain_reader(

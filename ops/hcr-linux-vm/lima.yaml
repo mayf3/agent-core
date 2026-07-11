@@ -1,0 +1,37 @@
+# Agent Core HCR Linux VM — Lima configuration (minimal boot).
+#
+# This VM provides a Linux environment with bubblewrap for HCR execution.
+# The Mac HOME is NOT mounted. Only the dedicated HCR share is accessible.
+# The Coding Harness HTTP port (7200) is forwarded to Mac loopback only.
+#
+# Dependencies are installed in a separate provision step after boot.
+
+images:
+  - location: "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-arm64.img"
+    arch: "aarch64"
+
+arch: "aarch64"
+
+cpus: 4
+memory: "8GiB"
+disk: "40GiB"
+
+# Do NOT mount the macOS user home.
+mounts:
+  - location: "~/.agent-core/hcr-linux"
+    writable: true
+
+# Port forwarding: only Mac loopback.
+portForwards:
+  - guestPort: 7200
+    hostPort: 7200
+    hostIP: "127.0.0.1"
+
+# No SSH agent forwarding
+ssh:
+  forwardAgent: false
+
+mountType: "reverse-sshfs"
+
+# Do not propagate proxy environment variables from host
+propagateProxyEnv: false

@@ -10,6 +10,7 @@
 use super::external_harness_runtime::config;
 use crate::capabilities::store::ContentStore;
 use crate::domain::capability_change::*;
+use crate::domain::CapabilityGrant;
 use crate::gateway::Gateway;
 use crate::harness::manifest::HarnessManifest;
 use crate::journal::JournalStore;
@@ -184,7 +185,12 @@ fn capability_decision_activation_affects_only_future_runs() -> Result<()> {
             captured: captured1.clone(),
         },
     );
-    let event1 = gateway.validate_ingress(&journal, gateway.cli_ingress("hello again".into())?)?;
+    let mut event1 =
+        gateway.validate_ingress(&journal, gateway.cli_ingress("hello again".into())?)?;
+    event1.principal.grants.push(CapabilityGrant {
+        operation: PROBE_OP.to_string(),
+        scope: "current_session".to_string(),
+    });
     let outcome1 = rt1.deliver(&journal, &gateway, event1)?;
     let r1 = outcome1.run_id.clone();
 

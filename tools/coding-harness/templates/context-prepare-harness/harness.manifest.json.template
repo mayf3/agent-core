@@ -1,0 +1,31 @@
+{
+  "schema_version": "harness-manifest-v0",
+  "harness_id": "__HARNESS_ID__",
+  "kind": "context.prepare.v0",
+  "owner": "local-owner",
+  "entrypoint": {
+    "command": "node server.mjs",
+    "cwd": "."
+  },
+  "health": {
+    "url": "http://127.0.0.1:17400/health",
+    "expected_status": 200
+  },
+  "endpoint": {
+    "url": "http://127.0.0.1:17400/context.prepare.v0",
+    "local_only": true
+  },
+  "permissions": {
+    "read_paths": [],
+    "network": ["127.0.0.1"]
+  },
+  "smoke": {
+    "command": "npm test",
+    "manual_prompt": "请根据外部上下文回答 smoke word。",
+    "expected_observation": "LLM response reflects EXTERNAL_HARNESS_SCAFFOLD_SMOKE_WORD: papaya"
+  },
+  "rollback": {
+    "strategy": "restore_previous_hook_env_or_disable_hook",
+    "previous_endpoint_env": "AGENT_CORE_CONTEXT_PREPARE_HOOK_URL"
+  }
+}

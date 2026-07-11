@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use crate::hcr::profile::{parse_profile_from_json, HcrProfile};
+
 #[derive(Debug, Clone)]
 pub struct WorkspacePermission {
     pub read: bool,
@@ -39,6 +41,12 @@ pub struct CodingConfig {
     pub capability_submit_token: String,
     /// Content store root for artifact/manifest/evidence blobs
     pub artifact_root: PathBuf,
+    /// HCR execution profiles, keyed by profile ID.
+    /// Only populated if `hcr_profiles` is configured in CODING_CONFIG.
+    pub hcr_profiles: HashMap<String, HcrProfile>,
+    /// HCR authentication token. Must be included in HCR exec requests.
+    /// Read from HCR_TOKEN environment variable, or empty (profile disabled).
+    pub hcr_token: String,
 }
 
 impl CodingConfig {
@@ -71,6 +79,16 @@ impl CodingConfig {
             }
         }
 
+        // Parse HCR profiles from the config JSON
+        let mut hcr_profiles = HashMap::new();
+        if let Some(profiles) = parsed.get("hcr_profiles").and_then(|v| v.as_object()) {
+            for (_id, profile_val) in profiles {
+                if let Some(profile) = parse_profile_from_json(profile_val) {
+                    hcr_profiles.insert(profile.id.clone(), profile);
+                }
+            }
+        }
+
         Self {
             workspaces,
             kernel_api_url: std::env::var("KERNEL_API_URL")
@@ -79,6 +97,8 @@ impl CodingConfig {
             artifact_root: std::env::var("HARNESS_ARTIFACT_ROOT")
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| std::env::temp_dir().join("coding-harness-artifacts")),
+            hcr_profiles,
+            hcr_token: std::env::var("HCR_TOKEN").unwrap_or_default(),
         }
     }
 

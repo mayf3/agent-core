@@ -99,6 +99,7 @@ fn fixture() -> (
         created_at: now,
         updated_at: now,
         registry_snapshot_id: String::new(),
+        mode: RunMode::Default,
     };
     (journal, gateway, runtime, session, run)
 }

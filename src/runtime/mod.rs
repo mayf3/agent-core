@@ -8,7 +8,7 @@ use crate::llm::{LlmClient, LlmInput};
 use crate::registry::snapshot::RegistrySnapshot;
 use anyhow::Result;
 use serde_json::json;
-mod coding_grants;
+pub(crate) mod coding_grants;
 pub(crate) mod hook_call;
 pub mod outbox_dispatcher;
 mod tool_execution;
@@ -179,7 +179,7 @@ where
         let snapshot = journal
             .load_registry_snapshot(&snapshot_id)
             .map_err(|e| anyhow::anyhow!("registry_snapshot_unavailable: {e}"))?;
-        let run = self.create_run(&session, &event, &snapshot_id, &snapshot);
+        let run = self.create_run(journal, &session, &event, &snapshot_id, &snapshot);
         journal.insert_run(&run)?;
         journal.append_event(
             JournalEventKind::RunStarted,

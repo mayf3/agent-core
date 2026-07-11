@@ -21,7 +21,7 @@ pub struct JournalStore {
 /// The schema `PRAGMA user_version` this kernel writes and understands. Bumped
 /// only when `migrations/` gains a new applied migration. The startup
 /// `migrate()` refuses to run against a DB whose version is newer than this.
-const CURRENT_SCHEMA_VERSION: i64 = 5;
+const CURRENT_SCHEMA_VERSION: i64 = 8;
 
 impl JournalStore {
     pub fn open(path: &Path) -> Result<Self> {
@@ -193,10 +193,11 @@ impl JournalStore {
             .conn
             .lock()
             .map_err(|_| anyhow!("journal mutex poisoned"))?;
+        let mode_str = serde_json::to_string(&run.mode)?;
         conn.execute(
             "INSERT INTO runs
-             (id, session_id, agent_id, trigger_event_id, principal_json, parent_run_id, delegated_by, status, created_at, updated_at, registry_snapshot_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+             (id, session_id, agent_id, trigger_event_id, principal_json, parent_run_id, delegated_by, status, created_at, updated_at, registry_snapshot_id, mode)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 run.id.0,
                 run.session_id.0,
@@ -213,6 +214,7 @@ impl JournalStore {
                 } else {
                     Some(&run.registry_snapshot_id)
                 },
+                mode_str,
             ],
         )?;
         Ok(())
@@ -341,6 +343,13 @@ impl JournalStore {
             conn.execute_batch(include_str!(
                 "../../migrations/0005_remove_manifest_operation_name_unique.sql"
             ))?;
+            conn.execute_batch(include_str!(
+                "../../migrations/0006_external_operation_grants.sql"
+            ))?;
+            conn.execute_batch(include_str!(
+                "../../migrations/0007_harness_change_requests.sql"
+            ))?;
+            conn.execute_batch(include_str!("../../migrations/0008_hcr_claims.sql"))?;
             super::queue::migrate(&conn)?;
             backfill_feishu_message_dedup(&conn)?;
             conn.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
@@ -374,7 +383,23 @@ impl JournalStore {
                     conn.execute_batch(include_str!(
                         "../../migrations/0005_remove_manifest_operation_name_unique.sql"
                     ))?;
-                    conn.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
+                    conn.pragma_update(None, "user_version", 5)?;
+                }
+                5 => {
+                    conn.execute_batch(include_str!(
+                        "../../migrations/0006_external_operation_grants.sql"
+                    ))?;
+                    conn.pragma_update(None, "user_version", 6)?;
+                }
+                6 => {
+                    conn.execute_batch(include_str!(
+                        "../../migrations/0007_harness_change_requests.sql"
+                    ))?;
+                    conn.pragma_update(None, "user_version", 7)?;
+                }
+                7 => {
+                    conn.execute_batch(include_str!("../../migrations/0008_hcr_claims.sql"))?;
+                    conn.pragma_update(None, "user_version", 8)?;
                 }
                 _ => break,
             }

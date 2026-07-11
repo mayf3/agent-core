@@ -43,7 +43,10 @@ impl super::JournalStore {
 
         // Build new spec list: existing ops + new external op.
         let mut new_specs: Vec<OperationSpec> = current_snap.operations.clone();
-        let risk = crate::domain::operation::coding_operation_risk(&manifest.operation_name);
+        // Unknown (non-coding) external operations default to Write (requires
+        // gateway approval) rather than ReadOnly (inline execution).
+        let risk = crate::domain::operation::coding_operation_risk(&manifest.operation_name)
+            .unwrap_or(crate::registry::snapshot::Risk::Write);
         new_specs.push(OperationSpec {
             name: manifest.operation_name.clone(),
             risk,
