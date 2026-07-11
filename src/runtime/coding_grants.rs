@@ -62,6 +62,25 @@ pub(crate) fn augment_grants(
     }
 }
 
+/// The subset of coding operations allowed in HCR mode.
+///
+/// Only workspace operations required for Route A harness creation are permitted.
+/// Task submission, capability proposals, and other operations are excluded
+/// from HCR mode and will be denied by the policy pipeline.
+pub fn hcr_allowed_operations() -> &'static [&'static str] {
+    &[
+        crate::domain::operation::external::WORKSPACE_LIST,
+        crate::domain::operation::external::WORKSPACE_READ,
+        crate::domain::operation::external::WORKSPACE_WRITE,
+        crate::domain::operation::external::WORKSPACE_EXEC,
+    ]
+}
+
+/// Check whether an operation is allowed in HCR mode.
+pub fn is_hcr_allowed_operation(operation: &str) -> bool {
+    hcr_allowed_operations().contains(&operation)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
