@@ -180,22 +180,15 @@ fn wrap_linux_bubblewrap(
     bwrap.arg("--unshare-all");
     bwrap.arg("--new-session");
 
-    // Required system paths (read-only)
-    bwrap.arg("--ro-bind");
-    bwrap.arg("/usr");
-    bwrap.arg("/usr");
-    bwrap.arg("--ro-bind");
-    bwrap.arg("/lib");
-    bwrap.arg("/lib");
-    bwrap.arg("--ro-bind");
-    bwrap.arg("/lib64");
-    bwrap.arg("/lib64");
-    bwrap.arg("--ro-bind");
-    bwrap.arg("/bin");
-    bwrap.arg("/bin");
-    bwrap.arg("--ro-bind");
-    bwrap.arg("/etc");
-    bwrap.arg("/etc");
+    // Required system paths (read-only).  Check each path exists because
+    // distro layouts differ: x86_64 has /lib64, ARM64 does not.
+    for path in &["/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc"] {
+        if std::path::Path::new(path).exists() {
+            bwrap.arg("--ro-bind");
+            bwrap.arg(path);
+            bwrap.arg(path);
+        }
+    }
     bwrap.arg("--proc");
     bwrap.arg("/proc");
     bwrap.arg("--dev");
