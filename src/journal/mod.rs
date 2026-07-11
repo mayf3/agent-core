@@ -7,6 +7,7 @@ pub mod harness_activation_ops;
 mod harness_change_requests;
 pub mod harness_ops;
 mod hash_chain;
+mod hcr_settlement;
 mod outbox;
 mod outbox_queue;
 mod queue;
