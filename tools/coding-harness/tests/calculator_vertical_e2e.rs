@@ -71,6 +71,8 @@ fn calculator_vertical_e2e() -> Result<()> {
         kernel_api_url: kernel_url,
         capability_submit_token: "test-submit-token".into(),
         artifact_root: artifact_root.clone(),
+        hcr_profiles: std::collections::HashMap::new(),
+        hcr_token: String::new(),
     };
     thread::spawn(move || coding_harness::server::serve(ch_listener, Arc::new(ch_config)));
     thread::sleep(Duration::from_millis(200));

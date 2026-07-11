@@ -193,6 +193,34 @@ fn dispatch(config: &CodingConfig, operation: &str, args: &Value) -> Value {
         }
     };
 
+    // ── HCR execution dispatch ──
+    // Uses profile-based security model, not workspace permission booleans.
+    if operation == "external.coding_hcr_exec" {
+        let ws_id = ws_id.as_ref().unwrap();
+        let profile_id = args
+            .get("hcr_profile_id")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let request_token = args.get("hcr_token").and_then(Value::as_str).unwrap_or("");
+
+        // Token validation: HCR profile requires matching token
+        if config.hcr_token.is_empty() || request_token != config.hcr_token {
+            return err_value("hcr_token_required");
+        }
+
+        let profile = match config.hcr_profiles.get(profile_id) {
+            Some(p) => p,
+            None => return err_value("hcr_profile_not_found"),
+        };
+
+        // Verify workspace_id matches profile binding
+        if profile.workspace_id != *ws_id {
+            return err_value("hcr_workspace_mismatch");
+        }
+
+        return workspace::handle_hcr_exec(root.as_ref().unwrap(), args, profile);
+    }
+
     match operation {
         "external.coding_workspace_list" => workspace::handle_list(root.as_ref().unwrap(), args),
         "external.coding_workspace_read" => workspace::handle_read(root.as_ref().unwrap(), args),

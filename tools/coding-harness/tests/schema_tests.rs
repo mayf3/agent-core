@@ -298,6 +298,7 @@ fn coding_manifest_llm_input_receives_complete_tool_definitions() {
         harness_artifact_root: std::path::PathBuf::from("."),
         max_tool_rounds: 12,
         tool_loop_timeout_ms: 300_000,
+        context_prepare_hook: Default::default(),
     };
     let j = JournalStore::in_memory().unwrap();
     let g = Gateway::new(config.clone());
