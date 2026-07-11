@@ -206,16 +206,35 @@ fn wrap_linux_bubblewrap(
     bwrap.arg(&home);
     bwrap.arg(&home);
 
-    // Network policy
+    // Network policy.
+    //
+    // N-1 ruling (sandbox-internal loopback only):
+    //   --unshare-all (above) already creates an isolated network
+    //   namespace for BOTH policies. The child therefore never reaches
+    //   the Linux guest host's 127.0.0.1, the Coding Harness endpoint,
+    //   the Mac host, the VM gateway, LAN, DNS, or the public internet.
+    //
+    //   NetworkPolicy::Deny
+    //     = all networking inside the namespace is disabled, including
+    //       the namespace's own 127.0.0.1 and ::1.
+    //   NetworkPolicy::LoopbackOnly
+    //     = only the *same* isolated namespace's 127.0.0.1 / ::1 are
+    //       usable. A server and its client must be launched together
+    //       inside ONE bwrap invocation. This does NOT — and is not
+    //       intended to — reach the guest host loopback.
+    //
+    // `--unshare-net` is added again under Deny for defence in depth:
+    // it is redundant with `--unshare-all` but makes the deny intent
+    // explicit and keeps the generated argv self-documenting.
     match config.network_policy {
         NetworkPolicy::Deny => {
             bwrap.arg("--unshare-net");
         }
         NetworkPolicy::LoopbackOnly => {
-            // Allow loopback by not using --unshare-net
-            // but restrict via iptables or rely on application-level
-            // For now, bwrap doesn't support fine-grained network.
-            // We document this limitation.
+            // Intentionally no extra flag: --unshare-all already moved
+            // the child into its own network namespace, whose loopback
+            // interface is the only thing reachable. Do NOT add
+            // --share-net or otherwise weaken isolation here.
         }
     }
 
@@ -266,6 +285,79 @@ mod tests {
         match backend {
             SandboxBackend::LinuxBubblewrap | SandboxBackend::Unavailable => {} // all valid
         }
+    }
+
+    // N-1 network isolation regression tests.
+    //
+    // On macOS `wrap_linux_bubblewrap` returns `Unavailable` (see the
+    // non-Linux fallback), so the argv assertions only run on Linux. The
+    // macOS profile tests above cover the seatbelt string generator.
+
+    /// Helper: wrap a no-op command and collect the resulting bwrap argv.
+    #[cfg(target_os = "linux")]
+    fn bwrap_argv_for(policy: NetworkPolicy) -> Vec<String> {
+        let config = SandboxConfig {
+            workspace_root: PathBuf::from("/tmp/test-ws"),
+            home_dir: PathBuf::from("/tmp/test-ws/.hcr-home"),
+            real_home: PathBuf::from("/home/someuser"),
+            agent_core_repo: None,
+            network_policy: policy,
+        };
+        let backend = SandboxBackend::LinuxBubblewrap;
+        let mut cmd = StdCommand::new("/bin/true");
+        let wrapped = wrap_with_sandbox(&mut cmd, &config, &backend).expect("wrap succeeds");
+        wrapped
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// Both policies MUST move the child into its own network namespace
+    /// via `--unshare-all`, so neither can reach the guest host loopback.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn both_policies_isolate_network_namespace() {
+        for policy in [NetworkPolicy::Deny, NetworkPolicy::LoopbackOnly] {
+            let argv = bwrap_argv_for(policy.clone());
+            assert!(
+                argv.contains(&"--unshare-all".to_string()),
+                "{policy:?}: --unshare-all must always be present (network isolation)"
+            );
+        }
+    }
+
+    /// Deny adds `--unshare-net` (defence in depth, redundant with
+    /// `--unshare-all`) — so even the namespace's own loopback is down.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn deny_policy_unshares_net_explicitly() {
+        let argv = bwrap_argv_for(NetworkPolicy::Deny);
+        assert!(
+            argv.contains(&"--unshare-net".to_string()),
+            "Deny: --unshare-net must be present"
+        );
+    }
+
+    /// LoopbackOnly must NOT add any network-weakening flag.  It relies
+    /// solely on `--unshare-all` for isolation; the only thing reachable
+    /// is the namespace's own loopback interface.  There is deliberately
+    /// no flag that re-shares the host/guest network namespace.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn loopback_only_never_weakens_isolation() {
+        let argv = bwrap_argv_for(NetworkPolicy::LoopbackOnly);
+        assert!(
+            !argv.contains(&"--unshare-net".to_string()),
+            "LoopbackOnly must not add --unshare-net (its loopback is the namespace's own)"
+        );
+        assert!(
+            !argv.iter().any(|a| a.starts_with("--share-net")),
+            "LoopbackOnly must never add a --share-net style weakening flag"
+        );
+        assert!(
+            argv.contains(&"--unshare-all".to_string()),
+            "LoopbackOnly still requires --unshare-all for namespace isolation"
+        );
     }
 
     #[test]

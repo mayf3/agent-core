@@ -7,11 +7,22 @@
 use std::path::PathBuf;
 
 /// Per-command network access policy.
+///
+/// Both variants execute inside an **isolated network namespace** created
+/// unconditionally by `--unshare-all` in the bubblewrap wrapper.  The
+/// distinction is therefore about what is reachable *inside that
+/// namespace*, not about reaching the Linux guest host or the Mac host.
+///
+/// See `tools/coding-harness/src/hcr/sandbox.rs` for the full N-1 ruling.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NetworkPolicy {
-    /// No network access allowed.
+    /// No network access allowed — not even the namespace's own loopback.
     Deny,
-    /// Loopback (localhost) only.
+    /// Sandbox-internal loopback only: the namespace's own `127.0.0.1` /
+    /// `::1` are usable, so a server and its client must run together in
+    /// one bubblewrap invocation.  This does **not** reach the Linux guest
+    /// host's loopback, the Coding Harness endpoint, the Mac host, the VM
+    /// gateway, LAN, DNS, or the public internet.
     LoopbackOnly,
 }
 
