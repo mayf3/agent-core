@@ -327,6 +327,7 @@ pub(super) fn run_outbox_test(status: RunStatus, expected: &str, suffix: &str) {
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
         registry_snapshot_id: String::new(),
+        mode: RunMode::Default,
     })
     .unwrap();
     if expected == "Failed" {

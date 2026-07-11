@@ -86,6 +86,9 @@ pub(crate) fn parse_kind(value: &str) -> JournalEventKind {
         "ExternalOperationGranted" => JournalEventKind::ExternalOperationGranted,
         "ExternalOperationRevoked" => JournalEventKind::ExternalOperationRevoked,
         "HarnessChangeRequested" => JournalEventKind::HarnessChangeRequested,
+        "HcrClaimSucceeded" => JournalEventKind::HcrClaimSucceeded,
+        "HcrClaimRejected" => JournalEventKind::HcrClaimRejected,
+        "HcrRunCreated" => JournalEventKind::HcrRunCreated,
         _ => JournalEventKind::Unknown,
     }
 }

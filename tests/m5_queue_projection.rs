@@ -309,6 +309,7 @@ fn test_run(config: &KernelConfig, session: &Session) -> Run {
         created_at: Utc::now(),
         updated_at: Utc::now(),
         registry_snapshot_id: String::new(),
+        mode: RunMode::Default,
     }
 }
 

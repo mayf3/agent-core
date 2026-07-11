@@ -1,7 +1,7 @@
 use crate::domain::{
     AgentId, ApprovedInvocation, CapabilityGrant, ChannelKind, EventId, InvocationId,
-    InvocationIntent, PrincipalId, PrincipalSource, PrincipalSubject, Run, RunId, RunPrincipal,
-    RunStatus, Session, SessionId, SessionStatus,
+    InvocationIntent, PrincipalId, PrincipalSource, PrincipalSubject, Run, RunId, RunMode,
+    RunPrincipal, RunStatus, Session, SessionId, SessionStatus,
 };
 use crate::journal::JournalStore;
 use crate::registry::snapshot::{BindingKind, OperationSpec, Risk};
@@ -48,6 +48,7 @@ fn retired_builtin_time_binding_returns_fail_closed_error() {
         created_at: Utc::now(),
         updated_at: Utc::now(),
         registry_snapshot_id: "snap_legacy".into(),
+        mode: RunMode::Default,
     };
     let session = Session {
         id: SessionId::new(),
