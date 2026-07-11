@@ -21,7 +21,7 @@ pub struct JournalStore {
 /// The schema `PRAGMA user_version` this kernel writes and understands. Bumped
 /// only when `migrations/` gains a new applied migration. The startup
 /// `migrate()` refuses to run against a DB whose version is newer than this.
-const CURRENT_SCHEMA_VERSION: i64 = 8;
+const CURRENT_SCHEMA_VERSION: i64 = 9;
 
 impl JournalStore {
     pub fn open(path: &Path) -> Result<Self> {
@@ -350,6 +350,7 @@ impl JournalStore {
                 "../../migrations/0007_harness_change_requests.sql"
             ))?;
             conn.execute_batch(include_str!("../../migrations/0008_hcr_claims.sql"))?;
+            conn.execute_batch(include_str!("../../migrations/0009_hcr_evidence.sql"))?;
             super::queue::migrate(&conn)?;
             backfill_feishu_message_dedup(&conn)?;
             conn.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
@@ -400,6 +401,10 @@ impl JournalStore {
                 7 => {
                     conn.execute_batch(include_str!("../../migrations/0008_hcr_claims.sql"))?;
                     conn.pragma_update(None, "user_version", 8)?;
+                }
+                8 => {
+                    conn.execute_batch(include_str!("../../migrations/0009_hcr_evidence.sql"))?;
+                    conn.pragma_update(None, "user_version", 9)?;
                 }
                 _ => break,
             }

@@ -1,12 +1,14 @@
-//! HCR (HarnessChangeRequest) worker and revalidation.
+//! HCR (HarnessChangeRequest) worker, evidence, settlement, and recovery.
 //!
-//! R2 adds atomic claim, trusted Run binding, and service-side revalidation
-//! for HCR execution. R3 will add settle logic; R4 will add final Feishu reply.
+//! R3A adds:
+//! - [`evidence::register_gate_evidence`] — durable gate evidence registration
+//! - [`settlement::settle_hcr`] — atomic settlement from persisted evidence
+//! - [`resume::determine_resume_state`] — evidence-based crash recovery
 //!
-//! This module provides:
-//! - [`revalidate::revalidate_hcr_context`] — server-side revalidation before
-//!   each privileged tool dispatch.
-//! - [`worker::execute_hcr`] — minimal HCR worker entry point.
+//! R2 provides worker entry point and claim/binding infrastructure.
 
+pub mod evidence;
+pub mod resume;
 pub mod revalidate;
+pub mod settlement;
 pub mod worker;

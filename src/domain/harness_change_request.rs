@@ -93,3 +93,99 @@ pub struct HcrRunBinding {
     pub run_id: String,
     pub created_at: String,
 }
+
+/// The kind of a trusted acceptance gate for HCR settlement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GateKind {
+    Scaffold,
+    Build,
+    TrustedTest,
+    TrustedSmoke,
+    Artifact,
+}
+
+impl GateKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            GateKind::Scaffold => "scaffold",
+            GateKind::Build => "build",
+            GateKind::TrustedTest => "trusted_test",
+            GateKind::TrustedSmoke => "trusted_smoke",
+            GateKind::Artifact => "artifact",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "scaffold" => Some(GateKind::Scaffold),
+            "build" => Some(GateKind::Build),
+            "trusted_test" => Some(GateKind::TrustedTest),
+            "trusted_smoke" => Some(GateKind::TrustedSmoke),
+            "artifact" => Some(GateKind::Artifact),
+            _ => None,
+        }
+    }
+
+    /// All required gates in execution order.
+    pub fn all_required() -> &'static [GateKind] {
+        &[
+            GateKind::Scaffold,
+            GateKind::Build,
+            GateKind::TrustedTest,
+            GateKind::TrustedSmoke,
+            GateKind::Artifact,
+        ]
+    }
+}
+
+/// Durable record of a single gate execution, bound to its receipt.
+/// Only created by the trusted `register_gate_evidence` entry point.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HcrGateEvidence {
+    pub evidence_id: String,
+    pub hcr_id: String,
+    pub claim_id: String,
+    pub run_id: String,
+    pub harness_id: String,
+    pub workspace_id: String,
+    pub gate_kind: String,
+    pub invocation_intent_id: String,
+    pub receipt_id: String,
+    pub operation: String,
+    pub execution_profile: String,
+    pub structured_status: String,
+    pub exit_code: i32,
+    pub timed_out: bool,
+    pub stdout_truncated: bool,
+    pub stderr_truncated: bool,
+    pub child_cleanup: Option<bool>,
+    pub error_code: Option<String>,
+    pub artifact_digest: Option<String>,
+    pub manifest_digest: Option<String>,
+    pub created_at: String,
+}
+
+/// A terminal settlement record for an HCR.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HcrSettlement {
+    pub settlement_id: String,
+    pub hcr_id: String,
+    pub claim_id: String,
+    pub run_id: String,
+    pub result: String,
+    pub error_code: Option<String>,
+    pub evidence_set_digest: String,
+    pub created_at: String,
+}
+
+/// Result of a settlement attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SettlementResult {
+    Succeeded,
+    CandidateFailed(String),
+    RetryableInfrastructureFailure(String),
+    AlreadySettled,
+    EvidenceIncomplete(String),
+    EvidenceConflict(String),
+}
