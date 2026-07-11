@@ -27,21 +27,77 @@ pub mod external {
     ];
 }
 
-/// The effective risk for a coding-harness operation based on its side effects.
-/// Read operations (list, read, status) are ReadOnly; write operations (write,
-/// exec, task_submit, propose) are Write. Non-coding operations default to
-/// ReadOnly for backward compatibility with other external harnesses.
-/// Returns the registry-level Risk type used in Snapshot operations.
-pub fn coding_operation_risk(name: &str) -> crate::registry::snapshot::Risk {
+/// Return the registry-level risk for a known coding-harness operation, or
+/// `None` for unknown / non-coding operations.
+///
+/// # Security (P0-A1)
+///
+/// Unknown operations **must not** receive a default `ReadOnly` risk —
+/// that would allow inline execution without gateway approval. Returning
+/// `None` forces callers to default to a safe fallback (e.g. `Write`),
+/// which requires explicit approval.
+pub fn coding_operation_risk(name: &str) -> Option<crate::registry::snapshot::Risk> {
     use crate::registry::snapshot::Risk as SnapshotRisk;
     match name {
         external::WORKSPACE_LIST | external::WORKSPACE_READ | external::TASK_STATUS => {
-            SnapshotRisk::ReadOnly
+            Some(SnapshotRisk::ReadOnly)
         }
         external::WORKSPACE_WRITE
         | external::WORKSPACE_EXEC
         | external::TASK_SUBMIT
-        | external::CAPABILITY_PROPOSE => SnapshotRisk::Write,
-        _ => SnapshotRisk::ReadOnly,
+        | external::CAPABILITY_PROPOSE => Some(SnapshotRisk::Write),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::registry::snapshot::Risk;
+
+    #[test]
+    fn known_read_operations_map_to_readonly() {
+        assert_eq!(
+            coding_operation_risk(external::WORKSPACE_LIST),
+            Some(Risk::ReadOnly)
+        );
+        assert_eq!(
+            coding_operation_risk(external::WORKSPACE_READ),
+            Some(Risk::ReadOnly)
+        );
+        assert_eq!(
+            coding_operation_risk(external::TASK_STATUS),
+            Some(Risk::ReadOnly)
+        );
+    }
+
+    #[test]
+    fn known_write_operations_map_to_write() {
+        assert_eq!(
+            coding_operation_risk(external::WORKSPACE_WRITE),
+            Some(Risk::Write)
+        );
+        assert_eq!(
+            coding_operation_risk(external::WORKSPACE_EXEC),
+            Some(Risk::Write)
+        );
+        assert_eq!(
+            coding_operation_risk(external::TASK_SUBMIT),
+            Some(Risk::Write)
+        );
+        assert_eq!(
+            coding_operation_risk(external::CAPABILITY_PROPOSE),
+            Some(Risk::Write)
+        );
+    }
+
+    /// P0-A1: unknown external operations must NOT default to ReadOnly.
+    #[test]
+    fn unknown_external_operation_is_not_readonly() {
+        assert!(coding_operation_risk("external.deploy_anything").is_none());
+        assert!(coding_operation_risk("external.write_file_via_new_name").is_none());
+        assert!(coding_operation_risk("external.hotload_probe").is_none());
+        // Completely unknown names also return None.
+        assert!(coding_operation_risk("does.not.exist").is_none());
     }
 }

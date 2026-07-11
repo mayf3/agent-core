@@ -215,6 +215,8 @@ fn north_star_e2e_capability_host() {
         kernel_api_url: kernel_url,
         capability_submit_token: "test-submit-token".to_string(),
         artifact_root: artifact_root.clone(),
+        hcr_profiles: std::collections::HashMap::new(),
+        hcr_token: String::new(),
     });
     thread::spawn(move || {
         coding_harness::server::serve(ch_listener, ch_config);

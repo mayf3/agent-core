@@ -56,6 +56,8 @@ impl HarnessServer {
             kernel_api_url: "http://127.0.0.1:1".into(),
             capability_submit_token: "test-token".into(),
             artifact_root: artifact_root.clone(),
+            hcr_profiles: std::collections::HashMap::new(),
+            hcr_token: String::new(),
         };
         let config = Arc::new(config);
         let shutdown = Arc::new(AtomicBool::new(false));

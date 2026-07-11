@@ -6,9 +6,13 @@ use uuid::Uuid;
 
 pub mod capability_change;
 pub mod coding_operations;
+pub mod context_block;
+pub mod harness_change_request;
 pub mod operation;
 pub mod retry;
 pub mod status;
+pub use context_block::*;
+pub use harness_change_request::*;
 pub use operation::*;
 pub use retry::*;
 pub use status::*;
@@ -107,6 +111,34 @@ pub struct CapabilityGrant {
     pub scope: String,
 }
 
+/// The execution mode of a Run. Determines which operations, workspace, and
+/// validation rules apply. Only the internal trusted constructor can set Hcr;
+/// external creation paths always produce Default.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RunMode {
+    /// A normal user-initiated Run (CLI or Feishu chat). Standard grants and
+    /// policy apply.
+    Default,
+    /// An HCR-bound Run, created by the internal worker after a successful
+    /// atomic claim. The fields are loaded from the persisted claim record
+    /// and are NOT accepted from external input.
+    Hcr {
+        /// The HarnessChangeRequest id this Run is bound to.
+        hcr_id: String,
+        /// The harness id the HCR is creating/changing.
+        harness_id: String,
+        /// The claim id that claimed this HCR for execution.
+        claim_id: String,
+    },
+}
+
+impl Default for RunMode {
+    fn default() -> Self {
+        RunMode::Default
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Run {
     pub id: RunId,
@@ -124,6 +156,11 @@ pub struct Run {
     /// Non-empty for all new Runs; old Runs are backfilled at boot.
     #[serde(default)]
     pub registry_snapshot_id: String,
+    /// The execution mode of this Run. Default for ordinary Runs; Hcr for
+    /// HCR-bound Runs. Modes carry mode-specific validation rules.
+    /// External creation paths always produce Default.
+    #[serde(default)]
+    pub mode: RunMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -212,39 +249,6 @@ pub enum RuntimeEventPayload {
         message_id: Option<String>,
         chat_id: Option<String>,
     },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ContextBlock {
-    pub kind: ContextBlockKind,
-    pub content: String,
-    pub compressibility: Compressibility,
-    pub source_ref: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum ContextBlockKind {
-    RootSystem,
-    RuntimeContract,
-    AgentProfile,
-    SkillCatalog,
-    ToolCatalog,
-    ToolResult,
-    ActiveSkill,
-    RecentMessages,
-    /// Context fragment injected by external hooks (context.prepare.v0).
-    /// Placed before UserMessage — never enters the immutable system prompt.
-    /// The Kernel does not interpret the fragment's product-layer semantics.
-    HookFragment,
-    UserMessage,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum Compressibility {
-    Never,
-    DropWhole,
-    Summarizable,
-    Truncate,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -467,6 +471,12 @@ pub enum JournalEventKind {
     CapabilityChangeActivated,
     CapabilityChangeActivationFailed,
     CapabilityChangeExpired,
+    /// External operation grant lifecycle events.
+    /// payload: `grant_id`, `operation`, `grantee_principal_id`, `channel`,
+    ///          `scope`, `risk`, `snapshot_id`
+    ExternalOperationGranted,
+    /// payload: `grant_id`, `operation`
+    ExternalOperationRevoked,
     /// Sentinel produced by `parse_kind`/`row_to_event` when the stored
     /// `kind` text does not match any known variant. The kernel never writes
     /// `Unknown` — observing it at read time indicates either external
@@ -477,6 +487,23 @@ pub enum JournalEventKind {
     /// flags the row as corrupt since the re-serialized string won't match.
     /// See HANDOVER §10.
     Unknown,
+    /// A HarnessChangeRequest was received, authorized, validated, and persisted.
+    /// payload: `request_id`, `source`, `source_message_id`, `harness_id`, `requirement`,
+    ///          `principal_id`, `channel`, `chat_type`, `session_id`, `status`
+    /// correlation_id: request_id
+    HarnessChangeRequested,
+    /// An HCR was successfully claimed by a worker. The first stateful action.
+    /// payload: `claim_id`, `hcr_id`, `harness_id`, `worker_instance_id`, `claimed_at`
+    /// correlation_id: claim_id
+    HcrClaimSucceeded,
+    /// An HCR claim was rejected (already claimed, wrong status, etc.).
+    /// payload: `hcr_id`, `reason`
+    /// correlation_id: hcr_id
+    HcrClaimRejected,
+    /// An HCR-bound Run was created or resumed after a successful claim.
+    /// payload: `claim_id`, `hcr_id`, `run_id`, `is_resume`
+    /// correlation_id: claim_id
+    HcrRunCreated,
     /// The Run exhausted its configured tool-round budget. The Run completes
     /// normally so the reply is delivered, but the user must start a new Run
     /// to continue. payload: `run_id`, `tool_rounds_used`, `max_tool_rounds`

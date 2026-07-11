@@ -6,6 +6,7 @@ mod capability_http;
 pub mod capability_routes;
 mod delivery;
 mod dispatcher_metrics;
+mod harness_change_request;
 pub mod harness_routes;
 use anyhow::{bail, Result};
 #[cfg(test)]
@@ -179,22 +180,25 @@ fn handle_connection(
         handle_approval_decision(stream, &gateway, &journal, &request, false)
     } else if path == "/v1/harness/register" {
         let body: Value = serde_json::from_slice(&request.body)?;
-        handle_harness_result(
+        harness_routes::handle_harness_result(
             stream,
             harness_routes::handle_register(&gateway, &journal, &body),
         )
     } else if path == "/v1/harness/enable" {
         let body: Value = serde_json::from_slice(&request.body)?;
-        handle_harness_result(
+        harness_routes::handle_harness_result(
             stream,
             harness_routes::handle_enable(&gateway, &journal, &body),
         )
     } else if path == "/v1/harness/disable" {
         let body: Value = serde_json::from_slice(&request.body)?;
-        handle_harness_result(
+        harness_routes::handle_harness_result(
             stream,
             harness_routes::handle_disable(&gateway, &journal, &body),
         )
+    } else if path == "/v1/harness-change-requests" {
+        let body: Value = serde_json::from_slice(&request.body)?;
+        harness_change_request::handle_http(stream, &journal, &gateway, config, &body)
     } else {
         write_json(stream, 404, json!({ "ok": false, "error": "not_found" }))
     }
@@ -273,38 +277,6 @@ fn handle_approval_decision(
             "decision": if approved { "approved" } else { "denied" },
         }),
     )
-}
-fn handle_harness_result(stream: &mut TcpStream, result: Result<String>) -> Result<()> {
-    match result {
-        Ok(body) => write_json(stream, 200, serde_json::from_str(&body)?),
-        Err(e) => {
-            // Prefer typed HarnessRouteError via downcast, fall back to
-            // stable string matching for errors that still carry the old
-            // prefix convention (e.g. manifest compute_manifest_id).
-            let (status, safe_msg) =
-                if let Some(hr_err) = e.downcast_ref::<harness_routes::HarnessRouteError>() {
-                    (hr_err.http_status(), hr_err.safe_error())
-                } else {
-                    let msg = e.to_string();
-                    if msg.starts_with("invalid_manifest") || msg.starts_with("invalid_request") {
-                        (400, "invalid_request")
-                    } else if msg.starts_with("unauthorized") {
-                        (401, "unauthorized")
-                    } else if msg.starts_with("manifest_not_found") {
-                        (404, "not_found")
-                    } else if msg.starts_with("snapshot_conflict")
-                        || msg.starts_with("operation_conflict")
-                    {
-                        (409, "conflict")
-                    } else if msg.starts_with("invalid_") {
-                        (400, "invalid_request")
-                    } else {
-                        (500, "internal_error")
-                    }
-                };
-            write_json(stream, status, json!({ "ok": false, "error": safe_msg }))
-        }
-    }
 }
 pub fn health_snapshot(
     journal: &JournalStore,
@@ -434,7 +406,7 @@ fn parse_request(buffer: &[u8]) -> Result<HttpRequest> {
         body: buffer[header_end + 4..].to_vec(),
     })
 }
-fn write_json(stream: &mut TcpStream, status: u16, body: Value) -> Result<()> {
+pub(crate) fn write_json(stream: &mut TcpStream, status: u16, body: Value) -> Result<()> {
     let reason = match status {
         200 => "OK",
         401 => "Unauthorized",

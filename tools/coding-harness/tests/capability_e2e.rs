@@ -100,6 +100,8 @@ fn start_basic_harness() -> HarnessServer {
         kernel_api_url: "http://127.0.0.1:1".into(),
         capability_submit_token: "test-token".into(),
         artifact_root: artifact_root.clone(),
+        hcr_profiles: std::collections::HashMap::new(),
+        hcr_token: String::new(),
     };
     let config = Arc::new(config);
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -295,6 +297,8 @@ fn capability_proposal_success_over_real_tcp() {
         kernel_api_url: kernel_url,
         capability_submit_token: submit_token.clone(),
         artifact_root: artifact_root.clone(),
+        hcr_profiles: std::collections::HashMap::new(),
+        hcr_token: String::new(),
     };
 
     let config = Arc::new(config);

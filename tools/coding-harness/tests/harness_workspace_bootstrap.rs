@@ -76,6 +76,8 @@ impl HarnessDevServer {
             kernel_api_url: format!("http://127.0.0.1:{}", port as u32 + 1000),
             capability_submit_token: "test-submit-token".into(),
             artifact_root: artifact_root.clone(),
+            hcr_profiles: std::collections::HashMap::new(),
+            hcr_token: String::new(),
         };
 
         let config = Arc::new(coding_config);
@@ -98,8 +100,7 @@ impl HarnessDevServer {
                     if std::time::Instant::now() >= deadline {
                         panic!(
                             "server did not become ready within 2s on port {}: {}",
-                            port,
-                            e
+                            port, e
                         );
                     }
                     std::thread::sleep(Duration::from_millis(20));

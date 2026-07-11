@@ -83,6 +83,7 @@ fn gateway_rejects_stdout_target_mismatch() -> Result<()> {
         created_at: Utc::now(),
         updated_at: Utc::now(),
         registry_snapshot_id: String::new(),
+        mode: RunMode::Default,
     };
     let intent = InvocationIntent {
         invocation_id: InvocationId::new(),
@@ -149,6 +150,7 @@ fn journal_recovery_marks_unknown_invocations() -> Result<()> {
         created_at: Utc::now(),
         updated_at: Utc::now(),
         registry_snapshot_id: String::new(),
+        mode: RunMode::Default,
     };
     journal.insert_run(&run)?;
     journal.append_event(

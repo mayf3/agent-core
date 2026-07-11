@@ -393,6 +393,7 @@ fn duplicate_failure_reply_not_enqueued_twice() {
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
         registry_snapshot_id: String::new(),
+        mode: RunMode::Default,
     };
     journal.insert_run(&run).unwrap();
     let session = Session {

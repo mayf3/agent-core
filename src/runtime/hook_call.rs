@@ -154,7 +154,7 @@ impl<L: crate::llm::LlmClient + 'static> super::Runtime<L> {
         let snapshot = journal
             .load_registry_snapshot(&snapshot_id)
             .map_err(|e| anyhow::anyhow!("registry_snapshot_unavailable: {e}"))?;
-        let run = self.create_run(&session, &event, &snapshot_id, &snapshot);
+        let run = self.create_run(journal, &session, &event, &snapshot_id, &snapshot);
         journal.insert_run(&run)?;
         journal.append_event(JournalEventKind::RunStarted, Some(&run.id), Some(&session.id),
             Some(&event.event_id.0), json!({"run_id": run.id.0, "trigger_event_id": run.trigger_event_id.0, "principal_id": run.principal.principal_id.0}))?;
@@ -207,6 +207,7 @@ impl<L: crate::llm::LlmClient + 'static> super::Runtime<L> {
 
     pub(crate) fn create_run(
         &self,
+        journal: &JournalStore,
         session: &Session,
         event: &ValidatedEvent,
         snapshot_id: &str,
@@ -216,6 +217,43 @@ impl<L: crate::llm::LlmClient + 'static> super::Runtime<L> {
         let mut principal = event.principal.clone();
         let is_owner = self.is_coding_owner(&principal, event.chat_type.as_deref());
         super::coding_grants::augment_grants(&mut principal, snapshot, is_owner);
+
+        // Load explicit external operation grants from the journal.
+        // These grants are persisted in external_operation_grants via
+        // JournalStore::create_external_operation_grant and are separate
+        // from channel-default grants and owner coding grants.
+        //
+        // conversation_kind is derived from event.chat_type and the session
+        // channel to distinguish Feishu private/p2p from group chat.
+        // Fail-closed: unrecognized combinations map to "" which matches
+        // no grant (conversation_kind has CHECK constraint p2p/group/cli).
+        let conversation_kind = match (&session.channel, event.chat_type.as_deref()) {
+            (ChannelKind::Cli, _) => "cli",
+            (ChannelKind::Feishu, Some("p2p")) => "p2p",
+            (ChannelKind::Feishu, Some("group")) => "group",
+            _ => "",
+        };
+        if let Ok(explicit_grants) = journal.load_active_external_operation_grants(
+            &principal.principal_id.0,
+            &format!("{:?}", session.channel),
+            conversation_kind,
+            "principal_channel",
+            snapshot_id,
+        ) {
+            for g in explicit_grants {
+                if !principal
+                    .grants
+                    .iter()
+                    .any(|gr| gr.operation == g.operation)
+                {
+                    principal.grants.push(CapabilityGrant {
+                        operation: g.operation,
+                        scope: g.scope,
+                    });
+                }
+            }
+        }
+
         Run {
             id: RunId::new(),
             session_id: session.id.clone(),
@@ -228,6 +266,7 @@ impl<L: crate::llm::LlmClient + 'static> super::Runtime<L> {
             created_at: now,
             updated_at: now,
             registry_snapshot_id: snapshot_id.to_string(),
+            mode: RunMode::Default,
         }
     }
 

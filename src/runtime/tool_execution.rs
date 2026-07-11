@@ -411,6 +411,47 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
         ) {
             return Ok(fatal);
         }
+
+        // HCR mode: per-dispatch revalidation (principal, channel,
+        // conversation, owner, HCR state, claim, harness, workspace) +
+        // operation allowlist + workspace validation.
+        if matches!(run.mode, RunMode::Hcr { .. }) {
+            let is_owner =
+                super::coding_grants::is_coding_owner(&self.config, &run.principal, Some("p2p"));
+            if let Err(_) = crate::hcr::revalidate::revalidate_hcr_dispatch_context(
+                journal, run, session, is_owner,
+            ) {
+                return Ok(rejected_result(
+                    crate::gateway::ToolRejection::PolicyDenied,
+                    None,
+                ));
+            }
+            if !crate::runtime::coding_grants::is_hcr_allowed_operation(
+                &approved.intent().operation,
+            ) {
+                return Ok(rejected_result(
+                    crate::gateway::ToolRejection::OperationNotAllowed,
+                    None,
+                ));
+            }
+            // Validate workspace_id for workspace operations.
+            if approved.intent().operation != crate::domain::operation::external::WORKSPACE_LIST {
+                if let Some(ws_id) = approved
+                    .intent()
+                    .arguments
+                    .get("workspace_id")
+                    .and_then(|v| v.as_str())
+                {
+                    if let Err(_) = crate::hcr::revalidate::validate_hcr_workspace(ws_id) {
+                        return Ok(rejected_result(
+                            crate::gateway::ToolRejection::InvalidArguments,
+                            None,
+                        ));
+                    }
+                }
+            }
+        }
+
         return Ok(dispatch_builtin_binding(
             spec,
             &approved,
