@@ -64,6 +64,7 @@ fn approved_for_run(
             created_at: Utc::now(),
             updated_at: Utc::now(),
             registry_snapshot_id: String::new(),
+            mode: RunMode::Default,
         },
         &Session {
             id: session_id.clone(),
@@ -98,6 +99,7 @@ fn seed_pending_outbox(
         created_at: Utc::now(),
         updated_at: Utc::now(),
         registry_snapshot_id: String::new(),
+        mode: RunMode::Default,
     };
     journal.insert_run(&run)?;
 
@@ -257,6 +259,7 @@ fn terminal_states_are_not_leased_by_dispatcher() -> Result<()> {
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
                 registry_snapshot_id: String::new(),
+                mode: RunMode::Default,
             };
             journal.insert_run(&run)?;
             let config = common::test_config();
@@ -340,6 +343,7 @@ fn terminal_transition_guard_rejects_non_dispatching_state() -> Result<()> {
         created_at: Utc::now(),
         updated_at: Utc::now(),
         registry_snapshot_id: String::new(),
+        mode: RunMode::Default,
     };
     journal.insert_run(&run)?;
     let config = common::test_config();

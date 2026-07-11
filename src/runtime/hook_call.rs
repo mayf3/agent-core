@@ -266,6 +266,7 @@ impl<L: crate::llm::LlmClient + 'static> super::Runtime<L> {
             created_at: now,
             updated_at: now,
             registry_snapshot_id: snapshot_id.to_string(),
+            mode: RunMode::Default,
         }
     }
 

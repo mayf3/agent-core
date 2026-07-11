@@ -293,6 +293,7 @@ impl JournalStore {
             updated_at: chrono::DateTime::parse_from_rfc3339(&updated_at)?
                 .with_timezone(&chrono::Utc),
             registry_snapshot_id: registry_snapshot_id.unwrap_or_default(),
+            mode: RunMode::Default,
         }))
     }
 

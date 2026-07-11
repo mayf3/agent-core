@@ -110,6 +110,7 @@ fn feishu_dispatch_success_records_assistant_reply_delivered() -> Result<()> {
         created_at: Utc::now(),
         updated_at: Utc::now(),
         registry_snapshot_id: String::new(),
+        mode: RunMode::Default,
     };
     j.insert_run(&run)?;
     let ap=g.approve_invocation(InvocationIntent{invocation_id:InvocationId("reply:rf".into()),run_id:RunId("rf".into()),operation:"feishu.send_message".into(),arguments:json!({"text":"feishu reply","session_id":sid.0,"message_id":"m1","chat_id":"oc1"}),idempotency_key:None},&run,&sess,&snap)?;

@@ -40,4 +40,8 @@ mod grant_ops_tests;
 #[path = "tests/grant_ops_lifecycle.rs"]
 mod grant_ops_lifecycle_tests;
 
+#[cfg(test)]
+#[path = "tests/hcr_claim.rs"]
+mod hcr_claim_tests;
+
 pub use sqlite::JournalStore;

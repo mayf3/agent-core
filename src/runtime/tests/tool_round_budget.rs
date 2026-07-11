@@ -166,6 +166,7 @@ fn run_with_budget(
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
         registry_snapshot_id: snapshot.snapshot_id.clone(),
+        mode: RunMode::Default,
     };
     journal.insert_run(&run).unwrap();
     let session = Session {

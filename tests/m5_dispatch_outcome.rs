@@ -28,6 +28,7 @@ fn seed_run(journal: &JournalStore) -> Result<(RunId, SessionId)> {
         created_at: Utc::now(),
         updated_at: Utc::now(),
         registry_snapshot_id: String::new(),
+        mode: RunMode::Default,
     };
     journal.insert_run(&run)?;
     Ok((run_id, session_id))
@@ -64,6 +65,7 @@ fn approved_for_run(
             created_at: Utc::now(),
             updated_at: Utc::now(),
             registry_snapshot_id: String::new(),
+            mode: RunMode::Default,
         },
         &Session {
             id: session_id.clone(),
