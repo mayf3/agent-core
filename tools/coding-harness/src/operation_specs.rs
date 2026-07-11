@@ -292,6 +292,50 @@ pub fn all_specs(workspace_ids: &[String]) -> Vec<OperationSpec> {
                 "required": ["proposal_id", "status"],
             }),
         },
+        OperationSpec {
+            operation_name: "external.coding_hcr_exec",
+            description: "在 HCR 安全执行 profile 下执行受控命令。不使用 shell，命令由 HCR profile 定义。需要有效的 HCR token。",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "workspace_id": ws,
+                    "hcr_profile_id": {
+                        "type": "string",
+                        "description": "HCR 执行 profile 的 ID（例如 hcr-v0）。profile 必须已在 CODING_CONFIG 中配置。"
+                    },
+                    "hcr_token": {
+                        "type": "string",
+                        "description": "HCR 认证 token，用于验证调用方有权使用 HCR profile。"
+                    },
+                    "command": {
+                        "type": "string",
+                        "description": "HCR profile 中定义的命令名称（例如 node_test、harness_local_smoke）。"
+                    },
+                    "params": {
+                        "type": "object",
+                        "description": "命令参数，key-value 键值对。键对应于命令模板中的参数名。",
+                        "additionalProperties": true
+                    }
+                },
+                "required": ["workspace_id", "hcr_profile_id", "hcr_token", "command"],
+                "additionalProperties": false
+            }),
+            output_schema: json!({
+                "type": "object",
+                "properties": {
+                    "status": {"type": "string"},
+                    "exit_code": {"type": "integer"},
+                    "timed_out": {"type": "boolean"},
+                    "stdout": {"type": "string"},
+                    "stderr": {"type": "string"},
+                    "stdout_truncated": {"type": "boolean"},
+                    "stderr_truncated": {"type": "boolean"},
+                    "child_cleanup": {"type": "string"},
+                    "error_code": {"type": "string"}
+                },
+                "required": ["status", "exit_code", "timed_out", "child_cleanup"],
+            }),
+        },
     ]
 }
 

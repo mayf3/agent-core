@@ -12,8 +12,8 @@ fn coding_manifests_are_deterministic_and_unique() {
     let ws = vec!["agent-dev".to_string()];
     let m1 = operation_specs::build_manifests(&ws, ep, ad);
     let m2 = operation_specs::build_manifests(&ws, ep, ad);
-    assert_eq!(m1.len(), 7);
-    for i in 0..7 {
+    assert_eq!(m1.len(), 8);
+    for i in 0..8 {
         assert_eq!(
             m1[i].manifest_id, m2[i].manifest_id,
             "deterministic: {}",
