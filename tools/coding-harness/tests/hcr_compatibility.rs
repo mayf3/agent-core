@@ -129,7 +129,7 @@ fn unsupported_platform_fails_closed() {
 
     let detected = SandboxBackend::detect();
     match detected {
-        SandboxBackend::MacOSSandboxExec | SandboxBackend::LinuxBubblewrap => {
+        SandboxBackend::LinuxBubblewrap => {
             eprintln!("Sandbox backend available: {:?}", detected);
         }
         SandboxBackend::Unavailable => {
