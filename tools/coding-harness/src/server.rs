@@ -163,7 +163,8 @@ fn dispatch(config: &CodingConfig, operation: &str, args: &Value) -> Value {
             Some(r) => {
                 let perm = config.perm_for(id).unwrap();
                 let needs_exec = operation == "external.coding_workspace_exec"
-                    || operation == "external.coding_task_submit";
+                    || operation == "external.coding_task_submit"
+                    || operation == "external.coding_hcr_exec";
                 let needs_write = operation == "external.coding_workspace_write";
                 if needs_exec && !perm.exec {
                     return err_value("exec_not_permitted");
