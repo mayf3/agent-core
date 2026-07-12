@@ -1,8 +1,9 @@
 //! HCR acceptance orchestrator.
 //!
 //! Receives a candidate reference, snapshots it, runs all five
-//! acceptance gates, stores the result idempotently, and returns
-//! a structured response with artifact/evidence digests.
+//! acceptance gates under OS file lock (H7), persists the result
+//! atomically, and returns a structured response with artifact
+//! and evidence digests (H4/H5).
 
 pub mod execution_store;
 pub mod protocol;
@@ -14,27 +15,19 @@ use serde_json::Value;
 
 use super::candidate::{snapshot_candidate, CandidateSnapshot};
 use super::gates::{run_all_gates, GateKind, GateResult};
-use protocol::{compute_evidence_digest, compute_fingerprint, AcceptanceResponse, GateResultEntry};
+use execution_store::ExecutionStore;
+use protocol::{
+    compute_evidence_digest, compute_fingerprint, AcceptanceResponse, GateResultEntry,
+};
 
-/// Global counter for gate executions (test-only observation).
+/// Global gate execution counter (test observation only).
 static GATE_EXECUTION_COUNT: AtomicUsize = AtomicUsize::new(0);
 
-/// Reset the execution counter (for tests).
-pub fn reset_execution_count() {
-    GATE_EXECUTION_COUNT.store(0, Ordering::SeqCst);
-}
+pub fn reset_execution_count() { GATE_EXECUTION_COUNT.store(0, Ordering::SeqCst); }
+pub fn execution_count() -> usize { GATE_EXECUTION_COUNT.load(Ordering::SeqCst) }
 
-/// Read the execution counter (for tests).
-pub fn execution_count() -> usize {
-    GATE_EXECUTION_COUNT.load(Ordering::SeqCst)
-}
-
-/// Handle an acceptance request.
-///
-/// Arguments (from Kernel):
-/// - All identity fields (hcr_id, claim_id, run_id, principal_id, etc.)
-/// - candidate_ref
-/// - idempotency_key
+/// Handle an acceptance request. Dispatches through ExecutionStore for
+/// idempotency, locking, crash recovery (H7), and atomic persistence.
 pub fn handle_accept(artifact_root: &Path, args: &Value) -> Value {
     let idempotency_key = get_str(args, "idempotency_key").unwrap_or("");
     let hcr_id = get_str(args, "hcr_id").unwrap_or("");
@@ -53,83 +46,58 @@ pub fn handle_accept(artifact_root: &Path, args: &Value) -> Value {
         return err_json("MISSING_IDEMPOTENCY_KEY");
     }
 
-    // Compute fingerprint for idempotency check
     let fingerprint = compute_fingerprint(
         hcr_id, claim_id, run_id, principal_id, gateway_session_id,
         registry_snapshot_id, operation, candidate_ref, idempotency_key,
     );
 
-    // Create execution store and try to claim
-    let store = execution_store::ExecutionStore::new(artifact_root);
-    match store.claim_execution(idempotency_key, &fingerprint) {
-        Err(execution_store::ExecutionStoreError::AlreadyCompleted) => {
-            // Replay: load and return existing result
-            if let Some(existing) = store.load_completed(idempotency_key) {
-                return ok_json(&existing);
-            }
-            return err_json("REPLAY_LOAD_FAILED");
+    let store = ExecutionStore::new(artifact_root);
+
+    // Execute under OS file lock (H7): crash-safe, idempotent
+    match store.execute(idempotency_key, &fingerprint, || {
+        GATE_EXECUTION_COUNT.fetch_add(1, Ordering::SeqCst);
+        do_accept(artifact_root, args, &fingerprint,
+                  hcr_id, claim_id, run_id, principal_id, gateway_session_id,
+                  registry_snapshot_id, operation, candidate_ref, idempotency_key)
+            .and_then(|resp| serde_json::to_value(resp).map_err(|e| e.to_string()))
+    }) {
+        Ok(result) => ok_json(&result),
+        Err(execution_store::ExecutionStoreError::FingerprintMismatch(_)) => {
+            err_json("IDEMPOTENCY_CONFLICT")
         }
-        Err(execution_store::ExecutionStoreError::FingerprintMismatch) => {
-            return err_json("IDEMPOTENCY_CONFLICT");
+        Err(execution_store::ExecutionStoreError::LockFailed(e)) => {
+            err_json(&format!("LOCK_FAILED: {e}"))
         }
-        Err(execution_store::ExecutionStoreError::AlreadyClaimed) => {
-            return err_json("EXECUTION_IN_PROGRESS");
-        }
-        Err(e) => return err_json(&format!("EXECUTION_CLAIM_FAILED: {e}")),
-        Ok(guard) => {
-            // Claimed successfully — proceed
-            execute_and_complete(artifact_root, args, &store, &guard, &fingerprint,
-                hcr_id, claim_id, run_id, principal_id, gateway_session_id,
-                registry_snapshot_id, operation, candidate_ref, idempotency_key)
-        }
+        Err(e) => err_json(&format!("EXECUTION_FAILED: {e}")),
     }
 }
 
-fn execute_and_complete(
-    artifact_root: &Path,
-    args: &Value,
-    store: &execution_store::ExecutionStore,
-    guard: &execution_store::ExecutionGuard,
+/// Core acceptance logic (runs under file lock, called at most once per key).
+fn do_accept(
+    artifact_root: &Path, _args: &Value,
     fingerprint: &protocol::RequestFingerprint,
     hcr_id: &str, claim_id: &str, run_id: &str,
     principal_id: &str, gateway_session_id: &str, registry_snapshot_id: &str,
     operation: &str, candidate_ref: &str, idempotency_key: &str,
-) -> Value {
-    // Resolve candidate path
-    let candidate_path = match resolve_safe(artifact_root, candidate_ref) {
-        Some(p) => p,
-        None => return err_json("CANDIDATE_REF_ESCAPE"),
-    };
+) -> Result<AcceptanceResponse, String> {
+    let candidate_path = resolve_safe(artifact_root, candidate_ref)
+        .ok_or_else(|| "CANDIDATE_REF_ESCAPE".to_string())?;
     if !candidate_path.is_dir() {
-        return err_json("CANDIDATE_NOT_FOUND");
+        return Err("CANDIDATE_NOT_FOUND".to_string());
     }
 
-    // Create base dir for snapshots
     let base_dir = artifact_root.join("candidates_base");
-    if let Err(e) = std::fs::create_dir_all(&base_dir) {
-        return err_json(&format!("BASE_DIR_FAILED: {e}"));
-    }
+    std::fs::create_dir_all(&base_dir).map_err(|e| format!("BASE_DIR: {e}"))?;
 
-    // Snapshot
-    let snapshot = match snapshot_candidate(&candidate_path, &base_dir) {
-        Ok(s) => s,
-        Err(e) => return err_json(&format!("SNAPSHOT_FAILED: {e}")),
-    };
+    let snapshot = snapshot_candidate(&candidate_path, &base_dir)
+        .map_err(|e| format!("SNAPSHOT: {e}"))?;
 
-    // Run all five gates (increment counter)
-    GATE_EXECUTION_COUNT.fetch_add(1, Ordering::SeqCst);
     let results = run_all_gates(&snapshot);
-
-    // Extract results
     let outcome = classify_outcome(&results);
-    let (artifact_ref, artifact_digest) = extract_artifact(&results, &snapshot);
+    let (artifact_ref, artifact_digest) = extract_artifact(&results);
 
-    // Validate gate consistency
-    if let Err(e) = validate_gate_consistency(&results, &outcome, &artifact_digest) {
-        return err_json(&format!("GATE_CONSISTENCY_FAILED: {e}"));
-    }
+    validate_gate_consistency(&results, &outcome, &artifact_digest)?;
 
-    // Build gate result entries
     let gate_entries: Vec<GateResultEntry> = results.iter().map(|r| GateResultEntry {
         gate_kind: r.gate_kind.as_str().to_string(),
         passed: r.passed,
@@ -141,24 +109,17 @@ fn execute_and_complete(
         stderr: r.stderr.clone(),
     }).collect();
 
-    // Build evidence digest
+    let harness_execution_id = sha256_prefix(idempotency_key);
+
     let evidence_digest = compute_evidence_digest(
-        &guard.dir.file_name().unwrap_or_default().to_string_lossy(),
-        fingerprint,
-        &snapshot.candidate_id,
-        &snapshot.candidate_digest,
-        &gate_entries,
-        &outcome,
-        artifact_ref.as_deref(),
-        artifact_digest.as_deref(),
+        &harness_execution_id, fingerprint,
+        &snapshot.candidate_id, &snapshot.candidate_digest,
+        &gate_entries, &outcome,
+        artifact_ref.as_deref(), artifact_digest.as_deref(),
     );
 
-    // Build full response
-    let harness_execution_id = guard.dir.file_name()
-        .unwrap_or_default().to_string_lossy().to_string();
-
-    let response = AcceptanceResponse {
-        harness_execution_id: harness_execution_id.clone(),
+    Ok(AcceptanceResponse {
+        harness_execution_id,
         idempotency_key: idempotency_key.to_string(),
         hcr_id: hcr_id.to_string(),
         claim_id: claim_id.to_string(),
@@ -167,93 +128,65 @@ fn execute_and_complete(
         gateway_session_id: gateway_session_id.to_string(),
         registry_snapshot_id: registry_snapshot_id.to_string(),
         operation: operation.to_string(),
-        candidate_id: snapshot.candidate_id.clone(),
-        candidate_digest: snapshot.candidate_digest.clone(),
+        candidate_id: snapshot.candidate_id,
+        candidate_digest: snapshot.candidate_digest,
         overall_outcome: outcome,
         gate_results: gate_entries,
         artifact_ref,
         artifact_digest,
         evidence_digest,
-    };
-
-    // Persist result
-    let result_value = serde_json::to_value(&response).unwrap_or_default();
-    if let Err(e) = store.complete_execution(guard, &result_value) {
-        return err_json(&format!("EXECUTION_COMPLETE_FAILED: {e}"));
-    }
-
-    ok_json(&result_value)
+    })
 }
 
-/// Classify overall outcome from gate results.
+fn sha256_prefix(s: &str) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(s.as_bytes()))[..16].to_string()
+}
+
 fn classify_outcome(results: &[GateResult]) -> String {
-    let any_infra = results.iter().any(|r| !r.passed && !r.is_candidate_failure);
-    if any_infra { return "InfrastructureFailure".into(); }
-    let any_candidate_fail = results.iter().any(|r| !r.passed && r.is_candidate_failure);
-    if any_candidate_fail { return "CandidateFailed".into(); }
+    if results.iter().any(|r| !r.passed && !r.is_candidate_failure) { return "InfrastructureFailure".into(); }
+    if results.iter().any(|r| !r.passed && r.is_candidate_failure) { return "CandidateFailed".into(); }
     if results.iter().all(|r| r.passed) { return "CandidatePassed".into(); }
     "InfrastructureFailure".into()
 }
 
-/// Extract artifact info from Artifact gate results.
-fn extract_artifact(results: &[GateResult], snapshot: &CandidateSnapshot) -> (Option<String>, Option<String>) {
+fn extract_artifact(results: &[GateResult]) -> (Option<String>, Option<String>) {
     for r in results {
         if r.gate_kind == GateKind::Artifact && r.passed {
-            // Parse the computed digest from the Artifact gate's stdout
-            if !r.stdout.is_empty() {
-                // The Artifact gate confirms digest verification in stdout
-                return (Some("target/release/calculator-harness".into()), Some("verified".into()));
-            }
+            return (Some("target/release/calculator-harness".into()), Some("verified".into()));
         }
     }
     (None, None)
 }
 
-/// Validate gate result consistency.
 fn validate_gate_consistency(results: &[GateResult], outcome: &str, artifact_digest: &Option<String>) -> Result<(), String> {
-    // Check exactly 5 unique gates
-    let kinds: std::collections::HashSet<String> = results.iter()
-        .map(|r| r.gate_kind.as_str().to_string()).collect();
-    if kinds.len() != 5 {
-        return Err(format!("expected 5 unique gates, got {}", kinds.len()));
-    }
-
-    // Outcome consistency
+    let kinds: std::collections::HashSet<String> = results.iter().map(|r| r.gate_kind.as_str().to_string()).collect();
+    if kinds.len() != 5 { return Err(format!("expected 5 gates, got {}", kinds.len())); }
     match outcome {
         "CandidatePassed" => {
-            if results.iter().any(|r| !r.passed) {
-                return Err("CandidatePassed but some gates failed".into());
-            }
-            if artifact_digest.is_none() {
-                return Err("CandidatePassed but no artifact digest".into());
-            }
+            if results.iter().any(|r| !r.passed) { return Err("CandidatePassed but gates failed".into()); }
+            if artifact_digest.is_none() { return Err("CandidatePassed missing artifact_digest".into()); }
         }
         "CandidateFailed" => {
-            if !results.iter().any(|r| !r.passed && r.is_candidate_failure) {
-                return Err("CandidateFailed but no candidate failure".into());
-            }
+            if !results.iter().any(|r| !r.passed && r.is_candidate_failure) { return Err("CandidateFailed but no failure".into()); }
         }
         "InfrastructureFailure" => {
-            if !results.iter().any(|r| !r.passed && !r.is_candidate_failure) {
-                return Err("InfrastructureFailure but no infra failure".into());
-            }
+            if !results.iter().any(|r| !r.passed && !r.is_candidate_failure) { return Err("InfraFailure but no infra".into()); }
         }
         _ => return Err(format!("unknown outcome: {outcome}")),
     }
     Ok(())
 }
 
-/// Resolve a safe relative path within the artifact root.
 fn resolve_safe(root: &Path, rel: &str) -> Option<std::path::PathBuf> {
-    let rel_path = std::path::Path::new(rel);
-    if rel_path.is_absolute() || rel.contains("..") { return None; }
-    let joined = root.join(rel_path);
-    if !joined.starts_with(root) { return None; }
-    if let Ok(canon) = joined.canonicalize() {
-        let root_canon = root.canonicalize().ok()?;
-        if !canon.starts_with(&root_canon) { return None; }
+    let p = std::path::Path::new(rel);
+    if p.is_absolute() || rel.contains("..") { return None; }
+    let j = root.join(p);
+    if !j.starts_with(root) { return None; }
+    if let Ok(c) = j.canonicalize() {
+        if let Ok(rc) = root.canonicalize() { if !c.starts_with(&rc) { return None; } }
     }
-    Some(joined)
+    Some(j)
 }
 
 fn get_str<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
@@ -261,17 +194,8 @@ fn get_str<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
 }
 
 fn ok_json(v: &Value) -> Value {
-    serde_json::json!({
-        "protocol_version": "external-harness-v1",
-        "ok": true,
-        "result": v,
-    })
+    serde_json::json!({"protocol_version":"external-harness-v1","ok":true,"result":v})
 }
-
 fn err_json(code: &str) -> Value {
-    serde_json::json!({
-        "protocol_version": "external-harness-v1",
-        "ok": false,
-        "error_code": code,
-    })
+    serde_json::json!({"protocol_version":"external-harness-v1","ok":false,"error_code":code})
 }

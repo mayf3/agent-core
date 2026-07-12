@@ -1,89 +1,163 @@
-//! Atomic Receipt append-or-compare with conflict detection (H3).
+//! Atomic Receipt append-or-compare with DB-level uniqueness (H3/H6).
 //!
-//! Uniqueness key: (hcr_id, claim_id, run_id, idempotency_key)
-//!
-//! - Same key + identical content → Duplicate (idempotent replay)
-//! - Same key + different content → Conflict (rejected)
-//! - New key → Appended
+//! Uses the `hcr_receipt_identities` table with a UNIQUE constraint on
+//! (hcr_id, claim_id, run_id, idempotency_key). All operations happen
+//! inside a `BEGIN IMMEDIATE` transaction for cross-connection safety.
 
 use crate::domain::*;
 use crate::journal::JournalStore;
 use anyhow::{anyhow, bail, Result};
+use rusqlite::params;
 use serde_json::Value;
 
-/// Result of a receipt append-or-compare operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppendReceiptResult {
-    /// Receipt was appended successfully.
     Appended,
-    /// Exact duplicate — same key, same content.
     Duplicate,
-    /// Conflict — same key, different content.
     Conflict(String),
 }
 
-/// Receipt key: (hcr_id, claim_id, run_id, idempotency_key).
-///
-/// Used as the correlation_id in the journal event to enable lookup
-/// and conflict detection.
-pub fn receipt_key(hcr_id: &str, claim_id: &str, run_id: &str, idempotency_key: &str) -> String {
-    format!("receipt:{hcr_id}:{claim_id}:{run_id}:{idempotency_key}")
+/// Canonical payload digest for receipt identity comparison.
+pub fn compute_payload_digest(
+    hcr_id: &str, claim_id: &str, run_id: &str,
+    principal_id: &str, gateway_session_id: &str, registry_snapshot_id: &str,
+    operation: &str, idempotency_key: &str,
+    harness_execution_id: &str, overall_outcome: &str,
+    candidate_digest: &str, artifact_ref: Option<&str>,
+    artifact_digest: Option<&str>, evidence_digest: &str,
+    gate_summaries: &[(&str, bool)],
+) -> String {
+    use sha2::{Digest, Sha256};
+    let canonical = serde_json::json!({
+        "hcr_id": hcr_id, "claim_id": claim_id, "run_id": run_id,
+        "principal_id": principal_id, "gateway_session_id": gateway_session_id,
+        "registry_snapshot_id": registry_snapshot_id, "operation": operation,
+        "idempotency_key": idempotency_key,
+        "harness_execution_id": harness_execution_id,
+        "overall_outcome": overall_outcome, "candidate_digest": candidate_digest,
+        "artifact_ref": artifact_ref, "artifact_digest": artifact_digest,
+        "evidence_digest": evidence_digest,
+        "gate_summaries": gate_summaries,
+    });
+    let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
+    let hex = hex::encode(Sha256::digest(&bytes));
+    format!("sha256:{hex}")
 }
 
 /// Append a receipt or detect duplicate/conflict atomically.
 ///
-/// Uses an INSERT OR IGNORE pattern on the journal with a unique
-/// constraint on the correlation_id. If the same correlation_id
-/// already exists with identical payload content, returns Duplicate.
-/// If same correlation_id with different content, returns Conflict.
+/// Uses a DB transaction with the UNIQUE constraint on
+/// `hcr_receipt_identities(hcr_id, claim_id, run_id, idempotency_key)`.
+///
+/// Cross-connection safe: the UNIQUE constraint is enforced by SQLite,
+/// not by application-level locking.
 pub fn append_or_compare_receipt(
     journal: &JournalStore,
     run_id: &RunId,
     session_id: &SessionId,
-    key: &str,
+    hcr_id: &str, claim_id: &str, the_run_id: &str,
+    idempotency_key: &str,
     receipt_status: ReceiptStatus,
     output: &Value,
+    payload_digest: &str,
+    identity_fields: &ReceiptIdentityFields,
 ) -> Result<AppendReceiptResult> {
-    // First, check if a receipt with this key already exists
-    let existing = journal.find_events_by_correlation(key)?;
+    // Use a transaction for atomicity
+    let mut conn = journal.conn.lock().map_err(|e| anyhow!("mutex: {e}"))?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
 
-    if !existing.is_empty() {
-        // Same key found — check if content matches
-        let last = &existing[existing.len() - 1];
-        let last_status = last.payload.get("status")
-            .and_then(|v| v.as_str()).unwrap_or("");
-        let last_output = last.payload.get("output");
+    // Check for existing identity
+    let existing: Option<String> = tx.query_row(
+        "SELECT payload_digest FROM hcr_receipt_identities
+         WHERE hcr_id = ?1 AND claim_id = ?2 AND run_id = ?3 AND idempotency_key = ?4",
+        params![hcr_id, claim_id, the_run_id, idempotency_key],
+        |row| row.get(0),
+    ).optional()?;
 
-        let our_status = format!("{:?}", receipt_status);
-
-        if last_status == our_status && last_output == Some(output) {
+    if let Some(existing_digest) = existing {
+        tx.commit()?;
+        if existing_digest == payload_digest {
             return Ok(AppendReceiptResult::Duplicate);
         } else {
             return Ok(AppendReceiptResult::Conflict(format!(
-                "existing status={last_status} vs new={our_status}"
+                "existing digest {existing_digest} vs new {payload_digest}"
             )));
         }
     }
 
-    // No existing receipt — append new one
-    let correlation_id = key;
-    let payload = serde_json::json!({
-        "invocation_id": format!("hcr_accept_{}", key),
+    // No existing identity — append ReceiptReceived event
+    let correlation_id = format!("receipt:{hcr_id}:{claim_id}:{the_run_id}:{idempotency_key}");
+    let event_payload = serde_json::json!({
+        "invocation_id": format!("hcr_accept_{}", correlation_id),
         "status": format!("{:?}", receipt_status),
         "output": output,
-        "correlation_key": key,
+        "correlation_key": correlation_id,
     });
 
-    journal.append_event(
+    let event = journal.append_event_in_tx(
+        &tx,
         JournalEventKind::ReceiptReceived,
         Some(run_id),
         Some(session_id),
-        Some(correlation_id),
-        payload,
+        Some(&correlation_id),
+        event_payload,
     )?;
 
-    Ok(AppendReceiptResult::Appended)
+    // Insert receipt identity (UNIQUE constraint protects against races)
+    match tx.execute(
+        "INSERT INTO hcr_receipt_identities
+         (hcr_id, claim_id, run_id, idempotency_key, payload_digest, receipt_event_id,
+          harness_execution_id, overall_outcome, candidate_digest,
+          artifact_ref, artifact_digest, evidence_digest, created_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12, ?13)",
+        params![
+            hcr_id, claim_id, the_run_id, idempotency_key, payload_digest,
+            event.event_id.0,
+            identity_fields.harness_execution_id,
+            identity_fields.overall_outcome,
+            identity_fields.candidate_digest,
+            identity_fields.artifact_ref,
+            identity_fields.artifact_digest,
+            identity_fields.evidence_digest,
+            chrono::Utc::now().to_rfc3339(),
+        ],
+    ) {
+        Ok(_) => {
+            tx.commit()?;
+            Ok(AppendReceiptResult::Appended)
+        }
+        Err(e) => {
+            // UNIQUE constraint violation — another connection inserted first
+            tx.commit()?;
+
+            // Re-read the existing entry
+            let existing_digest: Option<String> = conn.query_row(
+                "SELECT payload_digest FROM hcr_receipt_identities
+                 WHERE hcr_id = ?1 AND claim_id = ?2 AND run_id = ?3 AND idempotency_key = ?4",
+                params![hcr_id, claim_id, the_run_id, idempotency_key],
+                |row| row.get(0),
+            ).optional()?;
+
+            match existing_digest {
+                Some(d) if d == payload_digest => Ok(AppendReceiptResult::Duplicate),
+                Some(d) => Ok(AppendReceiptResult::Conflict(format!("existing {d} vs new {payload_digest}"))),
+                None => Ok(AppendReceiptResult::Conflict("unexpected missing identity after conflict".into())),
+            }
+        }
+    }
 }
+
+/// Fields from the validated acceptance response for receipt identity.
+pub struct ReceiptIdentityFields {
+    pub harness_execution_id: String,
+    pub overall_outcome: String,
+    pub candidate_digest: String,
+    pub artifact_ref: Option<String>,
+    pub artifact_digest: Option<String>,
+    pub evidence_digest: String,
+}
+
+// ── JournalStore extensions ──
 
 impl JournalStore {
     /// Create a persisted Run record for HCR acceptance.
@@ -109,38 +183,54 @@ impl JournalStore {
         Ok(())
     }
 
-    /// Find journal events by correlation_id.
-    pub fn find_events_by_correlation(&self, correlation_id: &str) -> Result<Vec<JournalEvent>> {
-        let conn = self.conn.lock().map_err(|e| anyhow!("mutex: {e}"))?;
-        let mut stmt = conn.prepare(
-            "SELECT sequence, event_id, run_id, session_id, correlation_id, kind,
-                    payload_json, previous_hash, hash, created_at
-             FROM journal_events WHERE correlation_id = ?1
-             ORDER BY sequence"
-        )?;
-        let rows = stmt.query_map(rusqlite::params![correlation_id], |row| {
-            Ok(JournalEvent {
-                sequence: row.get(0)?,
-                event_id: EventId(row.get(1)?),
-                run_id: row.get::<_, Option<String>>(2)?.map(RunId),
-                session_id: row.get::<_, Option<String>>(3)?.map(SessionId),
-                correlation_id: row.get(4)?,
-                kind: serde_json::from_str(&format!("\"{}\"", row.get::<_, String>(5)?))
-                    .unwrap_or(JournalEventKind::Unknown),
-                payload: serde_json::from_str(&row.get::<_, String>(6)?)
-                    .unwrap_or_default(),
-                previous_hash: row.get(7)?,
-                hash: row.get(8)?,
-                created_at: row.get::<_, String>(9)?
-                    .parse::<chrono::DateTime<chrono::Utc>>()
-                    .unwrap_or_default(),
-            })
-        }).map_err(|e| anyhow!("{e}"))?;
+    /// Append a journal event inside an existing transaction.
+    pub fn append_event_in_tx(
+        &self,
+        tx: &rusqlite::Transaction,
+        kind: JournalEventKind,
+        run_id: Option<&RunId>,
+        session_id: Option<&SessionId>,
+        correlation_id: Option<&str>,
+        payload: Value,
+    ) -> Result<JournalEvent> {
+        let event_id = EventId::new();
+        let kind_text = format!("{:?}", kind);
+        let payload_json = serde_json::to_string(&payload)?;
+        let now = chrono::Utc::now().to_rfc3339();
 
-        let mut result = Vec::new();
-        for row in rows {
-            result.push(row?);
-        }
-        Ok(result)
+        let prev: Option<(i64, String)> = tx
+            .query_row(
+                "SELECT sequence, hash FROM journal_events ORDER BY sequence DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let seq = prev.as_ref().map(|(s, _)| s + 1).unwrap_or(1);
+        let prev_hash = prev.map(|(_, h)| h);
+        let hash = crate::journal::hash_chain::event_hash(
+            prev_hash.as_deref(), seq, &kind_text, &payload_json,
+        );
+
+        tx.execute(
+            "INSERT INTO journal_events (sequence,event_id,run_id,session_id,correlation_id,kind,payload_json,previous_hash,hash,created_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+            params![seq, event_id.0, run_id.map(|r| r.0.as_str()), session_id.map(|s| s.0.as_str()),
+                    correlation_id, kind_text, payload_json, prev_hash, hash, now],
+        )?;
+
+        Ok(JournalEvent {
+            sequence: seq,
+            event_id,
+            run_id: run_id.cloned(),
+            session_id: session_id.cloned(),
+            correlation_id: correlation_id.map(|s| s.to_string()),
+            kind,
+            payload,
+            previous_hash: prev_hash,
+            hash,
+            created_at: now.parse().unwrap_or_default(),
+        })
     }
 }
+
+use rusqlite::OptionalExtension;
