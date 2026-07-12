@@ -1,9 +1,8 @@
-//! Evidence-based HCR recovery (R3A-R1).
-//! Checks terminal triple consistency: HCR status + settlement + event.
-//! Gates verified via canonical attempts + evidence + receipt events.
+//! Evidence-based HCR recovery (R3A-R2).
+//! Checks terminal triple consistency. Gates verified via source-chain validator.
 
 use crate::domain::*;
-use crate::hcr::evidence;
+use crate::hcr::validate;
 use crate::journal::JournalStore;
 use anyhow::Result;
 
@@ -45,25 +44,40 @@ pub fn determine_resume_state(journal: &JournalStore, hcr_id: &str) -> Result<Re
         .as_ref()
         .map_or(false, |h| h.status == "succeeded" || h.status == "failed");
 
-    // Triple consistency check.
+    // Triple consistency check with full field validation.
     if hcr_terminal || settlement.is_some() || !terminal_events.is_empty() {
         match (&hcr, &settlement, terminal_events.len()) {
-            (Some(h), Some(s), 1) if (h.status == "succeeded" || h.status == "failed") => {
+            (Some(h), Some(s), 1) if hcr_terminal => {
                 let ev = terminal_events[0];
                 let ev_result = ev
                     .payload
                     .get("result")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                if h.status == ev_result && s.result == ev_result && s.hcr_id == hcr_id {
+                let ev_sid = ev
+                    .payload
+                    .get("settlement_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let ev_digest = ev
+                    .payload
+                    .get("evidence_set_digest")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if h.status == ev_result
+                    && s.result == ev_result
+                    && s.hcr_id == hcr_id
+                    && s.settlement_id == ev_sid
+                    && s.evidence_set_digest == ev_digest
+                {
                     return Ok(ResumeState::AlreadySettled {
                         settlement_id: s.settlement_id.clone(),
                         result: s.result.clone(),
                     });
                 }
                 return Ok(ResumeState::Corruption(format!(
-                    "triple mismatch: HCR={}, settlement={}, event={}",
-                    h.status, s.result, ev_result,
+                    "triple mismatch: HCR={}, settlement={}, event={}, sid={}, digest={}",
+                    h.status, s.result, ev_result, ev_sid, ev_digest
                 )));
             }
             (Some(h), _, 0) if hcr_terminal => {
@@ -95,7 +109,7 @@ pub fn determine_resume_state(journal: &JournalStore, hcr_id: &str) -> Result<Re
         });
     };
 
-    // Check attempts + evidence (authoritative).
+    // AllGatesCompleted: validate all 5 gates via source-chain validator.
     let attempts = journal.get_attempts_for_hcr(hcr_id, &claim.claim_id.0, &binding.run_id)?;
     if attempts.len() != 5 {
         return Ok(ResumeState::Bound {
@@ -103,33 +117,22 @@ pub fn determine_resume_state(journal: &JournalStore, hcr_id: &str) -> Result<Re
             run_id: binding.run_id,
         });
     }
-    let evidence_list = journal.get_evidence_for_attempts(
-        &attempts
-            .iter()
-            .map(|a| a.gate_attempt_id.as_str())
-            .collect::<Vec<_>>(),
-    )?;
-    if evidence_list.len() != 5 {
+
+    let a_ids: Vec<&str> = attempts
+        .iter()
+        .map(|a| a.gate_attempt_id.as_str())
+        .collect();
+    let evidence = journal.get_evidence_for_attempts(&a_ids)?;
+    if evidence.len() != 5 {
         return Ok(ResumeState::Bound {
             claim_id: claim.claim_id.0,
             run_id: binding.run_id,
         });
     }
 
-    for ev in &evidence_list {
-        let Some(re) = events.iter().find(|e| e.event_id.0 == ev.receipt_event_id) else {
-            return Ok(ResumeState::Bound {
-                claim_id: claim.claim_id.0,
-                run_id: binding.run_id,
-            });
-        };
-        if re.kind != JournalEventKind::ReceiptReceived {
-            return Ok(ResumeState::Bound {
-                claim_id: claim.claim_id.0,
-                run_id: binding.run_id,
-            });
-        }
-        if evidence::verify_evidence_against_receipt(ev, re).is_err() {
+    for ev in &evidence {
+        // Validate full source chain — any failure means gates not complete.
+        if validate::validate_gate_source_chain(journal, &ev.gate_attempt_id).is_err() {
             return Ok(ResumeState::Bound {
                 claim_id: claim.claim_id.0,
                 run_id: binding.run_id,

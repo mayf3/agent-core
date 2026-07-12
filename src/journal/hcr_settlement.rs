@@ -108,13 +108,6 @@ impl JournalStore {
         id: &str,
         attempt_id: &str,
         receipt_event_id: &str,
-        status: &str,
-        exit_code: i32,
-        timed_out: bool,
-        stdout_trunc: bool,
-        stderr_trunc: bool,
-        child_cleanup: Option<bool>,
-        error_code: Option<&str>,
         payload_digest: &str,
         created_at: &str,
     ) -> Result<()> {
@@ -122,33 +115,16 @@ impl JournalStore {
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
 
         let updated = tx.execute(
-            "INSERT INTO hcr_gate_evidence
-             (evidence_id, gate_attempt_id, receipt_event_id, structured_status,
-              exit_code, timed_out, stdout_truncated, stderr_truncated,
-              child_cleanup, error_code, receipt_payload_digest, created_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
-            params![
-                id,
-                attempt_id,
-                receipt_event_id,
-                status,
-                exit_code,
-                timed_out as i32,
-                stdout_trunc as i32,
-                stderr_trunc as i32,
-                child_cleanup,
-                error_code,
-                payload_digest,
-                created_at
-            ],
+            "INSERT OR IGNORE INTO hcr_gate_evidence
+             (evidence_id, gate_attempt_id, receipt_event_id, receipt_payload_digest, created_at)
+             VALUES (?1,?2,?3,?4,?5)",
+            params![id, attempt_id, receipt_event_id, payload_digest, created_at],
         )?;
         if updated == 0 {
-            // INSERT OR IGNORE would be silent — reject instead.
             tx.commit()?;
             anyhow::bail!("EVIDENCE_INSERT_FAILED: duplicate or constraint violation");
         }
 
-        // Append journal event in same transaction.
         let event_id = EventId::new();
         let kind_text = format!("{:?}", JournalEventKind::HcrEvidenceRegistered);
         let payload_json = serde_json::to_string(&json!({
@@ -188,9 +164,7 @@ impl JournalStore {
             .map(|(i, _)| format!("?{}", i + 1))
             .collect();
         let sql = format!(
-            "SELECT evidence_id, gate_attempt_id, receipt_event_id, structured_status,
-                    exit_code, timed_out, stdout_truncated, stderr_truncated,
-                    child_cleanup, error_code, receipt_payload_digest, created_at
+            "SELECT evidence_id, gate_attempt_id, receipt_event_id, receipt_payload_digest, created_at
              FROM hcr_gate_evidence WHERE gate_attempt_id IN ({})",
             placeholders.join(","),
         );
@@ -207,15 +181,8 @@ impl JournalStore {
                 evidence_id: row.get(0)?,
                 gate_attempt_id: row.get(1)?,
                 receipt_event_id: row.get(2)?,
-                structured_status: row.get(3)?,
-                exit_code: row.get(4)?,
-                timed_out: row.get::<_, i32>(5)? != 0,
-                stdout_truncated: row.get::<_, i32>(6)? != 0,
-                stderr_truncated: row.get::<_, i32>(7)? != 0,
-                child_cleanup: row.get(8)?,
-                error_code: row.get(9)?,
-                receipt_payload_digest: row.get(10)?,
-                created_at: row.get(11)?,
+                receipt_payload_digest: row.get(3)?,
+                created_at: row.get(4)?,
             })
         })?;
         let mut r = Vec::new();
@@ -230,7 +197,7 @@ impl JournalStore {
     /// Internal-only: writes terminal HCR status + settlement record +
     /// terminal journal event in a single transaction. Does NOT accept
     /// caller result; only called by `settle_hcr` in `settlement.rs`.
-    pub fn settle_hcr_terminal(
+    pub(crate) fn settle_hcr_terminal_internal(
         &self,
         hcr_id: &str,
         claim_id: &str,
@@ -368,9 +335,8 @@ impl JournalStore {
     ) -> Result<Vec<HcrGateEvidence>> {
         let conn = self.conn.lock().map_err(|_| anyhow!("mutex"))?;
         let mut stmt = conn.prepare(
-            "SELECT e.evidence_id, e.gate_attempt_id, e.receipt_event_id, e.structured_status,
-                    e.exit_code, e.timed_out, e.stdout_truncated, e.stderr_truncated,
-                    e.child_cleanup, e.error_code, e.receipt_payload_digest, e.created_at
+            "SELECT e.evidence_id, e.gate_attempt_id, e.receipt_event_id,
+                    e.receipt_payload_digest, e.created_at
              FROM hcr_gate_evidence e
              JOIN hcr_gate_attempts a ON e.gate_attempt_id = a.gate_attempt_id
              WHERE a.hcr_id = ?1 AND a.claim_id = ?2 AND a.run_id = ?3
@@ -381,15 +347,8 @@ impl JournalStore {
                 evidence_id: row.get(0)?,
                 gate_attempt_id: row.get(1)?,
                 receipt_event_id: row.get(2)?,
-                structured_status: row.get(3)?,
-                exit_code: row.get(4)?,
-                timed_out: row.get::<_, i32>(5)? != 0,
-                stdout_truncated: row.get::<_, i32>(6)? != 0,
-                stderr_truncated: row.get::<_, i32>(7)? != 0,
-                child_cleanup: row.get(8)?,
-                error_code: row.get(9)?,
-                receipt_payload_digest: row.get(10)?,
-                created_at: row.get(11)?,
+                receipt_payload_digest: row.get(3)?,
+                created_at: row.get(4)?,
             })
         })?;
         let mut r = Vec::new();
