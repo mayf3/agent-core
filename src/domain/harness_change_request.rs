@@ -139,21 +139,30 @@ impl GateKind {
     }
 }
 
-/// Durable record of a single gate execution, bound to its receipt.
-/// Only created by the trusted `register_gate_evidence` entry point.
+/// Canonical service-side gate attempt. Created by `prepare_hcr_gate_attempt`.
+/// Records what operation/profile/workspace/harness this gate is expected to use.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HcrGateEvidence {
-    pub evidence_id: String,
+pub struct HcrGateAttempt {
+    pub gate_attempt_id: String,
     pub hcr_id: String,
     pub claim_id: String,
     pub run_id: String,
     pub harness_id: String,
     pub workspace_id: String,
     pub gate_kind: String,
+    pub expected_operation: String,
+    pub expected_profile: String,
     pub invocation_intent_id: String,
-    pub receipt_id: String,
-    pub operation: String,
-    pub execution_profile: String,
+    pub created_at: String,
+}
+
+/// Durable record of a single gate execution, bound to its receipt.
+/// Only created by the trusted `register_gate_evidence` entry point.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HcrGateEvidence {
+    pub evidence_id: String,
+    pub gate_attempt_id: String,
+    pub receipt_event_id: String,
     pub structured_status: String,
     pub exit_code: i32,
     pub timed_out: bool,
@@ -161,8 +170,7 @@ pub struct HcrGateEvidence {
     pub stderr_truncated: bool,
     pub child_cleanup: Option<bool>,
     pub error_code: Option<String>,
-    pub artifact_digest: Option<String>,
-    pub manifest_digest: Option<String>,
+    pub receipt_payload_digest: String,
     pub created_at: String,
 }
 
@@ -182,10 +190,16 @@ pub struct HcrSettlement {
 /// Result of a settlement attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SettlementResult {
-    Succeeded,
+    /// All gates passed. Carries settlement_id.
+    Succeeded(String),
+    /// Candidate code failed. Carries settlement_id.
     CandidateFailed(String),
-    RetryableInfrastructureFailure(String),
-    AlreadySettled,
+    /// Infrastructure failure; HCR remains running. Carries error message.
+    InfrastructureFailure(String),
+    /// HCR was already settled. Carries existing result description.
+    AlreadySettled(String),
+    /// Evidence set is incomplete or invalid. Carries error message.
     EvidenceIncomplete(String),
+    /// Conflicting evidence detected. Carries conflict message.
     EvidenceConflict(String),
 }

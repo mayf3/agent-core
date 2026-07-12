@@ -1,303 +1,425 @@
-//! Durable HCR gate evidence and settlement persistence (R3A).
-//!
-//! Store methods for the `hcr_gate_evidence` and `hcr_settlements` tables.
-//! Extracted to a separate file to keep `harness_change_requests.rs` under
-//! the 500-line structure limit.
+//! HCR gate attempt, evidence, and settlement persistence (R3A-R1).
+//! Store methods for hcr_gate_attempts, hcr_gate_evidence, hcr_settlements.
 
 use super::sqlite::JournalStore;
 use crate::domain::*;
 use anyhow::{anyhow, Result};
-use rusqlite::params;
-use rusqlite::OptionalExtension;
+use rusqlite::{params, OptionalExtension};
+use serde_json::json;
 
 impl JournalStore {
-    /// Insert a gate evidence record. All fields are pre-validated by the
-    /// caller (`register_gate_evidence`). The UNIQUE constraints on
-    /// (hcr_id, claim_id, run_id, gate_kind), receipt_id, and
-    /// invocation_intent_id prevent duplicates.
-    pub fn insert_gate_evidence(
+    // ── Gate Attempt ──────────────────────────────────────────────────
+
+    pub fn insert_gate_attempt(
         &self,
-        evidence_id: &str,
+        id: &str,
         hcr_id: &str,
         claim_id: &str,
         run_id: &str,
         harness_id: &str,
         workspace_id: &str,
         gate_kind: &str,
-        invocation_intent_id: &str,
-        receipt_id: &str,
-        operation: &str,
-        execution_profile: &str,
-        structured_status: &str,
-        exit_code: i32,
-        timed_out: bool,
-        stdout_truncated: bool,
-        stderr_truncated: bool,
-        child_cleanup: Option<bool>,
-        error_code: Option<&str>,
-        artifact_digest: Option<&str>,
-        manifest_digest: Option<&str>,
+        expected_op: &str,
+        expected_profile: &str,
+        intent_id: &str,
         created_at: &str,
     ) -> Result<()> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| anyhow!("journal mutex poisoned"))?;
-
+        let mut conn = self.conn.lock().map_err(|_| anyhow!("mutex"))?;
         conn.execute(
-            "INSERT OR IGNORE INTO hcr_gate_evidence
-             (evidence_id, hcr_id, claim_id, run_id, harness_id, workspace_id,
-              gate_kind, invocation_intent_id, receipt_id, operation, execution_profile,
-              structured_status, exit_code, timed_out, stdout_truncated, stderr_truncated,
-              child_cleanup, error_code, artifact_digest, manifest_digest, created_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)",
+            "INSERT INTO hcr_gate_attempts
+             (gate_attempt_id, hcr_id, claim_id, run_id, harness_id, workspace_id,
+              gate_kind, expected_operation, expected_profile, invocation_intent_id, created_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
             params![
-                evidence_id,
+                id,
                 hcr_id,
                 claim_id,
                 run_id,
                 harness_id,
                 workspace_id,
                 gate_kind,
-                invocation_intent_id,
-                receipt_id,
-                operation,
-                execution_profile,
-                structured_status,
-                exit_code,
-                timed_out as i32,
-                stdout_truncated as i32,
-                stderr_truncated as i32,
-                child_cleanup,
-                error_code,
-                artifact_digest,
-                manifest_digest,
-                created_at,
+                expected_op,
+                expected_profile,
+                intent_id,
+                created_at
             ],
         )?;
-
         Ok(())
     }
 
-    /// Load all gate evidence records for an HCR/claim/run.
-    pub fn get_gate_evidence_for_hcr(
+    pub fn get_gate_attempt(&self, id: &str) -> Result<Option<HcrGateAttempt>> {
+        let conn = self.conn.lock().map_err(|_| anyhow!("mutex"))?;
+        conn.query_row(
+            "SELECT gate_attempt_id, hcr_id, claim_id, run_id, harness_id, workspace_id,
+                    gate_kind, expected_operation, expected_profile, invocation_intent_id, created_at
+             FROM hcr_gate_attempts WHERE gate_attempt_id = ?1",
+            params![id],
+            |row| Ok(HcrGateAttempt {
+                gate_attempt_id: row.get(0)?, hcr_id: row.get(1)?,
+                claim_id: row.get(2)?, run_id: row.get(3)?,
+                harness_id: row.get(4)?, workspace_id: row.get(5)?,
+                gate_kind: row.get(6)?, expected_operation: row.get(7)?,
+                expected_profile: row.get(8)?, invocation_intent_id: row.get(9)?,
+                created_at: row.get(10)?,
+            }),
+        ).optional().map_err(Into::into)
+    }
+
+    pub fn get_attempts_for_hcr(
         &self,
         hcr_id: &str,
         claim_id: &str,
         run_id: &str,
-    ) -> Result<Vec<HcrGateEvidence>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| anyhow!("journal mutex poisoned"))?;
+    ) -> Result<Vec<HcrGateAttempt>> {
+        let conn = self.conn.lock().map_err(|_| anyhow!("mutex"))?;
         let mut stmt = conn.prepare(
-            "SELECT evidence_id, hcr_id, claim_id, run_id, harness_id, workspace_id,
-                    gate_kind, invocation_intent_id, receipt_id, operation, execution_profile,
-                    structured_status, exit_code, timed_out, stdout_truncated, stderr_truncated,
-                    child_cleanup, error_code, artifact_digest, manifest_digest, created_at
-             FROM hcr_gate_evidence
+            "SELECT gate_attempt_id, hcr_id, claim_id, run_id, harness_id, workspace_id,
+                    gate_kind, expected_operation, expected_profile, invocation_intent_id, created_at
+             FROM hcr_gate_attempts
              WHERE hcr_id = ?1 AND claim_id = ?2 AND run_id = ?3
-             ORDER BY gate_kind",
+             ORDER BY gate_kind"
         )?;
-
         let rows = stmt.query_map(params![hcr_id, claim_id, run_id], |row| {
-            Ok(HcrGateEvidence {
-                evidence_id: row.get(0)?,
+            Ok(HcrGateAttempt {
+                gate_attempt_id: row.get(0)?,
                 hcr_id: row.get(1)?,
                 claim_id: row.get(2)?,
                 run_id: row.get(3)?,
                 harness_id: row.get(4)?,
                 workspace_id: row.get(5)?,
                 gate_kind: row.get(6)?,
-                invocation_intent_id: row.get(7)?,
-                receipt_id: row.get(8)?,
-                operation: row.get(9)?,
-                execution_profile: row.get(10)?,
-                structured_status: row.get(11)?,
-                exit_code: row.get(12)?,
-                timed_out: row.get::<_, i32>(13)? != 0,
-                stdout_truncated: row.get::<_, i32>(14)? != 0,
-                stderr_truncated: row.get::<_, i32>(15)? != 0,
-                child_cleanup: row.get(16)?,
-                error_code: row.get(17)?,
-                artifact_digest: row.get(18)?,
-                manifest_digest: row.get(19)?,
-                created_at: row.get(20)?,
+                expected_operation: row.get(7)?,
+                expected_profile: row.get(8)?,
+                invocation_intent_id: row.get(9)?,
+                created_at: row.get(10)?,
             })
         })?;
-
-        let mut result = Vec::new();
+        let mut r = Vec::new();
         for row in rows {
-            result.push(row?);
+            r.push(row?);
         }
-        Ok(result)
+        Ok(r)
     }
 
-    /// Atomically settle an HCR: update status, write settlement record, and
-    /// append terminal journal event — all in one SQLite transaction.
-    ///
-    /// Returns the settlement_id. Idempotent: if already settled, returns
-    /// the existing settlement_id without changes.
-    pub fn settle_hcr_atomically(
+    // ── Evidence ──────────────────────────────────────────────────────
+
+    pub fn insert_evidence_atomically(
+        &self,
+        id: &str,
+        attempt_id: &str,
+        receipt_event_id: &str,
+        status: &str,
+        exit_code: i32,
+        timed_out: bool,
+        stdout_trunc: bool,
+        stderr_trunc: bool,
+        child_cleanup: Option<bool>,
+        error_code: Option<&str>,
+        payload_digest: &str,
+        created_at: &str,
+    ) -> Result<()> {
+        let mut conn = self.conn.lock().map_err(|_| anyhow!("mutex"))?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+
+        let updated = tx.execute(
+            "INSERT INTO hcr_gate_evidence
+             (evidence_id, gate_attempt_id, receipt_event_id, structured_status,
+              exit_code, timed_out, stdout_truncated, stderr_truncated,
+              child_cleanup, error_code, receipt_payload_digest, created_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+            params![
+                id,
+                attempt_id,
+                receipt_event_id,
+                status,
+                exit_code,
+                timed_out as i32,
+                stdout_trunc as i32,
+                stderr_trunc as i32,
+                child_cleanup,
+                error_code,
+                payload_digest,
+                created_at
+            ],
+        )?;
+        if updated == 0 {
+            // INSERT OR IGNORE would be silent — reject instead.
+            tx.commit()?;
+            anyhow::bail!("EVIDENCE_INSERT_FAILED: duplicate or constraint violation");
+        }
+
+        // Append journal event in same transaction.
+        let event_id = EventId::new();
+        let kind_text = format!("{:?}", JournalEventKind::HcrEvidenceRegistered);
+        let payload_json = serde_json::to_string(&json!({
+            "evidence_id": id, "gate_attempt_id": attempt_id,
+            "receipt_event_id": receipt_event_id,
+        }))?;
+
+        let prev: Option<(i64, String)> = tx
+            .query_row(
+                "SELECT sequence, hash FROM journal_events ORDER BY sequence DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let seq = prev.as_ref().map(|(s, _)| s + 1).unwrap_or(1);
+        let prev_hash = prev.map(|(_, h)| h);
+        let hash =
+            super::hash_chain::event_hash(prev_hash.as_deref(), seq, &kind_text, &payload_json);
+
+        tx.execute(
+            "INSERT INTO journal_events (sequence,event_id,run_id,session_id,correlation_id,kind,payload_json,previous_hash,hash,created_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+            params![seq, event_id.0, Option::<&str>::None, Option::<&str>::None,
+                    Some(id), kind_text, payload_json, prev_hash, hash, created_at],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn get_evidence_for_attempts(&self, attempt_ids: &[&str]) -> Result<Vec<HcrGateEvidence>> {
+        if attempt_ids.is_empty() {
+            return Ok(vec![]);
+        }
+        let placeholders: Vec<String> = attempt_ids
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("?{}", i + 1))
+            .collect();
+        let sql = format!(
+            "SELECT evidence_id, gate_attempt_id, receipt_event_id, structured_status,
+                    exit_code, timed_out, stdout_truncated, stderr_truncated,
+                    child_cleanup, error_code, receipt_payload_digest, created_at
+             FROM hcr_gate_evidence WHERE gate_attempt_id IN ({})",
+            placeholders.join(","),
+        );
+        let conn = self.conn.lock().map_err(|_| anyhow!("mutex"))?;
+        let mut stmt = conn.prepare(&sql)?;
+        let params: Vec<Box<dyn rusqlite::types::ToSql>> = attempt_ids
+            .iter()
+            .map(|s| Box::new(s.to_string()) as Box<dyn rusqlite::types::ToSql>)
+            .collect();
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params.iter().map(|b| b.as_ref()).collect();
+        let rows = stmt.query_map(param_refs.as_slice(), |row| {
+            Ok(HcrGateEvidence {
+                evidence_id: row.get(0)?,
+                gate_attempt_id: row.get(1)?,
+                receipt_event_id: row.get(2)?,
+                structured_status: row.get(3)?,
+                exit_code: row.get(4)?,
+                timed_out: row.get::<_, i32>(5)? != 0,
+                stdout_truncated: row.get::<_, i32>(6)? != 0,
+                stderr_truncated: row.get::<_, i32>(7)? != 0,
+                child_cleanup: row.get(8)?,
+                error_code: row.get(9)?,
+                receipt_payload_digest: row.get(10)?,
+                created_at: row.get(11)?,
+            })
+        })?;
+        let mut r = Vec::new();
+        for row in rows {
+            r.push(row?);
+        }
+        Ok(r)
+    }
+
+    // ── Terminal Settlement ──────────────────────────────────────────
+
+    /// Internal-only: writes terminal HCR status + settlement record +
+    /// terminal journal event in a single transaction. Does NOT accept
+    /// caller result; only called by `settle_hcr` in `settlement.rs`.
+    pub fn settle_hcr_terminal(
         &self,
         hcr_id: &str,
         claim_id: &str,
         run_id: &str,
         result: &str,
         error_code: Option<&str>,
-        evidence_set_digest: &str,
+        digest: &str,
     ) -> Result<String> {
-        let mut conn = self
-            .conn
-            .lock()
-            .map_err(|_| anyhow!("journal mutex poisoned"))?;
+        let mut conn = self.conn.lock().map_err(|_| anyhow!("mutex"))?;
 
-        // Check for existing settlement first.
-        let existing: Option<String> = conn
+        // Check existing settlement.
+        if let Some(sid) = conn
             .query_row(
                 "SELECT settlement_id FROM hcr_settlements WHERE hcr_id = ?1",
                 params![hcr_id],
                 |row| row.get(0),
             )
-            .optional()?;
-
-        if let Some(sid) = existing {
+            .optional()?
+        {
             return Ok(sid);
         }
 
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
 
-        // 1. Verify HCR is still running (CAS).
+        // CAS update HCR status.
         let updated = tx.execute(
-            "UPDATE harness_change_requests
-             SET status = ?1, error_code = ?2, updated_at = ?3
+            "UPDATE harness_change_requests SET status = ?1, error_code = ?2, updated_at = ?3
              WHERE request_id = ?4 AND status = 'running'",
             params![result, error_code, chrono::Utc::now().to_rfc3339(), hcr_id],
         )?;
-
         if updated == 0 {
-            // Either already settled or not running — rollback and check.
-            tx.commit()?; // Release the transaction.
-            let existing: Option<String> = conn
+            tx.commit()?;
+            if let Some(sid) = conn
                 .query_row(
                     "SELECT settlement_id FROM hcr_settlements WHERE hcr_id = ?1",
                     params![hcr_id],
                     |row| row.get(0),
                 )
-                .optional()?;
-            if let Some(sid) = existing {
+                .optional()?
+            {
                 return Ok(sid);
             }
-            anyhow::bail!(
-                "SETTLE_CAS_FAILED: HCR {hcr_id} status is not running or already terminal"
-            );
+            anyhow::bail!("SETTLE_CAS_FAILED: HCR {hcr_id} not running");
         }
 
-        // 2. Create settlement record.
         let settlement_id = format!("stl_{}", uuid::Uuid::new_v4().simple());
         let now = chrono::Utc::now().to_rfc3339();
         tx.execute(
-            "INSERT INTO hcr_settlements
-             (settlement_id, hcr_id, claim_id, run_id, result, error_code, evidence_set_digest, created_at)
+            "INSERT INTO hcr_settlements (settlement_id, hcr_id, claim_id, run_id, result, error_code, evidence_set_digest, created_at)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
-            params![
-                settlement_id,
-                hcr_id,
-                claim_id,
-                run_id,
-                result,
-                error_code,
-                evidence_set_digest,
-                now,
-            ],
+            params![settlement_id, hcr_id, claim_id, run_id, result, error_code, digest, now],
         )?;
 
-        // 3. Write terminal journal event in the same transaction.
+        // Terminal journal event.
         let terminal_kind = if result == "succeeded" {
             JournalEventKind::HcrSettlementSucceeded
         } else {
             JournalEventKind::HcrSettlementFailed
         };
-
-        // We need to append the event within the transaction.
-        let event_id = crate::domain::EventId::new();
+        let ev_id = EventId::new();
         let kind_text = format!("{:?}", terminal_kind);
-        let payload_json = serde_json::to_string(&serde_json::json!({
-            "hcr_id": hcr_id,
-            "claim_id": claim_id,
-            "run_id": run_id,
-            "result": result,
-            "error_code": error_code,
-            "evidence_set_digest": evidence_set_digest,
-            "settlement_id": settlement_id,
+        let payload_json = serde_json::to_string(&json!({
+            "hcr_id": hcr_id, "claim_id": claim_id, "run_id": run_id,
+            "result": result, "error_code": error_code,
+            "evidence_set_digest": digest, "settlement_id": settlement_id,
         }))?;
 
-        let previous: Option<(i64, String)> = tx
+        let prev: Option<(i64, String)> = tx
             .query_row(
                 "SELECT sequence, hash FROM journal_events ORDER BY sequence DESC LIMIT 1",
                 [],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-        let sequence = previous.as_ref().map(|(seq, _)| seq + 1).unwrap_or(1);
-        let previous_hash = previous.map(|(_, hash)| hash);
-        let hash = super::hash_chain::event_hash(
-            previous_hash.as_deref(),
-            sequence,
-            &kind_text,
-            &payload_json,
-        );
-
+        let seq = prev.as_ref().map(|(s, _)| s + 1).unwrap_or(1);
+        let prev_hash = prev.map(|(_, h)| h);
+        let hash =
+            super::hash_chain::event_hash(prev_hash.as_deref(), seq, &kind_text, &payload_json);
         tx.execute(
-            "INSERT INTO journal_events
-             (sequence, event_id, run_id, session_id, correlation_id, kind, payload_json, previous_hash, hash, created_at)
+            "INSERT INTO journal_events (sequence,event_id,run_id,session_id,correlation_id,kind,payload_json,previous_hash,hash,created_at)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
-            params![
-                sequence,
-                event_id.0,
-                Option::<&str>::None,     // run_id
-                Option::<&str>::None,     // session_id
-                hcr_id,                   // correlation_id
-                kind_text,
-                payload_json,
-                previous_hash,
-                hash,
-                now,
-            ],
+            params![seq, ev_id.0, Option::<&str>::None, Option::<&str>::None,
+                    hcr_id, kind_text, payload_json, prev_hash, hash, now],
         )?;
-
-        // 4. Commit everything atomically.
         tx.commit()?;
-
         Ok(settlement_id)
     }
 
-    /// Load a settlement record for an HCR.
-    pub fn get_hcr_settlement(&self, hcr_id: &str) -> Result<Option<HcrSettlement>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| anyhow!("journal mutex poisoned"))?;
+    // ── Run loading ──────────────────────────────────────────────────
+
+    pub fn get_run(&self, run_id: &str) -> Result<Option<Run>> {
+        let conn = self.conn.lock().map_err(|_| anyhow!("mutex"))?;
         let row = conn
             .query_row(
-                "SELECT settlement_id, hcr_id, claim_id, run_id, result, error_code,
-                        evidence_set_digest, created_at
-                 FROM hcr_settlements WHERE hcr_id = ?1",
-                params![hcr_id],
+                "SELECT id, session_id, agent_id, trigger_event_id, principal_json,
+                    parent_run_id, delegated_by, status, created_at, updated_at,
+                    registry_snapshot_id, mode
+             FROM runs WHERE id = ?1",
+                params![run_id],
                 |row| {
-                    Ok(HcrSettlement {
-                        settlement_id: row.get(0)?,
-                        hcr_id: row.get(1)?,
-                        claim_id: row.get(2)?,
-                        run_id: row.get(3)?,
-                        result: row.get(4)?,
-                        error_code: row.get(5)?,
-                        evidence_set_digest: row.get(6)?,
-                        created_at: row.get(7)?,
+                    let mode_str: String = row.get(11)?;
+                    let mode: RunMode = serde_json::from_str(&mode_str).unwrap_or(RunMode::Default);
+                    Ok(Run {
+                        id: RunId(row.get(0)?),
+                        session_id: SessionId(row.get(1)?),
+                        agent_id: AgentId(row.get(2)?),
+                        trigger_event_id: EventId(row.get(3)?),
+                        principal: serde_json::from_str(&row.get::<_, String>(4)?)
+                            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,
+                        parent_run_id: row.get::<_, Option<String>>(5)?.map(RunId),
+                        delegated_by: row.get::<_, Option<String>>(6)?.map(PrincipalId),
+                        status: RunStatus::Running, // simplified
+                        created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(8)?)
+                            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?
+                            .with_timezone(&chrono::Utc),
+                        updated_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(9)?)
+                            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?
+                            .with_timezone(&chrono::Utc),
+                        registry_snapshot_id: row.get::<_, Option<String>>(10)?.unwrap_or_default(),
+                        mode,
                     })
                 },
             )
             .optional()?;
         Ok(row)
+    }
+
+    // ── Evidence list ────────────────────────────────────────────────
+
+    pub fn get_gate_evidence_for_hcr(
+        &self,
+        hcr_id: &str,
+        claim_id: &str,
+        run_id: &str,
+    ) -> Result<Vec<HcrGateEvidence>> {
+        let conn = self.conn.lock().map_err(|_| anyhow!("mutex"))?;
+        let mut stmt = conn.prepare(
+            "SELECT e.evidence_id, e.gate_attempt_id, e.receipt_event_id, e.structured_status,
+                    e.exit_code, e.timed_out, e.stdout_truncated, e.stderr_truncated,
+                    e.child_cleanup, e.error_code, e.receipt_payload_digest, e.created_at
+             FROM hcr_gate_evidence e
+             JOIN hcr_gate_attempts a ON e.gate_attempt_id = a.gate_attempt_id
+             WHERE a.hcr_id = ?1 AND a.claim_id = ?2 AND a.run_id = ?3
+             ORDER BY a.gate_kind",
+        )?;
+        let rows = stmt.query_map(params![hcr_id, claim_id, run_id], |row| {
+            Ok(HcrGateEvidence {
+                evidence_id: row.get(0)?,
+                gate_attempt_id: row.get(1)?,
+                receipt_event_id: row.get(2)?,
+                structured_status: row.get(3)?,
+                exit_code: row.get(4)?,
+                timed_out: row.get::<_, i32>(5)? != 0,
+                stdout_truncated: row.get::<_, i32>(6)? != 0,
+                stderr_truncated: row.get::<_, i32>(7)? != 0,
+                child_cleanup: row.get(8)?,
+                error_code: row.get(9)?,
+                receipt_payload_digest: row.get(10)?,
+                created_at: row.get(11)?,
+            })
+        })?;
+        let mut r = Vec::new();
+        for row in rows {
+            r.push(row?);
+        }
+        Ok(r)
+    }
+
+    pub fn get_settlement(&self, hcr_id: &str) -> Result<Option<HcrSettlement>> {
+        let conn = self.conn.lock().map_err(|_| anyhow!("mutex"))?;
+        conn.query_row(
+            "SELECT settlement_id, hcr_id, claim_id, run_id, result, error_code,
+                    evidence_set_digest, created_at
+             FROM hcr_settlements WHERE hcr_id = ?1",
+            params![hcr_id],
+            |row| {
+                Ok(HcrSettlement {
+                    settlement_id: row.get(0)?,
+                    hcr_id: row.get(1)?,
+                    claim_id: row.get(2)?,
+                    run_id: row.get(3)?,
+                    result: row.get(4)?,
+                    error_code: row.get(5)?,
+                    evidence_set_digest: row.get(6)?,
+                    created_at: row.get(7)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
     }
 }
