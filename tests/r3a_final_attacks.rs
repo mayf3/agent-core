@@ -152,9 +152,16 @@ fn failed_receipt_tampered_evidence_cannot_settle_success() {
 fn settlement_reloads_receipt_source_fields() {
     let f = make_fixture();
     add_all_gates(&f);
-    let result = settlement::settle_hcr(&f.j, &f.hcr_id, &f.claim_id, &f.run_id).unwrap();
-    eprintln!("SETTLE_RESULT: {:?}", result);
-    assert!(matches!(result, SettleResult::Succeeded(_)));
+    match settlement::settle_hcr(&f.j, &f.hcr_id, &f.claim_id, &f.run_id) {
+        Ok(r) => {
+            eprintln!("SETTLE_RESULT: {:?}", r);
+            assert!(matches!(r, SettleResult::Succeeded(_)));
+        }
+        Err(e) => {
+            eprintln!("SETTLE_ERROR: {e}");
+            panic!("settle failed: {e}");
+        }
+    }
 }
 
 // ── 2. FK-OFF triggers ────────────────────────────────────────────────
