@@ -328,6 +328,7 @@ fn artifact_gate_check(candidate: &CandidateSnapshot) -> GateResult {
         candidate_id: candidate.candidate_id.clone(),
         candidate_digest: candidate.candidate_digest.clone(),
         candidate_digest_preserved: false,
+        computed_artifact_digest: None,
     }
 }
 

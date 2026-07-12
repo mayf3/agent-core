@@ -153,7 +153,8 @@ fn classify_outcome(results: &[GateResult]) -> String {
 fn extract_artifact(results: &[GateResult]) -> (Option<String>, Option<String>) {
     for r in results {
         if r.gate_kind == GateKind::Artifact && r.passed {
-            return (Some("target/release/calculator-harness".into()), Some("verified".into()));
+            let digest = r.computed_artifact_digest.clone().unwrap_or_else(|| "unknown".into());
+            return (Some("target/release/calculator-harness".into()), Some(digest));
         }
     }
     (None, None)
