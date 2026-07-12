@@ -93,3 +93,123 @@ pub struct HcrRunBinding {
     pub run_id: String,
     pub created_at: String,
 }
+
+/// The kind of a trusted acceptance gate for HCR settlement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GateKind {
+    Scaffold,
+    Build,
+    TrustedTest,
+    TrustedSmoke,
+    Artifact,
+}
+
+impl GateKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            GateKind::Scaffold => "scaffold",
+            GateKind::Build => "build",
+            GateKind::TrustedTest => "trusted_test",
+            GateKind::TrustedSmoke => "trusted_smoke",
+            GateKind::Artifact => "artifact",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "scaffold" => Some(GateKind::Scaffold),
+            "build" => Some(GateKind::Build),
+            "trusted_test" => Some(GateKind::TrustedTest),
+            "trusted_smoke" => Some(GateKind::TrustedSmoke),
+            "artifact" => Some(GateKind::Artifact),
+            _ => None,
+        }
+    }
+
+    /// All required gates. Sorted alphabetically to match SQL ORDER BY gate_kind.
+    pub fn all_required() -> &'static [GateKind] {
+        &[
+            GateKind::Artifact,
+            GateKind::Build,
+            GateKind::Scaffold,
+            GateKind::TrustedSmoke,
+            GateKind::TrustedTest,
+        ]
+    }
+}
+
+/// Canonical service-side gate attempt. Created by `prepare_hcr_gate_attempt`.
+/// Records what operation/profile/workspace/harness this gate is expected to use.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HcrGateAttempt {
+    pub gate_attempt_id: String,
+    pub hcr_id: String,
+    pub claim_id: String,
+    pub run_id: String,
+    pub harness_id: String,
+    pub workspace_id: String,
+    pub gate_kind: String,
+    pub expected_operation: String,
+    pub expected_profile: String,
+    pub invocation_intent_id: String,
+    pub created_at: String,
+}
+
+/// Durable record of a single gate execution, bound to its receipt.
+/// NO cached result fields — all structured values are parsed from the
+/// receipt journal event at settlement/resume time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HcrGateEvidence {
+    pub evidence_id: String,
+    pub gate_attempt_id: String,
+    pub receipt_event_id: String,
+    pub receipt_payload_digest: String,
+    pub created_at: String,
+}
+
+/// Structured gate receipt parsed from the journal ReceiptReceived event.
+/// Private fields — cannot be constructed by callers. Only created by the
+/// unified source-chain validator.
+#[derive(Debug, Clone)]
+pub struct ValidatedGateReceipt {
+    pub(crate) gate_attempt_id: String,
+    pub(crate) receipt_event_id: String,
+    pub(crate) status: String,
+    pub(crate) exit_code: i32,
+    pub(crate) timed_out: bool,
+    pub(crate) child_cleanup: Option<bool>,
+    pub(crate) error_code: Option<String>,
+    pub(crate) receipt_payload_digest: String,
+    pub(crate) operation: String,
+}
+
+/// A terminal settlement record for an HCR.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HcrSettlement {
+    pub settlement_id: String,
+    pub hcr_id: String,
+    pub claim_id: String,
+    pub run_id: String,
+    pub result: String,
+    pub error_code: Option<String>,
+    pub evidence_set_digest: String,
+    pub created_at: String,
+}
+
+/// Result of a settlement attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SettlementResult {
+    /// All gates passed. Carries settlement_id.
+    Succeeded(String),
+    /// Candidate code failed. Carries settlement_id.
+    CandidateFailed(String),
+    /// Infrastructure failure; HCR remains running. Carries error message.
+    InfrastructureFailure(String),
+    /// HCR was already settled. Carries existing result description.
+    AlreadySettled(String),
+    /// Evidence set is incomplete or invalid. Carries error message.
+    EvidenceIncomplete(String),
+    /// Conflicting evidence detected. Carries conflict message.
+    EvidenceConflict(String),
+}
