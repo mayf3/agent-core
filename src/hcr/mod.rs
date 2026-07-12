@@ -1,12 +1,7 @@
-//! HCR (HarnessChangeRequest) worker and revalidation.
-//!
-//! R2 adds atomic claim, trusted Run binding, and service-side revalidation
-//! for HCR execution. R3 will add settle logic; R4 will add final Feishu reply.
-//!
-//! This module provides:
-//! - [`revalidate::revalidate_hcr_context`] — server-side revalidation before
-//!   each privileged tool dispatch.
-//! - [`worker::execute_hcr`] — minimal HCR worker entry point.
-
+pub mod evidence;
+pub mod gate_attempt;
+pub mod resume;
 pub mod revalidate;
+pub mod settlement;
+pub mod validate;
 pub mod worker;

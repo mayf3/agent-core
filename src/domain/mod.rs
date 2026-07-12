@@ -504,6 +504,18 @@ pub enum JournalEventKind {
     /// payload: `claim_id`, `hcr_id`, `run_id`, `is_resume`
     /// correlation_id: claim_id
     HcrRunCreated,
+    /// A durable gate evidence record was successfully registered.
+    /// payload: `evidence_id`, `hcr_id`, `claim_id`, `run_id`, `gate_kind`, `receipt_id`
+    /// correlation_id: evidence_id
+    HcrEvidenceRegistered,
+    /// HCR settlement succeeded: all gates passed structured validation.
+    /// payload: `hcr_id`, `claim_id`, `run_id`, `result`, `evidence_set_digest`, `settlement_id`
+    /// correlation_id: hcr_id
+    HcrSettlementSucceeded,
+    /// HCR settlement failed due to candidate code failure.
+    /// payload: `hcr_id`, `claim_id`, `run_id`, `result`, `error_code`, `evidence_set_digest`, `settlement_id`
+    /// correlation_id: hcr_id
+    HcrSettlementFailed,
     /// The Run exhausted its configured tool-round budget. The Run completes
     /// normally so the reply is delivered, but the user must start a new Run
     /// to continue. payload: `run_id`, `tool_rounds_used`, `max_tool_rounds`
