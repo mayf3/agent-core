@@ -63,7 +63,8 @@ impl SandboxBackend {
                 }
             }
             if std::path::Path::new("/usr/bin/bwrap").exists()
-                || std::path::Path::new("/usr/local/bin/bwrap").exists() {
+                || std::path::Path::new("/usr/local/bin/bwrap").exists()
+            {
                 return SandboxBackend::LinuxBubblewrap;
             }
         }
@@ -106,13 +107,11 @@ fn generate_macos_sb_profile(config: &SandboxConfig) -> String {
 
     let net_policy = match config.network_policy {
         NetworkPolicy::Deny => "(deny network*)".to_string(),
-        NetworkPolicy::LoopbackOnly => {
-            [
-                "(deny network*)",
-                "(allow network* (remote ip \"localhost:*\"))",
-            ]
-            .join("\n")
-        }
+        NetworkPolicy::LoopbackOnly => [
+            "(deny network*)",
+            "(allow network* (remote ip \"localhost:*\"))",
+        ]
+        .join("\n"),
     };
 
     format!(
@@ -193,7 +192,8 @@ fn wrap_linux_bubblewrap(
     bwrap.arg("/proc");
     bwrap.arg("--dev");
     bwrap.arg("/dev");
-    bwrap.arg("--tmpfs");
+    bwrap.arg("--bind");
+    bwrap.arg("/tmp");
     bwrap.arg("/tmp");
 
     // Workspace read-write
@@ -201,7 +201,68 @@ fn wrap_linux_bubblewrap(
     bwrap.arg(&ws);
     bwrap.arg(&ws);
 
-    // Home read-write
+    // Private sandbox home (tmpfs — NOT host /home).
+    // The candidate sees an empty, writable /home that disappears
+    // when the sandbox exits.  Host home, SSH keys, gitconfig, and
+    // config directories are NOT accessible.
+    bwrap.arg("--tmpfs");
+    bwrap.arg("/home");
+    bwrap.arg("--dir");
+    bwrap.arg("/home/sandbox");
+
+    // Rust toolchain: read-only bind of specific host paths to
+    // custom sandbox locations.  Resolve RUSTUP_HOME and CARGO_HOME
+    // directly from the host environment (the callers set them before
+    // invocation).  Only the directories actually needed for cargo/rustc
+    // are exposed — NOT the entire host /home.
+    let mut sandbox_rustup = None;
+    let mut sandbox_cargo = None;
+
+    let host_rustup = std::env::var("RUSTUP_HOME").unwrap_or_else(|_| {
+        std::env::var("HOME")
+            .map(|h| format!("{h}/.rustup"))
+            .unwrap_or_default()
+    });
+    if !host_rustup.is_empty() && std::path::Path::new(&host_rustup).exists() {
+        let sb = "/opt/rustup";
+        bwrap.arg("--ro-bind");
+        bwrap.arg(&host_rustup);
+        bwrap.arg(sb);
+        sandbox_rustup = Some(sb.to_string());
+    }
+
+    let host_cargo = std::env::var("CARGO_HOME").unwrap_or_else(|_| {
+        std::env::var("HOME")
+            .map(|h| format!("{h}/.cargo"))
+            .unwrap_or_default()
+    });
+    // Create /opt directory structure for sandbox cargo/rustup paths
+    bwrap.arg("--dir");
+    bwrap.arg("/opt");
+    bwrap.arg("--dir");
+    bwrap.arg("/opt/cargo");
+
+    // Read-only bind of ONLY the cargo subdirectories required for building.
+    // The host's entire ~/.cargo is intentionally NOT mounted — that would
+    // expose credentials.toml, credentials, config.toml, config, and any
+    // private registry tokens.
+    //
+    // Only bind: bin, registry, git, .crates metadata files.
+    if !host_cargo.is_empty() && std::path::Path::new(&host_cargo).exists() {
+        let sb = "/opt/cargo";
+        sandbox_cargo = Some(sb.to_string());
+        for sub in &["bin", "registry", "git", ".crates.toml", ".crates2.json"] {
+            let host_sub = format!("{host_cargo}/{sub}");
+            let sb_sub = format!("{sb}/{sub}");
+            if std::path::Path::new(&host_sub).exists() {
+                bwrap.arg("--ro-bind");
+                bwrap.arg(&host_sub);
+                bwrap.arg(&sb_sub);
+            }
+        }
+    }
+
+    // Sandbox home (writable, per-gate)
     bwrap.arg("--bind");
     bwrap.arg(&home);
     bwrap.arg(&home);
@@ -251,6 +312,23 @@ fn wrap_linux_bubblewrap(
     // Set environment
     for (k, v) in original_env {
         bwrap.env(&k, &v);
+    }
+
+    // Override HOME, RUSTUP_HOME, CARGO_HOME to sandbox paths.
+    // HOME → private /home/sandbox (tmpfs, not host home)
+    // RUSTUP_HOME → /opt/rustup (ro-bind from host)
+    // CARGO_HOME → /opt/cargo (ro-bind from host)
+    bwrap.env("HOME", "/home/sandbox");
+    if let Some(rustup) = &sandbox_rustup {
+        bwrap.env("RUSTUP_HOME", rustup);
+    }
+    if let Some(cargo) = &sandbox_cargo {
+        bwrap.env("CARGO_HOME", cargo);
+        // Prepend sandbox cargo bin dir to PATH so `cargo` is found
+        let cargo_bin = format!("{cargo}/bin");
+        let path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{cargo_bin}:{path}");
+        bwrap.env("PATH", &new_path);
     }
 
     Ok(bwrap)
