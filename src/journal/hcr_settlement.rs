@@ -194,39 +194,73 @@ impl JournalStore {
 
     // ── Terminal Settlement ──────────────────────────────────────────
 
-    /// Internal-only: writes terminal HCR status + settlement record +
-    /// terminal journal event in a single transaction. Does NOT accept
-    /// caller result; only called by `settle_hcr` in `settlement.rs`.
-    pub(crate) fn settle_hcr_terminal_internal(
+    /// Write a terminal settlement from pre-validated source facts.
+    /// Computes result and digest internally — caller provides only identity
+    /// keys and validated gate data. No caller-supplied result/status/digest.
+    pub(crate) fn settle_hcr_terminal(
         &self,
         hcr_id: &str,
         claim_id: &str,
         run_id: &str,
-        result: &str,
         error_code: Option<&str>,
-        digest: &str,
+        attempts: &[HcrGateAttempt],
+        parsed_receipts: &[ValidatedGateReceipt],
     ) -> Result<String> {
+        // Classify result from source facts.
+        let has_failure = parsed_receipts
+            .iter()
+            .any(|r| r.exit_code != 0 || r.status == "Failed");
+        let result = if has_failure {
+            "candidate_failed"
+        } else {
+            "succeeded"
+        };
+        // HCR status column uses 'failed' (CHECK: pending/running/succeeded/failed/cancelled).
+        // Settlement record uses 'candidate_failed' (CHECK: succeeded/candidate_failed).
+
+        // Compute canonical digest from source facts.
+        let digest = crate::hcr::settlement::compute_digest(
+            hcr_id,
+            claim_id,
+            run_id,
+            attempts,
+            parsed_receipts,
+        );
+
         let mut conn = self.conn.lock().map_err(|_| anyhow!("mutex"))?;
 
-        // Check existing settlement.
-        if let Some(sid) = conn
+        // Check existing settlement with digest comparison.
+        if let Some(existing) = conn
             .query_row(
-                "SELECT settlement_id FROM hcr_settlements WHERE hcr_id = ?1",
+                "SELECT settlement_id, evidence_set_digest FROM hcr_settlements WHERE hcr_id = ?1",
                 params![hcr_id],
-                |row| row.get(0),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
             )
             .optional()?
         {
-            return Ok(sid);
+            if existing.1 != digest {
+                anyhow::bail!(
+                    "SETTLE_DIGEST_CONFLICT: existing {} != {}",
+                    existing.1,
+                    digest
+                );
+            }
+            return Ok(existing.0);
         }
 
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
 
-        // CAS update HCR status.
+        // HCR status uses 'failed' for candidate failures (CHECK constraint).
+        let hcr_status = if has_failure { "failed" } else { "succeeded" };
         let updated = tx.execute(
             "UPDATE harness_change_requests SET status = ?1, error_code = ?2, updated_at = ?3
              WHERE request_id = ?4 AND status = 'running'",
-            params![result, error_code, chrono::Utc::now().to_rfc3339(), hcr_id],
+            params![
+                hcr_status,
+                error_code,
+                chrono::Utc::now().to_rfc3339(),
+                hcr_id
+            ],
         )?;
         if updated == 0 {
             tx.commit()?;

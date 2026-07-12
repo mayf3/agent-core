@@ -17,7 +17,10 @@ pub fn settle_hcr(
         .ok_or_else(|| anyhow::anyhow!("SETTLE_HCR_NOT_FOUND"))?;
     if hcr.status == "succeeded" || hcr.status == "failed" {
         return if let Some(stl) = journal.get_settlement(hcr_id)? {
-            Ok(settlement_to_result(&stl))
+            Ok(SettlementResult::AlreadySettled(format!(
+                "result={}",
+                stl.result
+            )))
         } else {
             Ok(SettlementResult::EvidenceIncomplete(
                 "terminal no record".into(),
@@ -160,36 +163,41 @@ pub fn settle_hcr(
         )));
     }
 
-    let digest = compute_digest(hcr_id, claim_id, run_id, &attempts, &parsed);
+    // Check if already settled (pre-tx, fast path).
+    if let Some(existing) = journal.get_settlement(hcr_id)? {
+        return Ok(SettlementResult::AlreadySettled(format!(
+            "result={}",
+            existing.result
+        )));
+    }
 
-    if !candidate {
-        match journal.settle_hcr_terminal_internal(
-            hcr_id,
-            claim_id,
-            run_id,
-            "succeeded",
-            None,
-            &digest,
-        ) {
-            Ok(sid) => Ok(SettlementResult::Succeeded(sid)),
-            Err(_) => check_conflict(journal, hcr_id, &digest),
-        }
+    let err_opt = if candidate {
+        Some(first_err.as_str())
     } else {
-        match journal.settle_hcr_terminal_internal(
-            hcr_id,
-            claim_id,
-            run_id,
-            "candidate_failed",
-            Some(&first_err),
-            &digest,
-        ) {
-            Ok(sid) => Ok(SettlementResult::CandidateFailed(sid)),
-            Err(_) => check_conflict(journal, hcr_id, &digest),
+        None
+    };
+    match journal.settle_hcr_terminal(hcr_id, claim_id, run_id, err_opt, &attempts, &parsed) {
+        Ok(sid) => {
+            if candidate {
+                Ok(SettlementResult::CandidateFailed(sid))
+            } else {
+                Ok(SettlementResult::Succeeded(sid))
+            }
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("DIGEST_CONFLICT") {
+                Ok(SettlementResult::EvidenceConflict(msg))
+            } else {
+                Ok(SettlementResult::EvidenceConflict(format!(
+                    "settle failed and no existing settlement: {e}"
+                )))
+            }
         }
     }
 }
 
-fn compute_digest(
+pub fn compute_digest(
     hcr_id: &str,
     claim_id: &str,
     run_id: &str,
