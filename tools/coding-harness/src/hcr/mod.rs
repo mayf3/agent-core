@@ -13,9 +13,11 @@
 //! - **Structured results**: Consistent JSON envelope with status,
 //!   exit code, truncation flags, and cleanup confirmation.
 
+pub mod candidate;
 pub mod command;
 pub mod errors;
 pub mod executor;
+pub mod gates;
 pub mod process;
 pub mod profile;
 pub mod sandbox;
