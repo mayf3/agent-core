@@ -63,7 +63,8 @@ impl SandboxBackend {
                 }
             }
             if std::path::Path::new("/usr/bin/bwrap").exists()
-                || std::path::Path::new("/usr/local/bin/bwrap").exists() {
+                || std::path::Path::new("/usr/local/bin/bwrap").exists()
+            {
                 return SandboxBackend::LinuxBubblewrap;
             }
         }
@@ -106,13 +107,11 @@ fn generate_macos_sb_profile(config: &SandboxConfig) -> String {
 
     let net_policy = match config.network_policy {
         NetworkPolicy::Deny => "(deny network*)".to_string(),
-        NetworkPolicy::LoopbackOnly => {
-            [
-                "(deny network*)",
-                "(allow network* (remote ip \"localhost:*\"))",
-            ]
-            .join("\n")
-        }
+        NetworkPolicy::LoopbackOnly => [
+            "(deny network*)",
+            "(allow network* (remote ip \"localhost:*\"))",
+        ]
+        .join("\n"),
     };
 
     format!(
@@ -193,7 +192,8 @@ fn wrap_linux_bubblewrap(
     bwrap.arg("/proc");
     bwrap.arg("--dev");
     bwrap.arg("/dev");
-    bwrap.arg("--tmpfs");
+    bwrap.arg("--bind");
+    bwrap.arg("/tmp");
     bwrap.arg("/tmp");
 
     // Workspace read-write
@@ -202,6 +202,18 @@ fn wrap_linux_bubblewrap(
     bwrap.arg(&ws);
 
     // Home read-write
+
+    // Real user home (read-only) - needed for rustup/cargo toolchain
+    {
+        // real_home is PathBuf, not Option
+        let rh = &config.real_home;
+        if rh.as_os_str() != home.as_str() && rh.exists() {
+            bwrap.arg("--ro-bind");
+            bwrap.arg(rh);
+            bwrap.arg(rh);
+        }
+    }
+
     bwrap.arg("--bind");
     bwrap.arg(&home);
     bwrap.arg(&home);

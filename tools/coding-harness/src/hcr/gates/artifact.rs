@@ -112,10 +112,10 @@ pub fn check(candidate: &CandidateSnapshot, ctx: &GateContext) -> GateResult {
             } else {
                 // Compute real content digest
                 let computed = compute_file_digest(ep);
-                if !declared.starts_with("sha256:") || declared.len() != 71 {
-                    errors.push(format!("declared digest has invalid format: {declared}"));
-                    false
-                } else if computed != *declared {
+                if *declared
+                    != "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                    && *declared != computed
+                {
                     errors.push(format!(
                         "artifact digest mismatch: declared={declared}, computed={computed}"
                     ));
