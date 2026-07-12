@@ -13,6 +13,13 @@
 //! The build gate creates a writable copy of the candidate source in the
 //! shared work directory. Subsequent gates (TrustedTest, TrustedSmoke)
 //! locate the built binary in the shared build output.
+//!
+//! # Security
+//!
+//! - Candidate digest is enforced before AND after every gate. Any change
+//!   aborts the entire acceptance run (H1).
+//! - Sandbox execution fails closed: no host fallback when sandbox is
+//!   unavailable (B2).
 
 pub mod artifact;
 pub mod build;
@@ -21,6 +28,8 @@ pub mod trusted_smoke;
 pub mod trusted_test;
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::hcr::candidate::{verify_digest, CandidateSnapshot};
@@ -141,16 +150,17 @@ impl GateContext {
     }
 }
 
+// ── Digest enforcement: re-export the error message ──
+/// Error message emitted when candidate digest changes between gate checks.
+pub const CANDIDATE_INTEGRITY_VIOLATION: &str = "CANDIDATE_INTEGRITY_VIOLATION";
+
 /// Run all five acceptance gates against the given candidate snapshot.
 ///
-/// Returns a vector of five `GateResult`s in the order:
-/// Scaffold, Build, TrustedTest, TrustedSmoke, Artifact.
-///
-/// Each gate verifies the candidate digest before and after execution.
-/// The Build gate creates a writable copy in the work directory so
-/// the original candidate remains immutable.
+/// Returns a vector of 0–5 `GateResult`s. If the candidate digest changes
+/// before or during any gate, execution aborts immediately and later gates
+/// are not executed (H1 enforcement).
 pub fn run_all_gates(candidate: &CandidateSnapshot) -> Vec<GateResult> {
-    let mut results = Vec::with_capacity(5);
+    let expected_digest = &candidate.candidate_digest;
 
     let work_base = std::env::temp_dir().join(format!(
         "hcr_gates_work_{}_{}",
@@ -163,40 +173,87 @@ pub fn run_all_gates(candidate: &CandidateSnapshot) -> Vec<GateResult> {
 
     let ctx = GateContext::new(work_base.clone(), candidate);
 
-    // Helper to run a gate with digest verification
+    // Helper to run a gate with mandatory digest verification.
+    // Returns None (abort) if digest changed.
     let run_gate = |gate_kind: GateKind,
                     gate_fn: fn(&CandidateSnapshot, &GateContext) -> GateResult|
-     -> GateResult {
-        // Verify digest before gate
-        let digest_ok_before = verify_digest(candidate).unwrap_or(false);
+     -> Option<GateResult> {
+        // Verify digest BEFORE gate — any change aborts acceptance.
+        let actual_before = verify_digest(candidate).unwrap_or(false);
+        if !actual_before {
+            let mut result = GateResult::infrastructure_failure(
+                gate_kind,
+                CANDIDATE_INTEGRITY_VIOLATION,
+                &format!(
+                    "candidate digest changed before {} gate: expected {}, observed changed",
+                    gate_kind.as_str(),
+                    expected_digest,
+                ),
+                candidate,
+            );
+            result.candidate_digest_preserved = false;
+            return Some(result);
+        }
 
+        // Execute the gate
         let mut result = gate_fn(candidate, &ctx);
 
-        // Verify digest after gate
-        let digest_ok_after = verify_digest(candidate).unwrap_or(false);
-        result.candidate_digest_preserved = digest_ok_before && digest_ok_after;
+        // Verify digest AFTER gate — any change aborts acceptance.
+        let actual_after = verify_digest(candidate).unwrap_or(false);
+        if !actual_after {
+            // The gate itself may have produced a result, but the digest
+            // changed — this is an infrastructure integrity failure.
+            let mut abort = GateResult::infrastructure_failure(
+                gate_kind,
+                CANDIDATE_INTEGRITY_VIOLATION,
+                &format!(
+                    "candidate digest changed during/after {} gate: expected {}, observed changed",
+                    gate_kind.as_str(),
+                    expected_digest,
+                ),
+                candidate,
+            );
+            abort.candidate_digest_preserved = false;
+            return Some(abort);
+        }
+
+        // Digest was preserved
+        result.candidate_digest_preserved = true;
 
         // Override candidate fields from snapshot
         result.candidate_id = candidate.candidate_id.clone();
         result.candidate_digest = candidate.candidate_digest.clone();
 
-        result
+        Some(result)
     };
 
-    // Gate 1: Scaffold
-    results.push(run_gate(GateKind::Scaffold, scaffold::check));
+    // Define the gate execution order
+    let gates: [(GateKind, fn(&CandidateSnapshot, &GateContext) -> GateResult); 5] = [
+        (GateKind::Scaffold, scaffold::check),
+        (GateKind::Build, build::check),
+        (GateKind::TrustedTest, trusted_test::check),
+        (GateKind::TrustedSmoke, trusted_smoke::check),
+        (GateKind::Artifact, artifact::check),
+    ];
 
-    // Gate 2: Build
-    results.push(run_gate(GateKind::Build, build::check));
+    let mut results = Vec::with_capacity(5);
 
-    // Gate 3: TrustedTest
-    results.push(run_gate(GateKind::TrustedTest, trusted_test::check));
-
-    // Gate 4: TrustedSmoke
-    results.push(run_gate(GateKind::TrustedSmoke, trusted_smoke::check));
-
-    // Gate 5: Artifact
-    results.push(run_gate(GateKind::Artifact, artifact::check));
+    for (kind, func) in &gates {
+        match run_gate(*kind, *func) {
+            Some(r) => {
+                let aborted =
+                    !r.passed && r.error_code.as_deref() == Some(CANDIDATE_INTEGRITY_VIOLATION);
+                results.push(r);
+                if aborted {
+                    break;
+                }
+            }
+            None => {
+                // Shouldn't happen since run_gate always returns Some
+                break;
+            }
+        }
+    }
 
     // Cleanup work base
     let _ = std::fs::remove_dir_all(&work_base);
@@ -204,19 +261,37 @@ pub fn run_all_gates(candidate: &CandidateSnapshot) -> Vec<GateResult> {
     results
 }
 
-/// Run a command directly with sandbox support and custom env vars.
+// ── Sandboxed command execution (fail-closed) ──
+
+/// Result of a sandboxed command execution.
+#[derive(Debug, Clone)]
+pub(crate) struct SandboxedCommandResult {
+    pub exit_code: i32,
+    pub timed_out: bool,
+    pub stdout: String,
+    pub stderr: String,
+    pub child_cleanup: CleanupStatus,
+}
+
+/// Run a command with mandatory sandbox wrapping.
 ///
-/// Sandbox is best-effort: if no backend is available, the command runs
-/// without sandbox wrapping. Suitable for test/gate contexts.
-#[allow(dead_code)]
-pub(crate) fn run_command_direct_sandboxed(
+/// # Security (B2)
+///
+/// This function **never** falls back to host execution. If the sandbox
+/// backend is unavailable or initialization fails, it returns an
+/// `Err` tuple indicating `InfrastructureFailure`. The caller must
+/// propagate this as a gate failure.
+///
+/// On macOS without sandbox-exec, or Linux without bubblewrap, every
+/// call returns an error — no candidate code is executed on the host.
+pub(crate) fn run_command_sandboxed(
     program: &Path,
     args: &[&str],
     work_dir: &Path,
     timeout: Duration,
     stdin_input: &[&str],
     extra_env: &[(&str, &str)],
-) -> (i32, bool, String, String, CleanupStatus) {
+) -> Result<SandboxedCommandResult, SandboxedCommandResult> {
     let backend = SandboxBackend::detect();
 
     let sandbox_config = SandboxConfig {
@@ -226,6 +301,17 @@ pub(crate) fn run_command_direct_sandboxed(
         agent_core_repo: process::find_agent_core_repo(),
         network_policy: crate::hcr::profile::NetworkPolicy::Deny,
     };
+
+    // Fail-closed: sandbox must be available
+    if let SandboxBackend::Unavailable = backend {
+        return Err(SandboxedCommandResult {
+            exit_code: -1,
+            timed_out: false,
+            stdout: String::new(),
+            stderr: "sandbox backend unavailable: execution denied (fail-closed)".into(),
+            child_cleanup: CleanupStatus::Confirmed,
+        });
+    }
 
     let mut cmd = std::process::Command::new(program);
     cmd.args(args);
@@ -259,12 +345,20 @@ pub(crate) fn run_command_direct_sandboxed(
         cmd.process_group(0);
     }
 
-    // Wrap with sandbox (best-effort)
+    // Wrap with sandbox — fail-closed
     let mut cmd = match sandbox::wrap_with_sandbox(&mut cmd, &sandbox_config, &backend) {
         Ok(c) => c,
-        Err(_e) => {
-            // Sandbox unavailable — continue without wrapping
-            cmd
+        Err(e) => {
+            if needs_cleanup {
+                let _ = std::fs::remove_dir_all(&sandbox_home);
+            }
+            return Err(SandboxedCommandResult {
+                exit_code: -1,
+                timed_out: false,
+                stdout: String::new(),
+                stderr: format!("sandbox init failed (fail-closed): {e}"),
+                child_cleanup: CleanupStatus::Confirmed,
+            });
         }
     };
 
@@ -283,13 +377,13 @@ pub(crate) fn run_command_direct_sandboxed(
             if needs_cleanup {
                 let _ = std::fs::remove_dir_all(&sandbox_home);
             }
-            return (
-                -1,
-                false,
-                String::new(),
-                format!("spawn failed: {e}"),
-                CleanupStatus::Confirmed,
-            );
+            return Err(SandboxedCommandResult {
+                exit_code: -1,
+                timed_out: false,
+                stdout: String::new(),
+                stderr: format!("spawn failed: {e}"),
+                child_cleanup: CleanupStatus::Confirmed,
+            });
         }
     };
 
@@ -303,18 +397,18 @@ pub(crate) fn run_command_direct_sandboxed(
     }
 
     // Drain stdout/stderr
-    let out_buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let err_buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let out_buf = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let err_buf = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let done = Arc::new(AtomicBool::new(false));
 
     if let Some(pipe) = child.stdout.take() {
-        let b = std::sync::Arc::clone(&out_buf);
-        let d = std::sync::Arc::clone(&done);
+        let b = Arc::clone(&out_buf);
+        let d = Arc::clone(&done);
         std::thread::spawn(move || process::drain_reader(pipe, b, d, 1_048_576));
     }
     if let Some(pipe) = child.stderr.take() {
-        let b = std::sync::Arc::clone(&err_buf);
-        let d = std::sync::Arc::clone(&done);
+        let b = Arc::clone(&err_buf);
+        let d = Arc::clone(&done);
         std::thread::spawn(move || process::drain_reader(pipe, b, d, 1_048_576));
     }
 
@@ -356,5 +450,11 @@ pub(crate) fn run_command_direct_sandboxed(
         CleanupStatus::Confirmed
     };
 
-    (exit_code, timed_out, stdout_str, stderr_str, cleanup)
+    Ok(SandboxedCommandResult {
+        exit_code,
+        timed_out,
+        stdout: stdout_str,
+        stderr: stderr_str,
+        child_cleanup: cleanup,
+    })
 }
