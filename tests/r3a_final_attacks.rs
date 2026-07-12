@@ -448,28 +448,129 @@ fn twenty_independent_connections_settle_once() {
     }
 }
 
+// ── 6. Terminal-idempotent replay (no source-fact change) ───────────────
+//
+// A legitimate settlement is terminal. Replaying `settle_hcr()` on the same
+// HCR *without* changing any persistent source fact is an idempotent read: it
+// returns `AlreadySettled` referring to the *same* persisted settlement, and
+// produces no additional settlement row or terminal event.
+
+fn terminal_event_count(j: &JournalStore, hcr_id: &str) -> usize {
+    j.events()
+        .unwrap()
+        .into_iter()
+        .filter(|e| {
+            (e.kind == JournalEventKind::HcrSettlementSucceeded
+                || e.kind == JournalEventKind::HcrSettlementFailed)
+                && e.correlation_id.as_deref() == Some(hcr_id)
+        })
+        .count()
+}
+
 #[test]
-fn concurrent_conflicting_evidence_digest_is_rejected() {
+fn same_evidence_digest_replay_is_already_settled() {
     let f = make_fixture();
     add_all_gates(&f);
-    // First settle succeeds.
+
+    // First call: production settlement succeeds.
     let r1 = settlement::settle_hcr(&f.j, &f.hcr_id, &f.claim_id, &f.run_id).unwrap();
-    assert!(
-        matches!(r1, SettleResult::Succeeded(_)),
-        "first must succeed: {r1:?}"
-    );
+    let sid1 = match r1 {
+        SettleResult::Succeeded(sid) => sid,
+        other => panic!("first settle must succeed, got {other:?}"),
+    };
 
-    // Tamper receipt payload directly (changes canonical digest).
-    f.j.execute_sql_for_test(&format!(
-        "UPDATE journal_events SET payload_json = json_set(payload_json, '$.output.exit_code', 99) WHERE event_id IN (SELECT receipt_event_id FROM hcr_gate_evidence e JOIN hcr_gate_attempts a ON e.gate_attempt_id = a.gate_attempt_id WHERE a.hcr_id = '{}')",
-        f.hcr_id
-    )).unwrap();
+    // Record persisted terminal identity.
+    let s1 =
+        f.j.get_settlement(&f.hcr_id)
+            .expect("query settlement")
+            .expect("settlement row after first settle");
+    assert_eq!(s1.settlement_id, sid1);
+    assert_eq!(s1.result, "succeeded");
+    let digest1 = s1.evidence_set_digest.clone();
 
-    // Second settle after evidence change must return AlreadySettled
-    // (the existing settlement prevails, and digest change creates conflict).
+    // No persistent source fact is changed. Replay the same production entry point.
     let r2 = settlement::settle_hcr(&f.j, &f.hcr_id, &f.claim_id, &f.run_id).unwrap();
     assert!(
         matches!(r2, SettleResult::AlreadySettled(_)),
-        "settle after tamper must return AlreadySettled: {r2:?}"
+        "replay must be AlreadySettled, got {r2:?}"
+    );
+
+    // The persisted settlement identity is unchanged.
+    let s2 =
+        f.j.get_settlement(&f.hcr_id)
+            .expect("query settlement")
+            .expect("settlement row after replay");
+    assert_eq!(s2.settlement_id, sid1, "settlement id must be identical");
+    assert_eq!(s2.result, s1.result, "result must be identical");
+    assert_eq!(
+        s2.evidence_set_digest, digest1,
+        "evidence-set digest must be identical"
+    );
+
+    // Exactly one settlement row and one terminal event.
+    assert!(
+        f.j.get_settlement(&f.hcr_id).unwrap().is_some(),
+        "settlement row exists"
+    );
+    assert_eq!(
+        terminal_event_count(&f.j, &f.hcr_id),
+        1,
+        "exactly one terminal event"
+    );
+}
+
+// ── 7. Pre-settlement receipt tamper is an infrastructure failure ────────
+//
+// Tampering a Receipt payload *before* settlement — without updating the
+// Evidence record's stored payload digest — cannot form a new legitimate
+// canonical digest. The per-evidence payload-digest guard rejects it as an
+// InfrastructureFailure, the HCR stays `running`, and no terminal settlement
+// row or event is produced.
+
+#[test]
+fn pre_settlement_receipt_tamper_is_infrastructure_failure() {
+    let f = make_fixture();
+    add_all_gates(&f);
+
+    // Tamper a real Receipt source field (exit_code) for every gate's receipt
+    // *before* settlement, without touching the stored Evidence payload digest.
+    f.j.execute_sql_for_test(&format!(
+        "UPDATE journal_events SET payload_json = json_set(payload_json, '$.output.exit_code', 99) \
+         WHERE event_id IN (\
+            SELECT e.receipt_event_id FROM hcr_gate_evidence e \
+            JOIN hcr_gate_attempts a ON e.gate_attempt_id = a.gate_attempt_id \
+            WHERE a.hcr_id = '{}'\
+         )",
+        f.hcr_id
+    ))
+    .expect("tamper receipt exit_code");
+
+    // Production settlement must reject the tampered evidence without going terminal.
+    let r = settlement::settle_hcr(&f.j, &f.hcr_id, &f.claim_id, &f.run_id).unwrap();
+    assert!(
+        matches!(r, SettleResult::InfrastructureFailure(_)),
+        "pre-settlement receipt tamper must be InfrastructureFailure, got {r:?}"
+    );
+
+    // HCR remains running; no settlement row; no terminal event.
+    let hcr =
+        f.j.get_harness_change_request(&f.hcr_id)
+            .expect("query hcr")
+            .expect("hcr row");
+    assert_eq!(
+        hcr.status, "running",
+        "HCR must remain running after reject"
+    );
+
+    assert!(
+        f.j.get_settlement(&f.hcr_id)
+            .expect("query settlement")
+            .is_none(),
+        "no settlement row must be produced"
+    );
+    assert_eq!(
+        terminal_event_count(&f.j, &f.hcr_id),
+        0,
+        "no terminal event must be produced"
     );
 }
