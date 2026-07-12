@@ -103,8 +103,10 @@ pub fn append_or_compare_receipt(
         event_payload,
     )?;
 
-    // Insert receipt identity (UNIQUE constraint protects against races)
-    match tx.execute(
+    // Insert receipt identity (UNIQUE constraint protects against races).
+    // BOTH the journal event and the identity row are in the same transaction:
+    // if either fails, the ENTIRE transaction rolls back — no orphan events.
+    let identity_result = tx.execute(
         "INSERT INTO hcr_receipt_identities
          (hcr_id, claim_id, run_id, idempotency_key, payload_digest, receipt_event_id,
           harness_execution_id, overall_outcome, candidate_digest,
@@ -121,24 +123,37 @@ pub fn append_or_compare_receipt(
             identity_fields.evidence_digest,
             chrono::Utc::now().to_rfc3339(),
         ],
-    ) {
+    );
+
+    match identity_result {
         Ok(_) => {
+            // Both identity and Journal event committed atomically
             tx.commit()?;
             Ok(AppendReceiptResult::Appended)
         }
         Err(e) => {
-            // UNIQUE constraint violation — another connection inserted first
-            tx.commit()?;
+            // UNIQUE constraint violation: another connection inserted first.
+            // ROLLBACK the entire transaction — the Journal event must NOT
+            // be committed if the identity row failed. This prevents orphan
+            // ReceiptReceived events (H3/H6 fix).
+            if let Err(rollback_err) = tx.rollback() {
+                // If rollback itself fails, the DB is in a bad state
+                return Err(anyhow!("ROLLBACK_FAILED: {rollback_err} after UNIQUE error: {e}"));
+            }
 
-            // Re-read the existing entry
-            let existing_digest: Option<String> = conn.query_row(
+            // Open a fresh transaction to re-read the winner's identity
+            let mut conn2 = journal.conn.lock().map_err(|e| anyhow!("mutex: {e}"))?;
+            let tx2 = conn2.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+
+            let winner_digest: Option<String> = tx2.query_row(
                 "SELECT payload_digest FROM hcr_receipt_identities
                  WHERE hcr_id = ?1 AND claim_id = ?2 AND run_id = ?3 AND idempotency_key = ?4",
                 params![hcr_id, claim_id, the_run_id, idempotency_key],
                 |row| row.get(0),
             ).optional()?;
+            tx2.commit()?;
 
-            match existing_digest {
+            match winner_digest {
                 Some(d) if d == payload_digest => Ok(AppendReceiptResult::Duplicate),
                 Some(d) => Ok(AppendReceiptResult::Conflict(format!("existing {d} vs new {payload_digest}"))),
                 None => Ok(AppendReceiptResult::Conflict("unexpected missing identity after conflict".into())),
