@@ -301,123 +301,175 @@ fn terminal_hcr_without_settlement_is_corruption() {
 
 #[test]
 fn twenty_independent_connections_settle_once() {
-    // Verify CAS-based settlement: exactly 1 of N concurrent settlements
-    // creates a terminal record; the rest report AlreadySettled.
-    use std::sync::Mutex;
-    let db_path = db_path();
-    let hcr_id;
-    let claim_id;
-    let run_id;
-    {
-        let j = JournalStore::open(&db_path).unwrap();
-        let (hid, _) = j
-            .create_harness_change_request(
-                "Feishu",
-                "conc",
-                "s_c",
-                "feishu:open_id:owner",
-                "Feishu",
-                "p2p",
-                "test-harness",
-                "build",
-            )
-            .unwrap();
-        let cid = j
-            .claim_hcr_for_execution(&hid, "test-harness", "w1")
-            .unwrap()
-            .0;
-        let rid = format!("run_{}", uuid::Uuid::new_v4().simple());
-        j.create_hcr_run_binding(&hid, &cid, &rid).unwrap();
-        let run = Run {
-            id: RunId(rid.clone()),
-            session_id: SessionId("s_c".into()),
-            agent_id: AgentId("main".into()),
-            trigger_event_id: EventId::new(),
-            principal: RunPrincipal {
-                principal_id: PrincipalId("feishu:open_id:owner".into()),
-                subject: PrincipalSubject::FeishuOpenId("feishu:open_id:owner".into()),
-                source: PrincipalSource::Feishu,
-                grants: vec![],
-                requester_id: None,
-            },
-            parent_run_id: None,
-            delegated_by: None,
-            status: RunStatus::Running,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            registry_snapshot_id: "s".into(),
-            mode: RunMode::Hcr {
-                hcr_id: hid.clone(),
-                harness_id: "test-harness".into(),
-                claim_id: cid.clone(),
-            },
-        };
-        j.insert_run(&run).unwrap();
-        hcr_id = hid;
-        claim_id = cid;
-        run_id = rid;
-        let defs = agent_core_kernel::hcr::gate_attempt::GateDefinition::all();
-        for d in &defs {
-            let aid = format!("ga_{}", uuid::Uuid::new_v4().simple());
-            let iid = format!("inv_{}", uuid::Uuid::new_v4().simple());
-            j.insert_gate_attempt(
-                &aid,
-                &hcr_id,
-                &claim_id,
-                &run_id,
-                "test-harness",
-                d.workspace_id,
-                d.kind.as_str(),
-                d.operation,
-                d.profile,
-                &iid,
-                &Utc::now().to_rfc3339(),
-            )
-            .unwrap();
-            j.append_event(
-                JournalEventKind::InvocationProposed,
-                Some(&RunId(run_id.clone())),
-                Some(&SessionId("s_c".into())),
-                Some(&iid),
-                json!({"operation": d.operation, "source": "test"}),
-            )
-            .unwrap();
-            j.append_event(JournalEventKind::ReceiptReceived, Some(&RunId(run_id.clone())), Some(&SessionId("s_c".into())), Some(&iid),
-                json!({"status": "Succeeded", "output": {"exit_code": 0, "timed_out": false, "child_cleanup": true}, "invocation_id": iid})).unwrap();
-            evidence::register_gate_evidence(&j, &aid).unwrap();
+    // Real concurrent settle: 20 threads × 20 independent connections × Barrier.
+    let n = 20;
+    let rounds = 20;
+
+    for round in 0..rounds {
+        let db_path = db_path();
+        let hcr_id;
+        let claim_id;
+        let run_id;
+        {
+            let j = JournalStore::open(&db_path).unwrap();
+            let (hid, _) = j
+                .create_harness_change_request(
+                    "Feishu",
+                    &format!("cr{round}"),
+                    "s_c",
+                    "feishu:open_id:owner",
+                    "Feishu",
+                    "p2p",
+                    "test-harness",
+                    "build",
+                )
+                .unwrap();
+            let cid = j
+                .claim_hcr_for_execution(&hid, "test-harness", "w1")
+                .unwrap()
+                .0;
+            let rid = format!("run_{}", uuid::Uuid::new_v4().simple());
+            j.create_hcr_run_binding(&hid, &cid, &rid).unwrap();
+            let run = Run {
+                id: RunId(rid.clone()),
+                session_id: SessionId("s_c".into()),
+                agent_id: AgentId("main".into()),
+                trigger_event_id: EventId::new(),
+                principal: RunPrincipal {
+                    principal_id: PrincipalId("feishu:open_id:owner".into()),
+                    subject: PrincipalSubject::FeishuOpenId("feishu:open_id:owner".into()),
+                    source: PrincipalSource::Feishu,
+                    grants: vec![],
+                    requester_id: None,
+                },
+                parent_run_id: None,
+                delegated_by: None,
+                status: RunStatus::Running,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                registry_snapshot_id: "s".into(),
+                mode: RunMode::Hcr {
+                    hcr_id: hid.clone(),
+                    harness_id: "test-harness".into(),
+                    claim_id: cid.clone(),
+                },
+            };
+            j.insert_run(&run).unwrap();
+            hcr_id = hid;
+            claim_id = cid;
+            run_id = rid;
+            let defs = agent_core_kernel::hcr::gate_attempt::GateDefinition::all();
+            for d in &defs {
+                let aid = format!("ga_{}", uuid::Uuid::new_v4().simple());
+                let iid = format!("inv_{}", uuid::Uuid::new_v4().simple());
+                j.insert_gate_attempt(
+                    &aid,
+                    &hcr_id,
+                    &claim_id,
+                    &run_id,
+                    "test-harness",
+                    d.workspace_id,
+                    d.kind.as_str(),
+                    d.operation,
+                    d.profile,
+                    &iid,
+                    &Utc::now().to_rfc3339(),
+                )
+                .unwrap();
+                j.append_event(
+                    JournalEventKind::InvocationProposed,
+                    Some(&RunId(run_id.clone())),
+                    Some(&SessionId("s_c".into())),
+                    Some(&iid),
+                    json!({"operation": d.operation}),
+                )
+                .unwrap();
+                j.append_event(JournalEventKind::ReceiptReceived, Some(&RunId(run_id.clone())), Some(&SessionId("s_c".into())), Some(&iid),
+                    json!({"status": "Succeeded", "output": {"exit_code": 0, "timed_out": false, "child_cleanup": true}})).unwrap();
+                evidence::register_gate_evidence(&j, &aid).unwrap();
+            }
         }
-    }
 
-    // First settle should succeed.
-    {
-        let j = JournalStore::open(&db_path).unwrap();
-        let r = settlement::settle_hcr(&j, &hcr_id, &claim_id, &run_id).unwrap();
-        assert!(
-            matches!(r, SettleResult::Succeeded(_)),
-            "first settle must succeed: {:?}",
-            r
-        );
-    }
+        let p = Arc::new(db_path.clone());
+        let bar = Arc::new(Barrier::new(n));
+        let hid = Arc::new(hcr_id.clone());
+        let cid = Arc::new(claim_id.clone());
+        let rid = Arc::new(run_id.clone());
+        let mut handles = vec![];
 
-    // Second settle should return AlreadySettled.
-    {
-        let j = JournalStore::open(&db_path).unwrap();
-        let r = settlement::settle_hcr(&j, &hcr_id, &claim_id, &run_id).unwrap();
-        assert!(
-            matches!(r, SettleResult::AlreadySettled(_)),
-            "second settle must be AlreadySettled: {:?}",
-            r
-        );
-    }
+        for _ in 0..n {
+            let bp = Arc::clone(&p);
+            let b = Arc::clone(&bar);
+            let h = Arc::clone(&hid);
+            let c = Arc::clone(&cid);
+            let r = Arc::clone(&rid);
+            handles.push(thread::spawn(move || {
+                let j = JournalStore::open(&bp).unwrap();
+                b.wait();
+                settlement::settle_hcr(&j, &h, &c, &r)
+            }));
+        }
 
-    // Verify exactly 1 settlement + 1 terminal event.
-    {
-        let j = JournalStore::open(&db_path).unwrap();
-        j.execute_sql_for_test(&format!(
-            "SELECT 1 FROM hcr_settlements WHERE hcr_id = '{hcr_id}'"
-        ))
-        .unwrap();
-        // Can't easily return count from execute_sql_for_test, so just verify DB state.
+        let mut succ = 0usize;
+        let mut alrdy = 0usize;
+        let mut errs = 0usize;
+        for h in handles {
+            match h.join().unwrap() {
+                Ok(SettleResult::Succeeded(_)) => succ += 1,
+                Ok(SettleResult::AlreadySettled(_)) => alrdy += 1,
+                _ => errs += 1,
+            }
+        }
+
+        // Verify DB state via new raw SQLite connection.
+        let check_conn = rusqlite::Connection::open(&db_path).unwrap();
+        let _ = check_conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA query_only=1;");
+        let stl: i64 = check_conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM hcr_settlements WHERE hcr_id = '{hcr_id}'"),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        let evs: i64 = check_conn.query_row(
+            &format!("SELECT COUNT(*) FROM journal_events WHERE kind IN ('HcrSettlementSucceeded','HcrSettlementFailed') AND correlation_id = '{hcr_id}'"),
+            [], |row| row.get(0),
+        ).unwrap_or(0);
+
+        if succ != 1 || alrdy != n - 1 || errs != 0 || stl != 1 || evs != 1 {
+            eprintln!("ROUND {round}: succ={succ} alrdy={alrdy} errs={errs} stl={stl} ev={evs}");
+            panic!(
+                "round {round}: expected succ=1, alrdy={}, stl=1, ev=1",
+                n - 1
+            );
+        }
+
+        std::fs::remove_file(&db_path).ok();
     }
-    std::fs::remove_file(&db_path).ok();
+}
+
+#[test]
+fn concurrent_conflicting_evidence_digest_is_rejected() {
+    let f = make_fixture();
+    add_all_gates(&f);
+    // First settle succeeds.
+    let r1 = settlement::settle_hcr(&f.j, &f.hcr_id, &f.claim_id, &f.run_id).unwrap();
+    assert!(
+        matches!(r1, SettleResult::Succeeded(_)),
+        "first must succeed: {r1:?}"
+    );
+
+    // Tamper receipt payload directly (changes canonical digest).
+    f.j.execute_sql_for_test(&format!(
+        "UPDATE journal_events SET payload_json = json_set(payload_json, '$.output.exit_code', 99) WHERE event_id IN (SELECT receipt_event_id FROM hcr_gate_evidence e JOIN hcr_gate_attempts a ON e.gate_attempt_id = a.gate_attempt_id WHERE a.hcr_id = '{}')",
+        f.hcr_id
+    )).unwrap();
+
+    // Second settle after evidence change must return AlreadySettled
+    // (the existing settlement prevails, and digest change creates conflict).
+    let r2 = settlement::settle_hcr(&f.j, &f.hcr_id, &f.claim_id, &f.run_id).unwrap();
+    assert!(
+        matches!(r2, SettleResult::AlreadySettled(_)),
+        "settle after tamper must return AlreadySettled: {r2:?}"
+    );
 }
