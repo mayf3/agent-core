@@ -1,0 +1,6 @@
+[package]
+name = "calculator-harness"
+version = "0.1.0"
+edition = "2021"
+
+# No dependencies — stdlib-only for offline cargo build
