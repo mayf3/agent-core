@@ -144,17 +144,34 @@ pub fn handle(
         "gate_count": validated.gate_count,
     });
 
-    // 8. Atomic receipt append-or-compare (H3)
-    let receipt_key_str = receipt::receipt_key(
-        hcr_id, &outcome.claim_id.0, &outcome.run_id.0, &idempotency_key
+    // 8. Atomic receipt append-or-compare (H3/H6)
+    let identity_fields = receipt::ReceiptIdentityFields {
+        harness_execution_id: validated.harness_execution_id.clone(),
+        overall_outcome: validated.overall_outcome.clone(),
+        candidate_digest: validated.candidate_digest.clone(),
+        artifact_ref: validated.artifact_digest.clone(), // simplified
+        artifact_digest: validated.artifact_digest.clone(),
+        evidence_digest: validated.evidence_digest.clone(),
+    };
+    let payload_digest = receipt::compute_payload_digest(
+        hcr_id, &outcome.claim_id.0, &outcome.run_id.0,
+        &principal.principal_id.0, &session.id.0, &snapshot_id,
+        "external.coding_hcr_accept", &idempotency_key,
+        &validated.harness_execution_id, &validated.overall_outcome,
+        &validated.candidate_digest,
+        validated.artifact_digest.as_deref(),
+        validated.artifact_digest.as_deref(),
+        &validated.evidence_digest,
+        &[("scaffold", true), ("build", true), ("trusted_test", true),
+          ("trusted_smoke", true), ("artifact", true)],
     );
     match receipt::append_or_compare_receipt(
         journal, &outcome.run_id, &session.id,
-        &receipt_key_str, receipt_status, &output,
+        hcr_id, &outcome.claim_id.0, &outcome.run_id.0, &idempotency_key,
+        receipt_status, &output, &payload_digest, &identity_fields,
     )? {
         AppendReceiptResult::Appended => {}
         AppendReceiptResult::Duplicate => {
-            // Idempotent replay — skip settlement, return existing
             return Ok(json!({
                 "ok": true, "status": "duplicate",
                 "hcr_id": hcr_id, "outcome": validated.overall_outcome,
