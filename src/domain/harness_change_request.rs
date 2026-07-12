@@ -157,21 +157,31 @@ pub struct HcrGateAttempt {
 }
 
 /// Durable record of a single gate execution, bound to its receipt.
-/// Only created by the trusted `register_gate_evidence` entry point.
+/// NO cached result fields — all structured values are parsed from the
+/// receipt journal event at settlement/resume time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HcrGateEvidence {
     pub evidence_id: String,
     pub gate_attempt_id: String,
     pub receipt_event_id: String,
-    pub structured_status: String,
-    pub exit_code: i32,
-    pub timed_out: bool,
-    pub stdout_truncated: bool,
-    pub stderr_truncated: bool,
-    pub child_cleanup: Option<bool>,
-    pub error_code: Option<String>,
     pub receipt_payload_digest: String,
     pub created_at: String,
+}
+
+/// Structured gate receipt parsed from the journal ReceiptReceived event.
+/// Private fields — cannot be constructed by callers. Only created by the
+/// unified source-chain validator.
+#[derive(Debug, Clone)]
+pub struct ValidatedGateReceipt {
+    pub(crate) gate_attempt_id: String,
+    pub(crate) receipt_event_id: String,
+    pub(crate) status: String,
+    pub(crate) exit_code: i32,
+    pub(crate) timed_out: bool,
+    pub(crate) child_cleanup: Option<bool>,
+    pub(crate) error_code: Option<String>,
+    pub(crate) receipt_payload_digest: String,
+    pub(crate) operation: String,
 }
 
 /// A terminal settlement record for an HCR.
