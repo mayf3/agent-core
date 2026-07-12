@@ -6,6 +6,7 @@ use crate::hcr::validate;
 use crate::journal::JournalStore;
 use anyhow::Result;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResumeState {
     NotStarted,
     ClaimedNoBinding {

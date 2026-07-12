@@ -50,3 +50,39 @@ CREATE INDEX IF NOT EXISTS idx_hcr_evidence_attempt
 
 CREATE INDEX IF NOT EXISTS idx_hcr_settlements_hcr
     ON hcr_settlements(hcr_id);
+
+-- FK-OFF protection triggers: fire regardless of PRAGMA foreign_keys setting.
+CREATE TRIGGER IF NOT EXISTS trg_attempt_hcr_exists
+BEFORE INSERT ON hcr_gate_attempts
+WHEN NOT EXISTS (SELECT 1 FROM harness_change_requests WHERE request_id = NEW.hcr_id)
+BEGIN SELECT RAISE(ABORT, 'GHOST_HCR_IN_ATTEMPT'); END;
+
+CREATE TRIGGER IF NOT EXISTS trg_attempt_claim_exists
+BEFORE INSERT ON hcr_gate_attempts
+WHEN NOT EXISTS (SELECT 1 FROM hcr_claims WHERE claim_id = NEW.claim_id)
+BEGIN SELECT RAISE(ABORT, 'GHOST_CLAIM_IN_ATTEMPT'); END;
+
+CREATE TRIGGER IF NOT EXISTS trg_attempt_run_exists
+BEFORE INSERT ON hcr_gate_attempts
+WHEN NOT EXISTS (SELECT 1 FROM runs WHERE id = NEW.run_id)
+BEGIN SELECT RAISE(ABORT, 'GHOST_RUN_IN_ATTEMPT'); END;
+
+CREATE TRIGGER IF NOT EXISTS trg_evidence_attempt_exists
+BEFORE INSERT ON hcr_gate_evidence
+WHEN NOT EXISTS (SELECT 1 FROM hcr_gate_attempts WHERE gate_attempt_id = NEW.gate_attempt_id)
+BEGIN SELECT RAISE(ABORT, 'GHOST_ATTEMPT_IN_EVIDENCE'); END;
+
+CREATE TRIGGER IF NOT EXISTS trg_settlement_hcr_exists
+BEFORE INSERT ON hcr_settlements
+WHEN NOT EXISTS (SELECT 1 FROM harness_change_requests WHERE request_id = NEW.hcr_id)
+BEGIN SELECT RAISE(ABORT, 'GHOST_HCR_IN_SETTLEMENT'); END;
+
+CREATE TRIGGER IF NOT EXISTS trg_settlement_claim_exists
+BEFORE INSERT ON hcr_settlements
+WHEN NOT EXISTS (SELECT 1 FROM hcr_claims WHERE claim_id = NEW.claim_id)
+BEGIN SELECT RAISE(ABORT, 'GHOST_CLAIM_IN_SETTLEMENT'); END;
+
+CREATE TRIGGER IF NOT EXISTS trg_settlement_run_exists
+BEFORE INSERT ON hcr_settlements
+WHEN NOT EXISTS (SELECT 1 FROM runs WHERE id = NEW.run_id)
+BEGIN SELECT RAISE(ABORT, 'GHOST_RUN_IN_SETTLEMENT'); END;

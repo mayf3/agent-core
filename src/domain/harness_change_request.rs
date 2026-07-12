@@ -127,14 +127,14 @@ impl GateKind {
         }
     }
 
-    /// All required gates in execution order.
+    /// All required gates. Sorted alphabetically to match SQL ORDER BY gate_kind.
     pub fn all_required() -> &'static [GateKind] {
         &[
-            GateKind::Scaffold,
-            GateKind::Build,
-            GateKind::TrustedTest,
-            GateKind::TrustedSmoke,
             GateKind::Artifact,
+            GateKind::Build,
+            GateKind::Scaffold,
+            GateKind::TrustedSmoke,
+            GateKind::TrustedTest,
         ]
     }
 }
