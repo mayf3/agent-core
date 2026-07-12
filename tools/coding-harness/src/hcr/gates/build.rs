@@ -1,8 +1,8 @@
 //! Build acceptance gate.
 //!
 //! Copies the candidate source to a writable work directory, then
-//! executes `cargo build --release` with sandboxed process execution.
-//! Uses `CARGO_TARGET_DIR` to keep build artifacts separate.
+//! executes `cargo build --release` with mandatory sandboxed process
+//! execution. Sandbox unavailable = InfrastructureFailure (B2).
 //!
 //! Build failure is `CandidateFailed`; spawn/setup failures are
 //! `InfrastructureFailure`.
@@ -17,7 +17,6 @@ use crate::hcr::executor::CleanupStatus;
 ///
 /// Copies the candidate source to `ctx.build_source` (writable), then
 /// runs `cargo build --release` with `CARGO_TARGET_DIR=ctx.build_target`.
-/// The resulting binary is placed at `ctx.built_binary`.
 pub fn check(candidate: &CandidateSnapshot, ctx: &GateContext) -> GateResult {
     // Step 1: Copy candidate source to writable build directory
     let target_dir = &ctx.build_target;
@@ -40,7 +39,6 @@ pub fn check(candidate: &CandidateSnapshot, ctx: &GateContext) -> GateResult {
         );
     }
 
-    // Copy candidate source (excluding target/ dirs) to build_source
     if let Err(e) = copy_candidate_source(&candidate.candidate_path, build_source) {
         return GateResult::infrastructure_failure(
             GateKind::Build,
@@ -64,8 +62,8 @@ pub fn check(candidate: &CandidateSnapshot, ctx: &GateContext) -> GateResult {
             .unwrap_or_default()
     });
 
-    // Run cargo build in the build_source directory
-    let (exit_code, timed_out, stdout, stderr, child_cleanup) = super::run_command_direct_sandboxed(
+    // Run cargo build with mandatory sandbox (B2: fail-closed)
+    let result = super::run_command_sandboxed(
         std::path::Path::new("/usr/bin/env"),
         &[
             "cargo",
@@ -84,31 +82,50 @@ pub fn check(candidate: &CandidateSnapshot, ctx: &GateContext) -> GateResult {
         ],
     );
 
-    let passed = exit_code == 0 && !timed_out;
+    let sandbox_result = match result {
+        Ok(r) => r,
+        Err(e) => {
+            return GateResult {
+                gate_kind: GateKind::Build,
+                passed: false,
+                is_candidate_failure: false,
+                exit_code: e.exit_code,
+                timed_out: false,
+                child_cleanup: e.child_cleanup,
+                error_code: Some("BUILD_SANDBOX_UNAVAILABLE".into()),
+                stdout: e.stdout,
+                stderr: e.stderr,
+                candidate_id: candidate.candidate_id.clone(),
+                candidate_digest: candidate.candidate_digest.clone(),
+                candidate_digest_preserved: false,
+            };
+        }
+    };
+
+    let passed = sandbox_result.exit_code == 0 && !sandbox_result.timed_out;
 
     GateResult {
         gate_kind: GateKind::Build,
         passed,
-        is_candidate_failure: !passed && !timed_out,
-        exit_code,
-        timed_out,
-        child_cleanup,
+        is_candidate_failure: !passed && !sandbox_result.timed_out,
+        exit_code: sandbox_result.exit_code,
+        timed_out: sandbox_result.timed_out,
+        child_cleanup: sandbox_result.child_cleanup,
         error_code: if passed {
             None
-        } else if timed_out {
+        } else if sandbox_result.timed_out {
             Some("BUILD_TIMEOUT".into())
         } else {
             Some("BUILD_FAILED".into())
         },
-        stdout,
-        stderr,
+        stdout: sandbox_result.stdout,
+        stderr: sandbox_result.stderr,
         candidate_id: candidate.candidate_id.clone(),
         candidate_digest: candidate.candidate_digest.clone(),
         candidate_digest_preserved: false,
     }
 }
 
-/// Copy candidate source files to a writable build directory, excluding target/.
 fn copy_candidate_source(src: &Path, dst: &Path) -> Result<(), String> {
     for entry in std::fs::read_dir(src).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
