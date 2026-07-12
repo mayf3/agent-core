@@ -1,102 +1,143 @@
-//! Evidence-based HCR execution recovery (R3A).
-//!
-//! Determines execution progress from persistent state only:
-//! - HCR status, claim, run binding
-//! - Durable gate evidence records
-//! - Settlement record
-//!
-//! Does NOT trust event names (HcrGateCompleted, etc.) to determine
-//! gate completion. Only canonical `hcr_gate_evidence` rows count.
+//! Evidence-based HCR recovery (R3A-R1).
+//! Checks terminal triple consistency: HCR status + settlement + event.
+//! Gates verified via canonical attempts + evidence + receipt events.
 
 use crate::domain::*;
-use crate::hcr::evidence::{self, check_gate_completeness, validate_gate_evidence};
+use crate::hcr::evidence;
 use crate::journal::JournalStore;
 use anyhow::Result;
 
-/// Resume state derived from durable evidence only.
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResumeState {
-    /// No claim exists yet — start fresh.
     NotStarted,
-    /// Claim exists, no Run binding — create binding.
-    ClaimedNoBinding { claim_id: String },
-    /// Binding exists, Runtime may or may not have started.
-    /// We can't determine Runtime progress from evidence alone at this layer.
-    /// The caller checks Runtime state separately.
-    Bound { claim_id: String, run_id: String },
-    /// All five required gates have durable evidence and pass validation.
-    AllGatesCompleted { claim_id: String, run_id: String },
-    /// HCR has a terminal settlement record.
+    ClaimedNoBinding {
+        claim_id: String,
+    },
+    Bound {
+        claim_id: String,
+        run_id: String,
+    },
+    AllGatesCompleted {
+        claim_id: String,
+        run_id: String,
+    },
     AlreadySettled {
         settlement_id: String,
         result: String,
     },
+    Corruption(String),
 }
 
-/// Determine resume state from persistent store only.
-///
-/// Does NOT trust journal event names. Only `hcr_gate_evidence` rows
-/// and the `hcr_settlements` table are authoritative.
 pub fn determine_resume_state(journal: &JournalStore, hcr_id: &str) -> Result<ResumeState> {
-    // ── 1. First check for settlement (fast path) ─────────────────────
     let hcr = journal.get_harness_change_request(hcr_id)?;
+    let settlement = journal.get_settlement(hcr_id)?;
+    let events = journal.events()?;
 
-    // Check settlement record (most authoritative).
-    if let Some(settlement) = journal.get_hcr_settlement(hcr_id)? {
-        return Ok(ResumeState::AlreadySettled {
-            settlement_id: settlement.settlement_id,
-            result: settlement.result,
+    let terminal_events: Vec<&JournalEvent> = events
+        .iter()
+        .filter(|e| {
+            (e.kind == JournalEventKind::HcrSettlementSucceeded
+                || e.kind == JournalEventKind::HcrSettlementFailed)
+                && e.correlation_id.as_deref() == Some(hcr_id)
+        })
+        .collect();
+
+    let hcr_terminal = hcr
+        .as_ref()
+        .map_or(false, |h| h.status == "succeeded" || h.status == "failed");
+
+    // Triple consistency check.
+    if hcr_terminal || settlement.is_some() || !terminal_events.is_empty() {
+        match (&hcr, &settlement, terminal_events.len()) {
+            (Some(h), Some(s), 1) if (h.status == "succeeded" || h.status == "failed") => {
+                let ev = terminal_events[0];
+                let ev_result = ev
+                    .payload
+                    .get("result")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if h.status == ev_result && s.result == ev_result && s.hcr_id == hcr_id {
+                    return Ok(ResumeState::AlreadySettled {
+                        settlement_id: s.settlement_id.clone(),
+                        result: s.result.clone(),
+                    });
+                }
+                return Ok(ResumeState::Corruption(format!(
+                    "triple mismatch: HCR={}, settlement={}, event={}",
+                    h.status, s.result, ev_result,
+                )));
+            }
+            (Some(h), _, 0) if hcr_terminal => {
+                return Ok(ResumeState::Corruption(format!(
+                    "HCR terminal {} no settlement",
+                    h.status
+                )));
+            }
+            (_, Some(s), 0) => {
+                return Ok(ResumeState::Corruption(format!(
+                    "settlement {} no event",
+                    s.result
+                )));
+            }
+            (_, _, n) if n > 1 => {
+                return Ok(ResumeState::Corruption(format!("{} terminal events", n)))
+            }
+            _ => {}
+        }
+    }
+
+    // Check claim.
+    let Some(claim) = journal.get_active_claim_for_hcr(hcr_id)? else {
+        return Ok(ResumeState::NotStarted);
+    };
+    let Some(binding) = journal.get_run_binding_for_claim(&claim.claim_id.0)? else {
+        return Ok(ResumeState::ClaimedNoBinding {
+            claim_id: claim.claim_id.0,
+        });
+    };
+
+    // Check attempts + evidence (authoritative).
+    let attempts = journal.get_attempts_for_hcr(hcr_id, &claim.claim_id.0, &binding.run_id)?;
+    if attempts.len() != 5 {
+        return Ok(ResumeState::Bound {
+            claim_id: claim.claim_id.0,
+            run_id: binding.run_id,
+        });
+    }
+    let evidence_list = journal.get_evidence_for_attempts(
+        &attempts
+            .iter()
+            .map(|a| a.gate_attempt_id.as_str())
+            .collect::<Vec<_>>(),
+    )?;
+    if evidence_list.len() != 5 {
+        return Ok(ResumeState::Bound {
+            claim_id: claim.claim_id.0,
+            run_id: binding.run_id,
         });
     }
 
-    // If HCR status is terminal but no settlement record exists, that's a
-    // corruption state. Report as AlreadySettled with the status.
-    if let Some(ref hcr) = hcr {
-        if hcr.status == "succeeded" || hcr.status == "failed" {
-            return Ok(ResumeState::AlreadySettled {
-                settlement_id: String::new(),
-                result: hcr.status.clone(),
-            });
-        }
-    }
-
-    // ── 2. Check for claim ────────────────────────────────────────────
-    let claim = match journal.get_active_claim_for_hcr(hcr_id)? {
-        Some(c) => c,
-        None => return Ok(ResumeState::NotStarted),
-    };
-
-    // ── 3. Check for Run binding ──────────────────────────────────────
-    let binding = match journal.get_run_binding_for_claim(&claim.claim_id.0)? {
-        Some(b) => b,
-        None => {
-            return Ok(ResumeState::ClaimedNoBinding {
+    for ev in &evidence_list {
+        let Some(re) = events.iter().find(|e| e.event_id.0 == ev.receipt_event_id) else {
+            return Ok(ResumeState::Bound {
                 claim_id: claim.claim_id.0,
+                run_id: binding.run_id,
+            });
+        };
+        if re.kind != JournalEventKind::ReceiptReceived {
+            return Ok(ResumeState::Bound {
+                claim_id: claim.claim_id.0,
+                run_id: binding.run_id,
             });
         }
-    };
-
-    // ── 4. Check for durable gate evidence (authoritative) ────────────
-    let evidence_list =
-        evidence::load_gate_evidence(journal, hcr_id, &claim.claim_id.0, &binding.run_id)?;
-
-    // Check completeness first (must have exactly 5 distinct gates).
-    if check_gate_completeness(&evidence_list).is_ok() {
-        // All 5 gates have evidence. Now validate each one.
-        let all_valid = evidence_list
-            .iter()
-            .all(|ev| validate_gate_evidence(ev).is_ok());
-
-        if all_valid {
-            return Ok(ResumeState::AllGatesCompleted {
+        if evidence::verify_evidence_against_receipt(ev, re).is_err() {
+            return Ok(ResumeState::Bound {
                 claim_id: claim.claim_id.0,
                 run_id: binding.run_id,
             });
         }
     }
 
-    // ── 5. Default: bound but gates incomplete ────────────────────────
-    Ok(ResumeState::Bound {
+    Ok(ResumeState::AllGatesCompleted {
         claim_id: claim.claim_id.0,
         run_id: binding.run_id,
     })

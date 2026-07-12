@@ -29,13 +29,16 @@ impl JournalStore {
             std::fs::create_dir_all(parent)?;
         }
         let conn = Connection::open(path)?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
         let store = Self::with_conn(conn);
         store.migrate()?;
         Ok(store)
     }
 
     pub fn in_memory() -> Result<Self> {
-        let store = Self::with_conn(Connection::open_in_memory()?);
+        let conn = Connection::open_in_memory()?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        let store = Self::with_conn(conn);
         store.migrate()?;
         // Auto-init registry for tests; production uses open() + explicit init.
         store.initialize_registry()?;
