@@ -236,14 +236,22 @@ fn wrap_linux_bubblewrap(
             .map(|h| format!("{h}/.cargo"))
             .unwrap_or_default()
     });
+    // Create /opt directory structure for sandbox cargo/rustup paths
+    bwrap.arg("--dir");
+    bwrap.arg("/opt");
+    bwrap.arg("--dir");
+    bwrap.arg("/opt/cargo");
+
+    // Read-only bind of ONLY the cargo subdirectories required for building.
+    // The host's entire ~/.cargo is intentionally NOT mounted — that would
+    // expose credentials.toml, credentials, config.toml, config, and any
+    // private registry tokens.
+    //
+    // Only bind: bin, registry, git, .crates metadata files.
     if !host_cargo.is_empty() && std::path::Path::new(&host_cargo).exists() {
         let sb = "/opt/cargo";
-        bwrap.arg("--ro-bind");
-        bwrap.arg(&host_cargo);
-        bwrap.arg(sb);
         sandbox_cargo = Some(sb.to_string());
-        // Also bind registry/cache/git subdirs if present
-        for sub in &["registry", "git", ".crates.toml", ".crates2.json"] {
+        for sub in &["bin", "registry", "git", ".crates.toml", ".crates2.json"] {
             let host_sub = format!("{host_cargo}/{sub}");
             let sb_sub = format!("{sb}/{sub}");
             if std::path::Path::new(&host_sub).exists() {
