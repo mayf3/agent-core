@@ -1,0 +1,10 @@
+{
+  "manifest_id": "calculator-acceptance-v1-wrong-multiply",
+  "harness_id": "calculator-harness-wrong-multiply",
+  "protocol_version": "external-harness-v1",
+  "operation": "external.calculator",
+  "operations": ["add", "subtract", "multiply", "divide"],
+  "description": "Calculator with intentional wrong multiply result for negative testing.",
+  "entry": "target/release/calculator-harness",
+  "artifact_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+}
