@@ -41,8 +41,16 @@ impl std::fmt::Display for ExecutionStoreError {
     }
 }
 
-impl From<std::io::Error> for ExecutionStoreError { fn from(e: std::io::Error) -> Self { ExecutionStoreError::Io(e) } }
-impl From<serde_json::Error> for ExecutionStoreError { fn from(e: serde_json::Error) -> Self { ExecutionStoreError::Serde(e) } }
+impl From<std::io::Error> for ExecutionStoreError {
+    fn from(e: std::io::Error) -> Self {
+        ExecutionStoreError::Io(e)
+    }
+}
+impl From<serde_json::Error> for ExecutionStoreError {
+    fn from(e: serde_json::Error) -> Self {
+        ExecutionStoreError::Serde(e)
+    }
+}
 
 /// Execution store with OS-level file locking.
 #[derive(Debug, Clone)]
@@ -52,7 +60,9 @@ pub struct ExecutionStore {
 
 impl ExecutionStore {
     pub fn new(artifact_root: &Path) -> Self {
-        ExecutionStore { root: artifact_root.join("executions") }
+        ExecutionStore {
+            root: artifact_root.join("executions"),
+        }
     }
 
     /// Full SHA-256 hex of the idempotency key.
@@ -69,17 +79,26 @@ impl ExecutionStore {
     /// 3. Otherwise calls `exec_fn`, persists result atomically.
     ///
     /// The lock is auto-released on process crash (OS kernel cleanup).
-    pub fn execute<F>(&self, key: &str, fingerprint: &RequestFingerprint, exec_fn: F)
-        -> Result<Value, ExecutionStoreError>
-    where F: FnOnce() -> Result<Value, String>
+    pub fn execute<F>(
+        &self,
+        key: &str,
+        fingerprint: &RequestFingerprint,
+        exec_fn: F,
+    ) -> Result<Value, ExecutionStoreError>
+    where
+        F: FnOnce() -> Result<Value, String>,
     {
         let dir = self.key_dir(key);
         fs::create_dir_all(&self.root)?;
         fs::create_dir_all(&dir)?;
 
-        let lock_file = OpenOptions::new().create(true).read(true).write(true)
+        let lock_file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
             .open(&dir.join("lock"))?;
-        lock_file.lock_exclusive()
+        lock_file
+            .lock_exclusive()
             .map_err(|e| ExecutionStoreError::LockFailed(e.to_string()))?;
 
         let result = self.execute_locked(&dir, fingerprint, exec_fn);
@@ -87,9 +106,14 @@ impl ExecutionStore {
         result
     }
 
-    fn execute_locked<F>(&self, dir: &Path, fingerprint: &RequestFingerprint, exec_fn: F)
-        -> Result<Value, ExecutionStoreError>
-    where F: FnOnce() -> Result<Value, String>
+    fn execute_locked<F>(
+        &self,
+        dir: &Path,
+        fingerprint: &RequestFingerprint,
+        exec_fn: F,
+    ) -> Result<Value, ExecutionStoreError>
+    where
+        F: FnOnce() -> Result<Value, String>,
     {
         let result_path = dir.join("result.json");
         let req_path = dir.join("request.json");
@@ -111,9 +135,9 @@ impl ExecutionStore {
         fs::write(&req_path, serde_json::to_vec_pretty(&req)?)?;
 
         // 4. Run gates
-        let result = exec_fn().unwrap_or_else(|e| {
-            serde_json::json!({"error": e, "overall_outcome": "InfrastructureFailure"})
-        });
+        let result = exec_fn().unwrap_or_else(
+            |e| serde_json::json!({"error": e, "overall_outcome": "InfrastructureFailure"}),
+        );
 
         // 5. Atomic write: temp → fsync → rename
         let tmp = dir.join(".result.tmp");
@@ -125,14 +149,18 @@ impl ExecutionStore {
         }
         fs::rename(&tmp, &result_path)?;
         if let Some(p) = result_path.parent() {
-            if let Ok(f) = File::open(p) { let _ = f.sync_all(); }
+            if let Ok(f) = File::open(p) {
+                let _ = f.sync_all();
+            }
         }
         Ok(result)
     }
 
-    fn verify_and_load(&self, dir: &Path, fingerprint: &RequestFingerprint)
-        -> Result<Value, ExecutionStoreError>
-    {
+    fn verify_and_load(
+        &self,
+        dir: &Path,
+        fingerprint: &RequestFingerprint,
+    ) -> Result<Value, ExecutionStoreError> {
         let result_path = dir.join("result.json");
         if result_path.is_symlink() {
             return Err(ExecutionStoreError::CorruptResult("symlink".into()));
@@ -148,11 +176,15 @@ impl ExecutionStore {
         if req_path.exists() {
             let rc = fs::read_to_string(&req_path)?;
             if let Ok(r) = serde_json::from_str::<Value>(&rc) {
-                let sfp = r.get("request_fingerprint").and_then(|v| v.as_str()).unwrap_or("");
+                let sfp = r
+                    .get("request_fingerprint")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 if sfp != fingerprint.0 {
-                    return Err(ExecutionStoreError::FingerprintMismatch(
-                        format!("expected {expected} got {sfp}", expected = fingerprint.0)
-                    ));
+                    return Err(ExecutionStoreError::FingerprintMismatch(format!(
+                        "expected {expected} got {sfp}",
+                        expected = fingerprint.0
+                    )));
                 }
             }
         }
@@ -164,7 +196,11 @@ impl ExecutionStore {
         let dir = self.key_dir(key);
         let p = dir.join("result.json");
         if p.exists() && p.is_file() && !p.is_symlink() {
-            fs::read_to_string(&p).ok().and_then(|s| serde_json::from_str(&s).ok())
-        } else { None }
+            fs::read_to_string(&p)
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok())
+        } else {
+            None
+        }
     }
 }
