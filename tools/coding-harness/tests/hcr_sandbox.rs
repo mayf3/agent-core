@@ -172,16 +172,15 @@ fn child_cannot_read_fake_ssh_key() {
     // sandbox profile).  Keep it inside a temp subdirectory and clean up
     // afterwards so we don't pollute the user's home.
     let real_home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-    let canary_dir = std::path::Path::new(&real_home).join("tmp").join("hcr_test_17_canary");
+    let canary_dir = std::path::Path::new(&real_home)
+        .join("tmp")
+        .join("hcr_test_17_canary");
     let _ = std::fs::create_dir_all(&canary_dir);
     let canary_file = canary_dir.join("id_rsa");
     std::fs::write(&canary_file, b"FAKE SSH KEY").unwrap();
 
     let mut params = HashMap::new();
-    params.insert(
-        "path".into(),
-        canary_file.to_string_lossy().to_string(),
-    );
+    params.insert("path".into(), canary_file.to_string_lossy().to_string());
 
     let result = executor::execute(&profile, "read_file", &params, &ws);
 

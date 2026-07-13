@@ -98,7 +98,7 @@ pub fn check(candidate: &CandidateSnapshot, ctx: &GateContext) -> GateResult {
                 candidate_id: candidate.candidate_id.clone(),
                 candidate_digest: candidate.candidate_digest.clone(),
                 candidate_digest_preserved: false,
-    computed_artifact_digest: None,
+                computed_artifact_digest: None,
             };
         }
     };
@@ -124,7 +124,7 @@ pub fn check(candidate: &CandidateSnapshot, ctx: &GateContext) -> GateResult {
         candidate_id: candidate.candidate_id.clone(),
         candidate_digest: candidate.candidate_digest.clone(),
         candidate_digest_preserved: false,
-    computed_artifact_digest: None,
+        computed_artifact_digest: None,
     }
 }
 
