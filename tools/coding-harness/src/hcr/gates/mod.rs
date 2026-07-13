@@ -75,6 +75,9 @@ pub struct GateResult {
     pub candidate_id: String,
     pub candidate_digest: String,
     pub candidate_digest_preserved: bool,
+    /// Real computed SHA-256 of the build artifact (set by Artifact gate).
+    /// `None` if no artifact was validated or the gate failed.
+    pub computed_artifact_digest: Option<String>,
 }
 
 impl GateResult {
@@ -93,6 +96,7 @@ impl GateResult {
             "candidate_id": self.candidate_id,
             "candidate_digest": self.candidate_digest,
             "candidate_digest_preserved": self.candidate_digest_preserved,
+            "computed_artifact_digest": self.computed_artifact_digest,
         })
     }
 
@@ -116,6 +120,7 @@ impl GateResult {
             candidate_id: candidate.candidate_id.clone(),
             candidate_digest: candidate.candidate_digest.clone(),
             candidate_digest_preserved: false,
+    computed_artifact_digest: None,
         }
     }
 }
