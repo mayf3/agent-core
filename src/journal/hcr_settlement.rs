@@ -498,7 +498,8 @@ impl JournalStore {
             if status == "Failed" || exit_code != 0 {
                 candidate = true;
                 first_err = format!("{} failed st={} exit={}", akind, status, exit_code);
-                continue;
+                // Do NOT continue — push to parsed so that parsed.len() reaches 5
+                // and the CandidateFailed branch can be reached.
             }
 
             parsed.push(ValidatedGateReceipt {
