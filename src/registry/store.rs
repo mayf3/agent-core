@@ -62,6 +62,24 @@ pub fn builtin_specs() -> Vec<OperationSpec> {
             binding_kind: BindingKind::Builtin,
             binding_key: "builtin.system_status".into(),
         },
+        OperationSpec {
+            name: crate::domain::operation::external::TASK_SUBMIT.into(),
+            risk: Risk::Write,
+            description: "Submit a controlled coding harness development task.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "kind": {"type": "string", "enum": ["DevelopCapability"]},
+                    "operation": {"type": "string"},
+                    "functions": {"type": "array", "items": {"type": "string"}},
+                    "schema_version": {"type": "string"},
+                },
+                "required": ["kind", "operation", "schema_version"],
+            }),
+            idempotent: true,
+            binding_kind: BindingKind::External,
+            binding_key: "external.coding_task_submit.v0".into(),
+        },
     ]
 }
 
@@ -304,7 +322,7 @@ mod tests {
         let id = reg.current_snapshot_id().unwrap();
         assert!(id.starts_with("snap_"));
         let snap = reg.load_snapshot(&id).unwrap();
-        assert_eq!(snap.operations.len(), 4);
+        assert_eq!(snap.operations.len(), 5);
         assert!(snap.lookup("system.status").is_some());
     }
 
@@ -330,7 +348,7 @@ mod tests {
             let conn = Connection::open(&db_path).unwrap();
             let reg = Registry::new(conn).unwrap();
             let recovered = reg.load_snapshot(&snap_id).unwrap();
-            assert_eq!(recovered.operations.len(), 4);
+            assert_eq!(recovered.operations.len(), 5);
             assert_eq!(recovered.snapshot_id, snap_id);
             let t = recovered.lookup("system.status").unwrap();
             assert_eq!(t.risk, Risk::ReadOnly);
