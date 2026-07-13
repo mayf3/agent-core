@@ -410,7 +410,9 @@ impl JournalStore {
                     conn.pragma_update(None, "user_version", 9)?;
                 }
                 9 => {
-                    conn.execute_batch(include_str!("../../migrations/0010_hcr_receipt_identity.sql"))?;
+                    conn.execute_batch(include_str!(
+                        "../../migrations/0010_hcr_receipt_identity.sql"
+                    ))?;
                     conn.pragma_update(None, "user_version", 10)?;
                 }
                 _ => break,

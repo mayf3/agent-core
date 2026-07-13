@@ -58,7 +58,8 @@ pub fn validate_harness_response(
     let overall_outcome = valid_outcome(r)?;
 
     // ── 3. Gate results must exist ──
-    let gates = r.get("gate_results")
+    let gates = r
+        .get("gate_results")
         .and_then(|v| v.as_array())
         .ok_or_else(|| "missing gate_results".to_string())?;
 
@@ -68,7 +69,13 @@ pub fn validate_harness_response(
 
     // ── 4. Gate kinds must be unique ──
     let mut seen = HashSet::new();
-    let expected = ["scaffold", "build", "trusted_test", "trusted_smoke", "artifact"];
+    let expected = [
+        "scaffold",
+        "build",
+        "trusted_test",
+        "trusted_smoke",
+        "artifact",
+    ];
     for g in gates {
         let kind = g.get("gate_kind").and_then(|v| v.as_str()).unwrap_or("");
         if !expected.contains(&kind) {
@@ -82,14 +89,18 @@ pub fn validate_harness_response(
     // ── 5. Outcome consistency ──
     match overall_outcome {
         "CandidatePassed" => {
-            if gates.iter().any(|g| g.get("passed").and_then(|v| v.as_bool()) != Some(true)) {
+            if gates
+                .iter()
+                .any(|g| g.get("passed").and_then(|v| v.as_bool()) != Some(true))
+            {
                 return Err("CandidatePassed but some gates not passed".into());
             }
         }
         "CandidateFailed" => {
-            if !gates.iter().any(|g| {
-                g.get("is_candidate_failure").and_then(|v| v.as_bool()) == Some(true)
-            }) {
+            if !gates
+                .iter()
+                .any(|g| g.get("is_candidate_failure").and_then(|v| v.as_bool()) == Some(true))
+            {
                 return Err("CandidateFailed but no candidate failure gate".into());
             }
         }
@@ -107,7 +118,10 @@ pub fn validate_harness_response(
     // ── 6. Artifact digest (required for CandidatePassed) ──
     let artifact_digest = match overall_outcome {
         "CandidatePassed" => {
-            let d = r.get("artifact_digest").and_then(|v| v.as_str()).unwrap_or("");
+            let d = r
+                .get("artifact_digest")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             if d.is_empty() {
                 return Err("CandidatePassed but missing artifact_digest".into());
             }

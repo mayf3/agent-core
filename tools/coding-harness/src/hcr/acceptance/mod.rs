@@ -16,15 +16,17 @@ use serde_json::Value;
 use super::candidate::{snapshot_candidate, CandidateSnapshot};
 use super::gates::{run_all_gates, GateKind, GateResult};
 use execution_store::ExecutionStore;
-use protocol::{
-    compute_evidence_digest, compute_fingerprint, AcceptanceResponse, GateResultEntry,
-};
+use protocol::{compute_evidence_digest, compute_fingerprint, AcceptanceResponse, GateResultEntry};
 
 /// Global gate execution counter (test observation only).
 static GATE_EXECUTION_COUNT: AtomicUsize = AtomicUsize::new(0);
 
-pub fn reset_execution_count() { GATE_EXECUTION_COUNT.store(0, Ordering::SeqCst); }
-pub fn execution_count() -> usize { GATE_EXECUTION_COUNT.load(Ordering::SeqCst) }
+pub fn reset_execution_count() {
+    GATE_EXECUTION_COUNT.store(0, Ordering::SeqCst);
+}
+pub fn execution_count() -> usize {
+    GATE_EXECUTION_COUNT.load(Ordering::SeqCst)
+}
 
 /// Handle an acceptance request. Dispatches through ExecutionStore for
 /// idempotency, locking, crash recovery (H7), and atomic persistence.
@@ -47,8 +49,15 @@ pub fn handle_accept(artifact_root: &Path, args: &Value) -> Value {
     }
 
     let fingerprint = compute_fingerprint(
-        hcr_id, claim_id, run_id, principal_id, gateway_session_id,
-        registry_snapshot_id, operation, candidate_ref, idempotency_key,
+        hcr_id,
+        claim_id,
+        run_id,
+        principal_id,
+        gateway_session_id,
+        registry_snapshot_id,
+        operation,
+        candidate_ref,
+        idempotency_key,
     );
 
     let store = ExecutionStore::new(artifact_root);
@@ -56,10 +65,21 @@ pub fn handle_accept(artifact_root: &Path, args: &Value) -> Value {
     // Execute under OS file lock (H7): crash-safe, idempotent
     match store.execute(idempotency_key, &fingerprint, || {
         GATE_EXECUTION_COUNT.fetch_add(1, Ordering::SeqCst);
-        do_accept(artifact_root, args, &fingerprint,
-                  hcr_id, claim_id, run_id, principal_id, gateway_session_id,
-                  registry_snapshot_id, operation, candidate_ref, idempotency_key)
-            .and_then(|resp| serde_json::to_value(resp).map_err(|e| e.to_string()))
+        do_accept(
+            artifact_root,
+            args,
+            &fingerprint,
+            hcr_id,
+            claim_id,
+            run_id,
+            principal_id,
+            gateway_session_id,
+            registry_snapshot_id,
+            operation,
+            candidate_ref,
+            idempotency_key,
+        )
+        .and_then(|resp| serde_json::to_value(resp).map_err(|e| e.to_string()))
     }) {
         Ok(result) => ok_json(&result),
         Err(execution_store::ExecutionStoreError::FingerprintMismatch(_)) => {
@@ -74,11 +94,18 @@ pub fn handle_accept(artifact_root: &Path, args: &Value) -> Value {
 
 /// Core acceptance logic (runs under file lock, called at most once per key).
 fn do_accept(
-    artifact_root: &Path, _args: &Value,
+    artifact_root: &Path,
+    _args: &Value,
     fingerprint: &protocol::RequestFingerprint,
-    hcr_id: &str, claim_id: &str, run_id: &str,
-    principal_id: &str, gateway_session_id: &str, registry_snapshot_id: &str,
-    operation: &str, candidate_ref: &str, idempotency_key: &str,
+    hcr_id: &str,
+    claim_id: &str,
+    run_id: &str,
+    principal_id: &str,
+    gateway_session_id: &str,
+    registry_snapshot_id: &str,
+    operation: &str,
+    candidate_ref: &str,
+    idempotency_key: &str,
 ) -> Result<AcceptanceResponse, String> {
     let candidate_path = resolve_safe(artifact_root, candidate_ref)
         .ok_or_else(|| "CANDIDATE_REF_ESCAPE".to_string())?;
@@ -89,8 +116,8 @@ fn do_accept(
     let base_dir = artifact_root.join("candidates_base");
     std::fs::create_dir_all(&base_dir).map_err(|e| format!("BASE_DIR: {e}"))?;
 
-    let snapshot = snapshot_candidate(&candidate_path, &base_dir)
-        .map_err(|e| format!("SNAPSHOT: {e}"))?;
+    let snapshot =
+        snapshot_candidate(&candidate_path, &base_dir).map_err(|e| format!("SNAPSHOT: {e}"))?;
 
     let results = run_all_gates(&snapshot);
     let outcome = classify_outcome(&results);
@@ -98,24 +125,31 @@ fn do_accept(
 
     validate_gate_consistency(&results, &outcome, &artifact_digest)?;
 
-    let gate_entries: Vec<GateResultEntry> = results.iter().map(|r| GateResultEntry {
-        gate_kind: r.gate_kind.as_str().to_string(),
-        passed: r.passed,
-        is_candidate_failure: r.is_candidate_failure,
-        exit_code: r.exit_code,
-        timed_out: r.timed_out,
-        error_code: r.error_code.clone(),
-        stdout: r.stdout.clone(),
-        stderr: r.stderr.clone(),
-    }).collect();
+    let gate_entries: Vec<GateResultEntry> = results
+        .iter()
+        .map(|r| GateResultEntry {
+            gate_kind: r.gate_kind.as_str().to_string(),
+            passed: r.passed,
+            is_candidate_failure: r.is_candidate_failure,
+            exit_code: r.exit_code,
+            timed_out: r.timed_out,
+            error_code: r.error_code.clone(),
+            stdout: r.stdout.clone(),
+            stderr: r.stderr.clone(),
+        })
+        .collect();
 
     let harness_execution_id = sha256_prefix(idempotency_key);
 
     let evidence_digest = compute_evidence_digest(
-        &harness_execution_id, fingerprint,
-        &snapshot.candidate_id, &snapshot.candidate_digest,
-        &gate_entries, &outcome,
-        artifact_ref.as_deref(), artifact_digest.as_deref(),
+        &harness_execution_id,
+        fingerprint,
+        &snapshot.candidate_id,
+        &snapshot.candidate_digest,
+        &gate_entries,
+        &outcome,
+        artifact_ref.as_deref(),
+        artifact_digest.as_deref(),
     );
 
     Ok(AcceptanceResponse {
@@ -144,35 +178,64 @@ fn sha256_prefix(s: &str) -> String {
 }
 
 fn classify_outcome(results: &[GateResult]) -> String {
-    if results.iter().any(|r| !r.passed && !r.is_candidate_failure) { return "InfrastructureFailure".into(); }
-    if results.iter().any(|r| !r.passed && r.is_candidate_failure) { return "CandidateFailed".into(); }
-    if results.iter().all(|r| r.passed) { return "CandidatePassed".into(); }
+    if results.iter().any(|r| !r.passed && !r.is_candidate_failure) {
+        return "InfrastructureFailure".into();
+    }
+    if results.iter().any(|r| !r.passed && r.is_candidate_failure) {
+        return "CandidateFailed".into();
+    }
+    if results.iter().all(|r| r.passed) {
+        return "CandidatePassed".into();
+    }
     "InfrastructureFailure".into()
 }
 
 fn extract_artifact(results: &[GateResult]) -> (Option<String>, Option<String>) {
     for r in results {
         if r.gate_kind == GateKind::Artifact && r.passed {
-            let digest = r.computed_artifact_digest.clone().unwrap_or_else(|| "unknown".into());
-            return (Some("target/release/calculator-harness".into()), Some(digest));
+            let digest = r
+                .computed_artifact_digest
+                .clone()
+                .unwrap_or_else(|| "unknown".into());
+            return (
+                Some("target/release/calculator-harness".into()),
+                Some(digest),
+            );
         }
     }
     (None, None)
 }
 
-fn validate_gate_consistency(results: &[GateResult], outcome: &str, artifact_digest: &Option<String>) -> Result<(), String> {
-    let kinds: std::collections::HashSet<String> = results.iter().map(|r| r.gate_kind.as_str().to_string()).collect();
-    if kinds.len() != 5 { return Err(format!("expected 5 gates, got {}", kinds.len())); }
+fn validate_gate_consistency(
+    results: &[GateResult],
+    outcome: &str,
+    artifact_digest: &Option<String>,
+) -> Result<(), String> {
+    let kinds: std::collections::HashSet<String> = results
+        .iter()
+        .map(|r| r.gate_kind.as_str().to_string())
+        .collect();
+    if kinds.len() != 5 {
+        return Err(format!("expected 5 gates, got {}", kinds.len()));
+    }
     match outcome {
         "CandidatePassed" => {
-            if results.iter().any(|r| !r.passed) { return Err("CandidatePassed but gates failed".into()); }
-            if artifact_digest.is_none() { return Err("CandidatePassed missing artifact_digest".into()); }
+            if results.iter().any(|r| !r.passed) {
+                return Err("CandidatePassed but gates failed".into());
+            }
+            if artifact_digest.is_none() {
+                return Err("CandidatePassed missing artifact_digest".into());
+            }
         }
         "CandidateFailed" => {
-            if !results.iter().any(|r| !r.passed && r.is_candidate_failure) { return Err("CandidateFailed but no failure".into()); }
+            if !results.iter().any(|r| !r.passed && r.is_candidate_failure) {
+                return Err("CandidateFailed but no failure".into());
+            }
         }
         "InfrastructureFailure" => {
-            if !results.iter().any(|r| !r.passed && !r.is_candidate_failure) { return Err("InfraFailure but no infra".into()); }
+            if !results.iter().any(|r| !r.passed && !r.is_candidate_failure) {
+                return Err("InfraFailure but no infra".into());
+            }
         }
         _ => return Err(format!("unknown outcome: {outcome}")),
     }
@@ -181,11 +244,19 @@ fn validate_gate_consistency(results: &[GateResult], outcome: &str, artifact_dig
 
 fn resolve_safe(root: &Path, rel: &str) -> Option<std::path::PathBuf> {
     let p = std::path::Path::new(rel);
-    if p.is_absolute() || rel.contains("..") { return None; }
+    if p.is_absolute() || rel.contains("..") {
+        return None;
+    }
     let j = root.join(p);
-    if !j.starts_with(root) { return None; }
+    if !j.starts_with(root) {
+        return None;
+    }
     if let Ok(c) = j.canonicalize() {
-        if let Ok(rc) = root.canonicalize() { if !c.starts_with(&rc) { return None; } }
+        if let Ok(rc) = root.canonicalize() {
+            if !c.starts_with(&rc) {
+                return None;
+            }
+        }
     }
     Some(j)
 }
