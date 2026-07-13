@@ -13,6 +13,7 @@
 //! - **Structured results**: Consistent JSON envelope with status,
 //!   exit code, truncation flags, and cleanup confirmation.
 
+pub mod acceptance;
 pub mod candidate;
 pub mod command;
 pub mod errors;
