@@ -194,6 +194,14 @@ fn dispatch(config: &CodingConfig, operation: &str, args: &Value) -> Value {
         }
     };
 
+    // ── HCR acceptance dispatch ──
+    // Runs all five acceptance gates against a candidate and returns result.
+    // Uses the artifact_root for candidate snapshot storage. No workspace or
+    // profile needed — this is a direct harness acceptance operation.
+    if operation == "external.coding_hcr_accept" {
+        return crate::hcr::acceptance::handle_accept(&config.artifact_root, args);
+    }
+
     // ── HCR execution dispatch ──
     // Uses profile-based security model, not workspace permission booleans.
     if operation == "external.coding_hcr_exec" {

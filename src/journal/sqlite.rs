@@ -21,7 +21,7 @@ pub struct JournalStore {
 /// The schema `PRAGMA user_version` this kernel writes and understands. Bumped
 /// only when `migrations/` gains a new applied migration. The startup
 /// `migrate()` refuses to run against a DB whose version is newer than this.
-const CURRENT_SCHEMA_VERSION: i64 = 9;
+const CURRENT_SCHEMA_VERSION: i64 = 10;
 
 impl JournalStore {
     pub fn open(path: &Path) -> Result<Self> {
@@ -408,6 +408,10 @@ impl JournalStore {
                 8 => {
                     conn.execute_batch(include_str!("../../migrations/0009_hcr_evidence.sql"))?;
                     conn.pragma_update(None, "user_version", 9)?;
+                }
+                9 => {
+                    conn.execute_batch(include_str!("../../migrations/0010_hcr_receipt_identity.sql"))?;
+                    conn.pragma_update(None, "user_version", 10)?;
                 }
                 _ => break,
             }

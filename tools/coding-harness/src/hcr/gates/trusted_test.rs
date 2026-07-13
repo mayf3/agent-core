@@ -105,6 +105,7 @@ fn compile_trusted_test(source_path: &str, output_path: &Path, ctx: &GateContext
                 candidate_id: String::new(),
                 candidate_digest: String::new(),
                 candidate_digest_preserved: false,
+    computed_artifact_digest: None,
             };
         }
     };
@@ -129,6 +130,7 @@ fn compile_trusted_test(source_path: &str, output_path: &Path, ctx: &GateContext
         candidate_id: String::new(),
         candidate_digest: String::new(),
         candidate_digest_preserved: false,
+    computed_artifact_digest: None,
     }
 }
 
@@ -163,6 +165,7 @@ fn run_trusted_test(
                 candidate_id: candidate.candidate_id.clone(),
                 candidate_digest: candidate.candidate_digest.clone(),
                 candidate_digest_preserved: false,
+    computed_artifact_digest: None,
             };
         }
     };
@@ -187,5 +190,6 @@ fn run_trusted_test(
         candidate_id: candidate.candidate_id.clone(),
         candidate_digest: candidate.candidate_digest.clone(),
         candidate_digest_preserved: false,
+    computed_artifact_digest: None,
     }
 }
