@@ -6,6 +6,7 @@
 //! validation (H2), atomic receipt append-or-compare (H3), and
 //! real artifact/evidence digest handling (H4/H5).
 
+pub mod gate_evidence;
 pub mod receipt;
 pub mod response_validation;
 
@@ -51,10 +52,12 @@ pub fn handle(
     // 3. Create Run with RunMode::Hcr
     let trigger_event_id = EventId::new();
     let harness_id = {
-        let hcr = journal.get_harness_change_request(hcr_id)?
+        let hcr = journal
+            .get_harness_change_request(hcr_id)?
             .ok_or_else(|| anyhow::anyhow!("HCR_NOT_FOUND"))?;
         hcr.harness_id
     };
+    let gate_harness_id = harness_id.clone(); // saved for gate_evidence persistence
     let principal = RunPrincipal {
         principal_id: PrincipalId::new(),
         subject: PrincipalSubject::LocalUser,
@@ -89,7 +92,10 @@ pub fn handle(
 
     // 4. Gateway approval
     let invocation_id = InvocationId::new();
-    let idempotency_key = format!("hcr_accept:{}:{}:{}", hcr_id, outcome.claim_id.0, outcome.run_id.0);
+    let idempotency_key = format!(
+        "hcr_accept:{}:{}:{}",
+        hcr_id, outcome.claim_id.0, outcome.run_id.0
+    );
     let intent = InvocationIntent {
         invocation_id,
         run_id: outcome.run_id.clone(),
@@ -109,9 +115,18 @@ pub fn handle(
     let approved = gateway.approve_invocation(intent.clone(), &run, &session, &snapshot)?;
 
     // 5. Call Harness
-    let harness_response = call_harness_accept(config, &approved, candidate_ref, &idempotency_key,
-        hcr_id, &outcome.claim_id.0, &outcome.run_id.0,
-        &principal.principal_id.0, &session.id.0, &snapshot_id)?;
+    let harness_response = call_harness_accept(
+        config,
+        &approved,
+        candidate_ref,
+        &idempotency_key,
+        hcr_id,
+        &outcome.claim_id.0,
+        &outcome.run_id.0,
+        &principal.principal_id.0,
+        &session.id.0,
+        &snapshot_id,
+    )?;
 
     // 6. Validate Harness response (H2)
     let ctx = RequestContext {
@@ -129,7 +144,21 @@ pub fn handle(
         Err(e) => bail!("RESPONSE_VALIDATION_FAILED: {e}"),
     };
 
-    // 7. Determine receipt status
+    // ── 7. Persist five gate attempts + evidence (PR2 hotfix) ─────────────
+    // Maps each harness gate result to an HcrGateAttempt + InvocationProposed
+    // + ReceiptReceived + HcrGateEvidence chain, satisfying settle_hcr_in_tx()'s
+    // requirement of exactly 5 attempts + 5 evidence.
+    let harness_result = harness_response.get("result").unwrap_or(&harness_response);
+    gate_evidence::persist_gates(
+        journal,
+        harness_result,
+        hcr_id,
+        &outcome.claim_id.0,
+        &outcome.run_id.0,
+        &gate_harness_id,
+    )?;
+
+    // 8. Determine receipt status
     let receipt_status = match validated.overall_outcome.as_str() {
         "CandidatePassed" => ReceiptStatus::Succeeded,
         _ => ReceiptStatus::Failed,
@@ -154,21 +183,40 @@ pub fn handle(
         evidence_digest: validated.evidence_digest.clone(),
     };
     let payload_digest = receipt::compute_payload_digest(
-        hcr_id, &outcome.claim_id.0, &outcome.run_id.0,
-        &principal.principal_id.0, &session.id.0, &snapshot_id,
-        "external.coding_hcr_accept", &idempotency_key,
-        &validated.harness_execution_id, &validated.overall_outcome,
+        hcr_id,
+        &outcome.claim_id.0,
+        &outcome.run_id.0,
+        &principal.principal_id.0,
+        &session.id.0,
+        &snapshot_id,
+        "external.coding_hcr_accept",
+        &idempotency_key,
+        &validated.harness_execution_id,
+        &validated.overall_outcome,
         &validated.candidate_digest,
         validated.artifact_digest.as_deref(),
         validated.artifact_digest.as_deref(),
         &validated.evidence_digest,
-        &[("scaffold", true), ("build", true), ("trusted_test", true),
-          ("trusted_smoke", true), ("artifact", true)],
+        &[
+            ("scaffold", true),
+            ("build", true),
+            ("trusted_test", true),
+            ("trusted_smoke", true),
+            ("artifact", true),
+        ],
     );
     match receipt::append_or_compare_receipt(
-        journal, &outcome.run_id, &session.id,
-        hcr_id, &outcome.claim_id.0, &outcome.run_id.0, &idempotency_key,
-        receipt_status, &output, &payload_digest, &identity_fields,
+        journal,
+        &outcome.run_id,
+        &session.id,
+        hcr_id,
+        &outcome.claim_id.0,
+        &outcome.run_id.0,
+        &idempotency_key,
+        receipt_status,
+        &output,
+        &payload_digest,
+        &identity_fields,
     )? {
         AppendReceiptResult::Appended => {}
         AppendReceiptResult::Duplicate => {
@@ -203,8 +251,12 @@ fn call_harness_accept(
     approved: &ApprovedInvocation,
     candidate_ref: &str,
     idempotency_key: &str,
-    hcr_id: &str, claim_id: &str, run_id: &str,
-    principal_id: &str, gateway_session_id: &str, registry_snapshot_id: &str,
+    hcr_id: &str,
+    claim_id: &str,
+    run_id: &str,
+    principal_id: &str,
+    gateway_session_id: &str,
+    registry_snapshot_id: &str,
 ) -> Result<Value> {
     let body = json!({
         "protocol_version": "external-harness-v1",

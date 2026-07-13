@@ -19,12 +19,20 @@ pub enum AppendReceiptResult {
 
 /// Canonical payload digest for receipt identity comparison.
 pub fn compute_payload_digest(
-    hcr_id: &str, claim_id: &str, run_id: &str,
-    principal_id: &str, gateway_session_id: &str, registry_snapshot_id: &str,
-    operation: &str, idempotency_key: &str,
-    harness_execution_id: &str, overall_outcome: &str,
-    candidate_digest: &str, artifact_ref: Option<&str>,
-    artifact_digest: Option<&str>, evidence_digest: &str,
+    hcr_id: &str,
+    claim_id: &str,
+    run_id: &str,
+    principal_id: &str,
+    gateway_session_id: &str,
+    registry_snapshot_id: &str,
+    operation: &str,
+    idempotency_key: &str,
+    harness_execution_id: &str,
+    overall_outcome: &str,
+    candidate_digest: &str,
+    artifact_ref: Option<&str>,
+    artifact_digest: Option<&str>,
+    evidence_digest: &str,
     gate_summaries: &[(&str, bool)],
 ) -> String {
     use sha2::{Digest, Sha256};
@@ -55,7 +63,9 @@ pub fn append_or_compare_receipt(
     journal: &JournalStore,
     run_id: &RunId,
     session_id: &SessionId,
-    hcr_id: &str, claim_id: &str, the_run_id: &str,
+    hcr_id: &str,
+    claim_id: &str,
+    the_run_id: &str,
     idempotency_key: &str,
     receipt_status: ReceiptStatus,
     output: &Value,
@@ -67,12 +77,14 @@ pub fn append_or_compare_receipt(
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
 
     // Check for existing identity
-    let existing: Option<String> = tx.query_row(
-        "SELECT payload_digest FROM hcr_receipt_identities
+    let existing: Option<String> = tx
+        .query_row(
+            "SELECT payload_digest FROM hcr_receipt_identities
          WHERE hcr_id = ?1 AND claim_id = ?2 AND run_id = ?3 AND idempotency_key = ?4",
-        params![hcr_id, claim_id, the_run_id, idempotency_key],
-        |row| row.get(0),
-    ).optional()?;
+            params![hcr_id, claim_id, the_run_id, idempotency_key],
+            |row| row.get(0),
+        )
+        .optional()?;
 
     if let Some(existing_digest) = existing {
         tx.commit()?;
@@ -113,7 +125,11 @@ pub fn append_or_compare_receipt(
           artifact_ref, artifact_digest, evidence_digest, created_at)
          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12, ?13)",
         params![
-            hcr_id, claim_id, the_run_id, idempotency_key, payload_digest,
+            hcr_id,
+            claim_id,
+            the_run_id,
+            idempotency_key,
+            payload_digest,
             event.event_id.0,
             identity_fields.harness_execution_id,
             identity_fields.overall_outcome,
@@ -138,25 +154,33 @@ pub fn append_or_compare_receipt(
             // ReceiptReceived events (H3/H6 fix).
             if let Err(rollback_err) = tx.rollback() {
                 // If rollback itself fails, the DB is in a bad state
-                return Err(anyhow!("ROLLBACK_FAILED: {rollback_err} after UNIQUE error: {e}"));
+                return Err(anyhow!(
+                    "ROLLBACK_FAILED: {rollback_err} after UNIQUE error: {e}"
+                ));
             }
 
             // Open a fresh transaction to re-read the winner's identity
             let mut conn2 = journal.conn.lock().map_err(|e| anyhow!("mutex: {e}"))?;
             let tx2 = conn2.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
 
-            let winner_digest: Option<String> = tx2.query_row(
-                "SELECT payload_digest FROM hcr_receipt_identities
+            let winner_digest: Option<String> = tx2
+                .query_row(
+                    "SELECT payload_digest FROM hcr_receipt_identities
                  WHERE hcr_id = ?1 AND claim_id = ?2 AND run_id = ?3 AND idempotency_key = ?4",
-                params![hcr_id, claim_id, the_run_id, idempotency_key],
-                |row| row.get(0),
-            ).optional()?;
+                    params![hcr_id, claim_id, the_run_id, idempotency_key],
+                    |row| row.get(0),
+                )
+                .optional()?;
             tx2.commit()?;
 
             match winner_digest {
                 Some(d) if d == payload_digest => Ok(AppendReceiptResult::Duplicate),
-                Some(d) => Ok(AppendReceiptResult::Conflict(format!("existing {d} vs new {payload_digest}"))),
-                None => Ok(AppendReceiptResult::Conflict("unexpected missing identity after conflict".into())),
+                Some(d) => Ok(AppendReceiptResult::Conflict(format!(
+                    "existing {d} vs new {payload_digest}"
+                ))),
+                None => Ok(AppendReceiptResult::Conflict(
+                    "unexpected missing identity after conflict".into(),
+                )),
             }
         }
     }
@@ -223,7 +247,10 @@ impl JournalStore {
         let seq = prev.as_ref().map(|(s, _)| s + 1).unwrap_or(1);
         let prev_hash = prev.map(|(_, h)| h);
         let hash = crate::journal::hash_chain::event_hash(
-            prev_hash.as_deref(), seq, &kind_text, &payload_json,
+            prev_hash.as_deref(),
+            seq,
+            &kind_text,
+            &payload_json,
         );
 
         tx.execute(

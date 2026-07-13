@@ -103,7 +103,7 @@ pub fn check(candidate: &CandidateSnapshot, ctx: &GateContext) -> GateResult {
                     candidate_id: candidate.candidate_id.clone(),
                     candidate_digest: candidate.candidate_digest.clone(),
                     candidate_digest_preserved: false,
-    computed_artifact_digest: None,
+                    computed_artifact_digest: None,
                 };
             } else if ep.is_symlink() {
                 errors.push(format!("entry is a symlink, rejecting: {}", ep.display()));
@@ -179,7 +179,10 @@ pub fn check(candidate: &CandidateSnapshot, ctx: &GateContext) -> GateResult {
         child_cleanup: CleanupStatus::Confirmed,
         error_code,
         stdout: if passed {
-            format!("artifact_digest_verified=true\nartifact_digest={}", computed_artifact_digest.as_deref().unwrap_or("unknown"))
+            format!(
+                "artifact_digest_verified=true\nartifact_digest={}",
+                computed_artifact_digest.as_deref().unwrap_or("unknown")
+            )
         } else {
             String::new()
         },
@@ -222,6 +225,6 @@ fn fail(
         candidate_id: candidate.candidate_id.clone(),
         candidate_digest: candidate.candidate_digest.clone(),
         candidate_digest_preserved: false,
-    computed_artifact_digest: None,
+        computed_artifact_digest: None,
     }
 }

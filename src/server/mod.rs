@@ -6,9 +6,9 @@ mod capability_http;
 pub mod capability_routes;
 mod delivery;
 mod dispatcher_metrics;
-mod hcr_acceptance;
 mod harness_change_request;
 pub mod harness_routes;
+mod hcr_acceptance;
 use anyhow::{bail, Result};
 #[cfg(test)]
 pub(crate) use delivery::build_llm_from_config;
