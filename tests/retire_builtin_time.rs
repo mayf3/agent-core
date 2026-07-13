@@ -135,7 +135,7 @@ fn cleanup(path: &Path) {
 fn baseline_specs_no_time_now() {
     let specs = builtin_specs();
     assert!(!specs.iter().any(|op| op.name == "time.now"));
-    assert_eq!(specs.len(), 4);
+    assert_eq!(specs.len(), 5);
 }
 #[test]
 fn catalog_no_time_now() {

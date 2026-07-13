@@ -4,6 +4,8 @@ use crate::gateway::Gateway;
 use crate::journal::JournalStore;
 mod capability_http;
 pub mod capability_routes;
+pub mod coding_router;
+pub mod coding_task_submit;
 mod delivery;
 mod dispatcher_metrics;
 mod harness_change_request;
@@ -482,5 +484,8 @@ mod capability_routes_tests;
 #[cfg(test)]
 #[path = "harness_endpoint_tests.rs"]
 mod harness_endpoint_tests;
+#[cfg(test)]
+#[path = "r3a_phase_a_e2e.rs"]
+mod r3a_phase_a_e2e;
 #[cfg(test)]
 mod schema_upgrade_tests;
