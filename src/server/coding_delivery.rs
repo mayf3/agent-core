@@ -162,6 +162,8 @@ fn safe_category(error: &anyhow::Error) -> &'static str {
         "coding_owner_not_authorized"
     } else if message.contains("operation_not_allowed") {
         "coding_submit_not_registered"
+    } else if message.contains("CODING_ACCEPTANCE_INFRASTRUCTURE_FAILURE") {
+        "coding_infrastructure_failure"
     } else if message.contains("CANDIDATE_NOT_ACCEPTED") {
         "candidate_rejected"
     } else if message.contains("CONNECT") {
@@ -170,5 +172,23 @@ fn safe_category(error: &anyhow::Error) -> &'static str {
         "linux_sandbox_unavailable"
     } else {
         "coding_flow_failed"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::safe_category;
+    use anyhow::anyhow;
+
+    #[test]
+    fn acceptance_infrastructure_failure_does_not_blame_candidate() {
+        assert_eq!(
+            safe_category(&anyhow!("CODING_ACCEPTANCE_INFRASTRUCTURE_FAILURE")),
+            "coding_infrastructure_failure"
+        );
+        assert_eq!(
+            safe_category(&anyhow!("CANDIDATE_NOT_ACCEPTED")),
+            "candidate_rejected"
+        );
     }
 }
