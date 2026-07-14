@@ -47,7 +47,7 @@ mod grant_ops_lifecycle_tests;
 mod hcr_claim_tests;
 
 pub use event_observe::{
-    redact_payload, EventObserveQuery, EventObserveResponse, ObservedEvent,
-    DEFAULT_OBSERVE_LIMIT, MAX_OBSERVE_LIMIT, OBSERVE_SCHEMA_VERSION,
+    redact_payload, EventObserveQuery, EventObserveResponse, ObservedEvent, DEFAULT_OBSERVE_LIMIT,
+    MAX_OBSERVE_LIMIT, OBSERVE_SCHEMA_VERSION,
 };
 pub use sqlite::JournalStore;

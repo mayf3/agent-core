@@ -24,8 +24,11 @@ use agent_core_kernel::journal::event_observe::*;
 use agent_core_kernel::journal::JournalStore;
 use chrono::Utc;
 use serde_json::json;
+use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Barrier};
+use std::thread;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -36,7 +39,10 @@ static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// Get a unique temp path for a SQLite database file.
 fn unique_temp_path(label: &str) -> PathBuf {
     let c = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-    std::env::temp_dir().join(format!("r35_observe_{label}_{c}_{}.sqlite", std::process::id()))
+    std::env::temp_dir().join(format!(
+        "r35_observe_{label}_{c}_{}.sqlite",
+        std::process::id()
+    ))
 }
 
 /// Seed `n` RunStarted events with uniform run/session IDs.
@@ -478,7 +484,10 @@ fn observe_does_not_mutate_journal() -> anyhow::Result<()> {
     let count_after = j.event_count()?;
     let chain_after = j.verify_hash_chain()?;
 
-    assert_eq!(count_before, count_after, "event count changed after observe");
+    assert_eq!(
+        count_before, count_after,
+        "event count changed after observe"
+    );
     assert!(chain_before, "hash chain was valid before");
     assert!(chain_after, "hash chain still valid after observe");
 
@@ -498,7 +507,10 @@ fn observe_detects_corrupt_chain() -> anyhow::Result<()> {
     j.tamper_first_event_kind_for_test("TamperedByTest")?;
 
     // verify_hash_chain detects the tampering
-    assert!(!j.verify_hash_chain()?, "chain should be corrupt after tamper");
+    assert!(
+        !j.verify_hash_chain()?,
+        "chain should be corrupt after tamper"
+    );
 
     // observe_events must fail closed
     let err = j
@@ -597,11 +609,334 @@ fn multiple_consumers_use_independent_cursors() -> anyhow::Result<()> {
 
     // Consumer A and B see different events (their cursors diverged)
     assert_ne!(
-        a2.events[0].event_id,
-        b2.events[0].event_id,
+        a2.events[0].event_id, b2.events[0].event_id,
         "consumers at different cursors must see different event pages"
     );
 
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Principal-filter cursor regression coverage
+// ---------------------------------------------------------------------------
+
+#[test]
+fn principal_filter_paginates_interleaved_events_without_empty_loop() -> anyhow::Result<()> {
+    let j = JournalStore::in_memory()?;
+    insert_run(&j, "r_principal_a", "s_shared", "agent_a", "principal_a")?;
+    insert_run(&j, "r_principal_b", "s_shared", "agent_b", "principal_b")?;
+
+    let first_a = seed_events_for_run(
+        &j,
+        "r_principal_a",
+        "s_shared",
+        JournalEventKind::RunStarted,
+        1,
+    )?[0];
+    seed_events_for_run(
+        &j,
+        "r_principal_b",
+        "s_shared",
+        JournalEventKind::RunStarted,
+        2,
+    )?;
+    let second_a = seed_events_for_run(
+        &j,
+        "r_principal_a",
+        "s_shared",
+        JournalEventKind::RunStarted,
+        1,
+    )?[0];
+
+    let first = j.observe_events(&EventObserveQuery {
+        principal_id: "principal_a".to_string(),
+        limit: 1,
+        ..Default::default()
+    })?;
+    assert_eq!(first.events.len(), 1);
+    assert_eq!(first.events[0].run_id.as_deref(), Some("r_principal_a"));
+    assert_eq!(first.next_cursor, first_a);
+    assert!(first.has_more);
+
+    let second = j.observe_events(&EventObserveQuery {
+        after_sequence: Some(first.next_cursor),
+        principal_id: "principal_a".to_string(),
+        limit: 1,
+        ..Default::default()
+    })?;
+    assert_eq!(second.events.len(), 1);
+    assert_eq!(second.events[0].run_id.as_deref(), Some("r_principal_a"));
+    assert_eq!(second.next_cursor, second_a);
+    assert!(!second.has_more);
+
+    let terminal = j.observe_events(&EventObserveQuery {
+        after_sequence: Some(second.next_cursor),
+        principal_id: "principal_a".to_string(),
+        limit: 1,
+        ..Default::default()
+    })?;
+    assert!(terminal.events.is_empty());
+    assert!(!terminal.has_more);
+    assert!(
+        terminal.next_cursor > second.next_cursor || !terminal.has_more,
+        "an empty filtered page must advance or declare itself terminal"
+    );
+    Ok(())
+}
+
+#[test]
+fn empty_principal_page_is_terminal_and_later_append_is_visible() -> anyhow::Result<()> {
+    let j = JournalStore::in_memory()?;
+    insert_run(&j, "r_only_b", "s_shared", "agent_b", "principal_b")?;
+    seed_events_for_run(&j, "r_only_b", "s_shared", JournalEventKind::RunStarted, 3)?;
+
+    let empty = j.observe_events(&EventObserveQuery {
+        principal_id: "principal_a".to_string(),
+        limit: 1,
+        ..Default::default()
+    })?;
+    assert!(empty.events.is_empty());
+    assert!(
+        !empty.has_more,
+        "empty page must not advertise a stuck loop"
+    );
+
+    let replay = j.observe_events(&EventObserveQuery {
+        after_sequence: Some(empty.next_cursor),
+        principal_id: "principal_a".to_string(),
+        limit: 1,
+        ..Default::default()
+    })?;
+    assert!(replay.events.is_empty());
+    assert!(!replay.has_more);
+
+    insert_run(&j, "r_late_a", "s_shared", "agent_a", "principal_a")?;
+    let appended =
+        seed_events_for_run(&j, "r_late_a", "s_shared", JournalEventKind::RunStarted, 1)?[0];
+    let visible = j.observe_events(&EventObserveQuery {
+        after_sequence: Some(empty.next_cursor),
+        principal_id: "principal_a".to_string(),
+        limit: 1,
+        ..Default::default()
+    })?;
+    assert_eq!(visible.events.len(), 1);
+    assert_eq!(visible.next_cursor, appended);
+    assert_eq!(visible.events[0].run_id.as_deref(), Some("r_late_a"));
+    Ok(())
+}
+
+#[test]
+fn principal_filter_composes_with_run_session_and_kind() -> anyhow::Result<()> {
+    let j = JournalStore::in_memory()?;
+    insert_run(&j, "r_a_x", "s_x", "agent_a", "principal_a")?;
+    insert_run(&j, "r_a_y", "s_y", "agent_a", "principal_a")?;
+    insert_run(&j, "r_b_x", "s_x", "agent_b", "principal_b")?;
+
+    seed_events_for_run(&j, "r_a_x", "s_x", JournalEventKind::RunStarted, 2)?;
+    seed_events_for_run(&j, "r_a_x", "s_x", JournalEventKind::ToolCallIssued, 1)?;
+    seed_events_for_run(&j, "r_a_y", "s_y", JournalEventKind::RunStarted, 1)?;
+    seed_events_for_run(&j, "r_b_x", "s_x", JournalEventKind::RunStarted, 1)?;
+
+    let by_run = j.observe_events(&EventObserveQuery {
+        principal_id: "principal_a".to_string(),
+        run_id: "r_a_x".to_string(),
+        limit: 100,
+        ..Default::default()
+    })?;
+    assert_eq!(by_run.events.len(), 3);
+
+    let by_session = j.observe_events(&EventObserveQuery {
+        principal_id: "principal_a".to_string(),
+        session_id: "s_x".to_string(),
+        limit: 100,
+        ..Default::default()
+    })?;
+    assert_eq!(by_session.events.len(), 3);
+
+    let by_kind = j.observe_events(&EventObserveQuery {
+        principal_id: "principal_a".to_string(),
+        event_kind: "RunStarted".to_string(),
+        limit: 100,
+        ..Default::default()
+    })?;
+    assert_eq!(by_kind.events.len(), 3);
+
+    let combined = j.observe_events(&EventObserveQuery {
+        principal_id: "principal_a".to_string(),
+        run_id: "r_a_x".to_string(),
+        session_id: "s_x".to_string(),
+        event_kind: "RunStarted".to_string(),
+        limit: 100,
+        ..Default::default()
+    })?;
+    assert_eq!(combined.events.len(), 2);
+    assert!(combined
+        .events
+        .iter()
+        .all(|event| event.principal_id.as_deref() == Some("principal_a")));
+    Ok(())
+}
+
+#[test]
+fn principal_filter_cursor_survives_restart() -> anyhow::Result<()> {
+    let db_path = unique_temp_path("principal_restart");
+    let cursor;
+    {
+        let j = JournalStore::open(&db_path)?;
+        insert_run(&j, "r_restart_a", "s_restart", "agent_a", "principal_a")?;
+        insert_run(&j, "r_restart_b", "s_restart", "agent_b", "principal_b")?;
+        seed_events_for_run(
+            &j,
+            "r_restart_a",
+            "s_restart",
+            JournalEventKind::RunStarted,
+            1,
+        )?;
+        seed_events_for_run(
+            &j,
+            "r_restart_b",
+            "s_restart",
+            JournalEventKind::RunStarted,
+            2,
+        )?;
+        seed_events_for_run(
+            &j,
+            "r_restart_a",
+            "s_restart",
+            JournalEventKind::RunStarted,
+            1,
+        )?;
+        let first = j.observe_events(&EventObserveQuery {
+            principal_id: "principal_a".to_string(),
+            limit: 1,
+            ..Default::default()
+        })?;
+        assert!(first.has_more);
+        cursor = first.next_cursor;
+    }
+
+    let j = JournalStore::open(&db_path)?;
+    let second = j.observe_events(&EventObserveQuery {
+        after_sequence: Some(cursor),
+        principal_id: "principal_a".to_string(),
+        limit: 1,
+        ..Default::default()
+    })?;
+    assert_eq!(second.events.len(), 1);
+    assert_eq!(
+        second.events[0].principal_id.as_deref(),
+        Some("principal_a")
+    );
+    assert!(!second.has_more);
+    drop(j);
+    std::fs::remove_file(&db_path)?;
+    Ok(())
+}
+
+#[test]
+fn maximum_limit_is_accepted_for_principal_filter() -> anyhow::Result<()> {
+    let j = JournalStore::in_memory()?;
+    insert_run(&j, "r_max", "s_max", "agent_max", "principal_max")?;
+    seed_events_for_run(&j, "r_max", "s_max", JournalEventKind::RunStarted, 2)?;
+    let response = j.observe_events(&EventObserveQuery {
+        principal_id: "principal_max".to_string(),
+        limit: MAX_OBSERVE_LIMIT,
+        ..Default::default()
+    })?;
+    assert_eq!(response.events.len(), 2);
+    assert!(!response.has_more);
+    Ok(())
+}
+
+#[test]
+fn twenty_consumers_progress_while_writer_appends_interleaved_principals() -> anyhow::Result<()> {
+    const CONSUMERS: usize = 20;
+    const MATCHING_EVENTS: usize = 20;
+
+    let journal = Arc::new(JournalStore::in_memory()?);
+    insert_run(
+        &journal,
+        "r_concurrent_a",
+        "s_concurrent",
+        "agent_a",
+        "principal_a",
+    )?;
+    insert_run(
+        &journal,
+        "r_concurrent_b",
+        "s_concurrent",
+        "agent_b",
+        "principal_b",
+    )?;
+
+    let start = Arc::new(Barrier::new(CONSUMERS + 1));
+    let writer_done = Arc::new(AtomicBool::new(false));
+    let writer = {
+        let journal = Arc::clone(&journal);
+        let start = Arc::clone(&start);
+        let writer_done = Arc::clone(&writer_done);
+        thread::spawn(move || -> anyhow::Result<()> {
+            start.wait();
+            for index in 0..MATCHING_EVENTS {
+                let kind = JournalEventKind::RunStarted;
+                seed_events_for_run(&journal, "r_concurrent_a", "s_concurrent", kind.clone(), 1)?;
+                seed_events_for_run(&journal, "r_concurrent_b", "s_concurrent", kind, 1)?;
+                if index % 4 == 0 {
+                    thread::yield_now();
+                }
+            }
+            writer_done.store(true, Ordering::Release);
+            Ok(())
+        })
+    };
+
+    let mut consumers = Vec::with_capacity(CONSUMERS);
+    for _ in 0..CONSUMERS {
+        let journal = Arc::clone(&journal);
+        let start = Arc::clone(&start);
+        let writer_done = Arc::clone(&writer_done);
+        consumers.push(thread::spawn(move || -> anyhow::Result<Vec<String>> {
+            start.wait();
+            let mut cursor = 0;
+            let mut event_ids = Vec::new();
+            for _ in 0..10_000 {
+                let page = journal.observe_events(&EventObserveQuery {
+                    after_sequence: Some(cursor),
+                    principal_id: "principal_a".to_string(),
+                    limit: 1,
+                    ..Default::default()
+                })?;
+                assert!(
+                    page.next_cursor > cursor || !page.has_more,
+                    "pagination invariant violated at cursor {cursor}"
+                );
+                if page.events.is_empty() {
+                    if writer_done.load(Ordering::Acquire) {
+                        return Ok(event_ids);
+                    }
+                    thread::yield_now();
+                    continue;
+                }
+                assert!(page.next_cursor > cursor);
+                cursor = page.next_cursor;
+                event_ids.extend(page.events.into_iter().map(|event| event.event_id));
+            }
+            anyhow::bail!("consumer failed to reach terminal page")
+        }));
+    }
+
+    writer.join().expect("writer thread panicked")?;
+    let mut baseline: Option<HashSet<String>> = None;
+    for consumer in consumers {
+        let ids = consumer.join().expect("consumer thread panicked")?;
+        let unique: HashSet<String> = ids.into_iter().collect();
+        assert_eq!(unique.len(), MATCHING_EVENTS);
+        if let Some(expected) = &baseline {
+            assert_eq!(&unique, expected, "independent consumers must converge");
+        } else {
+            baseline = Some(unique);
+        }
+    }
     Ok(())
 }
 

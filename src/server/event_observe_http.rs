@@ -170,7 +170,9 @@ fn build_query(params: HashMap<String, String>) -> Result<EventObserveQuery> {
     let limit: i64 = if limit_str.is_empty() {
         crate::journal::event_observe::DEFAULT_OBSERVE_LIMIT
     } else {
-        limit_str.parse().map_err(|_| anyhow::anyhow!("invalid_limit"))?
+        limit_str
+            .parse()
+            .map_err(|_| anyhow::anyhow!("invalid_limit"))?
     };
 
     if limit < 1 || limit > MAX_OBSERVE_LIMIT {
@@ -180,7 +182,9 @@ fn build_query(params: HashMap<String, String>) -> Result<EventObserveQuery> {
     let after_sequence: Option<i64> = if cursor_str.is_empty() {
         None
     } else {
-        let seq: i64 = cursor_str.parse().map_err(|_| anyhow::anyhow!("invalid_cursor"))?;
+        let seq: i64 = cursor_str
+            .parse()
+            .map_err(|_| anyhow::anyhow!("invalid_cursor"))?;
         if seq < 0 {
             bail!("invalid_cursor");
         }
