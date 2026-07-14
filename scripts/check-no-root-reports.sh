@@ -6,18 +6,31 @@
 # are temporary artifacts that belong in /tmp or docs/.
 #
 # Usage:
-#   ./scripts/check-no-root-reports.sh
+#   ./scripts/check-no-root-reports.sh [repository-root]
 #
 # Exit code:
 #   0  — no forbidden files found
 #   1  — at least one forbidden file present (with diagnostics)
 #
-# CI integration:
-#   Add to CI pipeline to fail if report leaks into root.
+# The optional root is used by the Rust integration test so `cargo test`
+# continuously enforces this repository policy.
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+if [ "$#" -gt 1 ]; then
+    echo "Usage: $0 [repository-root]" >&2
+    exit 2
+fi
+
+if [ "$#" -eq 1 ]; then
+    if [ ! -d "$1" ]; then
+        echo "ERROR: repository root is not a directory: $1" >&2
+        exit 2
+    fi
+    REPO_ROOT="$(cd "$1" && pwd)"
+else
+    REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+fi
 BAD=0
 
 for pattern in '*_AUDIT_REPORT.md' '*_IMPLEMENTATION_REPORT.md' '*_INVESTIGATION_REPORT.md'; do
