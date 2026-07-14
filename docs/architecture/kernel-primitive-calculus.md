@@ -18,13 +18,13 @@
 |---|---|
 | §1 | Why a dual track (inward screening + outward delivery) is required |
 | §2 | The rule for judging whether something is a Kernel primitive |
-| §3 | The candidate 8 irreducible primitives |
+| §3 | The candidate 8 (provisional) primitives; K8 disputed |
 | §4 | The four external interaction modes (Observe / Propose / Transform / Effect) |
 | §5 | Lean-like candidate syntax for invariants |
 | §6 | Derivation formulas: how current domain objects decompose over the 8 |
 | §7 | Primitive Gap Protocol |
-| §8 | Generic Self-Evolution V1 |
-| §9 | OpenClaw-style alternative North Stars (not adopted, recorded for contrast) |
+| §8 | Generic Self-Evolution: current human gate vs. future external repair loop |
+| §9 | OpenClaw as an external replacement goal (ADOPTED) vs. all-in-one Kernel (REJECTED) |
 | §10 | Decision: screen only, do not slim — and the Non-Action List |
 
 Cross-references to existing docs:
@@ -124,9 +124,17 @@ domain alias (D), an externalizable product capability (E), a phase scaffold
 
 ## 3. Candidate 8 Primitives
 
-The eight primitives below are the smallest candidate set that, in this model,
+The eight primitives below are the *candidate* set that, in this model,
 everything else composes over. Each is cross-referenced to the real code that
 *currently* plays that role (not to a future implementation).
+
+> **Provisional-set note.** Seven of these (K1–K7) stand as candidate
+> irreducible primitives. **K8 Allow Boundary is disputed / provisional** and is
+> documented as such below (see the K8 note): it may not be an independent
+> object primitive at all, but an inference rule / transition invariant enforced
+> along Intent → Decision → Invocation. This document does **not** claim the
+> eight primitives have been proven minimal and irreducible; that proof is the
+> job of the screening matrix and future formal work.
 
 | # | Candidate primitive | Role | Current code that carries it (evidence) |
 |---|---|---|---|
@@ -143,6 +151,34 @@ everything else composes over. Each is cross-referenced to the real code that
 > current code is **not** organized around these eight names, and the code must
 > not be reorganized to match them in this round. They exist here only to make
 > the screening in §6 precise.
+
+### K8 is disputed / provisional
+
+K8 (Allow Boundary) is **not** asserted to be a settled, independently
+irreducible primitive. It is retained in the candidate table so the screening
+in §6 has a label for the enforcement surface, but its status is open:
+
+```text
+Allow Boundary may not be a standalone object primitive at all.
+It may instead be an unbypassable execution rule, or a safety
+invariant, enforced on the Intent -> Decision -> Invocation transition.
+```
+
+Concretely, K5 already carries the authorization half (Decision) and the gating
+check `is_allowed` (`src/domain/operation.rs:90`); much of what §3 lists under
+K8 is the *enforcement of that K5 transition*, not a separable object. The
+re-screening condition is recorded in
+[`primitive-screening-matrix.md`](./primitive-screening-matrix.md):
+
+```text
+If every Allow Boundary semantic can be expressed as a transition
+invariant over Intent + Decision + Invocation, then K8 is no longer
+an independent primitive and demotes to an inference rule.
+```
+
+Because K8 is provisional, the candidate set is described as "8 (provisional)",
+and **this document does not claim the eight primitives have been proven minimal
+and irreducible.**
 
 ---
 
@@ -223,8 +259,9 @@ invariant is a good fit for which technique later.
 ## 6. Derived Concept Formulas
 
 Each current first-class concept is expressed as a composition of the candidate
-8 primitives. **These formulas describe a target decomposition, not current
-code.** Full per-concept evidence and migration risk live in
+8 (provisional) primitives — K8 included as a label even though it is disputed
+(§3). **These formulas describe a target decomposition, not current code.** Full
+per-concept evidence and migration risk live in
 [`primitive-screening-matrix.md`](./primitive-screening-matrix.md).
 
 ```text
@@ -265,11 +302,12 @@ safe to *expose* externally without touching internal storage.
 ## 7. Primitive Gap Protocol
 
 When a real external demand cannot be met by composing the candidate 8
-primitives, the Kernel **must not** quietly absorb the product logic. Instead:
+(provisional) primitives, the Kernel **must not** quietly absorb the product
+logic. Instead:
 
 ```text
 1. State the demand precisely (what the external world needs to do).
-2. Show which composition of the 8 was attempted and why it failed.
+2. Show which composition of the 8 (K8 provisional) was attempted and why it failed.
 3. Produce a PrimitiveGapProposal:
      - the missing primitive (or missing mode contract)
      - the security invariant it would carry
@@ -287,12 +325,82 @@ case that X silently becomes a new Kernel object.
 
 ---
 
-## 8. Generic Self-Evolution V1
+## 8. Generic Self-Evolution: Kernel Boundary vs. External Repair Loop
 
 Self-evolution is already constrained by
 [`docs/architecture-rfc.md`](../architecture-rfc.md) §8 and
 [`docs/evolution-harness.md`](../evolution-harness.md). This section restates it
-in primitive terms so the model is self-consistent.
+in primitive terms so the model is self-consistent, and — importantly —
+separates the **Kernel's hard boundary** from the **External Evolution
+Harness's** capabilities. The current "human gate" is a stage, not a permanent
+axiom.
+
+### What the Kernel never does (boundary, stable across all stages)
+
+```text
+The Kernel does not run the evolution loop.
+The Kernel does not edit its own code.
+The Kernel does not mint its own Decisions.
+The Kernel does not bypass Approval.
+```
+
+These are invariant for every stage below. The distinction in later stages is
+only about *who* produces the Decision (a human, or an external Policy Handler
+proposing auto-approval) — never about the Kernel performing the evolution work
+itself.
+
+### What the External Evolution Harness may do (supported, regardless of stage)
+
+```text
+continuously Observe the Kernel's durable facts
+diagnose problems
+construct reproductions
+develop patches
+add regression tests
+run the Gate
+generate an Upgrade / Repair Proposal
+verify deployment results
+propose a rollback suggestion
+```
+
+The rehearsal harness is the external Proposer + Evaluator; the Kernel
+contributes only the durable facts (K6), the pinned Snapshots (K3) for replay,
+and records the Allow Decision (K5). An external harness may run the full
+observe → diagnose → reproduce → patch → test → gate → propose loop. What it
+cannot do is finalize an effective Decision inside the Kernel without going
+through the Kernel's approval + journal path.
+
+### Stage: current (today)
+
+```text
+Production merge / deploy still requires user approval.
+Every effective Decision is minted and verified by the Kernel
+only after an explicit human approval.
+```
+
+This is the present reality. It must not be read as a permanent theorem: it is
+the current stage of a maturing external harness.
+
+### Stage: future (allowed, not forbidden)
+
+```text
+Under all of:
+  - no new privilege granted,
+  - no change to a Contract,
+  - a complete regression suite passes, and
+  - a reliable rollback is available for the low-risk change,
+an external Policy Handler may propose auto-approval.
+The final effective Decision is still recorded and verified by the Kernel
+through the same Intent -> Decision -> Invocation path.
+```
+
+The point of spelling this out: today's human gate is **not** promoted into a
+permanent axiom that all upgrades must *forever* be a human PR merge. Low-risk
+upgrades may, in the future, be auto-approved by an external Policy Handler
+within the constraints above; the Kernel still records and verifies the
+resulting Decision. Higher-risk changes remain human-gated.
+
+### Loop sketch (labels the human vs. policy choice point)
 
 ```text
 Observe failure (K6 / Observe)
@@ -302,46 +410,74 @@ Observe failure (K6 / Observe)
   -> Static checks (external)
   -> Replay selected historical runs (Observe K6 + Snapshot K3)
   -> Evaluate into score/report (external evaluator)
-  -> Human or policy Decision (K5)
-  -> Promote by PR merge and tag (external, manual merge)
+  -> Human or external-Policy-Handler Decision (K5)
+       [current stage: human only; future stage: policy may auto-approve
+        low-risk changes under the constraints above]
+  -> Promote by PR merge and tag (external)
+       [current stage: manual merge/deploy under human approval]
   -> Rollback to last-known-good if needed (external)
 ```
 
-Generic Self-Evolution V1 = the rehearsal harness is the external Proposer +
-Evaluator; the Kernel contributes only the durable facts (K6), the pinned
-Snapshots (K3) for replay, and the Allow Decision (K5) at promotion. The Kernel
-never runs the evolution loop, never auto-merges, and never edits its own `src/`
-during a run.
+Generic Self-Evolution = the External Evolution Harness runs the loop above; the
+Kernel never runs the evolution loop, never auto-merges on its own, and never
+edits its own `src/` during a run. The progression from "human gate today" to
+"policy-approvable low-risk upgrades later" changes **who approves**, not the
+Kernel's role.
 
 ---
 
-## 9. OpenClaw-style Alternative North Stars (recorded, not adopted)
+## 9. OpenClaw as an External Replacement Goal (ADOPTED), Not an Internal Kernel Goal (REJECTED)
 
-For contrast, this section records two alternative "north star" framings
-(sketched as "OpenClaw" here as a placeholder name for an all-in-one vision).
-They are **not** adopted; they are written down so future readers know they were
-considered and why the dual track is preferred.
+This section distinguishes two readings of "OpenClaw." One is the project's
+current product direction; the other is an anti-pattern. They must not be
+confused.
 
 ```text
-OpenClaw-A : "The Kernel becomes a general agent operating system:
-              scheduling, memory, multi-agent, workflow, and tooling all in one."
-OpenClaw-B : "The Kernel owns a universal Workflow Engine and a general
-              plugin registry; every product feature is a registered plugin."
+REJECTED (the all-in-one internal reading):
+  Suck Dashboard, Memory, Compression, Scheduler, Router, Multi-Agent,
+  Workflow and similar features INTO the Kernel, producing an
+  all-in-one OpenClaw-like Kernel. This enlarges the Kernel's security
+  boundary and re-absorbs product logic the dual track pushes out.
+
+ADOPTED (the external replacement reading):
+  Keep a small Kernel. Through the feishu one-line flow, continuously
+  develop, approve, deploy, and repair EXTERNAL Harness capabilities,
+  progressively replacing the OpenClaw-style workloads the user
+  actually runs today.
 ```
 
-Why both are rejected as North Stars:
+The adopted external North Stars include at least:
 
-- They re-absorb product logic the dual track is deliberately pushing out
+```text
+Token Dashboard
+Long-term Memory
+Automatic Compression
+Scheduled Briefing
+Replaceable Router
+Multi-profile Collaboration
+Self-observation and Repair
+```
+
+These are the same capabilities the outward track in §1 validates one at a time
+against concrete demand. They are **adopted product goals**, built and repaired
+outside the Kernel through external Harness components — never by absorbing them
+into the Kernel primitives.
+
+Why the all-in-one internal reading remains REJECTED:
+
+- It re-absorbs product logic the dual track is deliberately pushing out
   (workflow engine, multi-agent scheduler, long-term memory, dashboards — all
   listed as *external* in [`docs/product-roadmap.md`](../product-roadmap.md) and
   [`docs/architecture-rfc.md`](../architecture-rfc.md) §1).
-- They make the Kernel's security boundary larger, not smaller, contradicting
+- It makes the Kernel's security boundary larger, not smaller, contradicting
   the primitive qualification rule (§2).
-- They conflict with the established rule: *if a feature can be a plugin or an
+- It conflicts with the established rule: *if a feature can be a plugin or an
   external loop, it should not be inside `core`* (`README.md` Key Principle).
 
-The adopted North Star remains: a small, stable Kernel whose primitives compose
-into everything else, with product capabilities growing externally.
+The adopted North Star is therefore: a small, stable Kernel whose primitives
+compose into everything else, with OpenClaw-style product capabilities growing
+**externally** and progressively replacing the user's current OpenClaw
+workloads.
 
 ---
 
@@ -351,8 +487,8 @@ into everything else, with product capabilities growing externally.
 verdict table and migration-risk notes; it does not execute migrations. The
 reasons:
 
-1. The candidate 8 are a *model*, not yet validated by behavior-equivalence on
-   real runs.
+1. The candidate 8 (provisional — K8 is disputed, see §3) are a *model*, not yet
+   validated by behavior-equivalence on real runs, and not proven minimal.
 2. Several current objects carry durable external contracts (APIs, Journal event
    kinds, stable IDs, Receipt identity) that must not move until a facade proves
    equivalence.
@@ -406,3 +542,24 @@ Recorded conflicts (this document records them; it does not resolve them):
 
 None of the above authorizes editing the RFCs. They are recorded so a future,
 separately-reviewed RFC update can address them.
+
+---
+
+## Appendix B: Branch Integration Note
+
+This `docs/kernel-primitive-calculus-v0` branch was cut from `main` at a point
+where the root-directory audit report was still present.
+
+```text
+This branch should be integrated against the latest origin/main AFTER
+both land:
+  1. the event.observe High fix, and
+  2. the root-report guard (which removes / forbids the
+     root-directory audit report).
+
+Do not delete the root-directory audit report on this branch directly;
+let it be resolved by the root-report guard and a rebase onto origin/main.
+```
+
+This document is documentation-only; the integration note does not authorize
+any production change on this branch.
