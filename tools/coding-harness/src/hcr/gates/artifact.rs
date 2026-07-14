@@ -22,7 +22,7 @@ use crate::hcr::executor::CleanupStatus;
 /// 3. Entry file exists (from build output), not a symlink
 /// 4. **Real artifact content SHA-256 matches manifest declaration** (B1)
 /// 5. No path escape
-pub fn check(candidate: &CandidateSnapshot, ctx: &GateContext) -> GateResult {
+pub(crate) fn check(candidate: &CandidateSnapshot, ctx: &GateContext) -> GateResult {
     let candidate_path = &candidate.candidate_path;
     let mut errors: Vec<String> = Vec::new();
 

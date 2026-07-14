@@ -69,16 +69,49 @@ pub fn builtin_specs() -> Vec<OperationSpec> {
             parameters: json!({
                 "type": "object",
                 "properties": {
+                    "session_id": {"type": "string"},
                     "kind": {"type": "string", "enum": ["DevelopCapability"]},
-                    "operation": {"type": "string"},
-                    "functions": {"type": "array", "items": {"type": "string"}},
-                    "schema_version": {"type": "string"},
+                    "operation": {"type": "string", "enum": ["external.calculator"]},
+                    "functions": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": ["add", "subtract", "multiply", "divide"]}
+                    },
+                    "schema_version": {"type": "string", "enum": ["calculator-v0"]},
+                    "idempotency_key": {"type": "string"}
                 },
-                "required": ["kind", "operation", "schema_version"],
+                "required": ["session_id", "kind", "operation", "functions", "schema_version", "idempotency_key"],
+                "additionalProperties": false,
             }),
             idempotent: true,
             binding_kind: BindingKind::External,
             binding_key: "external.coding_task_submit.v0".into(),
+        },
+        OperationSpec {
+            name: crate::domain::operation::external::HCR_ACCEPT.into(),
+            risk: Risk::Write,
+            description: "Run the fixed five-gate HCR candidate acceptance flow.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string"},
+                    "candidate_ref": {"type": "string"},
+                    "hcr_id": {"type": "string"},
+                    "claim_id": {"type": "string"},
+                    "run_id": {"type": "string"},
+                    "principal_id": {"type": "string"},
+                    "gateway_session_id": {"type": "string"},
+                    "registry_snapshot_id": {"type": "string"},
+                    "operation": {"type": "string", "enum": ["external.coding_hcr_accept"]},
+                    "idempotency_key": {"type": "string"}
+                },
+                "required": ["session_id", "candidate_ref", "hcr_id", "claim_id", "run_id",
+                             "principal_id", "gateway_session_id", "registry_snapshot_id",
+                             "operation", "idempotency_key"],
+                "additionalProperties": false,
+            }),
+            idempotent: true,
+            binding_kind: BindingKind::External,
+            binding_key: "external.coding_hcr_accept.v0".into(),
         },
     ]
 }
@@ -322,7 +355,7 @@ mod tests {
         let id = reg.current_snapshot_id().unwrap();
         assert!(id.starts_with("snap_"));
         let snap = reg.load_snapshot(&id).unwrap();
-        assert_eq!(snap.operations.len(), 5);
+        assert_eq!(snap.operations.len(), 6);
         assert!(snap.lookup("system.status").is_some());
     }
 
@@ -348,7 +381,7 @@ mod tests {
             let conn = Connection::open(&db_path).unwrap();
             let reg = Registry::new(conn).unwrap();
             let recovered = reg.load_snapshot(&snap_id).unwrap();
-            assert_eq!(recovered.operations.len(), 5);
+            assert_eq!(recovered.operations.len(), 6);
             assert_eq!(recovered.snapshot_id, snap_id);
             let t = recovered.lookup("system.status").unwrap();
             assert_eq!(t.risk, Risk::ReadOnly);

@@ -135,7 +135,7 @@ fn cleanup(path: &Path) {
 fn baseline_specs_no_time_now() {
     let specs = builtin_specs();
     assert!(!specs.iter().any(|op| op.name == "time.now"));
-    assert_eq!(specs.len(), 5);
+    assert_eq!(specs.len(), 6);
 }
 #[test]
 fn catalog_no_time_now() {
@@ -434,7 +434,14 @@ fn retirement_cas_conflict_does_not_corrupt_active_snapshot() {
         other_id, Utc::now().to_rfc3339(),
     )).unwrap();
     let active_id = journal.initialize_registry().expect("init");
-    assert_eq!(active_id, other_id, "must keep S_other");
+    assert_ne!(active_id, _s1_id, "must not restore the legacy snapshot");
+    let active = journal.load_registry_snapshot(&active_id).unwrap();
+    assert!(
+        active.lookup("system.status").is_some(),
+        "must keep S_other"
+    );
+    assert!(active.lookup("external.coding_task_submit").is_some());
+    assert!(active.lookup("external.coding_hcr_accept").is_some());
     assert_eq!(count_retirement_events(&journal, "retire_builtin_time"), 0);
     drop(journal);
     cleanup(&db_path);

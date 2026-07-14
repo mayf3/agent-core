@@ -28,6 +28,63 @@ fn existing_at_version_database_reopens_cleanly() -> Result<()> {
     Ok(())
 }
 
+/// A real v10 shape is upgraded with the trusted-link table and receipt
+/// identity columns. Legacy rows remain readable but cannot authorize a new
+/// trusted Proposal because both new identity fields default to empty.
+#[test]
+fn migration_v10_to_v11_preserves_receipts_and_adds_trust_fields() -> Result<()> {
+    let db_path = unique_temp_path();
+    {
+        let _journal = JournalStore::open(&db_path)?;
+    }
+    {
+        let conn = Connection::open(&db_path)?;
+        conn.execute(
+            "INSERT INTO hcr_receipt_identities
+             (hcr_id,claim_id,run_id,idempotency_key,payload_digest,receipt_event_id,
+              harness_execution_id,overall_outcome,candidate_digest,artifact_ref,
+              artifact_digest,evidence_digest)
+             VALUES ('legacy_hcr','legacy_claim','legacy_run','legacy_key','payload','event',
+                     'execution','CandidatePassed',?1,?1,?1,?1)",
+            ["sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+        )?;
+        conn.execute_batch(
+            "DROP TABLE capability_proposal_hcr_links;
+             DROP TABLE coding_task_submissions;
+             ALTER TABLE hcr_receipt_identities DROP COLUMN invocation_id;
+             ALTER TABLE hcr_receipt_identities DROP COLUMN candidate_id;
+             PRAGMA user_version=10;",
+        )?;
+    }
+
+    let journal = JournalStore::open(&db_path)?;
+    assert_eq!(journal.schema_version()?, 11);
+    let conn = Connection::open(&db_path)?;
+    let link_table: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master
+         WHERE type='table' AND name='capability_proposal_hcr_links'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(link_table, 1);
+    let submission_table: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master
+         WHERE type='table' AND name='coding_task_submissions'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(submission_table, 1);
+    let legacy: (String, String) = conn.query_row(
+        "SELECT candidate_id,invocation_id FROM hcr_receipt_identities
+         WHERE hcr_id='legacy_hcr'",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    assert_eq!(legacy, (String::new(), String::new()));
+    std::fs::remove_file(&db_path).ok();
+    Ok(())
+}
+
 /// A database newer than the kernel must be rejected at startup.
 #[test]
 fn newer_schema_version_is_rejected_cleanly() -> Result<()> {
