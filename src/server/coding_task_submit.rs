@@ -41,6 +41,7 @@ pub fn handle_coding_task_submit(
     source_message_id: &str,
 ) -> Result<CodingTaskSubmitResult> {
     validate_fixed_intent(intent)?;
+    validate_private_owner_context(config.feishu_coding_owner_id.as_deref(), run, session)?;
     if source_message_id.trim().is_empty() {
         bail!("MISSING_SOURCE_MESSAGE_ID");
     }
@@ -290,6 +291,30 @@ fn validate_fixed_intent(intent: &CodingIntent) -> Result<()> {
     }
     Ok(())
 }
+
+fn validate_private_owner_context(
+    configured_owner: Option<&str>,
+    run: &Run,
+    session: &Session,
+) -> Result<()> {
+    let owner = configured_owner
+        .filter(|owner| !owner.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("CODING_OWNER_NOT_CONFIGURED"))?;
+    let expected_principal = format!("feishu:open_id:{owner}");
+    if !matches!(session.channel, ChannelKind::Feishu)
+        || !matches!(run.principal.source, PrincipalSource::Feishu)
+        || !matches!(&run.principal.subject, PrincipalSubject::FeishuOpenId(id) if id == owner)
+        || run.principal.principal_id.0 != expected_principal
+        || session.conversation_key != expected_principal
+    {
+        bail!("CODING_REQUIRES_OWNER_PRIVATE_FEISHU_SESSION");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[path = "coding_private_origin_tests.rs"]
+mod private_origin_tests;
 
 fn validate_submit_result(value: &Value) -> Result<SubmittedCandidate> {
     if required_str(value, "operation")? != "external.calculator"

@@ -3,6 +3,7 @@
 
 pub mod artifact;
 pub mod config;
+pub mod deployment;
 pub mod process;
 pub mod protocol;
 pub mod server;

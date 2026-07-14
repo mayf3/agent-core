@@ -6,7 +6,7 @@
 use crate::domain::capability_change::*;
 use crate::domain::*;
 use crate::harness::manifest::HarnessManifest;
-use crate::registry::snapshot::{compute_snapshot_id, OperationSpec as SnapSpec};
+use crate::registry::snapshot::OperationSpec as SnapSpec;
 use anyhow::{anyhow, bail, Result};
 use chrono::Utc;
 use rusqlite::{params, Transaction, TransactionBehavior};
@@ -77,49 +77,13 @@ impl super::JournalStore {
             );
         }
 
-        // 2. Verify active snapshot hasn't changed.
-        let (db_snap, db_ver): (String, i64) = tx
-            .query_row(
-                "SELECT active_snapshot_id, version FROM registry_state WHERE singleton_id = 1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .map_err(|_| anyhow!("registry_state_not_found"))?;
-        if db_snap != expected_snapshot_id {
-            bail!("stale_expected_snapshot: has {db_snap} expected {expected_snapshot_id}");
-        }
-
-        // 3. Create the new RegistrySnapshot.
-        let snapshot_id = compute_snapshot_id(&new_operations)?;
-        let created_at = Utc::now().to_rfc3339();
-        tx.execute(
-            "INSERT INTO registry_snapshots (snapshot_id, created_at, operation_count, canonical_digest)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![&snapshot_id, &created_at, new_operations.len() as i64, &snapshot_id],
+        // 2. Compose and CAS-activate via the single shared Registry core.
+        let activation = super::activation_core::activate_registry_tx(
+            &tx,
+            &new_operations,
+            expected_snapshot_id,
         )?;
-        let mut sorted = new_operations.clone();
-        sorted.sort_by(|a, b| a.name.cmp(&b.name));
-        for op in &sorted {
-            tx.execute(
-                "INSERT INTO registry_snapshot_operations
-                 (snapshot_id, operation_name, risk, description, parameters_json, idempotent, binding_kind, binding_key)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![&snapshot_id, &op.name, format!("{:?}", op.risk),
-                    &op.description, serde_json::to_string(&op.parameters)?,
-                    op.idempotent as i64, format!("{:?}", op.binding_kind), &op.binding_key],
-            )?;
-        }
-
-        // 4. CAS update registry_state.
-        let new_version = db_ver + 1;
-        let changed = tx.execute(
-            "UPDATE registry_state SET active_snapshot_id = ?1, version = ?2, updated_at = ?3
-             WHERE singleton_id = 1 AND version = ?4",
-            params![&snapshot_id, new_version, Utc::now().to_rfc3339(), db_ver],
-        )?;
-        if changed == 0 {
-            bail!("registry_activation_conflict");
-        }
+        let snapshot_id = activation.new_snapshot_id;
 
         // 5. Update proposal to Activated.
         tx.execute(
@@ -214,11 +178,11 @@ impl super::JournalStore {
         }
 
         // 2. Get current registry state.
-        let (db_snap, db_ver): (String, i64) = tx
+        let db_snap: String = tx
             .query_row(
-                "SELECT active_snapshot_id, version FROM registry_state WHERE singleton_id = 1",
+                "SELECT active_snapshot_id FROM registry_state WHERE singleton_id = 1",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| row.get(0),
             )
             .map_err(|_| anyhow!("registry_state_not_found"))?;
 
@@ -279,37 +243,10 @@ impl super::JournalStore {
             new_operations[pos] = new_spec;
         }
 
-        // 7. Create the new RegistrySnapshot.
-        let snapshot_id = compute_snapshot_id(&new_operations)?;
-        let created_at = Utc::now().to_rfc3339();
-        tx.execute(
-            "INSERT INTO registry_snapshots (snapshot_id, created_at, operation_count, canonical_digest)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![&snapshot_id, &created_at, new_operations.len() as i64, &snapshot_id],
-        )?;
-        let mut sorted = new_operations.clone();
-        sorted.sort_by(|a, b| a.name.cmp(&b.name));
-        for op in &sorted {
-            tx.execute(
-                "INSERT INTO registry_snapshot_operations
-                 (snapshot_id, operation_name, risk, description, parameters_json, idempotent, binding_kind, binding_key)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![&snapshot_id, &op.name, format!("{:?}", op.risk),
-                    &op.description, serde_json::to_string(&op.parameters)?,
-                    op.idempotent as i64, format!("{:?}", op.binding_kind), &op.binding_key],
-            )?;
-        }
-
-        // 8. CAS update registry_state.
-        let new_version = db_ver + 1;
-        let changed = tx.execute(
-            "UPDATE registry_state SET active_snapshot_id = ?1, version = ?2, updated_at = ?3
-             WHERE singleton_id = 1 AND version = ?4",
-            params![&snapshot_id, new_version, Utc::now().to_rfc3339(), db_ver],
-        )?;
-        if changed == 0 {
-            bail!("registry_activation_conflict");
-        }
+        // 7. Compose and CAS-activate via the same core as every proposal.
+        let activation =
+            super::activation_core::activate_registry_tx(&tx, &new_operations, &db_snap)?;
+        let snapshot_id = activation.new_snapshot_id;
 
         // 9. Update proposal to Activated.
         tx.execute(

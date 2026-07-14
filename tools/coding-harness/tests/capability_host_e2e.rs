@@ -1,4 +1,8 @@
-//! North Star E2E: full production proposal/approval + Capability Host execution.
+//! Legacy capability activation E2E: proposal/approval + Capability Host execution.
+//!
+//! This deliberately exercises the pre-HCR approval path with a non-North-Star
+//! operation. `external.calculator` is reserved for the trusted HCR activation
+//! flow and is covered by the dedicated PR3B North Star test.
 //!
 //! Flow:
 //!   S0 (builtin ops only)
@@ -7,9 +11,9 @@
 //!     → submit Proposal via coding_capability_propose → Kernel API
 //!     → PendingApproval
 //!     → approve via Kernel API decision endpoint
-//!     → S1 (external.calculator added)
+//!     → S1 (external.legacy_calculator added)
 //!     → S0 Run cannot see calculator
-//!     → new Run calls external.calculator → Capability Host → Calculator → 42
+//!     → new Run calls external.legacy_calculator → Capability Host → Calculator → 42
 
 #[path = "calculator_helpers.rs"]
 mod helpers;
@@ -51,6 +55,8 @@ fn start_capability_host(artifact_root: &PathBuf) -> (u16, Arc<AtomicBool>) {
             exec_timeout: Duration::from_secs(30),
             max_stdout_bytes: 65536,
             max_stderr_bytes: 65536,
+            control_token: "legacy-test-control-token".to_string(),
+            execution_token: "legacy-test-execution-token".to_string(),
         };
         for stream in listener.incoming() {
             if s.load(Ordering::SeqCst) {
@@ -164,14 +170,14 @@ fn ch_err(ec: &str) -> String {
 }
 
 #[test]
-fn north_star_e2e_capability_host() {
+fn legacy_capability_activation_e2e_capability_host() {
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    let ws_root = std::env::temp_dir().join(format!("ns_e2e_ws_{ts}"));
+    let ws_root = std::env::temp_dir().join(format!("legacy_capability_e2e_ws_{ts}"));
     std::fs::create_dir_all(&ws_root).unwrap();
-    let artifact_root = std::env::temp_dir().join(format!("ns_e2e_art_{ts}"));
+    let artifact_root = std::env::temp_dir().join(format!("legacy_capability_e2e_art_{ts}"));
     std::fs::create_dir_all(&artifact_root).unwrap();
 
     // 1. Start coding-harness TCP server.
@@ -303,12 +309,12 @@ fn north_star_e2e_capability_host() {
     // 12. Create manifest with endpoint -> Capability Host.
     let manifest = agent_core_kernel::harness::manifest::HarnessManifest {
         manifest_id: String::new(),
-        harness_id: "ns-e2e-calc".into(),
+        harness_id: "legacy-capability-e2e-calc".into(),
         artifact_digest: calc_digest_str.clone(),
         protocol_version: "external-harness-v1".into(),
         endpoint: ch_host_endpoint.clone(),
-        operation_name: "external.calculator".into(),
-        description: "Calculator by coding harness E2E".into(),
+        operation_name: "external.legacy_calculator".into(),
+        description: "Legacy calculator capability activation E2E".into(),
         input_schema: json!({
             "type":"object","properties":{
                 "operation":{"type":"string","enum":["add","subtract","multiply","divide"]},
@@ -412,26 +418,26 @@ fn north_star_e2e_capability_host() {
     eprintln!("S1: {s1_id}");
     let s1_snap = journal.load_registry_snapshot(&s1_id).unwrap();
     let calc_spec = s1_snap
-        .lookup("external.calculator")
-        .expect("calculator in S1");
+        .lookup("external.legacy_calculator")
+        .expect("legacy calculator in S1");
     assert_eq!(
         calc_spec.binding_kind,
         agent_core_kernel::registry::snapshot::BindingKind::External
     );
 
-    // 17. S0 Run cannot see calculator.
+    // 17. S0 Run cannot see the legacy calculator.
     let s0_snap = journal.load_registry_snapshot(&s0_id).unwrap();
     assert!(
-        s0_snap.lookup("external.calculator").is_none(),
-        "S0 must not have calculator"
+        s0_snap.lookup("external.legacy_calculator").is_none(),
+        "S0 must not have legacy calculator"
     );
 
-    // 18. S1 Run dispatches to Capability Host → 42.
+    // 18. S1 Run dispatches the legacy calculator to Capability Host → 42.
     let calc_outcome = deliver_tool(
         journal,
         gateway,
         kernel_config,
-        "external.calculator",
+        "external.legacy_calculator",
         json!({"operation":"multiply","a":6,"b":7}),
     )
     .unwrap();
@@ -449,5 +455,5 @@ fn north_star_e2e_capability_host() {
         Some("Succeeded")
     );
     assert!(journal.verify_hash_chain().unwrap(), "hash chain valid");
-    eprintln!("=== NORTH STAR PASS: multiply(6,7)=42 via production path ===");
+    eprintln!("=== LEGACY CAPABILITY PASS: multiply(6,7)=42 via legacy path ===");
 }

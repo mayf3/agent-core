@@ -5,9 +5,14 @@ import {
   isApprovalAuthorised,
   fetchProposal,
   executeApprovalCommand,
+  handleProposalCardAction,
+  parsePendingProposalPresentation,
+  parseProposalCardAction,
+  sendPendingProposalCardReply,
   ApprovalError,
   type ApprovalConfig,
 } from "./approval.js";
+import { validateExecute } from "./execute-server.js";
 
 const ownerOpenId = "ou_owner123";
 const makeConfig = (overrides?: Partial<ApprovalConfig>): ApprovalConfig => ({
@@ -15,6 +20,21 @@ const makeConfig = (overrides?: Partial<ApprovalConfig>): ApprovalConfig => ({
   decisionToken: "test-decision-token",
   ownerOpenId,
   ...overrides,
+});
+const executeAsOwner = (config: ApprovalConfig, command: Parameters<typeof executeApprovalCommand>[1]) =>
+  executeApprovalCommand(config, command, `feishu:open_id:${ownerOpenId}`);
+const approvalBinding = () => ({
+  approval_id: "approval_abc",
+  principal_id: `feishu:open_id:${ownerOpenId}`,
+  expected_source_snapshot_id: "snap_old",
+  candidate_digest: "sha256:candidate",
+  artifact_digest: "sha256:abc",
+  manifest_digest: "sha256:def",
+  decision_nonce: "nonce_abc",
+  expires_at: "2026-07-15T00:00:00Z",
+  status: "Pending",
+  origin_channel: "Feishu",
+  origin_conversation_kind: "p2p",
 });
 
 // ═══════════════════════════════════════════════════════════════════
@@ -98,6 +118,7 @@ describe("fetchProposal", () => {
           artifact_digest: "sha256:abc",
           manifest_digest: "sha256:def",
           endpoint: "http://127.0.0.1:7300/execute",
+          approval: approvalBinding(),
         }),
       }),
     );
@@ -131,6 +152,29 @@ describe("fetchProposal", () => {
       (err: any) => err instanceof ApprovalError && err.code === "unauthorized",
     );
   });
+
+  it("fails closed for a group-origin or different-owner approval", async () => {
+    for (const approval of [
+      { ...approvalBinding(), origin_conversation_kind: "group" },
+      { ...approvalBinding(), principal_id: "feishu:open_id:someone_else" },
+    ]) {
+      (globalThis as any).fetch = mock.fn(() => Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({
+          proposal_id: "proposal_abc",
+          artifact_digest: "sha256:abc",
+          manifest_digest: "sha256:def",
+          approval,
+        }),
+      }));
+      await assert.rejects(
+        () => fetchProposal(makeConfig(), "proposal_abc"),
+        (err: any) => err instanceof ApprovalError &&
+          ["invalid_approval_origin", "invalid_approval_binding"].includes(err.code),
+      );
+    }
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════
@@ -146,9 +190,10 @@ describe("executeApprovalCommand", () => {
     artifact_digest: "sha256:abc",
     manifest_digest: "sha256:def",
     endpoint: "http://127.0.0.1:7300/execute",
+    approval: approvalBinding(),
   });
 
-  it("approve succeeds with real digest", async () => {
+  it("approve forwards the complete authoritative binding", async () => {
     const config = makeConfig();
     let callCount = 0;
     (globalThis as any).fetch = mock.fn(() => {
@@ -160,14 +205,33 @@ describe("executeApprovalCommand", () => {
       // POST decision
       return Promise.resolve({
         ok: true, status: 200,
-        json: () => Promise.resolve({ activated_snapshot_id: "snap_new", status: "Activated" }),
+        json: () => Promise.resolve({
+          approval_id: "approval_abc",
+          activated_snapshot_id: "snap_new",
+          decision_id: "decision_abc",
+          host_deployment_id: "deployment_abc",
+          status: "Activated",
+        }),
       });
     });
-    const result = await executeApprovalCommand(config, { kind: "approve", proposalId: "proposal_abc", reason: "" });
+    const result = await executeAsOwner(config, { kind: "approve", proposalId: "proposal_abc", reason: "" });
     assert.ok(result.ok);
     assert.ok(result.replyText.includes("proposal_abc"));
+    assert.ok(result.replyText.includes("decision_abc"));
     assert.ok(result.replyText.includes("snap_new"));
     assert.strictEqual(callCount, 2);
+    const post = (globalThis.fetch as any).mock.calls[1].arguments[1];
+    const body = JSON.parse(post.body);
+    assert.deepStrictEqual(body, {
+      decision: "approved",
+      approval_id: "approval_abc",
+      decision_nonce: "nonce_abc",
+      principal_id: `feishu:open_id:${ownerOpenId}`,
+      expected_source_snapshot_id: "snap_old",
+      candidate_digest: "sha256:candidate",
+      artifact_digest: "sha256:abc",
+      manifest_digest: "sha256:def",
+    });
   });
 
   it("reject succeeds with real digest", async () => {
@@ -180,10 +244,12 @@ describe("executeApprovalCommand", () => {
       }
       return Promise.resolve({
         ok: true, status: 200,
-        json: () => Promise.resolve({ status: "Rejected" }),
+        json: () => Promise.resolve({
+          approval_id: "approval_abc", decision_id: "decision_reject", status: "Rejected",
+        }),
       });
     });
-    const result = await executeApprovalCommand(config, { kind: "reject", proposalId: "proposal_abc", reason: "need more testing" });
+    const result = await executeAsOwner(config, { kind: "reject", proposalId: "proposal_abc", reason: "need more testing" });
     assert.ok(result.ok);
     assert.ok(result.replyText.includes("拒绝"));
     assert.ok(result.replyText.includes("need more testing"));
@@ -203,19 +269,41 @@ describe("executeApprovalCommand", () => {
         json: () => Promise.resolve({ error: "digest_mismatch" }),
       });
     });
-    const result = await executeApprovalCommand(config, { kind: "approve", proposalId: "proposal_abc", reason: "" });
+    const result = await executeAsOwner(config, { kind: "approve", proposalId: "proposal_abc", reason: "" });
     assert.ok(!result.ok);
     assert.ok(result.replyText.includes("digest_mismatch") || result.replyText.includes("失败"));
   });
 
-  it("fails when proposal not PendingApproval", async () => {
+  it("fails when proposal is expired", async () => {
     const config = makeConfig();
     (globalThis as any).fetch = mock.fn(() =>
-      Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ ...mockProposalJson(), status: "Activated" }) }),
+      Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ ...mockProposalJson(), status: "Expired" }) }),
     );
-    const result = await executeApprovalCommand(config, { kind: "approve", proposalId: "proposal_abc", reason: "" });
+    const result = await executeAsOwner(config, { kind: "approve", proposalId: "proposal_abc", reason: "" });
     assert.ok(!result.ok);
-    assert.ok(result.replyText.includes("Activated"));
+    assert.ok(result.replyText.includes("Expired"));
+  });
+
+  it("forwards an identical terminal callback for Kernel replay", async () => {
+    let calls = 0;
+    (globalThis as any).fetch = mock.fn(() => {
+      calls += 1;
+      if (calls === 1) {
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({
+          ...mockProposalJson(), status: "Activated",
+          approval: { ...approvalBinding(), status: "Approved" },
+        }) });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({
+        approval_id: "approval_abc", decision_id: "decision_abc", status: "Activated",
+        activated_snapshot_id: "snap_new", host_deployment_id: "deployment_abc",
+      }) });
+    });
+    const result = await executeAsOwner(
+      makeConfig(), { kind: "approve", proposalId: "proposal_abc", reason: "" },
+    );
+    assert.equal(result.ok, true);
+    assert.equal(calls, 2, "terminal callback must reach Kernel replay handling");
   });
 
   it("fails with network error", async () => {
@@ -223,7 +311,7 @@ describe("executeApprovalCommand", () => {
     (globalThis as any).fetch = mock.fn(() =>
       Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({ error: "internal_error" }) }),
     );
-    const result = await executeApprovalCommand(config, { kind: "approve", proposalId: "proposal_abc", reason: "" });
+    const result = await executeAsOwner(config, { kind: "approve", proposalId: "proposal_abc", reason: "" });
     assert.ok(!result.ok);
   });
 
@@ -232,8 +320,201 @@ describe("executeApprovalCommand", () => {
     (globalThis as any).fetch = mock.fn(() =>
       Promise.resolve({ ok: false, status: 404, json: () => Promise.resolve({ error: "proposal_not_found" }) }),
     );
-    const result = await executeApprovalCommand(config, { kind: "approve", proposalId: "proposal_nonexistent", reason: "" });
+    const result = await executeAsOwner(config, { kind: "approve", proposalId: "proposal_nonexistent", reason: "" });
     assert.ok(!result.ok);
     assert.ok(result.replyText.includes("不存在") || result.replyText.includes("not_found"));
+  });
+
+  it("fails closed when GET omits the approval binding", async () => {
+    const config = makeConfig();
+    const proposal = mockProposalJson() as any;
+    delete proposal.approval;
+    (globalThis as any).fetch = mock.fn(() =>
+      Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(proposal) }),
+    );
+    const result = await executeAsOwner(config, {
+      kind: "approve", proposalId: "proposal_abc", reason: "",
+    });
+    assert.equal(result.ok, false);
+    assert.match(result.replyText, /审批绑定/);
+  });
+
+  it("fails closed when GET returns a different proposal identity", async () => {
+    (globalThis as any).fetch = mock.fn(() => Promise.resolve({
+      ok: true, status: 200,
+      json: () => Promise.resolve({ ...mockProposalJson(), proposal_id: "proposal_other" }),
+    }));
+    const result = await executeAsOwner(makeConfig(), {
+      kind: "approve", proposalId: "proposal_abc", reason: "",
+    });
+    assert.equal(result.ok, false);
+    assert.match(result.replyText, /格式异常/);
+  });
+
+  it("fails closed when Kernel returns a decision status for the other action", async () => {
+    let calls = 0;
+    (globalThis as any).fetch = mock.fn(() => {
+      calls += 1;
+      if (calls === 1) {
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(mockProposalJson()) });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({
+        approval_id: "approval_abc", decision_id: "decision_wrong", status: "Activated",
+      }) });
+    });
+    const result = await executeAsOwner(makeConfig(), {
+      kind: "reject", proposalId: "proposal_abc", reason: "no",
+    });
+    assert.equal(result.ok, false);
+    assert.match(result.replyText, /格式异常/);
+  });
+
+  it("renders a durable activation failure as failure, not APPROVED", async () => {
+    let calls = 0;
+    (globalThis as any).fetch = mock.fn(() => {
+      calls += 1;
+      if (calls === 1) {
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(mockProposalJson()) });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({
+        approval_id: "approval_abc", decision_id: "decision_failed",
+        status: "ActivationFailed", activation_error: "CAPABILITY_HOST_DEPLOY_FAILED",
+      }) });
+    });
+    const result = await executeAsOwner(makeConfig(), {
+      kind: "approve", proposalId: "proposal_abc", reason: "",
+    });
+    assert.equal(result.ok, false);
+    assert.match(result.replyText, /激活失败/);
+    assert.doesNotMatch(result.replyText, /APPROVED/);
+  });
+});
+
+function cardProposal() {
+  return {
+    proposal_id: "proposal_abc",
+    status: "PendingApproval",
+    operation_name: "external.calculator",
+    manifest_id: "manifest_abc",
+    artifact_digest: "sha256:abc",
+    manifest_digest: "sha256:def",
+    approval: approvalBinding(),
+  };
+}
+
+function cardAction(overrides: Record<string, unknown> = {}) {
+  return {
+    operator: { open_id: ownerOpenId },
+    action: { value: {
+      proposal_id: "proposal_abc",
+      approval_id: "approval_abc",
+      decision_nonce: "nonce_abc",
+      decision: "approved",
+      ...overrides,
+    } },
+  };
+}
+
+describe("pending proposal card", () => {
+  it("accepts only the fixed structured execute presentation", () => {
+    const presentation = {
+      kind: "capability_proposal_pending_v1" as const,
+      proposal_id: "proposal_abc",
+    };
+    assert.deepStrictEqual(parsePendingProposalPresentation(presentation), presentation);
+    assert.equal(parsePendingProposalPresentation({ kind: "html", proposal_id: "p" }), null);
+    const base = {
+      protocol_version: "v1", operation: "feishu.send_message",
+      invocation_id: "inv_1", decision_id: "dec_1", idempotency_key: "idem_1",
+      arguments: { message_id: "om_1", presentation },
+    };
+    assert.doesNotThrow(() => validateExecute(base));
+    assert.throws(
+      () => validateExecute({ ...base, arguments: { ...base.arguments, text: "ambiguous" } }),
+      /invalid execute payload/,
+    );
+    assert.throws(
+      () => validateExecute({ ...base, arguments: { message_id: "om_1", text: "fallback", presentation: { kind: "invalid" } } }),
+      /invalid execute payload/,
+    );
+  });
+
+  it("refuses to render calculator controls for another operation", async () => {
+    (globalThis as any).fetch = mock.fn(() => Promise.resolve({
+      ok: true, status: 200,
+      json: () => Promise.resolve({ ...cardProposal(), operation_name: "external.other" }),
+    }));
+    await assert.rejects(
+      () => sendPendingProposalCardReply(
+        { request: mock.fn() }, "om_1",
+        { kind: "capability_proposal_pending_v1", proposal_id: "proposal_abc" },
+        makeConfig(),
+      ),
+      /unsupported_proposal_operation/,
+    );
+  });
+
+  it("GETs authoritative binding and replies with an interactive card", async () => {
+    (globalThis as any).fetch = mock.fn(() => Promise.resolve({
+      ok: true, status: 200, json: () => Promise.resolve(cardProposal()),
+    }));
+    const requests: any[] = [];
+    const client = { async request(request: any) {
+      requests.push(request);
+      return { data: { message_id: "om_card" } };
+    } };
+    const receipt = await sendPendingProposalCardReply(
+      client, "om_source",
+      { kind: "capability_proposal_pending_v1", proposal_id: "proposal_abc" },
+      makeConfig(),
+    );
+    assert.equal(receipt.message_id, "om_card");
+    assert.equal(requests[0].data.msg_type, "interactive");
+    assert.match(requests[0].data.content, /external\.calculator/);
+    assert.match(requests[0].data.content, /approval_abc/);
+  });
+
+  it("normalizes identity-bound card actions", () => {
+    assert.deepStrictEqual(parseProposalCardAction({ event: cardAction() }), {
+      proposalId: "proposal_abc", approvalId: "approval_abc",
+      decisionNonce: "nonce_abc", decision: "approved", operatorOpenId: ownerOpenId,
+    });
+    assert.equal(parseProposalCardAction(cardAction({ decision: "maybe" })), null);
+    assert.equal(parseProposalCardAction({ action: cardAction().action }), null);
+  });
+
+  it("binds operator and returns APPROVED with Decision ID and Snapshot", async () => {
+    (globalThis as any).fetch = mock.fn((_url: string, init: any) => {
+      if (init.method === "GET") {
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(cardProposal()) });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({
+        approval_id: "approval_abc", decision_id: "decision_abc", status: "Activated",
+        activated_snapshot_id: "snapshot_new", host_deployment_id: "deployment_abc",
+      }) });
+    });
+    const response = await handleProposalCardAction(makeConfig(), cardAction());
+    const raw = JSON.stringify(response);
+    assert.match(raw, /APPROVED/);
+    assert.match(raw, /decision_abc/);
+    assert.match(raw, /snapshot_new/);
+    const post = (globalThis.fetch as any).mock.calls[1].arguments[1];
+    assert.equal(JSON.parse(post.body).principal_id, `feishu:open_id:${ownerOpenId}`);
+  });
+
+  it("rejects non-owner and stale card binding before decision POST", async () => {
+    const fetchMock = mock.fn(() => Promise.resolve({
+      ok: true, status: 200, json: () => Promise.resolve(cardProposal()),
+    }));
+    (globalThis as any).fetch = fetchMock;
+    const stranger = cardAction();
+    stranger.operator.open_id = "ou_stranger";
+    assert.match(JSON.stringify(await handleProposalCardAction(makeConfig(), stranger)), /不是审批人/);
+    assert.equal(fetchMock.mock.callCount(), 0);
+    assert.match(
+      JSON.stringify(await handleProposalCardAction(makeConfig(), cardAction({ decision_nonce: "old" }))),
+      /nonce/,
+    );
+    assert.equal(fetchMock.mock.callCount(), 1);
   });
 });

@@ -25,7 +25,7 @@
 use crate::domain::*;
 use anyhow::Result;
 use chrono::Utc;
-use rusqlite::params;
+use rusqlite::{params, Transaction};
 use uuid::Uuid;
 
 /// Parameters for creating a new external operation grant.
@@ -44,6 +44,56 @@ pub struct CreateGrantParams {
     pub snapshot_id: String,
     pub created_by_principal_id: Option<String>,
     pub decision_reference: Option<String>,
+}
+
+/// Insert a grant as part of a larger activation transaction. The caller owns
+/// the matching Journal event so the grant and all decision facts commit or
+/// roll back together.
+pub(crate) fn create_external_operation_grant_tx(
+    tx: &Transaction<'_>,
+    params: &CreateGrantParams,
+) -> Result<(String, bool)> {
+    let grant_id = format!("grt_{}", Uuid::new_v4());
+    let changed = tx.execute(
+        "INSERT OR IGNORE INTO external_operation_grants
+         (grant_id,operation,grantee_principal_id,channel,conversation_kind,
+          scope,risk,capability_id,snapshot_id,status,created_at,
+          created_by_principal_id,decision_reference)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,'active',?10,?11,?12)",
+        params![
+            grant_id,
+            params.operation,
+            params.grantee_principal_id,
+            params.channel,
+            params.conversation_kind,
+            params.scope,
+            params.risk,
+            params.capability_id,
+            params.snapshot_id,
+            Utc::now().to_rfc3339(),
+            params.created_by_principal_id,
+            params.decision_reference,
+        ],
+    )?;
+    if changed == 1 {
+        return Ok((grant_id, true));
+    }
+    let existing = tx.query_row(
+        "SELECT grant_id FROM external_operation_grants
+         WHERE operation=?1 AND grantee_principal_id=?2 AND channel=?3
+           AND conversation_kind=?4 AND scope=?5 AND snapshot_id=?6
+           AND status='active'",
+        params![
+            params.operation,
+            params.grantee_principal_id,
+            params.channel,
+            params.conversation_kind,
+            params.scope,
+            params.snapshot_id,
+        ],
+        |row| row.get(0),
+    )?;
+    Ok((existing, false))
 }
 
 impl super::JournalStore {

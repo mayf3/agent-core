@@ -41,16 +41,30 @@ pub struct HarnessRequest {
     #[allow(dead_code)]
     pub protocol_version: String,
     pub operation_name: String,
-    #[allow(dead_code)]
     pub invocation_id: String,
     pub arguments: Value,
-    #[allow(dead_code)]
     pub manifest_id: String,
     pub artifact_digest: String,
+    pub registry_snapshot_id: String,
 }
 
 /// Parse and validate an incoming external-harness-v1 request.
 pub fn parse_harness_request(body: &Value) -> Result<HarnessRequest, String> {
+    let object = body
+        .as_object()
+        .ok_or_else(|| "malformed_request".to_string())?;
+    const FIELDS: [&str; 7] = [
+        "protocol_version",
+        "invocation_id",
+        "operation",
+        "arguments",
+        "manifest_id",
+        "artifact_digest",
+        "registry_snapshot_id",
+    ];
+    if object.len() != FIELDS.len() || !FIELDS.iter().all(|field| object.contains_key(*field)) {
+        return Err("malformed_request".to_string());
+    }
     let protocol_version = body
         .get("protocol_version")
         .and_then(Value::as_str)
@@ -85,6 +99,15 @@ pub fn parse_harness_request(body: &Value) -> Result<HarnessRequest, String> {
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
+    let registry_snapshot_id = body
+        .get("registry_snapshot_id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+
+    if operation_name.is_empty() || invocation_id.is_empty() || registry_snapshot_id.is_empty() {
+        return Err("missing_execution_identity".to_string());
+    }
 
     let arguments = body.get("arguments").cloned().unwrap_or(Value::Null);
 
@@ -95,6 +118,7 @@ pub fn parse_harness_request(body: &Value) -> Result<HarnessRequest, String> {
         arguments,
         manifest_id,
         artifact_digest,
+        registry_snapshot_id,
     })
 }
 

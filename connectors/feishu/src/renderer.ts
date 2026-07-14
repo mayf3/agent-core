@@ -52,13 +52,106 @@ export function renderProposalPending(data: {
   return lines.join("\n");
 }
 
+export interface PendingProposalCardData {
+  proposal_id: string;
+  operation_name: string;
+  artifact_digest: string;
+  approval_id: string;
+  decision_nonce: string;
+}
+
+/** Render the fixed v0 calculator approval card from Kernel-authoritative data. */
+export function renderProposalPendingCard(data: PendingProposalCardData): Record<string, unknown> {
+  const actionValue = {
+    proposal_id: data.proposal_id,
+    approval_id: data.approval_id,
+    decision_nonce: data.decision_nonce,
+  };
+  return {
+    config: { wide_screen_mode: true },
+    header: {
+      template: "orange",
+      title: { tag: "plain_text", content: "能力申请待审批" },
+    },
+    elements: [
+      {
+        tag: "div",
+        text: {
+          tag: "lark_md",
+          content: [
+            `**能力**：${truncate(data.operation_name, 80)}`,
+            "**运算**：加 / 减 / 乘 / 除",
+            `**Artifact**：${truncate(data.artifact_digest, 20)}`,
+            `**Proposal**：${truncate(data.proposal_id, 80)}`,
+          ].join("\n"),
+        },
+      },
+      {
+        tag: "action",
+        actions: [
+          {
+            tag: "button",
+            type: "primary",
+            text: { tag: "plain_text", content: "批准" },
+            value: { ...actionValue, decision: "approved" },
+          },
+          {
+            tag: "button",
+            type: "danger",
+            text: { tag: "plain_text", content: "拒绝" },
+            value: { ...actionValue, decision: "rejected" },
+          },
+        ],
+      },
+      {
+        tag: "note",
+        elements: [
+          { tag: "plain_text", content: `文本降级：批准 ${truncate(data.proposal_id, 80)}` },
+        ],
+      },
+    ],
+  };
+}
+
+export function renderDecisionCard(data: {
+  approved: boolean;
+  proposal_id: string;
+  decision_id?: string;
+  activated_snapshot_id?: string;
+  error?: string;
+}): Record<string, unknown> {
+  const outcome = data.error ? "ERROR" : data.approved ? "APPROVED" : "REJECTED";
+  const lines = [
+    `**${outcome}**`,
+    `**Proposal**：${truncate(data.proposal_id, 80)}`,
+  ];
+  if (data.decision_id) lines.push(`**Decision ID**：${truncate(data.decision_id, 80)}`);
+  if (data.activated_snapshot_id) {
+    lines.push(`**新 Snapshot**：${truncate(data.activated_snapshot_id, 80)}`);
+  }
+  if (data.error) lines.push(`**结果**：${renderError(data.error)}`);
+  return {
+    config: { wide_screen_mode: true },
+    header: {
+      template: data.error ? "red" : data.approved ? "green" : "grey",
+      title: {
+        tag: "plain_text",
+        content: data.error ? "审批失败" : data.approved ? "审批完成" : "审批未通过",
+      },
+    },
+    elements: [{ tag: "div", text: { tag: "lark_md", content: lines.join("\n") } }],
+  };
+}
+
 export function renderDecisionApproved(data: {
   proposal_id: string;
+  decision_id?: string;
   activated_snapshot_id?: string;
   manifest_id?: string;
 }): string {
-  const lines: string[] = ["✅ 已批准"];
+  const lines: string[] = ["✅ APPROVED（已批准）"];
   lines.push(`Proposal: ${data.proposal_id}`);
+  if (data.decision_id) lines.push(`Decision ID: ${truncate(data.decision_id, 80)}`);
   if (data.activated_snapshot_id) lines.push(`新 Snapshot: ${truncate(data.activated_snapshot_id, 20)}`);
   if (data.manifest_id) lines.push(`Manifest: ${truncate(data.manifest_id, 20)}`);
   return lines.join("\n");

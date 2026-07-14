@@ -153,6 +153,10 @@ fn deliver_event(
         super::coding_delivery::deliver(&runtime, journal, gateway, validated)?;
         return Ok(());
     }
+    if super::calculator_router::matches(&validated) {
+        super::calculator_delivery::deliver(config, journal, gateway, validated)?;
+        return Ok(());
+    }
     runtime.deliver(journal, gateway, validated)?;
     Ok(())
 }

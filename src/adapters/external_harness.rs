@@ -18,6 +18,9 @@ pub struct ExternalHarnessTransportConfig {
     pub read_timeout: Duration,
     pub write_timeout: Duration,
     pub max_response_bytes: usize,
+    /// Capability Host execution bearer. Generic legacy harnesses may ignore
+    /// the header; the hardened Capability Host rejects a missing value.
+    pub bearer_token: Option<String>,
 }
 
 impl Default for ExternalHarnessTransportConfig {
@@ -27,6 +30,9 @@ impl Default for ExternalHarnessTransportConfig {
             read_timeout: Duration::from_secs(10),
             write_timeout: Duration::from_secs(5),
             max_response_bytes: 64 * 1024,
+            bearer_token: std::env::var("AGENT_CORE_CAPABILITY_HOST_EXECUTION_TOKEN")
+                .ok()
+                .filter(|value| !value.trim().is_empty()),
         }
     }
 }
@@ -107,9 +113,15 @@ pub fn execute_external_harness_with_config(
     let mut stream = stream;
 
     // Send HTTP POST request using the manifest's path.
+    let authorization = config
+        .bearer_token
+        .as_deref()
+        .map(|token| format!("Authorization: Bearer {token}\r\n"))
+        .unwrap_or_default();
     let request = format!(
         "POST {} HTTP/1.1\r\n\
          Host: {}\r\n\
+         {}\
          Content-Type: application/json\r\n\
          Content-Length: {}\r\n\
          Connection: close\r\n\
@@ -117,6 +129,7 @@ pub fn execute_external_harness_with_config(
          {}",
         parsed.path,
         addr_str,
+        authorization,
         request_bytes.len(),
         String::from_utf8_lossy(&request_bytes),
     );
@@ -234,11 +247,34 @@ pub fn execute_external_harness_with_config(
             });
         }
 
+        let external_ref = harness_response
+            .get("capability_host_execution_id")
+            .and_then(Value::as_str)
+            .filter(|value| {
+                !value.is_empty()
+                    && value.len() <= 160
+                    && value
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | ':' | '.'))
+            })
+            .map(str::to_string);
+        if manifest.operation_name == "external.calculator"
+            && config.bearer_token.is_some()
+            && external_ref.is_none()
+        {
+            return Ok(Receipt {
+                invocation_id,
+                status: ReceiptStatus::Failed,
+                output: serde_json::json!({"error_category": "missing_execution_identity"}),
+                external_ref: None,
+                occurred_at: Utc::now(),
+            });
+        }
         Ok(Receipt {
             invocation_id,
             status: ReceiptStatus::Succeeded,
             output: result.clone(),
-            external_ref: None,
+            external_ref,
             occurred_at: Utc::now(),
         })
     } else {

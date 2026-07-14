@@ -1,18 +1,12 @@
-//! Artifact subprocess lifecycle.
-//!
-//! Reuses patterns from `tools/coding-harness/src/workspace.rs`:
-//! direct argv execution, process group, concurrent stdout/stderr drain,
-//! timeout → SIGTERM → SIGKILL cleanup.
+//! Bounded artifact subprocess lifecycle.
 
+use crate::artifact::ResolvedArtifact;
 use std::io::{Read, Write};
 use std::os::unix::process::CommandExt;
-use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-/// Result of executing an artifact subprocess.
 pub struct ProcessOutput {
     pub stdout: String,
     #[allow(dead_code)]
@@ -20,7 +14,6 @@ pub struct ProcessOutput {
     pub exit_code: Option<i32>,
 }
 
-/// Errors from artifact execution.
 #[derive(Debug)]
 pub enum ProcessError {
     Timeout,
@@ -30,165 +23,139 @@ pub enum ProcessError {
 impl std::fmt::Display for ProcessError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ProcessError::Timeout => write!(f, "artifact execution timed out"),
-            ProcessError::IoError(msg) => write!(f, "artifact I/O error: {msg}"),
+            Self::Timeout => write!(f, "artifact execution timed out"),
+            Self::IoError(message) => write!(f, "artifact I/O error: {message}"),
         }
     }
 }
 
-/// Run an artifact binary with process-harness-v1 protocol.
-///
-/// 1. Writes JSON to stdin
-/// 2. Concurrently drains stdout and stderr
-/// 3. Polls for completion up to timeout
-/// 4. Kills process group on timeout
-/// 5. Returns captured output
+/// Execute only the descriptor-backed artifact that was verified from CAS.
+/// The child receives no inherited environment or descriptors containing Host
+/// tokens. Its process group is killed on every exit path so descendants cannot
+/// keep output pipes alive after the direct child exits.
 pub fn run_artifact(
-    artifact_path: &std::path::Path,
+    artifact: &ResolvedArtifact,
     stdin_json: &str,
     timeout: Duration,
     max_stdout: usize,
     max_stderr: usize,
 ) -> Result<ProcessOutput, ProcessError> {
-    let mut child = Command::new(artifact_path)
+    let executable = artifact
+        .verified_execution_path()
+        .map_err(|error| ProcessError::IoError(format!("artifact verification failed: {error}")))?;
+    let mut child = Command::new(executable)
+        .env_clear()
+        .env("LANG", "C")
+        .env("LC_ALL", "C")
+        .env("TZ", "UTC")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0)
         .spawn()
-        .map_err(|e| ProcessError::IoError(format!("spawn failed: {e}")))?;
-
+        .map_err(|error| ProcessError::IoError(format!("spawn failed: {error}")))?;
     let child_pid = child.id() as i32;
 
-    // Write stdin.
     if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(stdin_json.as_bytes())
-            .map_err(|e| ProcessError::IoError(format!("stdin write failed: {e}")))?;
-        drop(stdin);
+        if let Err(error) = stdin.write_all(stdin_json.as_bytes()) {
+            terminate_and_reap(&mut child, child_pid, true);
+            return Err(ProcessError::IoError(format!(
+                "stdin write failed: {error}"
+            )));
+        }
     }
 
-    let done = Arc::new(AtomicBool::new(false));
-    let stdout_handle = {
-        let done = done.clone();
-        let stdout = child
-            .stdout
-            .take()
-            .map(|r| Box::new(r) as Box<dyn Read + Send>);
-        let max = max_stdout;
-        thread::spawn(move || drain_pipe(stdout, max, done))
+    let stdout = match child.stdout.take() {
+        Some(stdout) => stdout,
+        None => {
+            terminate_and_reap(&mut child, child_pid, true);
+            return Err(ProcessError::IoError("stdout pipe missing".into()));
+        }
     };
-    let stderr_handle = {
-        let done = done.clone();
-        let stderr = child
-            .stderr
-            .take()
-            .map(|r| Box::new(r) as Box<dyn Read + Send>);
-        let max = max_stderr;
-        thread::spawn(move || drain_pipe(stderr, max, done))
+    let stderr = match child.stderr.take() {
+        Some(stderr) => stderr,
+        None => {
+            terminate_and_reap(&mut child, child_pid, true);
+            return Err(ProcessError::IoError("stderr pipe missing".into()));
+        }
     };
+    let stdout_handle = thread::spawn(move || drain_bounded(stdout, max_stdout));
+    let stderr_handle = thread::spawn(move || drain_bounded(stderr, max_stderr));
 
     let deadline = Instant::now() + timeout;
-    let exit_code: Option<i32> = loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            break None;
-        }
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                done.store(true, Ordering::SeqCst);
-                break status.code();
-            }
-            Ok(None) => {
-                thread::sleep(Duration::from_millis(50));
-            }
-            Err(e) => {
-                done.store(true, Ordering::SeqCst);
-                return Err(ProcessError::IoError(format!("wait failed: {e}")));
-            }
-        }
-    };
-
-    let exit_code = match exit_code {
-        Some(code) => code,
-        None => {
-            done.store(true, Ordering::SeqCst);
-            kill_process_group(child_pid);
-            let _ = child.wait();
+    let status = loop {
+        if Instant::now() >= deadline {
+            terminate_and_reap(&mut child, child_pid, true);
+            let _ = join_output(stdout_handle, stderr_handle);
             return Err(ProcessError::Timeout);
         }
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => thread::sleep(Duration::from_millis(20)),
+            Err(error) => {
+                terminate_and_reap(&mut child, child_pid, true);
+                let _ = join_output(stdout_handle, stderr_handle);
+                return Err(ProcessError::IoError(format!("wait failed: {error}")));
+            }
+        }
     };
 
-    // Collect stdout/stderr.
-    let stdout = stdout_handle
-        .join()
-        .map_err(|_| ProcessError::IoError("stdout thread join failed".to_string()))?
-        .unwrap_or_default();
-    let stderr = stderr_handle
-        .join()
-        .map_err(|_| ProcessError::IoError("stderr thread join failed".to_string()))?
-        .unwrap_or_default();
-
+    // The direct child is reaped, but a descendant may still hold stdout or
+    // stderr. Kill the entire group before joining either drain thread.
+    kill_group(child_pid, false);
+    let (stdout, stderr) = join_output(stdout_handle, stderr_handle)?;
     Ok(ProcessOutput {
         stdout,
         stderr,
-        exit_code: Some(exit_code),
+        exit_code: status.code(),
     })
 }
 
-/// Drain a pipe reader into a bounded string. Sets `done` to signal
-/// completion and close the reader.
-fn drain_pipe(
-    reader: Option<Box<dyn Read + Send>>,
-    max_bytes: usize,
-    done: Arc<AtomicBool>,
-) -> Option<String> {
-    let reader = match reader {
-        Some(r) => r,
-        None => return None,
-    };
-    let mut buf = Vec::new();
+fn drain_bounded(mut reader: impl Read, limit: usize) -> String {
+    let mut bytes = Vec::with_capacity(limit.min(8192));
     let mut chunk = [0u8; 4096];
-    let mut reader = reader.take((max_bytes + 1) as u64);
     loop {
-        match reader.read(&mut chunk) {
-            Ok(0) => break,
-            Ok(n) => {
-                buf.extend_from_slice(&chunk[..n]);
-                if buf.len() > max_bytes {
-                    let _ = reader.read_to_end(&mut Vec::new());
-                    break;
-                }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                if done.load(Ordering::SeqCst) {
-                    break;
-                }
-                thread::sleep(Duration::from_millis(10));
-            }
-            Err(_) => break,
+        let read = match reader.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(read) => read,
+        };
+        if bytes.len() <= limit {
+            let remaining = limit.saturating_add(1).saturating_sub(bytes.len());
+            bytes.extend_from_slice(&chunk[..read.min(remaining)]);
         }
     }
-    if done.load(Ordering::SeqCst) {
-        let _ = reader.read_to_end(&mut buf);
-    }
-    String::from_utf8(buf).ok()
+    String::from_utf8(bytes).unwrap_or_default()
 }
 
-/// Kill a process group by PID of any member.
+fn join_output(
+    stdout: thread::JoinHandle<String>,
+    stderr: thread::JoinHandle<String>,
+) -> Result<(String, String), ProcessError> {
+    let stdout = stdout
+        .join()
+        .map_err(|_| ProcessError::IoError("stdout drain failed".into()))?;
+    let stderr = stderr
+        .join()
+        .map_err(|_| ProcessError::IoError("stderr drain failed".into()))?;
+    Ok((stdout, stderr))
+}
+
+fn terminate_and_reap(child: &mut Child, pid: i32, graceful: bool) {
+    kill_group(pid, graceful);
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 #[cfg(unix)]
-fn kill_process_group(pid: i32) {
-    use libc::{killpg, SIGKILL, SIGTERM};
+fn kill_group(pid: i32, graceful: bool) {
     unsafe {
-        let _ = killpg(pid, SIGTERM);
-    }
-    thread::sleep(Duration::from_millis(500));
-    unsafe {
-        let _ = killpg(pid, SIGKILL);
+        if graceful {
+            let _ = libc::killpg(pid, libc::SIGTERM);
+            thread::sleep(Duration::from_millis(200));
+        }
+        let _ = libc::killpg(pid, libc::SIGKILL);
     }
 }
 
 #[cfg(not(unix))]
-fn kill_process_group(_pid: i32) {
-    // Non-Unix: child handle drop eventually cleans up.
-}
+fn kill_group(_pid: i32, _graceful: bool) {}

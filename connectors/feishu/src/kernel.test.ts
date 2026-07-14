@@ -73,3 +73,15 @@ test("normalizeMessageEvent normalizes mentions into {open_id, name}", () => {
   ]);
   assert.equal(normalized.payload.chat_type, "group");
 });
+
+test("normalizeMessageEvent rejects missing or unknown chat_type", () => {
+  for (const chatType of [undefined, "", "tenant_wide"]) {
+    const raw = feishuEvent();
+    if (chatType === undefined) {
+      delete (raw.event as any).message.chat_type;
+    } else {
+      (raw.event as any).message.chat_type = chatType;
+    }
+    assert.throws(() => normalizeMessageEvent(raw), /invalid_or_missing_chat_type/);
+  }
+});
