@@ -4,6 +4,8 @@ use crate::gateway::Gateway;
 use crate::journal::JournalStore;
 mod capability_http;
 pub mod capability_routes;
+mod coding_delivery;
+mod coding_harness_client;
 pub mod coding_router;
 pub mod coding_task_submit;
 mod delivery;

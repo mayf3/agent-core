@@ -190,16 +190,19 @@ fn coding_manifest_registration_chain_preserves_schema() {
             .and_then(|v| v.as_bool()),
         Some(false)
     );
-    let sbe = submit_params
-        .pointer("/properties/backend")
+    let operation = submit_params
+        .pointer("/properties/operation")
         .unwrap()
         .get("enum")
         .unwrap()
         .as_array()
         .unwrap();
     assert_eq!(
-        sbe.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>(),
-        vec!["opencode"]
+        operation
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect::<Vec<_>>(),
+        vec!["external.calculator"]
     );
     let ts_params = fn_tool("external.coding_task_status")
         .get("function")
@@ -457,16 +460,19 @@ fn coding_manifest_llm_input_receives_complete_tool_definitions() {
             .and_then(|v| v.as_bool()),
         Some(false)
     );
-    let sbe = submit_params
-        .pointer("/properties/backend")
+    let operation = submit_params
+        .pointer("/properties/operation")
         .unwrap()
         .get("enum")
         .unwrap()
         .as_array()
         .unwrap();
     assert_eq!(
-        sbe.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>(),
-        vec!["opencode"]
+        operation
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect::<Vec<_>>(),
+        vec!["external.calculator"]
     );
     let ts_params = fn_tool("external.coding_task_status")
         .get("function")

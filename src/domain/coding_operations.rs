@@ -12,6 +12,7 @@ pub mod external {
     pub const WORKSPACE_EXEC: &str = "external.coding_workspace_exec";
     pub const TASK_SUBMIT: &str = "external.coding_task_submit";
     pub const TASK_STATUS: &str = "external.coding_task_status";
+    pub const HCR_ACCEPT: &str = "external.coding_hcr_accept";
     pub const CAPABILITY_PROPOSE: &str = "external.coding_capability_propose";
 
     /// The exact set of seven coding-harness operations that an authorized

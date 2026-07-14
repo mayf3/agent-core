@@ -1,254 +1,441 @@
-//! Coding Task Submit orchestrator.
-//!
-//! After the Coding Intent Router matches a user request, this module
-//! drives the full chain:
-//!   HCR creation → claim/Run binding → Harness candidate generation
-//!   → PR2 acceptance (5 gates) → Settlement → CapabilityChangeProposal
-//!
-//! The caller is responsible for ensuring the calculator candidate files
-//! exist at `candidate_dir` before calling `handle_coding_task_submit`.
+//! Trusted orchestration for the fixed North Star coding task.
 
+use crate::capabilities::store::{ContentStore, Sha256Digest};
 use crate::config::KernelConfig;
 use crate::domain::capability_change::CapabilityChangeProposal;
 use crate::domain::*;
 use crate::gateway::Gateway;
-use crate::journal::JournalStore;
-use crate::server::coding_router::CodingIntent;
-use crate::server::hcr_acceptance;
+use crate::harness::manifest::HarnessManifest;
+use crate::journal::{CodingTaskSubmissionClaim, JournalStore};
+use crate::server::{coding_harness_client, coding_router::CodingIntent, hcr_acceptance};
 use anyhow::{bail, Result};
 use chrono::Utc;
-use serde_json::json;
+use serde_json::{json, Value};
+use std::time::Duration;
 
-/// Result of a complete coding task submit flow.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CodingTaskSubmitResult {
+    pub submit_invocation_id: String,
+    pub acceptance_invocation_id: String,
     pub hcr_id: String,
     pub claim_id: String,
     pub run_id: String,
     pub harness_execution_id: String,
     pub candidate_id: String,
     pub candidate_digest: String,
-    pub artifact_digest: Option<String>,
+    pub artifact_ref: String,
+    pub artifact_digest: String,
     pub evidence_digest: String,
     pub settlement_id: String,
-    pub proposal_id: Option<String>,
-    pub proposal_link_id: Option<String>,
+    pub proposal_id: String,
 }
 
-/// Run the full coding task submit chain.
-///
-/// 1. Create (or find existing) HCR
-/// 2. Call HCR acceptance with candidate_ref
-/// 3. If settlement succeeds, create CapabilityChangeProposal + trusted link
-///
-/// `candidate_dir`: absolute path to the calculator candidate source directory
-///   (must be reachable by the coding harness from its artifact_root).
+/// Execute the real submit → candidate → HCR acceptance → Proposal chain.
 pub fn handle_coding_task_submit(
     journal: &JournalStore,
     gateway: &Gateway,
     config: &KernelConfig,
     intent: &CodingIntent,
-    principal: &RunPrincipal,
-    session_id: &str,
-    candidate_dir: &str,
+    run: &Run,
+    session: &Session,
+    source_message_id: &str,
 ) -> Result<CodingTaskSubmitResult> {
-    // ── 1. Create (or find existing) HCR ─────────────────────────────────
-    // Idempotency key: principal + spec digest
-    let spec_digest = spec_digest(intent);
-    let dedup_key = format!("{}_{}", principal.principal_id.0, spec_digest);
-    let source_message_id = format!("dev_{}", dedup_key);
+    validate_fixed_intent(intent)?;
+    if source_message_id.trim().is_empty() {
+        bail!("MISSING_SOURCE_MESSAGE_ID");
+    }
+    let snapshot = journal.load_registry_snapshot(&run.registry_snapshot_id)?;
 
+    // 1. Claim durable ownership before invoking the Harness. Concurrent
+    // delivery of one message either observes this claim or the stored result.
+    let submit_key = format!("calculator-submit:{source_message_id}");
+    let request_identity = json!({
+        "session_id": session.id.0,
+        "principal_id": run.principal.principal_id.0,
+        "kind": "DevelopCapability",
+        "operation": intent.operation,
+        "functions": intent.functions,
+        "schema_version": intent.schema_version,
+    });
+    let request_digest = Sha256Digest::compute(&serde_json::to_vec(&request_identity)?)
+        .as_str()
+        .to_string();
+    let proposed_invocation = InvocationId::new();
+    let claim = journal.claim_coding_task_submission(
+        source_message_id,
+        &request_digest,
+        &proposed_invocation,
+        &run.id,
+        &session.id,
+    )?;
+    let (submit_invocation, submitted) = match claim {
+        CodingTaskSubmissionClaim::InProgress => bail!("CODING_TASK_ALREADY_IN_PROGRESS"),
+        CodingTaskSubmissionClaim::Succeeded {
+            invocation_id,
+            result,
+        } => {
+            let submitted = validate_submit_result(&result)?;
+            (invocation_id, submitted)
+        }
+        CodingTaskSubmissionClaim::Claimed { invocation_id } => {
+            match execute_new_submission(
+                journal,
+                gateway,
+                config,
+                run,
+                session,
+                &snapshot,
+                &invocation_id,
+                &submit_key,
+                intent,
+            ) {
+                Ok((result, submitted)) => {
+                    journal.complete_coding_task_submission(
+                        source_message_id,
+                        &invocation_id,
+                        &result,
+                    )?;
+                    (invocation_id, submitted)
+                }
+                Err(error) => {
+                    journal.fail_coding_task_submission(
+                        source_message_id,
+                        &invocation_id,
+                        "SUBMIT_FAILED",
+                    )?;
+                    return Err(error);
+                }
+            }
+        }
+    };
+
+    // 2. Only a successfully created Harness candidate may create an HCR.
+    let requirement = json!({
+        "kind": "DevelopCapability",
+        "operation": intent.operation,
+        "functions": intent.functions,
+        "schema_version": intent.schema_version,
+        "submit_invocation_id": submit_invocation.0,
+        "candidate_ref": submitted.candidate_ref,
+        "candidate_id": submitted.candidate_id,
+        "candidate_digest": submitted.candidate_digest,
+    });
     let (hcr_id, deduplicated) = journal.create_harness_change_request(
         "CodingRouter",
-        &source_message_id,
-        session_id,
-        &principal.principal_id.0,
-        "internal",
-        "p2p",
+        source_message_id,
+        &session.id.0,
+        &run.principal.principal_id.0,
+        channel_name(session.channel.clone()),
+        chat_type_name(session.channel.clone()),
         "coding-harness-v0",
-        &json!({
+        &requirement.to_string(),
+    )?;
+    if deduplicated {
+        if let Some(existing) = load_existing_result(journal, &hcr_id, &submit_invocation.0)? {
+            return Ok(existing);
+        }
+        bail!("CODING_TASK_ALREADY_IN_PROGRESS");
+    }
+
+    // 3. Existing PR2 acceptance performs its own Registry/Gateway approval,
+    // invokes the real Harness and persists five attempts/evidence + Receipt.
+    let accepted = hcr_acceptance::handle(
+        journal,
+        gateway,
+        config,
+        &hcr_id,
+        &json!({"candidate_ref": submitted.candidate_ref}),
+    )?;
+    let accepted_digest = required_str(&accepted, "candidate_digest")?;
+    if accepted_digest != submitted.candidate_digest {
+        bail!("CANDIDATE_DIGEST_CHANGED_BETWEEN_SUBMIT_AND_ACCEPTANCE");
+    }
+    if required_str(&accepted, "outcome")? != "CandidatePassed" {
+        bail!("CANDIDATE_NOT_ACCEPTED");
+    }
+
+    let candidate_id = required_str(&accepted, "candidate_id")?.to_string();
+    let artifact_ref = required_str(&accepted, "artifact_ref")?.to_string();
+    let artifact_digest = required_digest(&accepted, "artifact_digest")?;
+    let evidence_digest = required_digest(&accepted, "evidence_digest")?;
+    let settlement_id = required_str(&accepted, "settlement_id")?.to_string();
+    let claim_id = required_str(&accepted, "claim_id")?.to_string();
+    let hcr_run_id = required_str(&accepted, "run_id")?.to_string();
+    let harness_execution_id = required_str(&accepted, "harness_execution_id")?.to_string();
+    let acceptance_invocation_id = required_str(&accepted, "acceptance_invocation_id")?.to_string();
+
+    // 4. Artifact and evidence were stored by the Harness.  Kernel re-loads
+    // and hashes both, then builds a real activation manifest in the same CAS.
+    let store = ContentStore::new(config.harness_artifact_root.clone());
+    let artifact_key = Sha256Digest::parse(&artifact_digest)?;
+    let evidence_key = Sha256Digest::parse(&evidence_digest)?;
+    store.load(&artifact_key)?;
+    store.load(&evidence_key)?;
+    let manifest = calculator_manifest(&artifact_digest)?;
+    let manifest_bytes = serde_json::to_vec(&manifest)?;
+    let manifest_digest = store.store(&manifest_bytes)?.as_str().to_string();
+
+    let proposal_id = format!("proposal_{}", uuid::Uuid::new_v4().simple());
+    let proposal = CapabilityChangeProposal::new(
+        proposal_id.clone(),
+        run.principal.principal_id.0.clone(),
+        run.agent_id.clone(),
+        session.id.clone(),
+        run.id.clone(),
+        artifact_ref.clone(),
+        artifact_digest.clone(),
+        manifest.manifest_id.clone(),
+        manifest_digest,
+        evidence_digest.clone(),
+        evidence_digest.clone(),
+        vec!["external.calculator".to_string()],
+        "fixed calculator-v0; five Linux bubblewrap gates passed".to_string(),
+        run.registry_snapshot_id.clone(),
+    );
+    let link = CapabilityProposalHcrLink {
+        proposal_id: proposal_id.clone(),
+        hcr_id: hcr_id.clone(),
+        claim_id: claim_id.clone(),
+        run_id: hcr_run_id.clone(),
+        operation: "external.calculator".to_string(),
+        candidate_id: candidate_id.clone(),
+        candidate_digest: accepted_digest.to_string(),
+        artifact_ref: artifact_ref.clone(),
+        artifact_digest: artifact_digest.clone(),
+        evidence_digest: evidence_digest.clone(),
+        source_registry_snapshot_id: run.registry_snapshot_id.clone(),
+        settlement_id: settlement_id.clone(),
+        created_at: Utc::now().to_rfc3339(),
+    };
+    let proposal_id = journal.create_proposal_with_hcr_link(&proposal, &link)?;
+
+    Ok(CodingTaskSubmitResult {
+        submit_invocation_id: submit_invocation.0,
+        acceptance_invocation_id,
+        hcr_id,
+        claim_id,
+        run_id: hcr_run_id,
+        harness_execution_id,
+        candidate_id,
+        candidate_digest: accepted_digest.to_string(),
+        artifact_ref,
+        artifact_digest,
+        evidence_digest,
+        settlement_id,
+        proposal_id,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_new_submission(
+    journal: &JournalStore,
+    gateway: &Gateway,
+    config: &KernelConfig,
+    run: &Run,
+    session: &Session,
+    snapshot: &crate::registry::snapshot::RegistrySnapshot,
+    invocation_id: &InvocationId,
+    submit_key: &str,
+    intent: &CodingIntent,
+) -> Result<(Value, SubmittedCandidate)> {
+    let submit_intent = InvocationIntent {
+        invocation_id: invocation_id.clone(),
+        run_id: run.id.clone(),
+        operation: crate::domain::operation::external::TASK_SUBMIT.to_string(),
+        arguments: json!({
+            "session_id": session.id.0,
             "kind": "DevelopCapability",
             "operation": intent.operation,
             "functions": intent.functions,
             "schema_version": intent.schema_version,
-        })
-        .to_string(),
-    )?;
-
-    if deduplicated {
-        // HCR already exists — check for existing settlement + proposal.
-        let hcr = journal
-            .get_harness_change_request(&hcr_id)?
-            .ok_or_else(|| anyhow::anyhow!("HCR_NOT_FOUND_AFTER_CREATE"))?;
-        if hcr.status == "succeeded" || hcr.status == "failed" {
-            // Already settled — load existing settlement and check for proposal.
-            // For now, return a "retry" result since detailed recovery
-            // requires loading settlements by hcr_id.
-            bail!("HCR_ALREADY_SETTLED_RETRY_NOT_IMPLEMENTED");
-        }
-        // HCR exists but not settled — caller should retry acceptance.
-    }
-
-    // ── 2. Call existing HCR acceptance handler ───────────────────────────
-    let accept_body = json!({
-        "candidate_ref": candidate_dir,
-    });
-    let accept_result = hcr_acceptance::handle(journal, gateway, config, &hcr_id, &accept_body)?;
-
-    let outcome = accept_result["outcome"]
-        .as_str()
-        .unwrap_or("Unknown")
-        .to_string();
-    let harness_execution_id = accept_result["harness_execution_id"]
-        .as_str()
-        .unwrap_or("")
-        .to_string();
-    let candidate_digest = accept_result
-        .get("candidate_digest")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let artifact_digest = accept_result["artifact_digest"]
-        .as_str()
-        .map(|s| s.to_string());
-    let evidence_digest = accept_result["evidence_digest"]
-        .as_str()
-        .unwrap_or("")
-        .to_string();
-    let settlement_result_str = accept_result["settlement_result"]
-        .as_str()
-        .unwrap_or("")
-        .to_string();
-
-    // Extract settlement_id from settlement_result.
-    let settlement_id = extract_settlement_id(&settlement_result_str);
-    let is_succeeded = settlement_result_str.starts_with("Succeeded");
-
-    // ── 3. Create proposal only if settlement succeeded ──────────────────
-    let sid = settlement_id.clone();
-    let (proposal_id, proposal_link_id) = if is_succeeded {
-        let sid = sid.ok_or_else(|| anyhow::anyhow!("MISSING_SETTLEMENT_ID"))?;
-
-        let snapshot_id = journal.current_registry_snapshot_id()?;
-        let proposal = build_proposal(
-            journal,
-            principal,
-            session_id,
-            &outcome,
-            &harness_execution_id,
-            artifact_digest.as_deref().unwrap_or(""),
-            &evidence_digest,
-            &snapshot_id,
-            intent,
-        )?;
-
-        // Build the HCR trusted link.
-        let link = CapabilityProposalHcrLink {
-            proposal_id: proposal.proposal_id.clone(),
-            hcr_id: hcr_id.clone(),
-            claim_id: accept_result["claim_id"].as_str().unwrap_or("").to_string(),
-            run_id: accept_result["run_id"].as_str().unwrap_or("").to_string(),
-            operation: intent.operation.clone(),
-            candidate_id: accept_result
-                .get("candidate_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            candidate_digest: candidate_digest.clone(),
-            artifact_ref: artifact_digest.clone().unwrap_or_default(),
-            artifact_digest: artifact_digest.clone().unwrap_or_default(),
-            evidence_digest: evidence_digest.clone(),
-            source_registry_snapshot_id: snapshot_id,
-            settlement_id: sid.clone(),
-            created_at: Utc::now().to_rfc3339(),
-        };
-
-        let pid = journal.create_proposal_with_hcr_link(&proposal, &link)?;
-        (Some(pid.clone()), Some(link.proposal_id))
-    } else {
-        (None, None)
+            "idempotency_key": submit_key,
+        }),
+        idempotency_key: Some(submit_key.to_string()),
     };
+    append_invocation_proposed(journal, run, session, &submit_intent)?;
+    let approved = gateway.approve_invocation(submit_intent, run, session, snapshot)?;
+    append_invocation_approved(journal, run, session, &approved)?;
+    let result = coding_harness_client::execute(
+        &approved,
+        Duration::from_millis(config.harness_read_timeout_ms.max(30_000)),
+    )?;
+    let submitted = validate_submit_result(&result)?;
+    journal.append_event(
+        JournalEventKind::ReceiptReceived,
+        Some(&run.id),
+        Some(&session.id),
+        Some(&invocation_id.0),
+        json!({
+            "invocation_id": invocation_id.0,
+            "operation": crate::domain::operation::external::TASK_SUBMIT,
+            "status": "Succeeded",
+            "output": result,
+        }),
+    )?;
+    Ok((result, submitted))
+}
 
-    Ok(CodingTaskSubmitResult {
-        hcr_id,
-        claim_id: accept_result["claim_id"].as_str().unwrap_or("").to_string(),
-        run_id: accept_result["run_id"].as_str().unwrap_or("").to_string(),
-        harness_execution_id,
-        candidate_id: accept_result
-            .get("candidate_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
+struct SubmittedCandidate {
+    candidate_id: String,
+    candidate_ref: String,
+    candidate_digest: String,
+}
+
+fn validate_fixed_intent(intent: &CodingIntent) -> Result<()> {
+    if intent.operation != "external.calculator"
+        || intent.schema_version != "calculator-v0"
+        || intent.functions != ["add", "subtract", "multiply", "divide"]
+    {
+        bail!("UNSUPPORTED_CODING_SPEC");
+    }
+    Ok(())
+}
+
+fn validate_submit_result(value: &Value) -> Result<SubmittedCandidate> {
+    if required_str(value, "operation")? != "external.calculator"
+        || required_str(value, "schema_version")? != "calculator-v0"
+    {
+        bail!("HARNESS_SUBMIT_IDENTITY_MISMATCH");
+    }
+    let candidate_id = required_str(value, "candidate_id")?.to_string();
+    let candidate_ref = required_str(value, "candidate_ref")?.to_string();
+    if !candidate_ref.starts_with("generated/")
+        || candidate_ref.contains("..")
+        || std::path::Path::new(&candidate_ref).is_absolute()
+    {
+        bail!("INVALID_CANDIDATE_REF");
+    }
+    let candidate_digest = required_digest(value, "candidate_digest")?;
+    Ok(SubmittedCandidate {
+        candidate_id,
+        candidate_ref,
         candidate_digest,
-        artifact_digest,
-        evidence_digest,
-        settlement_id: settlement_id.unwrap_or_default(),
-        proposal_id,
-        proposal_link_id,
     })
 }
 
-/// Compute a deterministic spec digest for idempotency.
-fn spec_digest(intent: &CodingIntent) -> String {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(intent.operation.as_bytes());
-    for f in &intent.functions {
-        hasher.update(b"\0");
-        hasher.update(f.as_bytes());
-    }
-    hasher.update(b"\0");
-    hasher.update(intent.schema_version.as_bytes());
-    hex::encode(hasher.finalize())
-}
-
-/// Extract settlement_id from the debug format string "Succeeded(id)".
-fn extract_settlement_id(s: &str) -> Option<String> {
-    if s.starts_with("Succeeded(\"") || s.starts_with("CandidateFailed(\"") {
-        let start = s.find('"')? + 1;
-        let end = s.rfind('"')?;
-        if start < end {
-            return Some(s[start..end].to_string());
-        }
-    }
-    None
-}
-
-/// Build a CapabilityChangeProposal from settlement results.
-fn build_proposal(
-    journal: &JournalStore,
-    principal: &RunPrincipal,
-    _session_id: &str,
-    _outcome: &str,
-    _harness_execution_id: &str,
-    artifact_digest: &str,
-    evidence_digest: &str,
-    snapshot_id: &str,
-    intent: &CodingIntent,
-) -> Result<CapabilityChangeProposal> {
-    let proposal_id = format!("proposal_{}", uuid::Uuid::new_v4().simple());
-    let now = Utc::now();
-
-    let expected_snapshot = if snapshot_id.is_empty() {
-        journal.current_registry_snapshot_id()?
-    } else {
-        snapshot_id.to_string()
+fn calculator_manifest(artifact_digest: &str) -> Result<HarnessManifest> {
+    let mut manifest = HarnessManifest {
+        manifest_id: String::new(),
+        harness_id: "capability-host-v0".to_string(),
+        artifact_digest: artifact_digest.to_string(),
+        protocol_version: "external-harness-v1".to_string(),
+        endpoint: "http://127.0.0.1:7300/execute".to_string(),
+        operation_name: "external.calculator".to_string(),
+        description: "Approved calculator supporting add, subtract, multiply, and divide."
+            .to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "operation": {"type": "string", "enum": ["add", "subtract", "multiply", "divide"]},
+                "a": {"type": "number"},
+                "b": {"type": "number"}
+            },
+            "required": ["operation", "a", "b"],
+            "additionalProperties": false
+        }),
+        output_schema: json!({"type": "number"}),
+        idempotent: true,
+        created_at: Utc::now(),
     };
+    manifest.manifest_id = manifest.compute_manifest_id()?;
+    manifest.validate_all()?;
+    Ok(manifest)
+}
 
-    Ok(CapabilityChangeProposal::new(
-        proposal_id,
-        principal.principal_id.0.clone(),
-        AgentId("main".to_string()),
-        SessionId::new(),
-        RunId::new(),
-        artifact_digest.to_string(),               // artifact_ref
-        artifact_digest.to_string(),               // artifact_digest
-        "manifest.json".to_string(),               // manifest_ref
-        "placeholder_manifest_digest".to_string(), // manifest_digest
-        "evidence.json".to_string(),               // evidence_ref
-        evidence_digest.to_string(),               // evidence_digest
-        vec![intent.operation.clone()],            // requested_operations
-        "controlled coding task".to_string(),      // risk_summary
-        expected_snapshot,
-    ))
+fn append_invocation_proposed(
+    journal: &JournalStore,
+    run: &Run,
+    session: &Session,
+    intent: &InvocationIntent,
+) -> Result<()> {
+    journal.append_event(
+        JournalEventKind::InvocationProposed,
+        Some(&run.id),
+        Some(&session.id),
+        Some(&intent.invocation_id.0),
+        json!({
+            "invocation_id": intent.invocation_id.0,
+            "operation": intent.operation,
+            "idempotency_key": intent.idempotency_key,
+        }),
+    )?;
+    Ok(())
+}
+
+fn append_invocation_approved(
+    journal: &JournalStore,
+    run: &Run,
+    session: &Session,
+    approved: &ApprovedInvocation,
+) -> Result<()> {
+    journal.append_event(
+        JournalEventKind::InvocationApproved,
+        Some(&run.id),
+        Some(&session.id),
+        Some(&approved.intent().invocation_id.0),
+        json!({
+            "invocation_id": approved.intent().invocation_id.0,
+            "operation": approved.intent().operation,
+            "decision_id": approved.decision_id,
+        }),
+    )?;
+    Ok(())
+}
+
+fn required_str<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("MISSING_{key}"))
+}
+
+fn required_digest(value: &Value, key: &str) -> Result<String> {
+    let value = required_str(value, key)?;
+    Sha256Digest::parse(value)?;
+    Ok(value.to_string())
+}
+
+fn channel_name(channel: ChannelKind) -> &'static str {
+    match channel {
+        ChannelKind::Feishu => "Feishu",
+        ChannelKind::Cli => "Cli",
+    }
+}
+
+fn chat_type_name(channel: ChannelKind) -> &'static str {
+    match channel {
+        ChannelKind::Feishu => "p2p",
+        ChannelKind::Cli => "cli",
+    }
+}
+
+fn load_existing_result(
+    journal: &JournalStore,
+    hcr_id: &str,
+    submit_invocation_id: &str,
+) -> Result<Option<CodingTaskSubmitResult>> {
+    let Some(link) = journal.load_proposal_hcr_link_by_hcr(hcr_id)? else {
+        return Ok(None);
+    };
+    let Some((acceptance_invocation_id, harness_execution_id)) =
+        journal.load_hcr_receipt_identity(hcr_id)?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(CodingTaskSubmitResult {
+        submit_invocation_id: submit_invocation_id.to_string(),
+        acceptance_invocation_id,
+        hcr_id: hcr_id.to_string(),
+        claim_id: link.claim_id,
+        run_id: link.run_id,
+        harness_execution_id,
+        candidate_id: link.candidate_id,
+        candidate_digest: link.candidate_digest,
+        artifact_ref: link.artifact_ref,
+        artifact_digest: link.artifact_digest,
+        evidence_digest: link.evidence_digest,
+        settlement_id: link.settlement_id,
+        proposal_id: link.proposal_id,
+    }))
 }

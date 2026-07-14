@@ -6,7 +6,7 @@
 
 use crate::domain::*;
 use crate::journal::JournalStore;
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, Result};
 use rusqlite::params;
 use serde_json::Value;
 
@@ -121,9 +121,9 @@ pub fn append_or_compare_receipt(
     let identity_result = tx.execute(
         "INSERT INTO hcr_receipt_identities
          (hcr_id, claim_id, run_id, idempotency_key, payload_digest, receipt_event_id,
-          harness_execution_id, overall_outcome, candidate_digest,
+          harness_execution_id, overall_outcome, candidate_id, invocation_id, candidate_digest,
           artifact_ref, artifact_digest, evidence_digest, created_at)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12, ?13)",
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14, ?15)",
         params![
             hcr_id,
             claim_id,
@@ -133,6 +133,8 @@ pub fn append_or_compare_receipt(
             event.event_id.0,
             identity_fields.harness_execution_id,
             identity_fields.overall_outcome,
+            identity_fields.candidate_id,
+            identity_fields.invocation_id,
             identity_fields.candidate_digest,
             identity_fields.artifact_ref,
             identity_fields.artifact_digest,
@@ -190,6 +192,8 @@ pub fn append_or_compare_receipt(
 pub struct ReceiptIdentityFields {
     pub harness_execution_id: String,
     pub overall_outcome: String,
+    pub candidate_id: String,
+    pub invocation_id: String,
     pub candidate_digest: String,
     pub artifact_ref: Option<String>,
     pub artifact_digest: Option<String>,

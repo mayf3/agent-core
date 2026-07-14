@@ -155,7 +155,7 @@ fn make_readonly(path: &Path) -> Result<(), CandidateError> {
 /// `sha256("path1\0" + content1 + "path2\0" + content2 + ...)`
 ///
 /// Skips `target/` directories.
-fn compute_digest(root: &Path) -> Result<String, CandidateError> {
+pub(crate) fn compute_digest(root: &Path) -> Result<String, CandidateError> {
     let mut entries: Vec<PathBuf> = Vec::new();
     collect_relative_files(root, root, &mut entries)?;
 
