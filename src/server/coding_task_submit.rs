@@ -151,8 +151,11 @@ pub fn handle_coding_task_submit(
     if accepted_digest != submitted.candidate_digest {
         bail!("CANDIDATE_DIGEST_CHANGED_BETWEEN_SUBMIT_AND_ACCEPTANCE");
     }
-    if required_str(&accepted, "outcome")? != "CandidatePassed" {
-        bail!("CANDIDATE_NOT_ACCEPTED");
+    match required_str(&accepted, "outcome")? {
+        "CandidatePassed" => {}
+        "CandidateFailed" => bail!("CANDIDATE_NOT_ACCEPTED"),
+        "InfrastructureFailure" => bail!("CODING_ACCEPTANCE_INFRASTRUCTURE_FAILURE"),
+        _ => bail!("CODING_ACCEPTANCE_OUTCOME_INVALID"),
     }
 
     let candidate_id = required_str(&accepted, "candidate_id")?.to_string();

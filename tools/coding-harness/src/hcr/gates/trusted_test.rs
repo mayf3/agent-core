@@ -12,6 +12,14 @@ use std::time::Duration;
 
 use super::{CandidateSnapshot, GateContext, GateKind, GateResult};
 
+// Embed the trusted source in the Harness binary. Production releases live
+// under /home, which bubblewrap intentionally replaces with a private tmpfs;
+// passing the checkout path to rustc would therefore make a valid gate fail
+// with ENOENT. Feeding this compile-time-controlled source over stdin keeps
+// the host checkout and the user's home outside the sandbox.
+const TRUSTED_TEST_SOURCE: &str =
+    include_str!("../../../tests/fixtures/calculator_trusted_test.rs");
+
 /// Run the trusted test gate.
 pub(crate) fn check(candidate: &CandidateSnapshot, ctx: &GateContext) -> GateResult {
     let candidate_binary = find_candidate_binary(ctx);
@@ -28,19 +36,8 @@ pub(crate) fn check(candidate: &CandidateSnapshot, ctx: &GateContext) -> GateRes
         );
     }
 
-    let trusted_test_source = find_trusted_test_source();
-    if trusted_test_source.is_none() {
-        return GateResult::infrastructure_failure(
-            GateKind::TrustedTest,
-            "TRUSTED_TEST_SOURCE_NOT_FOUND",
-            "trusted test source not found",
-            candidate,
-        );
-    }
-    let test_source = trusted_test_source.unwrap();
-
     let test_binary = ctx.work_base.join("trusted_test_bin");
-    let compile_result = compile_trusted_test(&test_source, &test_binary, ctx);
+    let compile_result = compile_trusted_test(&test_binary, ctx);
     if !compile_result.passed {
         return compile_result;
     }
@@ -59,16 +56,7 @@ fn find_candidate_binary(ctx: &GateContext) -> String {
     ctx.built_binary.to_string_lossy().to_string()
 }
 
-fn find_trusted_test_source() -> Option<String> {
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let candidate = manifest_dir.join("tests/fixtures/calculator_trusted_test.rs");
-    if candidate.exists() {
-        return candidate.to_str().map(|s| s.to_string());
-    }
-    None
-}
-
-fn compile_trusted_test(source_path: &str, output_path: &Path, ctx: &GateContext) -> GateResult {
+fn compile_trusted_test(output_path: &Path, ctx: &GateContext) -> GateResult {
     if let Some(parent) = output_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -81,10 +69,10 @@ fn compile_trusted_test(source_path: &str, output_path: &Path, ctx: &GateContext
 
     let result = super::run_command_sandboxed(
         std::path::Path::new("/usr/bin/env"),
-        &["rustc", source_path, "-o", &output_path.to_string_lossy()],
+        &["rustc", "-", "-o", &output_path.to_string_lossy()],
         &ctx.work_base,
         Duration::from_secs(120),
-        &[],
+        &[TRUSTED_TEST_SOURCE],
         &[("RUSTUP_HOME", &rustup_home)],
     );
 
@@ -130,6 +118,19 @@ fn compile_trusted_test(source_path: &str, output_path: &Path, ctx: &GateContext
         candidate_digest: String::new(),
         candidate_digest_preserved: false,
         computed_artifact_digest: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TRUSTED_TEST_SOURCE;
+
+    #[test]
+    fn trusted_test_source_is_embedded_in_the_harness() {
+        assert!(TRUSTED_TEST_SOURCE.contains("multiply"));
+        assert!(TRUSTED_TEST_SOURCE.contains("divide"));
+        assert!(TRUSTED_TEST_SOURCE.contains("divide_by_zero"));
+        assert!(!TRUSTED_TEST_SOURCE.trim().is_empty());
     }
 }
 
