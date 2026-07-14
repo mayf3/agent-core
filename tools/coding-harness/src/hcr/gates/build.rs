@@ -11,13 +11,12 @@ use std::path::Path;
 use std::time::Duration;
 
 use super::{CandidateSnapshot, GateContext, GateKind, GateResult};
-use crate::hcr::executor::CleanupStatus;
 
 /// Run the build gate against the given candidate snapshot.
 ///
 /// Copies the candidate source to `ctx.build_source` (writable), then
 /// runs `cargo build --release` with `CARGO_TARGET_DIR=ctx.build_target`.
-pub fn check(candidate: &CandidateSnapshot, ctx: &GateContext) -> GateResult {
+pub(crate) fn check(candidate: &CandidateSnapshot, ctx: &GateContext) -> GateResult {
     // Step 1: Copy candidate source to writable build directory
     let target_dir = &ctx.build_target;
     let build_source = &ctx.build_source;

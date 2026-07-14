@@ -5,14 +5,13 @@
 //!
 //! Failure is `CandidateFailed`; infra/sandbox failures are InfraFailure.
 
-use std::path::Path;
 use std::time::Duration;
 
 use super::{CandidateSnapshot, GateContext, GateKind, GateResult};
 use crate::hcr::executor::CleanupStatus;
 
 /// Run the trusted smoke gate.
-pub fn check(candidate: &CandidateSnapshot, ctx: &GateContext) -> GateResult {
+pub(crate) fn check(candidate: &CandidateSnapshot, ctx: &GateContext) -> GateResult {
     let candidate_binary = find_candidate_binary(ctx);
 
     if !std::fs::metadata(&candidate_binary)

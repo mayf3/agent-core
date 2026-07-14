@@ -1,3 +1,4 @@
+pub mod calculator_generator;
 pub mod capability;
 pub mod config;
 pub mod hcr;

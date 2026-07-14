@@ -55,15 +55,8 @@ impl super::JournalStore {
             // Check for legacy builtin time.now to retire.
             match self.retire_legacy_builtin_time_if_present(&snap) {
                 Ok(true) => {
-                    // Retirement was performed; the cached ID is now updated
-                    // by retire_legacy_builtin_time_if_present. No need to re-init.
-                    // Return the NEW active snapshot ID.
-                    return self
-                        .current_snapshot_id
-                        .lock()
-                        .unwrap()
-                        .clone()
-                        .ok_or_else(|| anyhow!("registry_id_missing_after_retirement"));
+                    // Retirement updated the cached ID; continue into the
+                    // restart-safe PR3A control-operation seed below.
                 }
                 Ok(false) => {
                     // No legacy time.now found — return the original.
@@ -76,7 +69,20 @@ impl super::JournalStore {
                     return Err(e);
                 }
             }
-            return Ok(state_snapshot_id);
+            let active_id = self
+                .current_snapshot_id
+                .lock()
+                .unwrap()
+                .clone()
+                .ok_or_else(|| anyhow!("registry_id_missing_after_upgrade"))?;
+            let active = self.load_registry_snapshot(&active_id)?;
+            self.ensure_coding_control_operations(&active)?;
+            return self
+                .current_snapshot_id
+                .lock()
+                .unwrap()
+                .clone()
+                .ok_or_else(|| anyhow!("registry_id_missing_after_control_seed"));
         }
         // First boot: create baseline snapshot, set as current, init state.
         let snapshot = self.create_registry_snapshot(builtin_specs())?;
@@ -105,7 +111,7 @@ impl super::JournalStore {
             return Ok(false);
         }
         // Build a new spec list WITHOUT the legacy time.now.
-        let new_specs: Vec<OperationSpec> = current_snap
+        let mut new_specs: Vec<OperationSpec> = current_snap
             .operations
             .iter()
             .filter(|op| {
@@ -115,6 +121,23 @@ impl super::JournalStore {
             })
             .cloned()
             .collect();
+        // A legacy database can predate PR3A as well as the time.now
+        // retirement. Fold both deterministic upgrades into one activation so
+        // boot never exposes an intermediate snapshot or increments the CAS
+        // version twice.
+        let controls = [
+            crate::domain::operation::external::TASK_SUBMIT,
+            crate::domain::operation::external::HCR_ACCEPT,
+        ];
+        new_specs.retain(|spec| !controls.contains(&spec.name.as_str()));
+        let baseline = builtin_specs();
+        for name in controls {
+            let control = baseline
+                .iter()
+                .find(|spec| spec.name == name)
+                .ok_or_else(|| anyhow!("coding_control_spec_missing"))?;
+            new_specs.push(control.clone());
+        }
         // Verify the new snapshot is different.
         if new_specs.len() == current_snap.operations.len() {
             // Should not happen since we checked has_legacy above, but guard.

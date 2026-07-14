@@ -110,7 +110,7 @@ where
     /// paused for human approval. ReadOnly ops queue immediately; Write ops
     /// pause when require_write_approval is enabled. Risk is determined from
     /// the Run's pinned registry snapshot, not the static catalog.
-    fn enqueue_or_pause(
+    pub(crate) fn enqueue_or_pause(
         &self,
         journal: &JournalStore,
         approved: &ApprovedInvocation,
@@ -146,6 +146,10 @@ where
         journal.queue_outbox_dispatch(approved, Some(&session.id))?;
         journal.update_run_status(&run.id, "WaitingDispatch")?;
         Ok(())
+    }
+
+    pub(crate) fn config(&self) -> &KernelConfig {
+        &self.config
     }
     pub fn deliver(
         &self,

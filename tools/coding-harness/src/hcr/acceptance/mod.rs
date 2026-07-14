@@ -13,10 +13,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde_json::Value;
 
-use super::candidate::{snapshot_candidate, CandidateSnapshot};
-use super::gates::{run_all_gates, GateKind, GateResult};
+use super::candidate::snapshot_candidate;
+use super::gates::{run_all_gates_for_acceptance, GateKind, GateResult};
 use execution_store::ExecutionStore;
-use protocol::{compute_evidence_digest, compute_fingerprint, AcceptanceResponse, GateResultEntry};
+use protocol::{
+    canonical_evidence_bytes, compute_evidence_digest, compute_fingerprint, AcceptanceResponse,
+    GateResultEntry,
+};
 
 /// Global gate execution counter (test observation only).
 static GATE_EXECUTION_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -119,9 +122,29 @@ fn do_accept(
     let snapshot =
         snapshot_candidate(&candidate_path, &base_dir).map_err(|e| format!("SNAPSHOT: {e}"))?;
 
-    let results = run_all_gates(&snapshot);
+    let gate_run = run_all_gates_for_acceptance(&snapshot);
+    let results = gate_run.results;
     let outcome = classify_outcome(&results);
-    let (artifact_ref, artifact_digest) = extract_artifact(&results);
+    let (_gate_artifact_ref, artifact_digest) = extract_artifact(&results);
+
+    // Persist the exact verified executable bytes in the shared content store.
+    // The digest returned by the Artifact gate must match the store's digest.
+    let artifact_ref = if outcome == "CandidatePassed" {
+        let bytes = gate_run
+            .artifact_bytes
+            .as_deref()
+            .ok_or_else(|| "ACCEPTED_ARTIFACT_BYTES_MISSING".to_string())?;
+        let stored =
+            agent_core_kernel::capabilities::store::ContentStore::new(artifact_root.to_path_buf())
+                .store(bytes)
+                .map_err(|e| format!("ARTIFACT_STORE: {e}"))?;
+        if artifact_digest.as_deref() != Some(stored.as_str()) {
+            return Err("ARTIFACT_STORE_DIGEST_MISMATCH".to_string());
+        }
+        Some(stored.as_str().to_string())
+    } else {
+        None
+    };
 
     validate_gate_consistency(&results, &outcome, &artifact_digest)?;
 
@@ -151,6 +174,24 @@ fn do_accept(
         artifact_ref.as_deref(),
         artifact_digest.as_deref(),
     );
+
+    let evidence_bytes = canonical_evidence_bytes(
+        &harness_execution_id,
+        fingerprint,
+        &snapshot.candidate_id,
+        &snapshot.candidate_digest,
+        &gate_entries,
+        &outcome,
+        artifact_ref.as_deref(),
+        artifact_digest.as_deref(),
+    );
+    let stored_evidence =
+        agent_core_kernel::capabilities::store::ContentStore::new(artifact_root.to_path_buf())
+            .store(&evidence_bytes)
+            .map_err(|e| format!("EVIDENCE_STORE: {e}"))?;
+    if stored_evidence.as_str() != evidence_digest {
+        return Err("EVIDENCE_STORE_DIGEST_MISMATCH".to_string());
+    }
 
     Ok(AcceptanceResponse {
         harness_execution_id,

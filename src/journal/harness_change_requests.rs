@@ -112,6 +112,22 @@ impl JournalStore {
 
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
 
+        // Re-check after acquiring the database write lock. Another
+        // JournalStore connection may have won between the optimistic lookup
+        // above and BEGIN IMMEDIATE.
+        if let Some(request_id) = tx
+            .query_row(
+                "SELECT request_id FROM harness_change_requests
+                 WHERE source = ?1 AND source_message_id = ?2",
+                params![source, source_message_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+        {
+            tx.commit()?;
+            return Ok((request_id, true));
+        }
+
         let request_id = format!("hcr_{}", uuid::Uuid::new_v4().simple());
         let now = Utc::now().to_rfc3339();
 

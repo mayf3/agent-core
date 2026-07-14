@@ -1,6 +1,8 @@
 mod approval;
 pub mod capability_activation;
+mod capability_proposal_hcr;
 pub mod capability_proposals;
+mod coding_task_submissions;
 mod conversation;
 pub mod grant_ops;
 pub mod harness_activation_ops;
@@ -13,6 +15,7 @@ mod outbox_queue;
 mod queue;
 mod queue_health;
 mod recovery;
+mod registry_control_upgrade;
 mod registry_ops;
 mod sqlite;
 mod sqlite_read;
@@ -45,4 +48,5 @@ mod grant_ops_lifecycle_tests;
 #[path = "tests/hcr_claim.rs"]
 mod hcr_claim_tests;
 
+pub(crate) use coding_task_submissions::CodingTaskSubmissionClaim;
 pub use sqlite::JournalStore;
