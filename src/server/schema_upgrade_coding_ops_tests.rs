@@ -1,6 +1,9 @@
-//! Schema-upgrade tests for the seven canonical `external.coding_*`
-//! operations. Each operation starts from a distinct old manifest in the same
-//! initial snapshot; seven sequential schema upgrades must each produce a new
+//! Schema-upgrade tests for the six dynamic (non-builtin) `external.coding_*`
+//! operations. `external.coding_task_submit` is now a builtin seed operation
+//! and is excluded from schema-upgrade testing.
+//!
+//! Each operation starts from a distinct old manifest in the same
+//! initial snapshot; six sequential schema upgrades must each produce a new
 //! snapshot, preserve all prior upgrades (no rollback), keep every old manifest
 //! queryable, and emit events with the exact schema_upgrade payload.
 
@@ -18,9 +21,9 @@ const CODING_ENDPOINT: &str = "http://127.0.0.1:7200/coding";
 const CODING_ARTIFACT_PLACEHOLDER: &str =
     "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
-/// The seven canonical coding operations, in upgrade order.
+/// The six dynamic coding operations, in upgrade order.
+/// `external.coding_task_submit` is now a builtin seed operation.
 const CODING_OPS: &[&str] = &[
-    "external.coding_task_submit",
     "external.coding_task_status",
     "external.coding_workspace_list",
     "external.coding_workspace_read",
@@ -61,8 +64,6 @@ fn build_coding_manifest(op_name: &str, variant: u8) -> HarnessManifest {
         idempotent: true,
         created_at: chrono::Utc::now(),
     };
-    // Encode variant into the description+schema so manifest_id differs per
-    // variant even though the immutable fields are identical.
     m.description = format!("{op_name} variant {variant}");
     m.input_schema["properties"]["marker"] =
         json!({"type": "string", "enum": [format!("v{variant}")]});
@@ -96,7 +97,7 @@ fn proposal_body_for(
 
 /// Store the canonical coding-harness artifact bytes in `store` and return the
 /// resulting digest. This is the single source of the artifact_digest used
-/// across all seven manifests (both old and upgraded), so the schema-only
+/// across all six manifests (both old and upgraded), so the schema-only
 /// immutable-field check (artifact_digest unchanged) holds.
 fn store_coding_artifact(store: &crate::capabilities::store::ContentStore) -> Result<String> {
     let bytes = b"#!/bin/sh\necho coding-harness\n";
@@ -104,9 +105,9 @@ fn store_coding_artifact(store: &crate::capabilities::store::ContentStore) -> Re
     Ok(digest.as_str().to_string())
 }
 
-/// Activate all seven coding operations via the create path, returning the
-/// initial snapshot and a map of op_name → old manifest.
-fn activate_seven_ops(
+/// Activate all six coding operations via the create path, returning the
+/// initial snapshot and a map of op_name -> old manifest.
+fn activate_coding_ops(
     journal: &JournalStore,
 ) -> Result<(String, Vec<(String, HarnessManifest)>, String)> {
     let gw = gateway();
@@ -177,9 +178,6 @@ fn upgrade_one_op(
     ));
     std::fs::create_dir_all(&dir)?;
     let store = crate::capabilities::store::ContentStore::new(dir.join("store"));
-    // The upgrade setup's own store must hold the SAME artifact bytes the old
-    // manifest references; store_coding_artifact produces a deterministic
-    // digest for the canonical bytes, so it equals old.artifact_digest.
     let artifact_digest = store_coding_artifact(&store)?;
     let mut new_manifest = build_coding_manifest(&old.operation_name, 1);
     new_manifest.artifact_digest = artifact_digest;
@@ -220,14 +218,14 @@ fn upgrade_one_op(
 }
 
 #[test]
-fn seven_coding_ops_sequential_schema_upgrade() -> Result<()> {
+fn six_coding_ops_sequential_schema_upgrade() -> Result<()> {
     let journal = JournalStore::in_memory()?;
     let gw = gateway();
     let _ = &gw;
 
-    // 1. Initial snapshot with seven old manifests.
-    let (s_initial, old_manifests, _real_artifact) = activate_seven_ops(&journal)?;
-    assert_eq!(old_manifests.len(), 7);
+    // 1. Initial snapshot with six old manifests.
+    let (s_initial, old_manifests, _real_artifact) = activate_coding_ops(&journal)?;
+    assert_eq!(old_manifests.len(), 6);
 
     // 2. Sequentially upgrade each op. Each must produce a new snapshot and
     //    previously upgraded ops must NOT roll back.
@@ -254,7 +252,7 @@ fn seven_coding_ops_sequential_schema_upgrade() -> Result<()> {
         last_snap = new_snap;
     }
 
-    // 3. Final snapshot: all seven ops point to their NEW manifests.
+    // 3. Final snapshot: all six ops point to their NEW manifests.
     let final_snap = journal.load_registry_snapshot(&last_snap)?;
     for (op, new_id) in &new_ids {
         let spec = final_snap.lookup(op).unwrap();
@@ -264,7 +262,7 @@ fn seven_coding_ops_sequential_schema_upgrade() -> Result<()> {
         );
     }
 
-    // 4. All seven OLD manifests still queryable by id.
+    // 4. All six OLD manifests still queryable by id.
     for (_op, old) in &old_manifests {
         let m = journal
             .load_harness_manifest(&old.manifest_id)?
@@ -272,7 +270,7 @@ fn seven_coding_ops_sequential_schema_upgrade() -> Result<()> {
         assert_eq!(m.manifest_id, old.manifest_id);
     }
 
-    // 5. All seven NEW manifests exist.
+    // 5. All six NEW manifests exist.
     for (_op, new_id) in &new_ids {
         assert!(
             manifest_exists(&journal, new_id),
@@ -292,7 +290,7 @@ fn seven_coding_ops_sequential_schema_upgrade() -> Result<()> {
     // 7. Event payloads are exact: action, operation_name, old/new manifest_id,
     //    proposal_id, decision_id, old/new snapshot IDs.
     let payloads = schema_upgrade_payloads(&journal);
-    assert_eq!(payloads.len(), 7, "exactly seven schema_upgrade events");
+    assert_eq!(payloads.len(), 6, "exactly six schema_upgrade events");
     for payload in &payloads {
         let op = payload["operation_name"].as_str().unwrap();
         assert_eq!(payload["action"], "schema_upgrade");

@@ -166,11 +166,16 @@ fn stale_retirement_cas_refreshes_cache() {
     drop(store_a);
     let store_c = JournalStore::open(&db_path).expect("store_c open");
     let active = store_c.initialize_registry().expect("init store_c");
-    assert_eq!(active, newer_id, "fresh init must not return legacy");
+    assert_ne!(active, s1_id, "fresh init must not return legacy");
     let snap = store_c.load_registry_snapshot(&active).unwrap();
     assert!(
         snap.operations.iter().all(|op| op.name != "time.now"),
         "no time.now after re-init"
+    );
+    assert!(
+        snap.lookup("external.coding_task_submit").is_some()
+            && snap.lookup("external.coding_hcr_accept").is_some(),
+        "restart upgrade must preserve/seed the controlled coding operations"
     );
 
     drop(store_c);

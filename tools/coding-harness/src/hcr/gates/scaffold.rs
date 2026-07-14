@@ -20,7 +20,7 @@ use crate::hcr::executor::CleanupStatus;
 /// 4. manifest declares `operation = "external.calculator"`
 /// 5. manifest declares add/subtract/multiply/divide operations
 /// 6. entry path from manifest is syntactically valid
-pub fn check(candidate: &CandidateSnapshot, _ctx: &GateContext) -> GateResult {
+pub(crate) fn check(candidate: &CandidateSnapshot, _ctx: &GateContext) -> GateResult {
     let candidate_path = &candidate.candidate_path;
     let mut errors: Vec<String> = Vec::new();
 
