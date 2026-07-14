@@ -59,8 +59,8 @@ pub struct EventObserveQuery {
     /// Optional exact-session-ID filter. Empty string means no filter.
     pub session_id: String,
 
-    /// Optional principal-ID filter. Resolved via a LIKE on the `principal_json`
-    /// column. Empty string means no filter.
+    /// Optional exact principal-ID filter. Resolved from the `principal_json`
+    /// column in SQLite. Empty string means no filter.
     pub principal_id: String,
 }
 
@@ -153,7 +153,9 @@ const COL_PRINCIPAL_JSON: usize = 10;
 
 /// Build the observe SQL with a LEFT JOIN on `runs`. Optional filters use an
 /// empty-string sentinel pattern (`?N = '' OR col = ?N`) so the number of
-/// parameters is always fixed.
+/// parameters is always fixed. Principal filtering is applied before LIMIT;
+/// otherwise a page containing only other principals could return an empty
+/// result with a non-advancing cursor while later matches remain unreachable.
 fn observe_query_sql() -> &'static str {
     "SELECT je.sequence, je.event_id, je.run_id, je.session_id, je.correlation_id, \
             je.kind, je.payload_json, je.hash, je.created_at, \
@@ -164,8 +166,10 @@ fn observe_query_sql() -> &'static str {
        AND (?2 = '' OR je.kind = ?2) \
        AND (?3 = '' OR je.run_id = ?3) \
        AND (?4 = '' OR je.session_id = ?4) \
+       AND (?5 = '' OR (json_valid(r.principal_json) \
+                        AND json_extract(r.principal_json, '$.principal_id') = ?5)) \
      ORDER BY je.sequence ASC \
-     LIMIT ?5"
+     LIMIT ?6"
 }
 
 impl JournalStore {
@@ -179,11 +183,9 @@ impl JournalStore {
     ///
     /// # Principal-ID filtering
     ///
-    /// Because `principal_id` lives inside `principal_json` (a JSON TEXT column)
-    /// on the `runs` table, we apply this filter as a post-query step in Rust
-    /// rather than in SQL. When `principal_id` is set, up to `limit` matching
-    /// events are returned (potentially fewer than `limit` if the remaining
-    /// events are for a different principal).
+    /// `principal_id` lives inside `principal_json` (a JSON TEXT column) on the
+    /// `runs` table. It is filtered in SQL before LIMIT so pagination advances
+    /// over the matching result set and cannot get stuck on interleaved runs.
     pub fn observe_events(&self, query: &EventObserveQuery) -> Result<EventObserveResponse> {
         // ---- 1. Validate ----
         ensure!(
@@ -226,10 +228,22 @@ impl JournalStore {
             } else {
                 &query.session_id
             };
+            let param_principal = if query.principal_id.is_empty() {
+                ""
+            } else {
+                &query.principal_id
+            };
 
             let rows: Vec<RawObserveRow> = stmt
                 .query_map(
-                    rusqlite::params![after_seq, param_kind, param_run, param_session, fetch_limit],
+                    rusqlite::params![
+                        after_seq,
+                        param_kind,
+                        param_run,
+                        param_session,
+                        param_principal,
+                        fetch_limit
+                    ],
                     |row| {
                         Ok(RawObserveRow {
                             sequence: row.get(COL_SEQUENCE)?,
@@ -252,39 +266,15 @@ impl JournalStore {
             rows
         };
 
-        // ---- 4. Apply principal_id filter (Rust-level) ----
-        let filter_principal = !query.principal_id.is_empty();
-        let rows: Vec<RawObserveRow> = if filter_principal {
-            let target = &query.principal_id;
-            raw_rows
-                .into_iter()
-                .filter(|r| {
-                    r.principal_json
-                        .as_ref()
-                        .map(|pj| {
-                            // Parse principal_id from JSON (cheap for bounded rows)
-                            serde_json::from_str::<serde_json::Value>(pj)
-                                .ok()
-                                .and_then(|v| v.get("principal_id")?.as_str().map(|s| s.to_string()))
-                                .map(|pid| pid == *target)
-                                .unwrap_or(false)
-                        })
-                        .unwrap_or(false)
-                })
-                .collect()
-        } else {
-            raw_rows
-        };
-
-        // ---- 5. Detect has_more and trim to limit ----
-        let has_more = rows.len() > query.limit as usize;
+        // ---- 4. Detect has_more and trim to limit ----
+        let has_more = raw_rows.len() > query.limit as usize;
         let page: &[RawObserveRow] = if has_more {
-            &rows[..query.limit as usize]
+            &raw_rows[..query.limit as usize]
         } else {
-            &rows[..]
+            &raw_rows[..]
         };
 
-        // ---- 6. Build envelopes ----
+        // ---- 5. Build envelopes ----
         let next_cursor = if page.is_empty() {
             after_seq
         } else {
@@ -295,14 +285,11 @@ impl JournalStore {
         for r in page {
             let payload: Value =
                 serde_json::from_str(&r.payload_json).unwrap_or(serde_json::Value::Null);
-            let principal_id: Option<String> = r
-                .principal_json
-                .as_ref()
-                .and_then(|pj| {
-                    serde_json::from_str::<serde_json::Value>(pj)
-                        .ok()
-                        .and_then(|v| v.get("principal_id")?.as_str().map(|s| s.to_string()))
-                });
+            let principal_id: Option<String> = r.principal_json.as_ref().and_then(|pj| {
+                serde_json::from_str::<serde_json::Value>(pj)
+                    .ok()
+                    .and_then(|v| v.get("principal_id")?.as_str().map(|s| s.to_string()))
+            });
 
             events.push(ObservedEvent {
                 schema_version: OBSERVE_SCHEMA_VERSION,
@@ -355,8 +342,7 @@ impl JournalStore {
         })?;
         for row in rows {
             let (seq, kind_text, payload_json, stored_prev, stored_hash) = row?;
-            let expected =
-                event_hash(previous_hash.as_deref(), seq, &kind_text, &payload_json);
+            let expected = event_hash(previous_hash.as_deref(), seq, &kind_text, &payload_json);
             if stored_prev != previous_hash || stored_hash != expected {
                 return Ok(false);
             }
@@ -520,8 +506,7 @@ mod tests {
         );
         assert_eq!(resp.events[0].event_kind, "RunStarted");
         assert_eq!(
-            resp.events[1].event_kind,
-            "FutureKindFromFutureVersion",
+            resp.events[1].event_kind, "FutureKindFromFutureVersion",
             "stored kind text must be preserved, not re-routed via parse_kind"
         );
 
