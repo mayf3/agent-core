@@ -51,17 +51,23 @@ pub fn handle(
 
     // 3. Create Run with RunMode::Hcr
     let trigger_event_id = EventId::new();
-    let harness_id = {
-        let hcr = journal
-            .get_harness_change_request(hcr_id)?
-            .ok_or_else(|| anyhow::anyhow!("HCR_NOT_FOUND"))?;
-        hcr.harness_id
-    };
+    let hcr = journal
+        .get_harness_change_request(hcr_id)?
+        .ok_or_else(|| anyhow::anyhow!("HCR_NOT_FOUND"))?;
+    let harness_id = hcr.harness_id.clone();
     let gate_harness_id = harness_id.clone(); // saved for gate_evidence persistence
     let principal = RunPrincipal {
-        principal_id: PrincipalId::new(),
-        subject: PrincipalSubject::LocalUser,
-        source: PrincipalSource::Cli,
+        principal_id: PrincipalId(hcr.principal_id.clone()),
+        subject: if let Some(open_id) = hcr.principal_id.strip_prefix("feishu:open_id:") {
+            PrincipalSubject::FeishuOpenId(open_id.to_string())
+        } else {
+            PrincipalSubject::LocalUser
+        },
+        source: if hcr.channel.eq_ignore_ascii_case("feishu") {
+            PrincipalSource::Feishu
+        } else {
+            PrincipalSource::Cli
+        },
         grants: vec![CapabilityGrant {
             operation: "external.coding_hcr_accept".into(),
             scope: "hcr".into(),
@@ -97,10 +103,11 @@ pub fn handle(
         hcr_id, outcome.claim_id.0, outcome.run_id.0
     );
     let intent = InvocationIntent {
-        invocation_id,
+        invocation_id: invocation_id.clone(),
         run_id: outcome.run_id.clone(),
         operation: "external.coding_hcr_accept".into(),
         arguments: json!({
+            "session_id": session.id.0,
             "candidate_ref": candidate_ref,
             "hcr_id": hcr_id,
             "claim_id": outcome.claim_id.0,
@@ -167,7 +174,9 @@ pub fn handle(
     let output = json!({
         "harness_execution_id": validated.harness_execution_id,
         "overall_outcome": validated.overall_outcome,
+        "candidate_id": validated.candidate_id,
         "candidate_digest": validated.candidate_digest,
+        "artifact_ref": validated.artifact_ref,
         "artifact_digest": validated.artifact_digest,
         "evidence_digest": validated.evidence_digest,
         "gate_count": validated.gate_count,
@@ -177,8 +186,10 @@ pub fn handle(
     let identity_fields = receipt::ReceiptIdentityFields {
         harness_execution_id: validated.harness_execution_id.clone(),
         overall_outcome: validated.overall_outcome.clone(),
+        candidate_id: validated.candidate_id.clone(),
+        invocation_id: invocation_id.0.clone(),
         candidate_digest: validated.candidate_digest.clone(),
-        artifact_ref: validated.artifact_digest.clone(), // simplified
+        artifact_ref: validated.artifact_ref.clone(),
         artifact_digest: validated.artifact_digest.clone(),
         evidence_digest: validated.evidence_digest.clone(),
     };
@@ -194,7 +205,7 @@ pub fn handle(
         &validated.harness_execution_id,
         &validated.overall_outcome,
         &validated.candidate_digest,
-        validated.artifact_digest.as_deref(),
+        validated.artifact_ref.as_deref(),
         validated.artifact_digest.as_deref(),
         &validated.evidence_digest,
         &[
@@ -232,23 +243,32 @@ pub fn handle(
 
     // 9. R3A settlement
     let settlement = settle_hcr(journal, hcr_id, &outcome.claim_id.0, &outcome.run_id.0)?;
+    let settlement_id = match &settlement {
+        SettlementResult::Succeeded(id) | SettlementResult::CandidateFailed(id) => id.clone(),
+        _ => String::new(),
+    };
 
     Ok(json!({
         "ok": true,
+        "acceptance_invocation_id": invocation_id.0,
         "hcr_id": hcr_id,
         "claim_id": outcome.claim_id.0,
         "run_id": outcome.run_id.0,
         "outcome": validated.overall_outcome,
         "harness_execution_id": validated.harness_execution_id,
+        "candidate_id": validated.candidate_id,
+        "candidate_digest": validated.candidate_digest,
+        "artifact_ref": validated.artifact_ref,
         "artifact_digest": validated.artifact_digest,
         "evidence_digest": validated.evidence_digest,
+        "settlement_id": settlement_id,
         "settlement_result": format!("{:?}", settlement),
     }))
 }
 
 fn call_harness_accept(
-    config: &KernelConfig,
-    approved: &ApprovedInvocation,
+    _config: &KernelConfig,
+    _approved: &ApprovedInvocation,
     candidate_ref: &str,
     idempotency_key: &str,
     hcr_id: &str,

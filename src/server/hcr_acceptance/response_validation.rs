@@ -24,8 +24,10 @@ pub struct RequestContext {
 #[derive(Debug)]
 pub struct ValidatedResponse {
     pub harness_execution_id: String,
+    pub candidate_id: String,
     pub overall_outcome: String,
     pub candidate_digest: String,
+    pub artifact_ref: Option<String>,
     pub artifact_digest: Option<String>,
     pub evidence_digest: String,
     pub gate_count: usize,
@@ -53,6 +55,7 @@ pub fn validate_harness_response(
 
     // ── 2. Required fields must be non-empty and well-formatted ──
     let harness_execution_id = non_empty(r, "harness_execution_id")?;
+    let candidate_id = non_empty(r, "candidate_id")?;
     let candidate_digest = valid_sha256(r, "candidate_digest")?;
     let evidence_digest = valid_sha256(r, "evidence_digest")?;
     let overall_outcome = valid_outcome(r)?;
@@ -135,9 +138,16 @@ pub fn validate_harness_response(
     };
 
     // ── 7. Artifact ref must be a controlled relative path ──
-    if let Some(art_ref) = r.get("artifact_ref").and_then(|v| v.as_str()) {
+    let artifact_ref = r
+        .get("artifact_ref")
+        .and_then(|v| v.as_str())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    if let Some(art_ref) = artifact_ref.as_deref() {
         if !art_ref.is_empty() {
-            if art_ref.contains("..") || std::path::Path::new(art_ref).is_absolute() {
+            if art_ref.starts_with("sha256:") {
+                validate_sha256_fmt(art_ref)?;
+            } else if art_ref.contains("..") || std::path::Path::new(art_ref).is_absolute() {
                 return Err(format!("invalid artifact_ref: {art_ref}"));
             }
         }
@@ -148,8 +158,10 @@ pub fn validate_harness_response(
 
     Ok(ValidatedResponse {
         harness_execution_id: harness_execution_id.to_string(),
+        candidate_id: candidate_id.to_string(),
         overall_outcome: overall_outcome.to_string(),
         candidate_digest: candidate_digest.to_string(),
+        artifact_ref,
         artifact_digest,
         evidence_digest: evidence_digest.to_string(),
         gate_count: gates.len(),

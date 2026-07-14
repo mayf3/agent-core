@@ -98,6 +98,31 @@ pub fn compute_evidence_digest(
     artifact_ref: Option<&str>,
     artifact_digest: Option<&str>,
 ) -> String {
+    let bytes = canonical_evidence_bytes(
+        harness_execution_id,
+        fingerprint,
+        candidate_id,
+        candidate_digest,
+        gate_results,
+        overall_outcome,
+        artifact_ref,
+        artifact_digest,
+    );
+    let hex = hex::encode(Sha256::digest(&bytes));
+    format!("sha256:{hex}")
+}
+
+/// Canonical evidence bytes stored in the shared content-addressed store.
+pub fn canonical_evidence_bytes(
+    harness_execution_id: &str,
+    fingerprint: &RequestFingerprint,
+    candidate_id: &str,
+    candidate_digest: &str,
+    gate_results: &[GateResultEntry],
+    overall_outcome: &str,
+    artifact_ref: Option<&str>,
+    artifact_digest: Option<&str>,
+) -> Vec<u8> {
     let evidence = serde_json::json!({
         "harness_execution_id": harness_execution_id,
         "request_fingerprint": fingerprint.0,
@@ -108,9 +133,7 @@ pub fn compute_evidence_digest(
         "artifact_ref": artifact_ref,
         "artifact_digest": artifact_digest,
     });
-    let bytes = serde_json::to_vec(&evidence).unwrap_or_default();
-    let hex = hex::encode(Sha256::digest(&bytes));
-    format!("sha256:{hex}")
+    serde_json::to_vec(&evidence).unwrap_or_default()
 }
 
 /// Sanitize an idempotency key for use as a filesystem path component.
