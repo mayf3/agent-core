@@ -2,6 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert";
 import {
   renderProposalPending,
+  renderProposalPendingCard,
   renderDecisionApproved,
   renderDecisionRejected,
   renderToolCall,
@@ -31,11 +32,37 @@ describe("renderProposalPending", () => {
   });
 });
 
+describe("renderProposalPendingCard", () => {
+  it("renders calculator scope and identity-bound actions", () => {
+    const card = renderProposalPendingCard({
+      proposal_id: "proposal_abc",
+      operation_name: "external.calculator",
+      artifact_digest: "sha256:1234567890abcdefghijklmnopqrstuvwxyz",
+      approval_id: "approval_abc",
+      decision_nonce: "nonce_abc",
+    });
+    const raw = JSON.stringify(card);
+    assert.match(raw, /external\.calculator/);
+    assert.match(raw, /加 \/ 减 \/ 乘 \/ 除/);
+    assert.match(raw, /批准/);
+    assert.match(raw, /拒绝/);
+    assert.match(raw, /approval_abc/);
+    assert.match(raw, /nonce_abc/);
+    assert.ok(!raw.includes("abcdefghijklmnopqrstuvwxyz"), "artifact digest is shortened");
+  });
+});
+
 describe("renderDecisionApproved", () => {
   it("includes proposal and snapshot", () => {
-    const out = renderDecisionApproved({ proposal_id: "p1", activated_snapshot_id: "s1" });
-    assert.ok(out.includes("✅"));
+    const out = renderDecisionApproved({
+      proposal_id: "p1",
+      decision_id: "d1",
+      activated_snapshot_id: "s1",
+    });
+    assert.ok(out.includes("APPROVED"));
     assert.ok(out.includes("p1"));
+    assert.ok(out.includes("Decision ID: d1"));
+    assert.ok(out.includes("新 Snapshot: s1"));
   });
 });
 

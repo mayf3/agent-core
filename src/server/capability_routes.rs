@@ -206,11 +206,23 @@ pub fn handle_decision(
     principal: &str,
     config_agent_id: &AgentId,
 ) -> Result<Value> {
-    let input: DecisionBody = serde_json::from_value(body.clone())
-        .map_err(|e| CapabilityRouteError::InvalidRequest(format!("{e}")))?;
     let proposal = journal
         .load_proposal(proposal_id)?
         .ok_or_else(|| CapabilityRouteError::NotFound("proposal_not_found".into()))?;
+    // external.calculator is never allowed through the legacy digest-only
+    // decision path. A missing HCR/Approval link therefore fails closed in
+    // the trusted handler instead of falling back.
+    if proposal.requested_operations == ["external.calculator"] {
+        return super::capability_decision::handle(
+            journal,
+            store,
+            proposal_id,
+            body,
+            config_agent_id,
+        );
+    }
+    let input: DecisionBody = serde_json::from_value(body.clone())
+        .map_err(|e| CapabilityRouteError::InvalidRequest(format!("{e}")))?;
     if proposal.status != ProposalStatus::PendingApproval {
         return Err(CapabilityRouteError::Conflict(format!(
             "proposal_not_pending:{:?}",
@@ -431,6 +443,26 @@ pub fn handle_get_proposal(
     // Try to load manifest for endpoint info (best-effort).
     let manifest_id = proposal.manifest_ref.clone();
     let manifest_info = journal.load_harness_manifest(&manifest_id).ok().flatten();
+    let approval = journal.load_capability_approval_by_proposal(proposal_id)?;
+    let origin_context = journal.load_proposal_origin_context(proposal_id)?;
+    let approval_json = approval.map(|approval| {
+        let (origin_channel, origin_conversation_kind) = origin_context
+            .clone()
+            .unwrap_or_else(|| ("unknown".into(), "unknown".into()));
+        json!({
+            "approval_id": approval.approval_id,
+            "principal_id": approval.owner_principal_id,
+            "expected_source_snapshot_id": approval.source_registry_snapshot_id,
+            "candidate_digest": approval.candidate_digest,
+            "artifact_digest": approval.artifact_digest,
+            "manifest_digest": approval.manifest_digest,
+            "decision_nonce": approval.decision_nonce,
+            "expires_at": approval.expires_at.to_rfc3339(),
+            "status": approval.status,
+            "origin_channel": origin_channel,
+            "origin_conversation_kind": origin_conversation_kind,
+        })
+    });
 
     let resp = json!({
         "proposal_id": proposal.proposal_id,
@@ -446,6 +478,7 @@ pub fn handle_get_proposal(
         "expires_at": proposal.expires_at.to_rfc3339(),
         "decided_at": proposal.decided_at.map(|d| d.to_rfc3339()),
         "decision_reason": proposal.decision_reason,
+        "approval": approval_json,
     });
     Ok(resp)
 }

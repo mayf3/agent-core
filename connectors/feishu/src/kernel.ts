@@ -49,6 +49,10 @@ export function normalizeMessageEvent(raw: any) {
   const content = parseContent(message.content);
   const messageId = message.message_id || raw?.message_id || "";
   const providerEventId = header.event_id || raw?.event_id || "";
+  const chatType = message.chat_type ?? raw?.chat_type;
+  if (chatType !== "p2p" && chatType !== "group") {
+    throw new Error("invalid_or_missing_chat_type");
+  }
   return {
     external_event_id: messageId ? `message:${messageId}` : providerEventId || "missing_event_id",
     payload: {
@@ -56,7 +60,7 @@ export function normalizeMessageEvent(raw: any) {
       sender_open_id: sender.sender_id?.open_id || raw?.open_id || "",
       sender_type: sender.sender_type || raw?.sender_type || "user",
       chat_id: message.chat_id || raw?.chat_id || "",
-      chat_type: message.chat_type || raw?.chat_type || "p2p",
+      chat_type: chatType,
       message_id: messageId,
       message_type: message.message_type || content.type || "text",
       text: content.text || "",

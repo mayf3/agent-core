@@ -1,5 +1,7 @@
+mod activation_core;
 mod approval;
 pub mod capability_activation;
+mod capability_approvals;
 mod capability_proposal_hcr;
 pub mod capability_proposals;
 mod coding_task_submissions;
@@ -21,6 +23,8 @@ mod sqlite;
 mod sqlite_read;
 #[cfg(any(test, feature = "test-helpers"))]
 pub mod test_helpers;
+pub mod trusted_capability_activation;
+mod trusted_capability_validation;
 mod unknown;
 mod worker;
 

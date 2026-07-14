@@ -108,6 +108,7 @@ dependencies = [
  "agent-core-kernel",
  "anyhow",
  "chrono",
+ "fs2",
  "hex",
  "libc",
  "serde",

@@ -10,14 +10,15 @@ import {
 } from "./execute-store.js";
 
 function rec(overrides: Partial<StoredExecuteRecord> = {}): StoredExecuteRecord {
+  const now = new Date().toISOString();
   return {
     idempotencyKey: "key_1",
     invocationId: "inv_1",
     operation: "feishu.send_message",
     status: "sent",
     receiptSummary: { messageId: "om_reply_1" },
-    createdAt: "2026-06-18T10:00:00Z",
-    updatedAt: "2026-06-18T10:00:00Z",
+    createdAt: now,
+    updatedAt: now,
     ...overrides,
   };
 }
@@ -95,7 +96,7 @@ test("compaction rewrites the file (size resets, no duplicate lines)", () => {
   try {
     const store = createJsonlExecuteStore(path, { compactAfterBytes: 1 });
     store.set(rec({ idempotencyKey: "k1" }));
-    store.set(rec({ idempotencyKey: "k1", updatedAt: "2026-06-19T10:00:00Z" })); // overwrite
+    store.set(rec({ idempotencyKey: "k1" })); // overwrite
     const text = readFileSync(path, "utf8").trim().split("\n");
     // After compaction, only the latest state of k1 should remain (1 line).
     assert.equal(text.length, 1, "compaction collapses overwrites");

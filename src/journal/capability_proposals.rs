@@ -4,7 +4,7 @@ use crate::domain::capability_change::*;
 use crate::domain::*;
 use anyhow::{anyhow, bail, Result};
 use chrono::{DateTime, Utc};
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 
 #[allow(dead_code)]
 fn parse_status(s: &str) -> Result<ProposalStatus> {
@@ -32,6 +32,37 @@ fn parse_ops(s: &str) -> Result<Vec<String>> {
 }
 
 impl super::JournalStore {
+    /// Return the authoritative channel and conversation kind of the Run that
+    /// created a Proposal. Private Feishu sessions use an open_id key; group
+    /// sessions use a chat_id key.
+    pub fn load_proposal_origin_context(
+        &self,
+        proposal_id: &str,
+    ) -> Result<Option<(String, String)>> {
+        let conn = self.conn.lock().map_err(|_| anyhow!("mutex poisoned"))?;
+        conn.query_row(
+            "SELECT s.channel,s.conversation_key
+             FROM capability_change_proposals p
+             JOIN sessions s ON s.id=p.origin_session_id
+             WHERE p.proposal_id=?1",
+            params![proposal_id],
+            |row| {
+                let channel: String = row.get(0)?;
+                let key: String = row.get(1)?;
+                let kind = if channel == "Feishu" && key.starts_with("feishu:open_id:") {
+                    "p2p"
+                } else if channel == "Feishu" && key.starts_with("feishu:chat_id:") {
+                    "group"
+                } else {
+                    "unknown"
+                };
+                Ok((channel, kind.to_string()))
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
     pub fn create_proposal(&self, proposal: &CapabilityChangeProposal) -> Result<String> {
         let mut conn = self.conn.lock().map_err(|_| anyhow!("mutex poisoned"))?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
