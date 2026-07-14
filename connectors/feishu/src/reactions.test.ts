@@ -160,6 +160,9 @@ function config(reactionStatePath = join(tmpdir(), "agent-core-reactions.jsonl")
     reactionRetryAttempts: 3,
     reactionRetryBaseDelayMs: 0,
     executeStatePath: join(tmpdir(), "agent-core-executes.jsonl"),
+    kernelDecisionApiUrl: "http://127.0.0.1:4130",
+    kernelDecisionToken: "decision-token",
+    feishuOwnerOpenId: "ou_owner",
   };
 }
 

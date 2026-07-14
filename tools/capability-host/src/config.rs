@@ -1,8 +1,10 @@
 //! Capability Host configuration — all values come from environment variables.
-//! No submit/decision tokens are accepted (design boundary).
 
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
+
+const MIN_TOKEN_LENGTH: usize = 32;
 
 /// Configuration for the Capability Host process.
 pub struct CapabilityHostConfig {
@@ -16,6 +18,10 @@ pub struct CapabilityHostConfig {
     pub max_stdout_bytes: usize,
     /// Maximum bytes to read from artifact stderr.
     pub max_stderr_bytes: usize,
+    /// Bearer token accepted only by the deployment control endpoint.
+    pub control_token: String,
+    /// Bearer token accepted only by the artifact execution endpoint.
+    pub execution_token: String,
 }
 
 impl CapabilityHostConfig {
@@ -42,12 +48,62 @@ impl CapabilityHostConfig {
             .parse()
             .map_err(|_| "CAPABILITY_HOST_MAX_STDERR_BYTES must be a valid integer".to_string())?;
 
-        Ok(Self {
+        let control_token = std::env::var("CAPABILITY_HOST_CONTROL_TOKEN")
+            .map_err(|_| "CAPABILITY_HOST_CONTROL_TOKEN is required".to_string())?;
+        let execution_token = std::env::var("CAPABILITY_HOST_EXECUTION_TOKEN")
+            .map_err(|_| "CAPABILITY_HOST_EXECUTION_TOKEN is required".to_string())?;
+
+        let config = Self {
             listen_addr,
             artifact_root,
             exec_timeout: Duration::from_millis(exec_timeout_ms),
             max_stdout_bytes,
             max_stderr_bytes,
-        })
+            control_token,
+            execution_token,
+        };
+        config.validate()?;
+        Ok(config)
     }
+
+    pub fn validate(&self) -> Result<(), String> {
+        let address: SocketAddr = self
+            .listen_addr
+            .parse()
+            .map_err(|_| "CAPABILITY_HOST_LISTEN_ADDR must be an IP socket address".to_string())?;
+        if !address.ip().is_loopback() {
+            return Err("CAPABILITY_HOST_LISTEN_ADDR must be loopback".into());
+        }
+        validate_token("CAPABILITY_HOST_CONTROL_TOKEN", &self.control_token)?;
+        validate_token("CAPABILITY_HOST_EXECUTION_TOKEN", &self.execution_token)?;
+        if self.control_token == self.execution_token {
+            return Err("Capability Host control and execution tokens must differ".into());
+        }
+        if self.exec_timeout < Duration::from_millis(100)
+            || self.exec_timeout > Duration::from_secs(120)
+        {
+            return Err("CAPABILITY_HOST_EXEC_TIMEOUT_MS is out of range".into());
+        }
+        for (name, value) in [
+            ("CAPABILITY_HOST_MAX_STDOUT_BYTES", self.max_stdout_bytes),
+            ("CAPABILITY_HOST_MAX_STDERR_BYTES", self.max_stderr_bytes),
+        ] {
+            if value == 0 || value > 1024 * 1024 {
+                return Err(format!("{name} is out of range"));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn validate_token(name: &str, token: &str) -> Result<(), String> {
+    if token.len() < MIN_TOKEN_LENGTH
+        || token.len() > 512
+        || token.chars().any(|character| {
+            character.is_whitespace() || character.is_control() || !character.is_ascii()
+        })
+    {
+        return Err(format!("{name} must be 32-512 printable ASCII characters"));
+    }
+    Ok(())
 }

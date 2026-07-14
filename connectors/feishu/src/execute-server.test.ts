@@ -76,8 +76,8 @@ test("execute dedup contract: a 'sent' record causes the server to short-circuit
     operation: "feishu.send_message",
     status: "sent",
     receiptSummary: { messageId: "om_reply_1" },
-    createdAt: "2026-06-18T10:00:00Z",
-    updatedAt: "2026-06-18T10:00:00Z",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
   });
   const hit = store.get("idem_1");
   assert.ok(hit && hit.status === "sent", "a sent record is a positive dedup hit");
@@ -95,8 +95,8 @@ test("execute dedup contract: a 'failed'/absent record does NOT short-circuit (r
     invocationId: "inv_1",
     operation: "feishu.send_message",
     status: "failed",
-    createdAt: "2026-06-18T10:00:00Z",
-    updatedAt: "2026-06-18T10:00:00Z",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
   });
   const hit = store.get("idem_fail");
   assert.ok(!hit || hit.status !== "sent", "a failed record must not be a positive dedup");
@@ -117,8 +117,8 @@ test("execute dedup contract: persistence survives a new store object (restart)"
       operation: "feishu.send_message",
       status: "sent",
       receiptSummary: { messageId: "om_r" },
-      createdAt: "2026-06-18T10:00:00Z",
-      updatedAt: "2026-06-18T10:00:00Z",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
     });
     const restarted = createJsonlExecuteStore(path);
     const hit = restarted.get("idem_r");
@@ -178,6 +178,9 @@ function makeConfig(overrides: Record<string, unknown> = {}): ConnectorConfig {
     reactionRetryAttempts: 3,
     reactionRetryBaseDelayMs: 0,
     executeStatePath: join(tmpdir(), "executes.jsonl"),
+    kernelDecisionApiUrl: "http://127.0.0.1:4130",
+    kernelDecisionToken: "decision-token",
+    feishuOwnerOpenId: "ou_owner",
     ...overrides,
   };
 }
