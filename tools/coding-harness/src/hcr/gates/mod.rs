@@ -23,20 +23,24 @@
 
 pub mod artifact;
 pub mod build;
+mod runner;
 pub mod scaffold;
 pub mod trusted_smoke;
 pub mod trusted_test;
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::hcr::candidate::{verify_digest, CandidateSnapshot};
+use crate::hcr::candidate::CandidateSnapshot;
 use crate::hcr::executor::CleanupStatus;
 use crate::hcr::process;
 use crate::hcr::sandbox::{self, SandboxBackend, SandboxConfig};
 use serde_json::json;
+
+pub use runner::{run_all_gates, CANDIDATE_INTEGRITY_VIOLATION};
+pub(crate) use runner::{run_all_gates_for_acceptance, GateContext};
 
 /// The kind of acceptance gate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,147 +127,6 @@ impl GateResult {
             computed_artifact_digest: None,
         }
     }
-}
-
-/// Shared context passed between gates during execution.
-///
-/// Gates that produce build artifacts (Build) communicate the binary
-/// location to gates that consume them (TrustedTest, TrustedSmoke).
-#[derive(Debug, Clone)]
-pub(crate) struct GateContext {
-    /// The shared work directory root.
-    pub work_base: PathBuf,
-    /// Path to the candidate source copy for building (writable).
-    pub build_source: PathBuf,
-    /// Path to the build output target directory.
-    pub build_target: PathBuf,
-    /// Path to the built candidate binary (populated by Build gate).
-    pub built_binary: PathBuf,
-}
-
-impl GateContext {
-    pub fn new(work_base: PathBuf, candidate: &CandidateSnapshot) -> Self {
-        let build_source = work_base.join("build_src");
-        let build_target = work_base.join("target");
-        let built_binary = work_base.join("target/release/calculator-harness");
-        GateContext {
-            work_base,
-            build_source,
-            build_target,
-            built_binary,
-        }
-    }
-}
-
-// ── Digest enforcement: re-export the error message ──
-/// Error message emitted when candidate digest changes between gate checks.
-pub const CANDIDATE_INTEGRITY_VIOLATION: &str = "CANDIDATE_INTEGRITY_VIOLATION";
-
-/// Run all five acceptance gates against the given candidate snapshot.
-///
-/// Returns a vector of 0–5 `GateResult`s. If the candidate digest changes
-/// before or during any gate, execution aborts immediately and later gates
-/// are not executed (H1 enforcement).
-pub fn run_all_gates(candidate: &CandidateSnapshot) -> Vec<GateResult> {
-    let expected_digest = &candidate.candidate_digest;
-
-    let work_base = std::env::temp_dir().join(format!(
-        "hcr_gates_work_{}_{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-    ));
-
-    let ctx = GateContext::new(work_base.clone(), candidate);
-
-    // Helper to run a gate with mandatory digest verification.
-    // Returns None (abort) if digest changed.
-    let run_gate = |gate_kind: GateKind,
-                    gate_fn: fn(&CandidateSnapshot, &GateContext) -> GateResult|
-     -> Option<GateResult> {
-        // Verify digest BEFORE gate — any change aborts acceptance.
-        let actual_before = verify_digest(candidate).unwrap_or(false);
-        if !actual_before {
-            let mut result = GateResult::infrastructure_failure(
-                gate_kind,
-                CANDIDATE_INTEGRITY_VIOLATION,
-                &format!(
-                    "candidate digest changed before {} gate: expected {}, observed changed",
-                    gate_kind.as_str(),
-                    expected_digest,
-                ),
-                candidate,
-            );
-            result.candidate_digest_preserved = false;
-            return Some(result);
-        }
-
-        // Execute the gate
-        let mut result = gate_fn(candidate, &ctx);
-
-        // Verify digest AFTER gate — any change aborts acceptance.
-        let actual_after = verify_digest(candidate).unwrap_or(false);
-        if !actual_after {
-            // The gate itself may have produced a result, but the digest
-            // changed — this is an infrastructure integrity failure.
-            let mut abort = GateResult::infrastructure_failure(
-                gate_kind,
-                CANDIDATE_INTEGRITY_VIOLATION,
-                &format!(
-                    "candidate digest changed during/after {} gate: expected {}, observed changed",
-                    gate_kind.as_str(),
-                    expected_digest,
-                ),
-                candidate,
-            );
-            abort.candidate_digest_preserved = false;
-            return Some(abort);
-        }
-
-        // Digest was preserved
-        result.candidate_digest_preserved = true;
-
-        // Override candidate fields from snapshot
-        result.candidate_id = candidate.candidate_id.clone();
-        result.candidate_digest = candidate.candidate_digest.clone();
-
-        Some(result)
-    };
-
-    // Define the gate execution order
-    let gates: [(GateKind, fn(&CandidateSnapshot, &GateContext) -> GateResult); 5] = [
-        (GateKind::Scaffold, scaffold::check),
-        (GateKind::Build, build::check),
-        (GateKind::TrustedTest, trusted_test::check),
-        (GateKind::TrustedSmoke, trusted_smoke::check),
-        (GateKind::Artifact, artifact::check),
-    ];
-
-    let mut results = Vec::with_capacity(5);
-
-    for (kind, func) in &gates {
-        match run_gate(*kind, *func) {
-            Some(r) => {
-                let aborted =
-                    !r.passed && r.error_code.as_deref() == Some(CANDIDATE_INTEGRITY_VIOLATION);
-                results.push(r);
-                if aborted {
-                    break;
-                }
-            }
-            None => {
-                // Shouldn't happen since run_gate always returns Some
-                break;
-            }
-        }
-    }
-
-    // Cleanup work base
-    let _ = std::fs::remove_dir_all(&work_base);
-
-    results
 }
 
 // ── Sandboxed command execution (fail-closed) ──

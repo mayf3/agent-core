@@ -5,12 +5,14 @@ use std::path::PathBuf;
 use uuid::Uuid;
 
 pub mod capability_change;
+pub mod capability_proposal_link;
 pub mod coding_operations;
 pub mod context_block;
 pub mod harness_change_request;
 pub mod operation;
 pub mod retry;
 pub mod status;
+pub use capability_proposal_link::*;
 pub use context_block::*;
 pub use harness_change_request::*;
 pub use operation::*;

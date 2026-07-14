@@ -142,6 +142,19 @@ fn respond_error(stream: &mut TcpStream, status: u16, error_code: &str) {
 }
 
 fn dispatch(config: &CodingConfig, operation: &str, args: &Value) -> Value {
+    // North Star controlled development path.  This intentionally runs
+    // before generic workspace dispatch: callers cannot select a workspace,
+    // backend, model, or arbitrary objective for calculator-v0.
+    if operation == "external.coding_task_submit" && args.get("schema_version").is_some() {
+        return crate::calculator_generator::handle_submit(&config.artifact_root, args);
+    }
+    // HCR acceptance is another narrow control operation. It resolves the
+    // candidate only below artifact_root and must not be forced through the
+    // generic caller-selected workspace path.
+    if operation == "external.coding_hcr_accept" {
+        return crate::hcr::acceptance::handle_accept(&config.artifact_root, args);
+    }
+
     let is_task_op = operation == "external.coding_task_status";
     let available_ids: Vec<String> = config.workspaces.keys().cloned().collect();
     let ws_id = if is_task_op {
@@ -193,14 +206,6 @@ fn dispatch(config: &CodingConfig, operation: &str, args: &Value) -> Value {
             None => return structured_err("unknown_workspace_id", &available_ids, &[]),
         }
     };
-
-    // ── HCR acceptance dispatch ──
-    // Runs all five acceptance gates against a candidate and returns result.
-    // Uses the artifact_root for candidate snapshot storage. No workspace or
-    // profile needed — this is a direct harness acceptance operation.
-    if operation == "external.coding_hcr_accept" {
-        return crate::hcr::acceptance::handle_accept(&config.artifact_root, args);
-    }
 
     // ── HCR execution dispatch ──
     // Uses profile-based security model, not workspace permission booleans.
