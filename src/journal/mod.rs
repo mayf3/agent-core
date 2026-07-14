@@ -2,6 +2,7 @@ mod approval;
 pub mod capability_activation;
 pub mod capability_proposals;
 mod conversation;
+pub mod event_observe;
 pub mod grant_ops;
 pub mod harness_activation_ops;
 mod harness_change_requests;
@@ -45,4 +46,8 @@ mod grant_ops_lifecycle_tests;
 #[path = "tests/hcr_claim.rs"]
 mod hcr_claim_tests;
 
+pub use event_observe::{
+    redact_payload, EventObserveQuery, EventObserveResponse, ObservedEvent,
+    DEFAULT_OBSERVE_LIMIT, MAX_OBSERVE_LIMIT, OBSERVE_SCHEMA_VERSION,
+};
 pub use sqlite::JournalStore;
