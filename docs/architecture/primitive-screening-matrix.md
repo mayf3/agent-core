@@ -20,7 +20,13 @@ D = derivable domain alias (expressible as a composition of the 8)
 E = should-externalize strategy / product capability
 S = phase scaffold / North Star scaffolding (present or stubbed)
 U = under-evidenced; hold judgement
+P = provisional / disputed primitive candidate (K8 Allow Boundary; see K8 section)
 ```
+
+> **K8 caveat:** Allow Boundary (K8) is **provisional / disputed**, not a proven
+> irreducible primitive — see the "K8 Allow Boundary — provisional / disputed
+> screening" section. The candidate set is therefore "8 (provisional)" and is
+> not asserted to be minimal.
 
 ### Decision legend
 
@@ -36,6 +42,11 @@ Revisit             : re-screen when a stated trigger occurs
 ```text
 Candidate K: 8   (Identity, Scope, Snapshot, Run, Intent+Decision,
                    Journal Event, Receipt, Allow Boundary)
+                  NOTE: K8 Allow Boundary is PROVISIONAL / disputed.
+                  It is counted here so the screening has a label, but it
+                  may demote to an inference rule (see "K8 re-screening"
+                  below). The set is therefore 8 (provisional), and is NOT
+                  claimed to be proven minimal and irreducible.
 Candidate D: 14  (Agent, Principal, Session, Registry, HCR, Settlement,
                    Capability Proposal, Approval, Decision, InvocationIntent,
                    Invocation, Hook, ContextBlock, Capability)
@@ -48,6 +59,28 @@ Candidate U: 0
 Note: tallies count *roles*. Some concepts carry more than one role (e.g.
 Registry Snapshot is K3 *and* the Snapshot implementation); the per-row table is
 authoritative, the tally is a summary.
+
+---
+
+## K8 Allow Boundary — provisional / disputed screening
+
+K8 is **not** asserted to be an independently irreducible primitive. It is
+retained as a candidate label so the screening in `kernel-primitive-calculus.md`
+§3/§6 has a name for the enforcement surface, but its status is open. This
+section records the explicit re-screening condition.
+
+| Field | Content |
+|---|---|
+| Current concept | The non-bypassable enforcement point that gates Intent → Effect: `Risk::Write` forces the full intent → approval → adapter → receipt chain (`src/domain/operation.rs:90` `is_allowed`); `RegistrySnapshot::provider_tools_for_grants` is the model-visible catalog surface |
+| Classification | **K8 — PROVISIONAL** (disputed; may demote to an inference rule) |
+| Provisional reason | K5 already carries the authorization half (Decision) plus the gating check `is_allowed`. Much of what §3 groups under K8 is the *enforcement of the K5 transition*, not a separable object. K8 may not be a standalone object primitive at all — it may be an unbypassable execution rule / safety invariant enforced along Intent → Decision → Invocation. |
+| Re-screening condition | **If every Allow Boundary semantic can be expressed as a transition invariant over Intent(K5) + Decision(K5) + Invocation(§4 Effect path), then K8 is no longer an independent primitive and demotes to an inference rule.** |
+| What would *keep* K8 independent | Discovery of an Allow Boundary property that cannot be stated as a K5 transition invariant — e.g. a grant-resolution or catalog-visibility rule that must be enforced *outside* the Intent→Decision→Invocation path and is itself security load-bearing and cross-cutting (§2 criteria). Absent that, K8 is the least-supported candidate. |
+| Current decision | **Revisit / hold** — keep the K8 label for screening continuity; do **not** assert the 8 primitives are proven minimal. No production change either way (this round changes no code). |
+
+This provisional status is mirrored in `kernel-primitive-calculus.md` §3 (K8
+note) and §10. It means the candidate set is described as "8 (provisional)" and
+is **not** claimed to be proven minimal and irreducible.
 
 ---
 
