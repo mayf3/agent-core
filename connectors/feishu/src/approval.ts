@@ -10,7 +10,13 @@
  * exposed to the LLM context, Coding Harness, or Capability Host.
  */
 
-import { renderDecisionApproved, renderDecisionRejected, renderError } from "./renderer.js";
+import {
+  renderDecisionApproved,
+  renderDecisionCard,
+  renderDecisionRejected,
+  renderError,
+  renderProposalPendingCard,
+} from "./renderer.js";
 
 export interface ApprovalConfig {
   /** Kernel base URL, e.g. http://127.0.0.1:4130 */
@@ -36,12 +42,39 @@ export interface ProposalInfo {
   manifest_digest: string;
   endpoint?: string;
   risk?: string;
+  approval: ProposalApproval;
+}
+
+export interface ProposalApproval {
+  approval_id: string;
+  principal_id: string;
+  expected_source_snapshot_id: string;
+  candidate_digest: string;
+  artifact_digest: string;
+  manifest_digest: string;
+  decision_nonce: string;
+  expires_at: string;
+  status: string;
+  origin_channel: string;
+  origin_conversation_kind: string;
 }
 
 export interface ApprovalResult {
   ok: boolean;
   replyText: string;
   proposalInfo?: ProposalInfo;
+  decisionId?: string;
+  activatedSnapshotId?: string;
+  hostDeploymentId?: string;
+}
+
+export interface ProposalDecision {
+  kind: "approve" | "reject";
+  proposalId: string;
+  actorPrincipalId: string;
+  reason?: string;
+  expectedApprovalId?: string;
+  expectedDecisionNonce?: string;
 }
 
 // ── Command parsing ────────────────────────────────────────────────
@@ -130,10 +163,40 @@ export async function fetchProposal(
     }
     throw new ApprovalError(`获取 proposal 失败: ${renderError(errMsg)}`, "api_error");
   }
-  if (!data.proposal_id) {
+  if (!data.proposal_id || data.proposal_id !== proposalId) {
     throw new ApprovalError("获取 proposal 返回格式异常", "invalid_response");
   }
+  assertApprovalBinding(data.approval);
+  if (
+    data.approval.artifact_digest !== data.artifact_digest ||
+    data.approval.manifest_digest !== data.manifest_digest ||
+    data.approval.principal_id !== principalForOpenId(config.ownerOpenId || "")
+  ) {
+    throw new ApprovalError("Proposal 审批绑定不一致", "invalid_approval_binding");
+  }
   return data as ProposalInfo;
+}
+
+function assertApprovalBinding(value: any): asserts value is ProposalApproval {
+  const fields = [
+    "approval_id",
+    "principal_id",
+    "expected_source_snapshot_id",
+    "candidate_digest",
+    "artifact_digest",
+    "manifest_digest",
+    "decision_nonce",
+    "expires_at",
+    "status",
+    "origin_channel",
+    "origin_conversation_kind",
+  ];
+  if (!value || fields.some((field) => typeof value[field] !== "string" || !value[field])) {
+    throw new ApprovalError("Proposal 缺少完整审批绑定", "invalid_approval_binding");
+  }
+  if (value.origin_channel !== "Feishu" || value.origin_conversation_kind !== "p2p") {
+    throw new ApprovalError("审批仅支持私聊来源的 Proposal", "invalid_approval_origin");
+  }
 }
 
 // ── Domain errors ──────────────────────────────────────────────────
@@ -157,57 +220,149 @@ export class ApprovalError extends Error {
 export async function executeApprovalCommand(
   config: ApprovalConfig,
   command: ApprovalCommand,
+  actorPrincipalId: string,
 ): Promise<ApprovalResult> {
-  // 1. Fetch proposal details to get real digests and verify status.
+  return executeProposalDecision(config, {
+    kind: command.kind,
+    proposalId: command.proposalId,
+    actorPrincipalId,
+    reason: command.reason,
+  });
+}
+
+export function principalForOpenId(openId: string): string {
+  return openId ? `feishu:open_id:${openId}` : "";
+}
+
+function approvalOperatorError(config: ApprovalConfig, operatorOpenId: string): string | null {
+  if (!config.decisionToken) return "审批功能未配置 (decision token 缺失)";
+  if (!config.ownerOpenId) return "审批功能未配置 (owner 未设置)";
+  if (operatorOpenId !== config.ownerOpenId) return "您不是审批人";
+  return null;
+}
+
+/** Execute one fully identity-bound decision. Kernel remains authoritative. */
+export async function executeProposalDecision(
+  config: ApprovalConfig,
+  decisionInput: ProposalDecision,
+): Promise<ApprovalResult> {
+  // 1. Fetch the authoritative binding on every click/text command.
   let proposal: ProposalInfo;
   try {
-    proposal = await fetchProposal(config, command.proposalId);
+    proposal = await fetchProposal(config, decisionInput.proposalId);
   } catch (err) {
     const msg = err instanceof ApprovalError ? err.message : String(err);
     return { ok: false, replyText: msg };
   }
 
-  // 2. Verify proposal is still PendingApproval.
-  if (proposal.status !== "PendingApproval") {
+  // 2. Terminal states must still reach Kernel so an identical callback can
+  // replay its durable result and a conflicting callback can be rejected.
+  const replayableProposalStatuses = new Set([
+    "PendingApproval", "Approved", "Rejected", "Activated", "ActivationFailed",
+  ]);
+  if (!replayableProposalStatuses.has(proposal.status)) {
     return {
       ok: false,
-      replyText: `Proposal ${command.proposalId} 状态为 ${proposal.status}，无法审批`,
+      replyText: `Proposal ${decisionInput.proposalId} 状态为 ${proposal.status}，无法审批`,
+      proposalInfo: proposal,
+    };
+  }
+  const replayableApprovalStatuses = new Set([
+    "Pending", "Approved", "Rejected", "ActivationFailed",
+  ]);
+  if (!replayableApprovalStatuses.has(proposal.approval.status)) {
+    return {
+      ok: false,
+      replyText: `Approval ${proposal.approval.approval_id} 状态为 ${proposal.approval.status}，无法审批`,
       proposalInfo: proposal,
     };
   }
 
-  // 3. Build decision payload with real digests.
-  const decision = command.kind === "approve" ? "approved" : "rejected";
-  const { ok, data } = await kernelFetch(
-    config,
-    `/v1/capability-change-proposals/${encodeURIComponent(command.proposalId)}/decision`,
-    "POST",
-    {
-      decision,
-      artifact_digest: proposal.artifact_digest,
-      manifest_digest: proposal.manifest_digest,
-    },
-  );
+  if (decisionInput.expectedApprovalId && decisionInput.expectedApprovalId !== proposal.approval.approval_id) {
+    return { ok: false, replyText: "审批卡片已失效，请使用最新卡片", proposalInfo: proposal };
+  }
+  if (decisionInput.expectedDecisionNonce && decisionInput.expectedDecisionNonce !== proposal.approval.decision_nonce) {
+    return { ok: false, replyText: "审批卡片 nonce 已失效，请使用最新卡片", proposalInfo: proposal };
+  }
+  if (!decisionInput.actorPrincipalId) {
+    return { ok: false, replyText: "审批人身份缺失", proposalInfo: proposal };
+  }
+
+  // 3. Forward every authoritative binding field. The edge never decides.
+  const decision = decisionInput.kind === "approve" ? "approved" : "rejected";
+  let response: { ok: boolean; data: any };
+  try {
+    response = await kernelFetch(
+      config,
+      `/v1/capability-change-proposals/${encodeURIComponent(decisionInput.proposalId)}/decision`,
+      "POST",
+      {
+        decision,
+        approval_id: proposal.approval.approval_id,
+        decision_nonce: proposal.approval.decision_nonce,
+        principal_id: decisionInput.actorPrincipalId,
+        expected_source_snapshot_id: proposal.approval.expected_source_snapshot_id,
+        candidate_digest: proposal.approval.candidate_digest,
+        artifact_digest: proposal.approval.artifact_digest,
+        manifest_digest: proposal.approval.manifest_digest,
+      },
+    );
+  } catch {
+    return { ok: false, replyText: "审批服务暂时不可用", proposalInfo: proposal };
+  }
+  const { ok, data } = response;
 
   if (ok) {
-    if (command.kind === "approve") {
+    if (
+      decisionInput.kind === "approve" &&
+      data.approval_id === proposal.approval.approval_id &&
+      typeof data.decision_id === "string" &&
+      data.decision_id &&
+      data.status === "ActivationFailed"
+    ) {
+      return {
+        ok: false,
+        replyText: `批准已记录，但能力激活失败: ${renderError(String(data.activation_error || "activation_failed"))}`,
+        proposalInfo: proposal,
+        decisionId: data.decision_id,
+      };
+    }
+    const expectedStatus = decisionInput.kind === "approve" ? "Activated" : "Rejected";
+    const invalidIdentity =
+      data.approval_id !== proposal.approval.approval_id ||
+      typeof data.decision_id !== "string" ||
+      !data.decision_id ||
+      data.status !== expectedStatus;
+    const invalidActivation = decisionInput.kind === "approve" && (
+      typeof data.activated_snapshot_id !== "string" || !data.activated_snapshot_id ||
+      typeof data.host_deployment_id !== "string" || !data.host_deployment_id
+    );
+    if (invalidIdentity || invalidActivation) {
+      return { ok: false, replyText: "审批服务返回格式异常", proposalInfo: proposal };
+    }
+    if (decisionInput.kind === "approve") {
       return {
         ok: true,
         replyText: renderDecisionApproved({
-          proposal_id: command.proposalId,
+          proposal_id: decisionInput.proposalId,
+          decision_id: data.decision_id,
           activated_snapshot_id: data.activated_snapshot_id,
           manifest_id: proposal.manifest_id,
         }),
         proposalInfo: proposal,
+        decisionId: data.decision_id,
+        activatedSnapshotId: data.activated_snapshot_id,
+        hostDeploymentId: data.host_deployment_id,
       };
     }
     return {
       ok: true,
       replyText: renderDecisionRejected({
-        proposal_id: command.proposalId,
-        reason: command.reason || undefined,
+        proposal_id: decisionInput.proposalId,
+        reason: decisionInput.reason || undefined,
       }),
       proposalInfo: proposal,
+      decisionId: data.decision_id,
     };
   }
 
@@ -215,7 +370,120 @@ export async function executeApprovalCommand(
   const errorMsg = String(data.error || "unknown_error");
   return {
     ok: false,
-    replyText: `${command.kind === "approve" ? "批准" : "拒绝"}失败: ${renderError(errorMsg)}`,
+    replyText: `${decisionInput.kind === "approve" ? "批准" : "拒绝"}失败: ${renderError(errorMsg)}`,
     proposalInfo: proposal,
+  };
+}
+
+export interface PendingProposalPresentation {
+  kind: "capability_proposal_pending_v1";
+  proposal_id: string;
+}
+
+export function parsePendingProposalPresentation(value: unknown): PendingProposalPresentation | null {
+  const input = value as Record<string, unknown> | null;
+  if (
+    !input ||
+    Object.keys(input).length !== 2 ||
+    input.kind !== "capability_proposal_pending_v1" ||
+    typeof input.proposal_id !== "string" ||
+    !input.proposal_id
+  ) return null;
+  return { kind: input.kind, proposal_id: input.proposal_id };
+}
+
+export async function sendPendingProposalCardReply(
+  client: any,
+  messageId: string,
+  presentation: PendingProposalPresentation,
+  config: ApprovalConfig,
+) {
+  const proposal = await fetchProposal(config, presentation.proposal_id);
+  if (proposal.status !== "PendingApproval" || proposal.approval.status !== "Pending") {
+    throw new Error("proposal_not_pending");
+  }
+  if (proposal.operation_name !== "external.calculator") {
+    throw new Error("unsupported_proposal_operation");
+  }
+  const card = renderProposalPendingCard({
+    proposal_id: proposal.proposal_id,
+    operation_name: proposal.operation_name,
+    artifact_digest: proposal.approval.artifact_digest,
+    approval_id: proposal.approval.approval_id,
+    decision_nonce: proposal.approval.decision_nonce,
+  });
+  const response = await client.request({
+    method: "POST",
+    url: `/open-apis/im/v1/messages/${encodeURIComponent(messageId)}/reply`,
+    data: { msg_type: "interactive", content: JSON.stringify(card) },
+  });
+  return {
+    message_id: response?.data?.message_id || response?.data?.message?.message_id || null,
+    status: "sent",
+  };
+}
+
+export function parseProposalCardAction(raw: any) {
+  const event = raw?.event || raw;
+  const operatorOpenId = String(event?.operator?.open_id || "");
+  let value = event?.action?.value;
+  if (typeof value === "string") {
+    try { value = JSON.parse(value); } catch { return null; }
+  }
+  if (!value || typeof value !== "object") return null;
+  const input = value as Record<string, unknown>;
+  if (
+    typeof input.proposal_id !== "string" || !input.proposal_id ||
+    typeof input.approval_id !== "string" || !input.approval_id ||
+    typeof input.decision_nonce !== "string" || !input.decision_nonce ||
+    (input.decision !== "approved" && input.decision !== "rejected") || !operatorOpenId
+  ) return null;
+  return {
+    proposalId: input.proposal_id,
+    approvalId: input.approval_id,
+    decisionNonce: input.decision_nonce,
+    decision: input.decision,
+    operatorOpenId,
+  };
+}
+
+export async function handleProposalCardAction(config: ApprovalConfig, raw: unknown) {
+  const action = parseProposalCardAction(raw);
+  if (!action) return cardCallbackError("invalid_card_action");
+  // Card callbacks do not expose a trustworthy chat_type. Never synthesize
+  // one: authenticate the operator here; fetchProposal independently requires
+  // the Kernel-authoritative Proposal origin to be Feishu/p2p.
+  const authError = approvalOperatorError(config, action.operatorOpenId);
+  if (authError) return cardCallbackError(authError, action.proposalId);
+  const result = await executeProposalDecision(config, {
+    kind: action.decision === "approved" ? "approve" : "reject",
+    proposalId: action.proposalId,
+    actorPrincipalId: principalForOpenId(action.operatorOpenId),
+    expectedApprovalId: action.approvalId,
+    expectedDecisionNonce: action.decisionNonce,
+  });
+  if (!result.ok) return cardCallbackError(result.replyText, action.proposalId);
+  const approved = action.decision === "approved";
+  return {
+    toast: { type: "success", content: approved ? "APPROVED" : "REJECTED" },
+    card: {
+      type: "raw",
+      data: renderDecisionCard({
+        approved,
+        proposal_id: action.proposalId,
+        decision_id: result.decisionId,
+        activated_snapshot_id: result.activatedSnapshotId,
+      }),
+    },
+  };
+}
+
+function cardCallbackError(error: string, proposalId = "unknown") {
+  return {
+    toast: { type: "error", content: "审批失败" },
+    card: {
+      type: "raw",
+      data: renderDecisionCard({ approved: false, proposal_id: proposalId, error }),
+    },
   };
 }

@@ -2,12 +2,18 @@ import http from "node:http";
 import type { ConnectorConfig } from "./config.js";
 import type { ReactionTracker } from "./reactions.js";
 import type { ExecuteStore } from "./execute-store.js";
+import type { ApprovalConfig } from "./approval.js";
+import {
+  parsePendingProposalPresentation,
+  sendPendingProposalCardReply,
+} from "./approval.js";
 
 export function startExecuteServer(
   config: ConnectorConfig,
   client: any,
   reactions?: ReactionTracker,
   executeStore?: ExecuteStore,
+  approvalConfig?: ApprovalConfig,
 ) {
   // In-flight dedup within this process (concurrent requests for the same key).
   const inFlight = new Map<string, Promise<unknown>>();
@@ -46,7 +52,7 @@ export function startExecuteServer(
       }
 
       console.log(`execute approved operation=${body.operation} invocation=${shortId(body.invocation_id)} msg=${shortId(body.arguments.message_id)}`);
-      const promise = sendReply(client, body.arguments.message_id, body.arguments.text)
+      const promise = sendReply(client, body.arguments, approvalConfig)
         .then((receipt) => {
           void reactions?.markSucceeded(body.arguments.message_id);
           // Persist SUCCESS only — a failure must not be recorded as sent.
@@ -96,18 +102,32 @@ export function validateExecute(body: any) {
   if (body.operation !== "feishu.send_message") {
     throw new Error("operation_not_allowed");
   }
-  if (!body.invocation_id || !body.decision_id || !body.idempotency_key || !body.arguments?.message_id || !body.arguments?.text) {
+  if (!body.invocation_id || !body.decision_id || !body.idempotency_key || !body.arguments?.message_id) {
+    throw new Error("invalid execute payload");
+  }
+  const hasText = typeof body.arguments.text === "string" && body.arguments.text.length > 0;
+  const presentationSupplied = body.arguments.presentation !== undefined;
+  const hasPresentation = Boolean(parsePendingProposalPresentation(body.arguments.presentation));
+  if (presentationSupplied && !hasPresentation) {
+    throw new Error("invalid execute payload");
+  }
+  if (hasText === hasPresentation) {
     throw new Error("invalid execute payload");
   }
 }
 
-async function sendReply(client: any, messageId: string, text: string) {
+async function sendReply(client: any, args: any, approvalConfig?: ApprovalConfig) {
+  const presentation = parsePendingProposalPresentation(args.presentation);
+  if (presentation) {
+    if (!approvalConfig) throw new Error("approval_not_configured");
+    return sendPendingProposalCardReply(client, args.message_id, presentation, approvalConfig);
+  }
   const response = await client.request({
     method: "POST",
-    url: `/open-apis/im/v1/messages/${encodeURIComponent(messageId)}/reply`,
+    url: `/open-apis/im/v1/messages/${encodeURIComponent(args.message_id)}/reply`,
     data: {
       msg_type: "text",
-      content: JSON.stringify({ text }),
+      content: JSON.stringify({ text: args.text }),
     },
   });
   return {

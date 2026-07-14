@@ -8,6 +8,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 mod policy;
 pub use policy::{evaluate_policy, PolicyVerdict};
+mod message_arguments;
 mod tool_call;
 pub use tool_call::{validate_tool_call, ToolRejection};
 #[derive(Clone)]
@@ -70,11 +71,10 @@ impl Gateway {
         // Argument-shape validation is a schema concern (M2a's
         // `argument_schema`, deferred), not an access-control stage, so it
         // stays here rather than in the policy pipeline. The feishu send
-        // operation requires message_id / chat_id / text to be present.
+        // operation requires a destination plus exactly one supported
+        // presentation mode.
         if intent.operation == crate::domain::operation::FEISHU_SEND_MESSAGE {
-            string_arg(&intent.arguments, "message_id")?;
-            string_arg(&intent.arguments, "chat_id")?;
-            string_arg(&intent.arguments, "text")?;
+            message_arguments::validate_feishu_send_arguments(&intent.arguments)?;
         }
         Ok(ApprovedInvocation::new(
             intent,

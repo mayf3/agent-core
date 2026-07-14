@@ -3,7 +3,11 @@ mod common;
 use common::*;
 
 fn tmpdir(label: &str) -> std::path::PathBuf {
-    let d = std::env::temp_dir().join(format!("ch_safety_{label}_{}", std::process::id()));
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let d = std::env::temp_dir().join(format!("ch_safety_{label}_{}_{nonce}", std::process::id()));
     std::fs::create_dir_all(&d).ok();
     d
 }
@@ -15,18 +19,16 @@ fn non_json_stdout_is_rejected() {
     let digest = store_artifact(&root, &path);
     let (port, _) = start_capability_host(&root);
     std::thread::sleep(std::time::Duration::from_millis(200));
-    let (code, body) = send_http(
-        "127.0.0.1",
+    let (code, response) = deploy_calculator(
+        &root,
         port,
-        &serde_json::json!({
-            "protocol_version":"external-harness-v1","invocation_id":"nj1","operation":"t",
-            "arguments":{},"manifest_id":"m","artifact_digest":digest,
-        })
-        .to_string(),
+        &digest,
+        "proposal-nj",
+        "decision-nj",
+        "snapshot-nj",
     );
-    assert_eq!(code, 200);
-    let r: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(r["error_code"], "artifact_protocol_error");
+    assert_eq!(code, 400);
+    assert_eq!(response["error_code"], "deployment_probe_failed");
 }
 
 #[test]
@@ -36,18 +38,16 @@ fn nonzero_exit_is_structured_failure() {
     let digest = store_artifact(&root, &path);
     let (port, _) = start_capability_host(&root);
     std::thread::sleep(std::time::Duration::from_millis(200));
-    let (code, body) = send_http(
-        "127.0.0.1",
+    let (code, response) = deploy_calculator(
+        &root,
         port,
-        &serde_json::json!({
-            "protocol_version":"external-harness-v1","invocation_id":"nz1","operation":"t",
-            "arguments":{},"manifest_id":"m","artifact_digest":digest,
-        })
-        .to_string(),
+        &digest,
+        "proposal-nz",
+        "decision-nz",
+        "snapshot-nz",
     );
-    assert_eq!(code, 200);
-    let r: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(r["error_code"], "artifact_failed");
+    assert_eq!(code, 400);
+    assert_eq!(response["error_code"], "deployment_probe_failed");
 }
 
 #[test]
@@ -67,6 +67,8 @@ fn artifact_timeout_kills_process_tree() {
             exec_timeout: std::time::Duration::from_secs(2),
             max_stdout_bytes: 65536,
             max_stderr_bytes: 65536,
+            control_token: CONTROL_TOKEN.into(),
+            execution_token: EXECUTION_TOKEN.into(),
         };
         for stream in listener.incoming() {
             if s.load(std::sync::atomic::Ordering::SeqCst) {
@@ -78,18 +80,16 @@ fn artifact_timeout_kills_process_tree() {
         }
     });
     std::thread::sleep(std::time::Duration::from_millis(200));
-    let (code, body) = send_http(
-        "127.0.0.1",
+    let (code, response) = deploy_calculator(
+        &root,
         port,
-        &serde_json::json!({
-            "protocol_version":"external-harness-v1","invocation_id":"to1","operation":"t",
-            "arguments":{},"manifest_id":"m","artifact_digest":digest,
-        })
-        .to_string(),
+        &digest,
+        "proposal-to",
+        "decision-to",
+        "snapshot-to",
     );
-    assert_eq!(code, 200);
-    let r: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(r["error_code"], "artifact_timeout");
+    assert_eq!(code, 400);
+    assert_eq!(response["error_code"], "deployment_probe_failed");
 }
 
 #[test]
@@ -99,41 +99,66 @@ fn large_stdout_does_not_deadlock() {
     let digest = store_artifact(&root, &path);
     let (port, _) = start_capability_host(&root);
     std::thread::sleep(std::time::Duration::from_millis(200));
-    let (code, body) = send_http(
-        "127.0.0.1",
+    let (code, response) = deploy_calculator(
+        &root,
         port,
-        &serde_json::json!({
-            "protocol_version":"external-harness-v1","invocation_id":"lo1","operation":"t",
-            "arguments":{},"manifest_id":"m","artifact_digest":digest,
-        })
-        .to_string(),
+        &digest,
+        "proposal-lo",
+        "decision-lo",
+        "snapshot-lo",
     );
-    assert_eq!(code, 200);
-    let r: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
-    assert_eq!(r["ok"], false, "large stdout should not produce ok=true");
+    assert_eq!(code, 400);
+    assert_eq!(response["error_code"], "deployment_probe_failed");
 }
 
 #[test]
 fn request_cannot_supply_artifact_path() {
     let root = tmpdir("pathinj");
-    let calc = match calculator_binary() {
-        Some(b) => b,
-        None => {
-            eprintln!("calculator binary not found, skipping");
-            return;
-        }
-    };
+    let calc = fixture_path!("calculator");
     let digest = store_artifact(&root, &calc);
     let (port, _) = start_capability_host(&root);
     std::thread::sleep(std::time::Duration::from_millis(200));
+    let (deploy_code, deployed) = deploy_calculator(
+        &root,
+        port,
+        &digest,
+        "proposal-pi",
+        "decision-pi",
+        "snapshot-pi",
+    );
+    assert_eq!(deploy_code, 200, "{deployed}");
     let (code, body) = send_http("127.0.0.1", port, &serde_json::json!({
         "protocol_version":"external-harness-v1","invocation_id":"pi1",
         "operation":"external.calculator",
         "arguments":{"operation":"multiply","a":6,"b":7,"artifact_path":"/etc/passwd","entrypoint":"../../evil"},
-        "manifest_id":"m","artifact_digest":digest,
+        "manifest_id":deployed["manifest_id"],"artifact_digest":digest,
+        "registry_snapshot_id":"snapshot-pi",
     }).to_string());
     assert_eq!(code, 200);
     let r: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(r["ok"], true, "path injection fields should be ignored");
-    assert_eq!(r["result"], 42);
+    assert_eq!(r["ok"], false);
+    assert_eq!(r["error_code"], "invalid_calculator_arguments");
+}
+
+#[test]
+fn successful_parent_with_orphan_pipe_holder_does_not_block_join() {
+    let root = tmpdir("orphanpipe");
+    let path = fixture_path!("orphan-pipe");
+    let digest = store_artifact(&root, &path);
+    let (port, _) = start_capability_host(&root);
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    let started = std::time::Instant::now();
+    let (code, response) = deploy_calculator(
+        &root,
+        port,
+        &digest,
+        "proposal-orphan",
+        "decision-orphan",
+        "snapshot-orphan",
+    );
+    assert_eq!(code, 200, "{response}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(2),
+        "descendant-held output pipe stalled deployment"
+    );
 }

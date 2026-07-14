@@ -9,6 +9,9 @@ use anyhow::Result;
 use serde_json::json;
 
 pub fn matches(event: &ValidatedEvent) -> bool {
+    if !matches!(event.source, EventSource::Feishu) || event.chat_type.as_deref() != Some("p2p") {
+        return false;
+    }
     let RuntimeEventPayload::UserMessage { text, .. } = &event.payload;
     super::coding_router::parse_coding_intent(text).is_ok()
 }
@@ -58,7 +61,7 @@ pub fn deliver<L: LlmClient + 'static>(
         }),
     )?;
 
-    let (reply, failed) = match super::coding_task_submit::handle_coding_task_submit(
+    let (reply, failed, proposal_id) = match super::coding_task_submit::handle_coding_task_submit(
         journal,
         gateway,
         runtime.config(),
@@ -74,6 +77,7 @@ pub fn deliver<L: LlmClient + 'static>(
                 short_digest(&result.artifact_digest),
             ),
             false,
+            Some(result.proposal_id),
         ),
         Err(error) => {
             journal.fail_run(&run.id)?;
@@ -88,11 +92,26 @@ pub fn deliver<L: LlmClient + 'static>(
                     "error_category": safe_category(&error),
                 }),
             )?;
-            (format!("开发未完成：{}", safe_category(&error)), true)
+            (format!("开发未完成：{}", safe_category(&error)), true, None)
         }
     };
 
-    let reply_intent = runtime.reply_intent(&run, &session, &reply, message_id, chat_id);
+    let mut reply_intent = runtime.reply_intent(&run, &session, &reply, message_id, chat_id);
+    if let Some(proposal_id) = proposal_id {
+        if let Some(arguments) = reply_intent.arguments.as_object_mut() {
+            // The Connector enforces exactly one presentation mode.  The card
+            // contains the complete user-facing pending message, so do not
+            // also send an ambiguous text payload.
+            arguments.remove("text");
+            arguments.insert(
+                "presentation".to_string(),
+                json!({
+                    "kind": "capability_proposal_pending_v1",
+                    "proposal_id": proposal_id,
+                }),
+            );
+        }
+    }
     let correlation_id = reply_intent.invocation_id.0.clone();
     journal.append_event(
         JournalEventKind::InvocationProposed,

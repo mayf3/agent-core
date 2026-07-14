@@ -21,6 +21,8 @@ use std::time::Duration;
 
 use helpers::*;
 
+const LEGACY_CALCULATOR: &str = "external.legacy_calculator";
+
 #[test]
 fn calculator_vertical_e2e() -> Result<()> {
     eprintln!("=== CALCULATOR VERTICAL E2E START ===");
@@ -171,7 +173,7 @@ fn calculator_vertical_e2e() -> Result<()> {
     // Write manifest.json and evidence.json via workspace.write.
     let manifest = json!({
         "harness_id":"calculator_harness","protocol_version":"external-harness-v1",
-        "endpoint":calc_endpoint,"operation_name":"external.calculator","description":"Arithmetic",
+        "endpoint":calc_endpoint,"operation_name":LEGACY_CALCULATOR,"description":"Arithmetic",
         "input_schema":{"type":"object","properties":{"operation":{"type":"string"},"a":{"type":"number"},"b":{"type":"number"}},
                         "required":["operation","a","b"],"additionalProperties":false},
         "output_schema":{"type":"object","properties":{"result":{"type":"number"}},
@@ -313,10 +315,10 @@ fn calculator_vertical_e2e() -> Result<()> {
 
     // Verify S1 active, S0 runs unchanged.
     assert_eq!(j_local.current_registry_snapshot_id()?, s1, "S1 is active");
-    // Verify external.calculator is in S1 (added by decision).
+    // Verify the legacy test operation is in S1 (added by decision).
     let s1_snap = j_local.load_registry_snapshot(&s1)?;
     assert!(
-        s1_snap.lookup("external.calculator").is_some(),
+        s1_snap.lookup(LEGACY_CALCULATOR).is_some(),
         "calculator in S1"
     );
 
@@ -365,13 +367,7 @@ fn calculator_vertical_e2e() -> Result<()> {
     ];
 
     for (label, args, expected_status, expected_result) in &test_cases {
-        let outcome = deliver_tool(
-            j_local,
-            g_local,
-            kc_local,
-            "external.calculator",
-            args.clone(),
-        )?;
+        let outcome = deliver_tool(j_local, g_local, kc_local, LEGACY_CALCULATOR, args.clone())?;
         assert_eq!(outcome.session_id, session_id, "{label}: same session");
         assert_eq!(
             j_local.current_registry_snapshot_id()?,

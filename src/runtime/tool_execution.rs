@@ -187,7 +187,7 @@ pub(crate) fn dispatch_builtin_binding(
             }
         }
     };
-    let (status, output, text) = match receipt_result {
+    let (status, output, external_ref, text) = match receipt_result {
         Ok(receipt) => {
             let text = match receipt.status {
                 ReceiptStatus::Succeeded => {
@@ -205,7 +205,7 @@ pub(crate) fn dispatch_builtin_binding(
                     "status: execution_failed\nerror_category: unknown_outcome".to_string()
                 }
             };
-            (receipt.status, receipt.output, text)
+            (receipt.status, receipt.output, receipt.external_ref, text)
         }
         Err(e) => {
             // First try typed ToolDispatchError downcast for precise category.
@@ -239,6 +239,7 @@ pub(crate) fn dispatch_builtin_binding(
             (
                 ReceiptStatus::Failed,
                 json!({"error_category": cat}),
+                None,
                 format!("status: execution_failed\nerror_category: {cat}"),
             )
         }
@@ -253,6 +254,7 @@ pub(crate) fn dispatch_builtin_binding(
             "invocation_id": approved.intent().invocation_id,
             "status": format!("{:?}", status),
             "output": output,
+            "external_ref": external_ref,
         }),
     ) {
         return fatal;

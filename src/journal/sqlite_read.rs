@@ -77,7 +77,9 @@ pub(crate) fn parse_kind(value: &str) -> JournalEventKind {
         "RegistrySnapshotActivated" => JournalEventKind::RegistrySnapshotActivated,
         // Phase 2 capability-change-control-plane: proposal lifecycle kinds.
         "CapabilityChangeProposed" => JournalEventKind::CapabilityChangeProposed,
+        "CapabilityChangeApproved" => JournalEventKind::CapabilityChangeApproved,
         "CapabilityChangeActivated" => JournalEventKind::CapabilityChangeActivated,
+        "CapabilityChangeActivationFailed" => JournalEventKind::CapabilityChangeActivationFailed,
         "CapabilityChangeRejected" => JournalEventKind::CapabilityChangeRejected,
         "CapabilityChangeExpired" => JournalEventKind::CapabilityChangeExpired,
         "ToolBudgetExhausted" => JournalEventKind::ToolBudgetExhausted,

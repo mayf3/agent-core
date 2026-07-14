@@ -159,6 +159,31 @@ impl super::JournalStore {
                 link.created_at,
             ],
         )?;
+        let approval_id = format!("approval_{}", uuid::Uuid::new_v4().simple());
+        let decision_nonce = format!(
+            "{}{}",
+            uuid::Uuid::new_v4().simple(),
+            uuid::Uuid::new_v4().simple()
+        );
+        tx.execute(
+            "INSERT INTO capability_change_approvals
+             (approval_id,proposal_id,owner_principal_id,source_registry_snapshot_id,
+              candidate_digest,artifact_digest,manifest_digest,decision_nonce,status,
+              created_at,expires_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,'Pending',?9,?10)",
+            params![
+                approval_id,
+                proposal.proposal_id,
+                proposal.submitter_principal_id,
+                link.source_registry_snapshot_id,
+                link.candidate_digest,
+                link.artifact_digest,
+                proposal.manifest_digest,
+                decision_nonce,
+                proposal.created_at.to_rfc3339(),
+                proposal.expires_at.to_rfc3339(),
+            ],
+        )?;
         super::queue::append_event_tx(
             &tx,
             JournalEventKind::CapabilityChangeProposed,
@@ -176,6 +201,8 @@ impl super::JournalStore {
                 "candidate_id": link.candidate_id,
                 "candidate_digest": link.candidate_digest,
                 "settlement_id": link.settlement_id,
+                "approval_id": approval_id,
+                "approval_expires_at": proposal.expires_at,
             }),
         )?;
         tx.commit()?;

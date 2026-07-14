@@ -2,11 +2,17 @@ import * as Lark from "@larksuiteoapi/node-sdk";
 import { loadConfig } from "./config.js";
 import { startExecuteServer } from "./execute-server.js";
 import { createJsonlExecuteStore } from "./execute-store.js";
-import { postIngress } from "./kernel.js";
+import { normalizeMessageEvent, postIngress } from "./kernel.js";
 import { createReactionTracker } from "./reactions.js";
 import { safeLarkLogger } from "./safe-logger.js";
-import { parseApprovalCommand, isApprovalAuthorised, executeApprovalCommand } from "./approval.js";
+import {
+  parseApprovalCommand,
+  isApprovalAuthorised,
+  executeApprovalCommand,
+  principalForOpenId,
+} from "./approval.js";
 import type { ApprovalConfig } from "./approval.js";
+import { handleProposalCardAction } from "./approval.js";
 import {
   parseHarnessChangeCommand,
   isHarnessChangeAuthorised,
@@ -26,7 +32,6 @@ const client = new Lark.Client(baseConfig);
 const reactions = createReactionTracker(config, client);
 const executeStore = createJsonlExecuteStore(config.executeStatePath);
 executeStore.load(); // warm up the store from disk on startup
-startExecuteServer(config, client, reactions, executeStore);
 
 // Approval adapter config — decision token isolated from LLM path.
 const approvalConfig: ApprovalConfig = {
@@ -34,6 +39,7 @@ const approvalConfig: ApprovalConfig = {
   decisionToken: config.kernelDecisionToken,
   ownerOpenId: config.feishuOwnerOpenId,
 };
+startExecuteServer(config, client, reactions, executeStore, approvalConfig);
 
 /**
  * Try to handle a message as an approval command BEFORE sending it to the LLM.
@@ -65,7 +71,11 @@ async function tryHandleApproval(
   }
 
   // Execute approval (fetches proposal digests, calls Decision API).
-  const result = await executeApprovalCommand(approvalConfig, cmd);
+  const result = await executeApprovalCommand(
+    approvalConfig,
+    cmd,
+    principalForOpenId(senderOpenId),
+  );
   if (result.ok) {
     await reactions?.markSucceeded(messageId);
   } else {
@@ -152,49 +162,16 @@ async function sendTextReply(client: any, messageId: string, text: string) {
   }
 }
 
-function normalizeEvent(raw: any) {
-  const event = raw?.event || raw;
-  const header = raw?.header || event?.header || {};
-  const message = event?.message || {};
-  const sender = event?.sender || {};
-  const content = parseContent(message.content);
-  const messageId = message.message_id || raw?.message_id || "";
-  return {
-    external_event_id: messageId ? `message:${messageId}` : header.event_id || "missing_event_id",
-    payload: {
-      provider_event_id: header.event_id || "",
-      sender_open_id: sender.sender_id?.open_id || raw?.open_id || "",
-      sender_type: sender.sender_type || raw?.sender_type || "user",
-      chat_id: message.chat_id || raw?.chat_id || "",
-      chat_type: message.chat_type || raw?.chat_type || "p2p",
-      message_id: messageId,
-      message_type: message.message_type || content.type || "text",
-      text: content.text || "",
-      mentions: normalizeMentions(message.mentions || content.mentions || []),
-    },
-  };
-}
-
-function parseContent(value: unknown): any {
-  if (!value) return {};
-  if (typeof value === "object") return value;
-  try {
-    return JSON.parse(String(value));
-  } catch {
-    return { text: String(value) };
-  }
-}
-
-function normalizeMentions(values: any[]) {
-  return values.map((mention: any) => ({
-    open_id: mention.id?.open_id || mention.open_id || "",
-    name: mention.name || mention.id?.name || "",
-  }));
-}
-
 const eventDispatcher = new Lark.EventDispatcher({}).register({
   "im.message.receive_v1": async (data: unknown) => {
-    const normalized = normalizeEvent(data);
+    let normalized;
+    try {
+      normalized = normalizeMessageEvent(data);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`invalid Feishu message event: ${message.slice(0, 100)}`);
+      return;
+    }
     const payload = normalized.payload;
 
     // 1. Try approval interception (before LLM).
@@ -241,6 +218,17 @@ const eventDispatcher = new Lark.EventDispatcher({}).register({
       const message = error instanceof Error ? error.message : String(error);
       console.error(`kernel ingress error: ${message.slice(0, 200)}`);
     });
+  },
+  "card.action.trigger": async (data: unknown) => {
+    try {
+      return await handleProposalCardAction(approvalConfig, data);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`approval card handler error: ${message.slice(0, 200)}`);
+      return {
+        toast: { type: "error", content: "审批失败，请稍后重试" },
+      };
+    }
   },
 });
 
