@@ -271,7 +271,7 @@ fn legacy_capability_activation_e2e_capability_host() {
         "external.coding_workspace_exec",
         json!({
             "workspace_id": "test", "command": "rustc",
-            "args": ["calc.rs", "-o", "calculator-artifact"],
+            "args": ["calc.rs", "-C", "opt-level=z", "-C", "strip=symbols", "-o", "calculator-artifact"],
             "relative_cwd": ".", "timeout_seconds": 60, "max_output_bytes": 65536,
         }),
     )
