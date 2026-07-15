@@ -60,7 +60,7 @@ export interface PendingProposalCardData {
   decision_nonce: string;
 }
 
-/** Render the fixed v0 calculator approval card from Kernel-authoritative data. */
+/** Render a generic component approval card from Kernel-authoritative data. */
 export function renderProposalPendingCard(data: PendingProposalCardData): Record<string, unknown> {
   const actionValue = {
     proposal_id: data.proposal_id,
@@ -79,8 +79,7 @@ export function renderProposalPendingCard(data: PendingProposalCardData): Record
         text: {
           tag: "lark_md",
           content: [
-            `**能力**：${truncate(data.operation_name, 80)}`,
-            "**运算**：加 / 减 / 乘 / 除",
+            `**组件 / 能力**：${truncate(data.operation_name, 80)}`,
             `**Artifact**：${truncate(data.artifact_digest, 20)}`,
             `**Proposal**：${truncate(data.proposal_id, 80)}`,
           ].join("\n"),
@@ -118,6 +117,7 @@ export function renderDecisionCard(data: {
   proposal_id: string;
   decision_id?: string;
   activated_snapshot_id?: string;
+  component_url?: string;
   error?: string;
 }): Record<string, unknown> {
   const outcome = data.error ? "ERROR" : data.approved ? "APPROVED" : "REJECTED";
@@ -129,6 +129,7 @@ export function renderDecisionCard(data: {
   if (data.activated_snapshot_id) {
     lines.push(`**新 Snapshot**：${truncate(data.activated_snapshot_id, 80)}`);
   }
+  if (data.component_url) lines.push(`**服务地址**：${truncate(data.component_url, 200)}`);
   if (data.error) lines.push(`**结果**：${renderError(data.error)}`);
   return {
     config: { wide_screen_mode: true },
@@ -148,12 +149,14 @@ export function renderDecisionApproved(data: {
   decision_id?: string;
   activated_snapshot_id?: string;
   manifest_id?: string;
+  component_url?: string;
 }): string {
   const lines: string[] = ["✅ APPROVED（已批准）"];
   lines.push(`Proposal: ${data.proposal_id}`);
   if (data.decision_id) lines.push(`Decision ID: ${truncate(data.decision_id, 80)}`);
   if (data.activated_snapshot_id) lines.push(`新 Snapshot: ${truncate(data.activated_snapshot_id, 20)}`);
   if (data.manifest_id) lines.push(`Manifest: ${truncate(data.manifest_id, 20)}`);
+  if (data.component_url) lines.push(`服务地址: ${truncate(data.component_url, 200)}`);
   return lines.join("\n");
 }
 

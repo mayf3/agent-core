@@ -181,8 +181,17 @@ pub fn handle_coding_task_submit(
     store.load(&artifact_key)?;
     store.load(&evidence_key)?;
     let component_manifest: Value = serde_json::from_slice(&store.load(&component_manifest_key)?)?;
-    let manifest = invocable_manifest(request, &component_manifest, &artifact_digest)?;
-    let manifest_bytes = serde_json::to_vec(&manifest)?;
+    let (manifest_ref, manifest_bytes) = match request.target_kind {
+        TargetKind::InvocableCapability => {
+            let manifest = invocable_manifest(request, &component_manifest, &artifact_digest)?;
+            (manifest.manifest_id.clone(), serde_json::to_vec(&manifest)?)
+        }
+        TargetKind::HookConsumerService => {
+            let manifest = service_manifest(request, &component_manifest, &artifact_digest)?;
+            (manifest.manifest_id.clone(), serde_json::to_vec(&manifest)?)
+        }
+        _ => bail!("DEPLOYMENT_PROFILE_NOT_IMPLEMENTED"),
+    };
     let manifest_digest = store.store(&manifest_bytes)?.as_str().to_string();
 
     let proposal_id = format!("proposal_{}", uuid::Uuid::new_v4().simple());
@@ -194,7 +203,7 @@ pub fn handle_coding_task_submit(
         run.id.clone(),
         artifact_ref.clone(),
         artifact_digest.clone(),
-        manifest.manifest_id.clone(),
+        manifest_ref,
         manifest_digest,
         evidence_digest.clone(),
         evidence_digest.clone(),
@@ -397,6 +406,67 @@ fn invocable_manifest(
     Ok(manifest)
 }
 
+fn service_manifest(
+    request: &DevelopmentRequest,
+    component: &Value,
+    artifact_digest: &str,
+) -> Result<ServiceManifest> {
+    if request.target_kind != TargetKind::HookConsumerService
+        || required_str(component, "schema_version")? != "component-artifact-v1"
+        || required_str(component, "kind")? != "hook_consumer_service"
+        || required_str(component, "component_id")? != request.name
+        || required_str(component, "profile_id")? != request.build_profile
+        || required_str(component, "contract_catalog_version")? != request.contract_catalog_version
+        || required_str(component, "deployment_profile")? != request.deployment_profile
+        || !string_set_matches(component, "required_contracts", &request.required_contracts)?
+        || !string_set_matches(
+            component,
+            "requested_permissions",
+            &request.requested_permissions,
+        )?
+    {
+        bail!("COMPONENT_MANIFEST_IDENTITY_MISMATCH");
+    }
+    let service = component
+        .get("service")
+        .filter(|value| value.is_object())
+        .ok_or_else(|| anyhow::anyhow!("SERVICE_COMPONENT_MANIFEST_MISSING"))?;
+    let mut manifest = ServiceManifest {
+        schema_version: SERVICE_MANIFEST_SCHEMA.into(),
+        manifest_id: String::new(),
+        component_id: request.name.clone(),
+        kind: TargetKind::HookConsumerService,
+        artifact_digest: artifact_digest.into(),
+        entrypoint: "artifact".into(),
+        runtime_profile: request.deployment_profile.clone(),
+        version: required_str(service, "version")?.into(),
+        required_contracts: request.required_contracts.clone(),
+        requested_permissions: request.requested_permissions.clone(),
+        listen_policy: ListenPolicy {
+            host: "127.0.0.1".into(),
+            port: 0,
+            exposure: "loopback".into(),
+        },
+        healthcheck: ServiceHealthcheck {
+            method: "GET".into(),
+            path: required_str(service, "healthcheck_path")?.into(),
+            timeout_ms: 10_000,
+        },
+        state_path: "state".into(),
+        upgrade_policy: UpgradePolicy {
+            strategy: "replace_after_ready".into(),
+            require_healthy_before_switch: true,
+        },
+        rollback_policy: RollbackPolicy {
+            retain_previous_versions: 2,
+            automatic_on_health_failure: true,
+        },
+    };
+    manifest.manifest_id = manifest.compute_manifest_id()?;
+    manifest.validate()?;
+    Ok(manifest)
+}
+
 fn string_set_matches(value: &Value, key: &str, expected: &[String]) -> Result<bool> {
     let values = value
         .get(key)
@@ -564,6 +634,38 @@ mod component_manifest_tests {
         })
     }
 
+    fn service_request() -> DevelopmentRequest {
+        let mut draft =
+            DevelopmentRequestDraft::new(TargetKind::HookConsumerService, "token-dashboard".into());
+        draft.requirements = vec!["consume durable model usage facts".into()];
+        draft.required_contracts = vec!["event.observe.v0".into()];
+        draft.requested_permissions = vec!["journal.observe".into()];
+        draft.acceptance_criteria = vec!["projection is rebuildable".into()];
+        DevelopmentRequest::from_draft(
+            draft,
+            "principal:test".into(),
+            "session:test".into(),
+            "message:service".into(),
+            "development:message:service".into(),
+            CONTRACT_CATALOG_VERSION.into(),
+        )
+        .unwrap()
+    }
+
+    fn service_component() -> Value {
+        json!({
+            "schema_version":"component-artifact-v1",
+            "component_id":"token-dashboard",
+            "kind":"hook_consumer_service",
+            "profile_id":"hook-consumer-service-v0",
+            "contract_catalog_version":CONTRACT_CATALOG_VERSION,
+            "required_contracts":["event.observe.v0"],
+            "requested_permissions":["journal.observe"],
+            "deployment_profile":"managed-service-v0",
+            "service":{"version":"0.1.0","healthcheck_path":"/health"}
+        })
+    }
+
     #[test]
     fn post_gate_manifest_must_match_requested_contracts_and_permissions() {
         let request = request();
@@ -573,5 +675,21 @@ mod component_manifest_tests {
         let mut escalated = component();
         escalated["requested_permissions"] = json!(["component.invoke", "deployment.effect"]);
         assert!(invocable_manifest(&request, &escalated, &digest).is_err());
+    }
+
+    #[test]
+    fn hook_consumer_manifest_becomes_a_restricted_service_contract() {
+        let request = service_request();
+        let digest = format!("sha256:{}", "b".repeat(64));
+        let manifest = service_manifest(&request, &service_component(), &digest).unwrap();
+        assert_eq!(manifest.component_id, "token-dashboard");
+        assert_eq!(manifest.entrypoint, "artifact");
+        assert_eq!(manifest.listen_policy.host, "127.0.0.1");
+        assert_eq!(manifest.listen_policy.port, 0);
+        assert_eq!(manifest.requested_permissions, ["journal.observe"]);
+
+        let mut escalated = service_component();
+        escalated["requested_permissions"] = json!(["journal.observe", "kernel.write"]);
+        assert!(service_manifest(&request, &escalated, &digest).is_err());
     }
 }

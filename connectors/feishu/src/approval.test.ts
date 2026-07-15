@@ -439,19 +439,22 @@ describe("pending proposal card", () => {
     );
   });
 
-  it("refuses to render calculator controls for another operation", async () => {
+  it("renders the same identity-bound controls for a managed component", async () => {
     (globalThis as any).fetch = mock.fn(() => Promise.resolve({
       ok: true, status: 200,
       json: () => Promise.resolve({ ...cardProposal(), operation_name: "external.other" }),
     }));
-    await assert.rejects(
-      () => sendPendingProposalCardReply(
-        { request: mock.fn() }, "om_1",
-        { kind: "capability_proposal_pending_v1", proposal_id: "proposal_abc" },
-        makeConfig(),
-      ),
-      /unsupported_proposal_operation/,
+    const requests: any[] = [];
+    await sendPendingProposalCardReply(
+      { request: async (request: any) => {
+        requests.push(request);
+        return { data: { message_id: "om_service" } };
+      } },
+      "om_1",
+      { kind: "capability_proposal_pending_v1", proposal_id: "proposal_abc" },
+      makeConfig(),
     );
+    assert.match(requests[0].data.content, /external\.other/);
   });
 
   it("GETs authoritative binding and replies with an interactive card", async () => {

@@ -38,6 +38,9 @@ impl super::JournalStore {
     /// The old snapshot remains immutable; the retired operation is never
     /// forwarded to an external harness, and no receipt is fabricated.
     pub fn initialize_registry(&self) -> Result<String> {
+        // Managed services have an independent immutable component snapshot.
+        // Initialize it before any early return from the operation-registry path.
+        self.initialize_component_registry()?;
         // Check if we already have a cached current_snapshot_id (idempotent).
         if self.current_snapshot_id.lock().unwrap().is_some() {
             return self
