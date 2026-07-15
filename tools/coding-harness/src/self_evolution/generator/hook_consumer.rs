@@ -52,11 +52,11 @@ pub(super) fn generate(
         load_existing(request, &candidate_id, &candidate)
     } else {
         let config = ModelConfig::from_env()?;
-        let mut source = model::generate_module(&config, request)?;
-        for repair_round in 0..=4 {
+        let mut source = model::generate_module_with_retry(&config, request)?;
+        for repair_round in 0..=3 {
             match compile_probe(&base, &candidate_id, request, &source) {
                 Ok(()) => break,
-                Err(CompileProbeError::Candidate(diagnostics)) if repair_round < 4 => {
+                Err(CompileProbeError::Candidate(diagnostics)) if repair_round < 3 => {
                     #[cfg(debug_assertions)]
                     eprintln!(
                         "generator compile probe failed before repair {}:\n{}",
