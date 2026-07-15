@@ -261,35 +261,29 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
         provider_tools: &[serde_json::Value],
         follow_ups: &[LlmFollowUp],
     ) -> Result<LlmOutput> {
-        let next = match self.llm.complete(LlmInput {
-            blocks: blocks.to_vec(),
-            user_text: user_text.to_string(),
-            granted_operations: run
-                .principal
-                .grants
-                .iter()
-                .map(|g| g.operation.clone())
-                .collect(),
-            provider_tools: provider_tools.to_vec(),
-            follow_ups: follow_ups.to_vec(),
-        }) {
+        let next = match self.complete_model_invocation(
+            journal,
+            run,
+            session,
+            follow_ups.len(),
+            LlmInput {
+                blocks: blocks.to_vec(),
+                user_text: user_text.to_string(),
+                granted_operations: run
+                    .principal
+                    .grants
+                    .iter()
+                    .map(|g| g.operation.clone())
+                    .collect(),
+                provider_tools: provider_tools.to_vec(),
+                follow_ups: follow_ups.to_vec(),
+            },
+        ) {
             Ok(next) => next,
             Err(_) => {
                 return self.handle_followup_llm_failure(journal, run, session);
             }
         };
-        if journal
-            .append_event(
-                JournalEventKind::LlmCompleted,
-                Some(&run.id),
-                Some(&session.id),
-                None,
-                next.journal_payload.clone(),
-            )
-            .is_err()
-        {
-            return self.handle_followup_llm_failure(journal, run, session);
-        }
         Ok(next)
     }
 

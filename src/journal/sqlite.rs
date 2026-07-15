@@ -82,7 +82,7 @@ impl JournalStore {
         let event_id = EventId::new();
         let created_at = Utc::now();
         let payload_json = serde_json::to_string(&payload)?;
-        let kind_text = format!("{:?}", kind);
+        let kind_text = kind.storage_name();
         let mut conn = self
             .conn
             .lock()
@@ -302,7 +302,7 @@ impl JournalStore {
         let mut previous_hash: Option<String> = None;
         for event in events {
             let payload_json = serde_json::to_string(&event.payload)?;
-            let kind_text = format!("{:?}", event.kind);
+            let kind_text = event.kind.storage_name();
             let expected = event_hash(
                 previous_hash.as_deref(),
                 event.sequence,
