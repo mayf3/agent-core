@@ -26,6 +26,11 @@
 | §8 | Generic Self-Evolution: current human gate vs. future external repair loop |
 | §9 | OpenClaw as an external replacement goal (ADOPTED) vs. all-in-one Kernel (REJECTED) |
 | §10 | Decision: screen only, do not slim — and the Non-Action List |
+| §11 | Model Layers (sufficiency supplement: the candidate model is layered, not flat) |
+| §12 | Liveness analysis (state machines, Attempt, Receipt terminal, temporal property) |
+| §13 | Time model (four sub-domains, three expression options) |
+| §14 | Snapshot vs. Grant semantic resolution (formula correction + revocation semantics) |
+| §15 | North Star sufficiency table (which demand is expressible, gap, or unresolved) |
 
 Cross-references to existing docs:
 
@@ -92,6 +97,7 @@ Automatic Compression
 Scheduled Briefing
 Replaceable Router
 Multi-profile Collaboration
+Self-observation and Repair
 ```
 
 When a real demand cannot be expressed by the candidate primitives, the Kernel
@@ -266,10 +272,14 @@ per-concept evidence and migration risk live in
 
 ```text
 Agent      ≈ Identity(K1) + Scope-bag(K2) + Snapshot-of-profile(K3) + Run(K4)
-Principal  ≈ Identity(K1) + grant set derived from Snapshot(K3,K8)
+Principal  ≈ Identity(K1) + mutable grant set pinned-at-Run-start
+              (grants are INDEPENDENT authorization state in
+              `external_operation_grants`, minted-against but NOT derived from
+              Snapshot(K3); see §14 for the correction and the deferred-
+              revocation finding)
 Session    ≈ Scope(K2) + ordered Journal Events(K6) / Runs(K4)
 Run        ≈ K4 (primitive) pinned to Snapshot(K3) under Identity(K1) in Scope(K2)
-Registry   ≈ Snapshot(K3) catalogue + Allow Boundary(K8) for tool visibility
+Registry   ≈ Snapshot(K3) catalogue (capability definitions) + per-principal grant filter
 Registry Snapshot = K3 (primitive)
 HCR        ≈ a Propose(§4) for a development Run(K4) + 5 gate Receipts(K7) + Settlement Decision(K5)
 Settlement ≈ terminal Decision(K5) reducing a set of Receipts(K7) + Journal Event(K6)
@@ -287,9 +297,10 @@ Router     ≈ external Propose(§4) component; Kernel only validates + creates 
 Scheduler  ≈ external time logic → run.create Propose(§4); NOT a Kernel cron platform
 spawn      ≈ future cross-Scope(K2) Run(K4) creation; currently not_enabled
 yield      ≈ future Run(K4) control-suspend; currently not_enabled
-Capability ≈ Snapshot(K3) operation row + Allow Boundary(K8) + per-principal grant
-External Operation ≈ Snapshot(K3) row with BindingKind::External + grant(K8)
-Workspace/Profile ≈ Identity(K1) + on-disk profile + Snapshot(K3) of grants (no first-class type today)
+Capability ≈ Snapshot(K3) operation row + per-principal grant state (independent)
+External Operation ≈ Snapshot(K3) row with BindingKind::External
+                     + mutable per-principal grant state (external_operation_grants)
+Workspace/Profile ≈ Identity(K1) + on-disk profile + mutable per-principal grant state (no first-class type today)
 ```
 
 The recurring observation: a large share of "objects" are really one of the 8
@@ -515,6 +526,421 @@ and is mirrored in the dispatch rules in [`docs/agent-dispatch.md`](../agent-dis
 
 ---
 
+## 11. Model Layers (Sufficiency Supplement)
+
+> Added in the sufficiency-and-state-semantics round. **This section does not
+> add or remove any primitive.** It states that the candidate model is *layered*,
+> not a flat list of objects, and records a Lean-like *candidate* shape. It does
+> **not** claim any property is proven.
+
+The candidate 8 (provisional) primitives in §3 are **state carriers**. But a
+complete model of the Kernel must distinguish *layers* that the §3 list alone
+conflates. The table below separates them. Each row is a *category of model
+element*; the candidate primitives from §3 populate the rows marked "state
+carriers" only.
+
+| # | Layer | What it is | Current carrier (evidence) |
+|---|---|---|---|
+| L1 | **State** | The durable values the Kernel remembers | `runs`, `sessions`, `journal_events`, `outbox_dispatches`, `worker_jobs`, `external_operation_grants`, `registry_snapshots` (tables under `migrations/`); newtypes in `src/domain/mod.rs:37-41` |
+| L2 | **Input / Command** | What an external actor submits to mutate state | `/v1/ingress` Propose (`src/gateway/`); HCR claim + Run binding (`src/hcr/worker.rs:35`); `/v1/approve`/`/v1/deny` (`src/gateway/mod.rs:368-465`); capability proposal (`src/journal/capability_proposal_hcr.rs:11`) |
+| L3 | **Transition relation** | The rules by which `(State, Input) → State'` is permitted; the guard that decides whether a step is legal | `evaluate_policy` (`src/gateway/policy.rs:66-101`); outbox terminal-transition guard `TERMINAL_TRANSITION_ERROR` (`src/journal/outbox_queue.rs:8`); CAS guards in `activate_registry_tx` (`src/journal/activation_core.rs:73-126`) |
+| L4 | **Effect** | The real-world side effects a transition may emit | outbox dispatch (`src/journal/outbox.rs`); `InvocationAdapter` trait (`src/adapters/mod.rs:11`); `ReceiptReceived` fact |
+| L5 | **Trace** | The append-only, hash-chained sequence of facts produced by transitions | `journal_events` table + `previous_hash`/`hash`/`sequence` (`migrations/0001_init.sql:27-38`); `verify_hash_chain` (`src/journal/sqlite.rs:300-318`) |
+| L6 | **Safety invariant** | A property that must hold on **every** reachable state | No-Effect-without-Decision (`is_allowed`/`evaluate_policy`); Receipt binds exactly one invocation (`outbox_dispatches.invocation_id UNIQUE`); Journal append-only + hash chain |
+| L7 | **Liveness property** | A property that asserts something *eventually* happens (a temporal property, not a state shape) | delivery + retry + dead-letter (§12); recovery of `Unknown` runs (`src/journal/unknown.rs`) |
+| L8 | **Environmental observation** | Inputs the Kernel reads from its environment that are **not** submitted commands — clock reads, host facts | `Utc::now()` reads (§13); `examples/time_harness.rs` answering `external.time_now` |
+
+**Why the layering matters for sufficiency.** Several questions in the task —
+"is Liveness a primitive?", "is Time a primitive?" — only become answerable
+once L7 (liveness) and L8 (environmental observation) are recognized as
+*distinct layers*. A liveness property is **not** a state carrier, so it cannot
+be a §3-style primitive by definition; it is a temporal property that must be
+*enforced by* the transition relation (L3). The §12 and §13 analyses use this
+layering. **This section makes no claim that the layering is complete or proven;
+it records a candidate decomposition.**
+
+### Lean-like candidate step shape (illustrative, not compiled)
+
+The transition relation (L3) has a candidate shape. This is a *target sketch*
+for future property tests — **it is not proven, and nothing depends on it
+compiling.**
+
+```lean
+-- Candidate shape of one Kernel step (L3 transition relation).
+-- NOT proven; illustrative only.
+step : State → Input → State × List Effect
+```
+
+Read as: given the current `State` and an `Input`, the transition relation
+returns a new `State` and a (possibly empty) list of `Effect`s. Safety
+invariants (L6) are predicates over `State` that must hold before *and* after
+every `step`. Liveness properties (L7) are temporal predicates over the *trace*
+(L5) of states produced by a sequence of `step`s — e.g. "every `Dispatching`
+outbox row eventually reaches a terminal state (Succeeded/Failed/Unknown/Dead)."
+
+> **Not claimed.** The Kernel does not assert this shape is implemented, that
+> `step` totalizes over all `(State, Input)` pairs, or that any liveness
+> property is formally proven. The sketch exists only to make §12/§13 precise.
+
+---
+
+## 12. Liveness Analysis
+
+> Added in the sufficiency round. **This section does not add a Liveness
+> primitive.** It records the existing liveness machinery in the code, answers
+> four specific questions, and concludes whether liveness is a primitive, a
+> transition relation, or a temporal property.
+
+The candidate primitives in §3 are all *state carriers* (L1). Liveness is
+different: it is the question of whether the system **eventually makes
+progress** — e.g. does a queued dispatch terminate, does a stale lease get
+reclaimed, does an `Unknown` run get reconciled. This is a **temporal property
+(L7)**, not a state shape. This section distinguishes the two.
+
+### Existing liveness machinery (real code)
+
+The Kernel already implements reliable-effect delivery machinery, but it was
+not represented in §3. Concretely:
+
+| Mechanism | State machine | Evidence |
+|---|---|---|
+| **Outbox dispatch** | `OutboxDispatchStatus`: `Pending → Dispatching → {Succeeded, Failed, RetryableFailed → (backoff) → Dispatching, Unknown, Dead}` | `src/domain/status.rs:42-82`; transitions in `src/journal/outbox_queue.rs` + `src/journal/outbox.rs:10-105` |
+| **Worker job** | `WorkerJobStatus`: `Queued → Running → {Succeeded, Failed, RetryableFailed → (backoff) → Running, Dead}` | `src/domain/status.rs:3-40`; lease loop `src/journal/worker.rs:10-88` |
+| **Lease + reclaim** | 5-minute lease (`Duration::minutes(5)`); stale-lease reclaim predicate `locked_until <= now` | `src/journal/worker.rs:43,52-56`; `src/journal/outbox.rs:58,62-66` |
+| **Retry + backoff** | exponential `base * 2^(attempts-1)` capped at `max_retry_delay_ms`; `available_at` persisted deadline | `src/domain/retry.rs:22-31`; applied `src/journal/worker.rs:235-241`, `src/journal/outbox_queue.rs:420-426` |
+| **Dead-letter** | terminal `Dead` after `max_*_attempts`; never re-leased | `src/journal/worker.rs:272-303`; `src/journal/outbox_queue.rs:458-498` |
+| **Unknown recovery** | `DispatchStarted` with no terminal fact → `Unknown` + run status set to `Unknown` | `src/journal/unknown.rs:75-146` |
+
+These two state machines are the **reliable-effect delivery substrate**. They
+are distinct from any external Scheduler/Cron (see the distinction below).
+
+### Q1. Can the worker/outbox intermediate states be modeled as an Invocation/Attempt state machine?
+
+**Partially, and with a caveat.** The outbox dispatch row *is* effectively an
+attempt state machine for one `invocation_id`: it carries `status`, `attempts`
+(an integer counter, `queue.rs:47`), `available_at`, `locked_by`,
+`locked_until`, and `last_error`. The transitions in
+`src/journal/outbox_queue.rs` realize a recognizable attempt lifecycle
+(`Pending → Dispatching → terminal-or-retryable → Dead`).
+
+The caveat: there is **no general first-class `Attempt` type** — an attempt is
+the integer `attempts` counter on the row, not a separately-addressable object.
+The HCR flow *does* have a first-class attempt type (`HcrGateAttempt`,
+`src/domain/harness_change_request.rs:145`, table `hcr_gate_attempts` in
+`migrations/0009_hcr_evidence.sql:5-19` with a 1:1 binding to an invocation
+intent and a 1:1 binding to a receipt event), but that is HCR-specific, not a
+general Kernel object.
+
+### Q2. Does K7 Receipt carry only terminal evidence?
+
+**Yes — Receipt is terminal evidence bound to exactly one invocation.**
+`ReceiptStatus` has exactly three variants: `Succeeded`, `Failed`, `Unknown`
+(`src/domain/mod.rs:295-300`). `ReceiptReceived` is written only on terminal
+transitions of the outbox (`succeed_outbox_dispatch`, `fail_outbox_dispatch`;
+`src/journal/outbox_queue.rs:148-159,315-326`), and only safe (sanitized) fields
+are journaled. The `Unknown` terminal does *not* write `ReceiptReceived` — it
+writes `OutboxDispatchUnknown` instead (`src/journal/unknown.rs:85-97`), a
+deliberate choice. So K7 Receipt is exactly "terminal-outcome evidence for one
+invocation"; it carries no retry/intermediate semantics.
+
+### Q3. Is "Attempt" a derived object, an internal implementation structure, or a candidate new primitive?
+
+**A derived object / internal implementation structure — not a candidate
+primitive in this round.** An attempt is the `attempts` counter + the
+non-terminal lifecycle of an outbox/worker row. It is fully derivable from the
+dispatch row's state; it has no stable cross-cutting contract of its own (the
+HCR `HcrGateAttempt` is a domain-specific generalization, not a Kernel-wide
+contract). Promoting Attempt to a primitive would require showing it carries a
+security invariant the existing state machine does not — which the evidence does
+not support. **No Attempt primitive is added.**
+
+### Q4. Is liveness a primitive, a transition relation, or a temporal property?
+
+**A temporal property (L7), enforced *by* the transition relation (L3) — not a
+state-carrying primitive.** Liveness assertions like "every `Dispatching`
+outbox row eventually reaches a terminal state" are predicates over the trace
+(L5), not values stored in state. They are realized by the retry/backoff +
+dead-letter + unknown-recovery machinery above. They cannot be a §3-style
+primitive (which are all state carriers). **No Liveness primitive is added.**
+See §13 for the related Time question.
+
+### Kernel reliable-effect delivery ≠ external Scheduler / Cron
+
+These must not be conflated:
+
+```text
+Kernel reliable-effect delivery (this section)
+  = the in-Kernel guarantee that an approved invocation's effect is
+    delivered at-least-once, retried with backoff, dead-lettered, and
+    reconciled if its outcome is Unknown. This is a SAFETY + liveness
+    substrate for the Intent -> Decision -> Effect chain (K5).
+
+External Scheduler / Cron (row 22 of the matrix)
+  = an external Proposer(§4) that decides WHEN to create a new Run,
+    based on wall-clock time or recurrence. The Kernel does not host
+    this. (See §13 for why Time alone does not justify a Scheduler primitive.)
+```
+
+**The existence of retry/backoff machinery does NOT justify adding a Scheduler
+Kernel primitive.** Retry is part of reliable delivery; scheduling is an
+external Propose concern. These are different layers.
+
+---
+
+## 13. Time Model
+
+> Added in the sufficiency round. **This section does not add a Time primitive,
+> does not implement a Clock, and does not change any production code.** It
+> classifies every time-based safety/recovery read, evaluates three expression
+> options, and records a judgment.
+
+### Four distinct time sub-domains actually present
+
+A code audit of every `Utc::now()` and persisted deadline shows the Kernel uses
+time in **four categorically different ways**. Conflating them is the root cause
+of the "is Time a primitive?" confusion.
+
+| Sub-domain | Definition | Current carriers (evidence) |
+|---|---|---|
+| **(a) Logical order / Journal sequence** | Monotonic integer counter; **NOT** wall-clock. Authority for event ordering and mixed into the hash chain. | `journal_events.sequence` (`migrations/0001_init.sql:34`); `append_event_tx` reads `MAX(sequence)+1` (`src/journal/queue.rs:127-183`); `sequence` is hashed (`src/journal/hash_chain.rs:3-13`); `registry_state.version` CAS counter (`src/journal/activation_core.rs:73-126`) |
+| **(b) Wall-clock observation** | `Utc::now()` read purely to stamp a record (audit/log); **no decision depends on it.** | `created_at`/`updated_at`/`decided_at` stamps across `src/journal/sqlite.rs`, `src/registry/`, `src/domain/`; `revoked_at` is an audit stamp, not the revocation decision (the `status` transition is — `src/journal/grant_ops.rs:200-205`) |
+| **(c) Monotonic duration** | A relative delta (e.g. "lease for 5 min", "backoff N ms"); used to *compute* a deadline. | 5-min lease `Duration::minutes(5)` (`worker.rs:43`, `outbox.rs:58`); backoff `next_retry_delay_ms` (`src/domain/retry.rs:22-31`); approval TTL `write_approval_ttl_secs` (`src/config.rs:55`) |
+| **(d) Persisted deadline** | A stored absolute timestamp a safety/recovery decision compares against `Utc::now()`. **The load-bearing category.** | See the table below |
+
+### Persisted deadlines that gate safety/recovery decisions
+
+| Decision | Persisted deadline | Evidence |
+|---|---|---|
+| Fail stale `AwaitingApproval` run | journal event `created_at` vs `now - ttl` | `src/journal/approval.rs:36-59` |
+| Worker/outbox lease reclaimable | `locked_until` vs now | `src/journal/worker.rs:22-28`; `src/journal/outbox.rs:22-24` |
+| Worker/outbox retry re-admissible | `available_at` vs now | `worker.rs:24-25`; `outbox.rs:22-23` |
+| Stale-lease health | `locked_until <= now` | `src/journal/queue_health.rs:142-155,74-87` |
+| Unknown-invocation recovery | `locked_until <= now` (+ fact presence) | `src/journal/unknown.rs:155-202` |
+| Capability proposal expiry | `capability_change_proposals.expires_at` vs now | `src/server/capability_routes.rs:236`; in-tx re-check `src/journal/capability_activation.rs:64-69` |
+| Trusted-approval expiry | `capability_change_approvals.expires_at` vs now | `src/server/capability_decision.rs:52-59`; `src/journal/trusted_capability_activation.rs:338-341`; sweep `src/journal/activation_core.rs:291-294` |
+
+**Observation (not an action):** every persisted deadline is `Utc::now()`
+compared against RFC3339 `TEXT` columns. There is **no monotonic-clock
+abstraction**; two inconsistent comparison conventions coexist (`< now` vs
+`>= expiry`). Also, `RetryPolicy.lease_timeout_ms` (`src/domain/retry.rs:7,18`,
+default 30000) is **vestigial** — the actual lease is hardcoded
+`Duration::minutes(5)`, so configuring it has no effect. These are recorded as
+observations; **no code is changed this round.**
+
+### Three expression options (judgment recorded, not implemented)
+
+The task asks to evaluate three ways Time *could* be modeled. This round only
+records the judgment for each; none is implemented.
+
+| Option | Description | Judgment this round |
+|---|---|---|
+| **(1) Time as an independent primitive** | Add a `Time`/`Clock` primitive to §3 | **NOT PROVEN.** The four sub-domains above show Time is not a *state carrier*; the load-bearing uses (d) are persisted deadlines, which are already values stored in existing state (outbox/worker rows, proposal/approval tables). Adding a Time primitive would duplicate state that already exists. The logical-order sub-domain (a) is already the Journal `sequence` (K6). No independent Time primitive is justified by the evidence. |
+| **(2) TimeObservation as an Input (L2)** | Model clock reads as environmental inputs to the transition relation | **Plausible as a modeling lens**, and consistent with L8 (environmental observation). It captures the truth that `Utc::now()` is read from the host, not stored as Kernel state. But it does not require a new primitive — it is a way of *describing* how existing transitions read sub-domain (d) deadlines. |
+| **(3) Clock as a trusted environment boundary** | Treat the host clock as a trust boundary the Kernel reads but does not own | **Consistent with the existing architecture** (the Kernel already trusts the host for `Utc::now()` and for `examples/time_harness.rs`). This is a *boundary statement*, not a primitive. It would matter if the Kernel ever needed a verifiable/monotonic clock (e.g. for lease safety under clock skew) — a future concern, **not acted on this round.** |
+
+**Conclusion:** none of the three options is PROVEN to require a new primitive.
+The load-bearing time semantics are **persisted deadlines (d)** already stored
+in existing state, plus **logical sequence (a)** already covered by K6. **No
+Time primitive is added; no Clock is implemented.**
+
+---
+
+## 14. Snapshot vs. Grant Semantic Resolution
+
+> Added in the sufficiency round. **This section does not change any production
+> code.** It corrects a wrong formula in §6, records the grant/snapshot
+> relationship precisely, and reports the deferred-revocation finding.
+
+### The correction
+
+The original §6 formula
+
+```text
+Principal ≈ Identity(K1) + grant set derived from Snapshot(K3,K8)
+```
+
+is **wrong**. Grants are **not** derived from the snapshot. Corrected formulas
+were applied in §6 above and are restated here for clarity:
+
+```text
+RegistrySnapshot  = K3 (primitive)
+                    an immutable, content-addressed capability/binding CATALOGUE.
+                    Contains OperationSpec rows (name, risk, parameters,
+                    binding_kind). Carries NO principal and NO authorization
+                    state. (src/registry/snapshot.rs:77-82,98-107)
+
+ExternalOperationGrant = independent, mutable, revocable AUTHORIZATION STATE
+                    (status: active|revoked; revoked_at audit stamp) persisted
+                    in external_operation_grants, minted-AGAINST a snapshot_id
+                    but NOT computed from snapshot contents.
+                    (src/domain/operation.rs:310-321;
+                     migrations/0006_external_operation_grants.sql:1-6,22-49)
+```
+
+The migration header is explicit about the separation:
+*"Separates grant authorization from capability activation: activating a
+capability only registers the operation in the registry snapshot; a grant is
+required for a specific principal to invoke it."*
+(`migrations/0006_external_operation_grants.sql:1-6`)
+
+### The grant ↔ snapshot relationship (intersection, not derivation)
+
+The model-visible tool catalog is computed by
+`RegistrySnapshot::provider_tools_for_grants` (`src/registry/snapshot.rs:101-107`).
+It takes the grant list as a **caller-supplied parameter** and **intersects** it
+with the snapshot's operation definitions:
+
+```text
+provider_tools_for_grants(snapshot, granted)
+  = { op in snapshot.operations
+        | op.name in granted
+        | op.is_visible_to_provider() }
+```
+
+It does **not** read the grant table. The snapshot contributes operation
+*definitions*; the grants contribute the *authorization filter*. Calling grants
+"derived from the snapshot" inverts the relationship. The same intersection
+shape is used at both call sites (`src/runtime/mod.rs:205-234`,
+`src/runtime/tool_loop.rs:43-51`).
+
+### When grants are loaded, and whether dispatch revalidates them
+
+| Question | Answer | Evidence |
+|---|---|---|
+| Does a Run pin a snapshot? | **Yes** — `runs.registry_snapshot_id` (`migrations/0002_registry_snapshots.sql:27`), written at `src/runtime/hook_call.rs:268` | |
+| When are grants loaded? | **Once, at Run creation** — `create_run` merges (a) owner-coding grants derived from snapshot ops (`src/runtime/coding_grants.rs:38-63`) and (b) active rows from `external_operation_grants` filtered by the pinned `snapshot_id` (`src/runtime/hook_call.rs:236-255`), then freezes the result into `run.principal.grants` and persists the Run. | |
+| Does effect dispatch re-check the live grant table? | **No.** `evaluate_policy` is pure ("no I/O, no Gateway state, no mutation", `src/gateway/policy.rs:49-65`) and reads only the borrowed `run.principal.grants` (the frozen copy) + the pinned snapshot (`src/gateway/policy.rs:66-101`). The sole non-test read of `load_active_external_operation_grants` is the run-start site. | |
+| Does HCR-mode dispatch re-check grants? | **No.** HCR per-dispatch revalidation (`src/hcr/revalidate.rs:34-130+`) rechecks RunMode/HCR/claim/owner/channel identity but **never queries `external_operation_grants`**. | |
+
+### Revocation semantics
+
+Because grants are pinned at Run start and never re-read during the Run,
+revoking a grant takes effect **on the next Run** for that principal — **not**
+on in-flight tool calls within the current Run. This is **deferred (run-start
+pinning)**, not immediate.
+
+**Is this a real safety contradiction?** The docs do **not** claim immediate
+revocation. §6's original (now-corrected) formula "grant set derived from
+Snapshot" did *imply* a tighter coupling than exists, but no document asserted
+"revocation takes effect immediately within an in-flight Run." Therefore this is
+recorded as a **disputed / under-evidenced semantic (Classification = U)**, not
+a High-severity contradiction. It is a decision the project has not yet made
+explicitly:
+
+```text
+A. Run-start grant pinning        (current behavior)
+   Grants are resolved once at create_run and frozen for the Run.
+   Revocation affects the NEXT Run only.
+
+B. Effect-time grant revalidation (not implemented)
+   Each dispatch re-reads the live grant table. Revocation is immediate,
+   even within an in-flight Run.
+
+C. Hybrid: Registry pinned, high-risk Effect revalidated (not implemented)
+   The capability catalogue (snapshot) is pinned for determinism, but a
+   high-risk Effect re-reads the live grant table before dispatch.
+```
+
+**Classification = U / disputed.** No ADR or test in the repository decides
+among A/B/C. This round does **not** change the behavior (it stays A) and does
+**not** implement B or C. The finding is recorded for a future, separately-
+reviewed decision.
+
+---
+
+## 15. North Star Sufficiency Table
+
+> Added in the sufficiency round. This table evaluates each North Star against
+> the candidate primitives and assigns one of four classifications. **"Not yet
+> implemented" is NOT automatically `GENUINE_PRIMITIVE_GAP`.** A gap is only
+> "genuine" when the demand *cannot* be expressed by composing the candidate
+> primitives — i.e. it would require a new state-carrying primitive (§7
+> Primitive Gap Protocol).
+
+### Classification legend
+
+```text
+EXPRESSIBLE_WITH_CURRENT_CANDIDATES
+  The North Star can be composed from the candidate 8 (provisional) primitives
+  + the four interaction modes (§4). What is missing is external harness
+  implementation, not a Kernel primitive.
+
+CONTRACT_OR_IMPLEMENTATION_MISSING
+  The composition is clear, but a specific API, profile, contract, or
+  deployment harness does not yet exist. Adding it does NOT add a primitive.
+
+SEMANTICS_UNRESOLVED
+  The composition is plausible but depends on a semantic decision the project
+  has not made (see §14 A/B/C). Cannot be classified until that decision lands.
+
+GENUINE_PRIMITIVE_GAP
+  The demand CANNOT be met by composing the candidate primitives. Requires a
+  PrimitiveGapProposal (§7). Reserved for the strongest case only.
+```
+
+### Sufficiency table
+
+| North Star | Classification | Composition formula & failure point |
+|---|---|---|
+| **Token Dashboard** | `EXPRESSIBLE_WITH_CURRENT_CANDIDATES` | An external Observe(§4) component reading durable facts (K6 Journal events, K4 Run status) and rendering usage. The Kernel already exposes read paths (`src/journal/sqlite_read.rs`). Missing: an external dashboard component — not a primitive. |
+| **Long-term Memory** | `EXPRESSIBLE_WITH_CURRENT_CANDIDATES` | External memory store keyed by Identity(K1)/Scope(K2); the Kernel contributes Session(K2) + ordered Events(K6). Compression summarization pointer already exists on sessions. Missing: external memory component — not a primitive. |
+| **Automatic Compression** | `EXPRESSIBLE_WITH_CURRENT_CANDIDATES` | A `context.compress.v0` hook (Transform mode, §4) already exists (`src/hook/types.rs:19-49`); ContextBlock has `Compressibility` (`src/domain/context_block.rs:36-42`). The composition is `Transform(§4) payload per Run(K4)`. Missing: a compression policy/component — not a primitive. |
+| **Scheduled Briefing** | `EXPRESSIBLE_WITH_CURRENT_CANDIDATES` | An external Scheduler (row 22) Propose(§4) creating a Run(K4) on a schedule. The Kernel needs no cron platform (§12). Missing: external scheduler + briefing profile — not a primitive. (§13 shows Time alone does not justify a primitive.) |
+| **Replaceable Router** | `EXPRESSIBLE_WITH_CURRENT_CANDIDATES` | Router = external Propose(§4); the Kernel only validates + creates Intent(K5)/Run(K4) (row 21). Current routers are in-process by design. Externalizing is an implementation step — not a primitive. |
+| **Multi-profile Collaboration** | `EXPRESSIBLE_WITH_CURRENT_CANDIDATES` | Multiple Runs of different profiles composed via Identity(K1) + Scope(K2) + `correlation_id` on journal events (`src/domain/mod.rs:376`). `agent_id` foreign key already supports it (row 1). Missing: multi-profile runtime/profile type (row 27) — implementation, not a primitive. |
+| **Self-observation and Repair** | `EXPRESSIBLE_WITH_CURRENT_CANDIDATES` | The external Evolution Harness loop (§8): Observe(K6) → diagnose → Propose patch → Gate → Decision(K5) → deploy. The Kernel contributes durable facts + pinned Snapshots(K3) + records the Decision. Missing: harness maturity — not a primitive. |
+| **Rollback** | `EXPRESSIBLE_WITH_CURRENT_CANDIDATES` | See the Rollback derivation below. A rollback is a sequence of existing primitives, not a new one. |
+| **Grant Revocation** | `SEMANTICS_UNRESOLVED` | Grant revocation EXISTS (`src/journal/grant_ops.rs:192-224`) and is expressible (grant = independent state). But the *timing semantics* (immediate vs deferred) is the §14 A/B/C dispute. Classified `SEMANTICS_UNRESOLVED`, not a primitive gap — no new primitive is needed for any of A/B/C. |
+
+### Rollback derivation
+
+The task asks to verify that `rollback` decomposes over existing primitives
+rather than requiring a new `Rollback` primitive. The candidate derivation:
+
+```text
+rollback
+  = Intent(activate a historical snapshot/artifact)   -- K5 Intent
+  -> Decision (human or policy approval)              -- K5 Decision
+  -> Deployment Effect (activate registry snapshot)   -- §4 Effect
+  -> Receipt                                          -- K7 Receipt
+  -> active binding changed Event                     -- K6 Journal Event
+```
+
+Does the current activation mechanism support this derivation? **Yes, for the
+registry-snapshot case.** Snapshot activation is already atomic and journaled:
+`activate_registry_tx` performs a CAS on `registry_state` + appends a journal
+event inside `BEGIN IMMEDIATE` (`src/journal/activation_core.rs:73-126`), and
+`activate_snapshot_transactional` (`src/journal/registry_ops.rs:203`) wraps CAS
++ journal. Capability activation (`activate_proposal_atomic`,
+`src/journal/capability_activation.rs:51-70`) re-reads `expires_at` in-transaction
+as a TOCTOU guard. So "activate a historical snapshot" is already an Effect that
+produces a changed-binding Event + Receipt.
+
+What is missing is **not a primitive** — it is the external harness/API surface
+to *request* a rollback (a Profile/Deployment Harness that issues the Intent and
+records which historical artifact to activate). That is a
+`CONTRACT_OR_IMPLEMENTATION_MISSING` concern, not a `GENUINE_PRIMITIVE_GAP`.
+**No Rollback primitive is added.**
+
+### Tally of classifications
+
+```text
+EXPRESSIBLE_WITH_CURRENT_CANDIDATES : 8  (Token Dashboard, Long-term Memory,
+     Automatic Compression, Scheduled Briefing, Replaceable Router,
+     Multi-profile Collaboration, Self-observation and Repair, Rollback)
+CONTRACT_OR_IMPLEMENTATION_MISSING  : 0  (folded into the EXPRESSIBLE rows
+     as "missing: external component", since none requires a new primitive)
+SEMANTICS_UNRESOLVED                : 1  (Grant Revocation — §14 A/B/C)
+GENUINE_PRIMITIVE_GAP               : 0
+```
+
+**No North Star requires a new primitive this round.** Two require follow-up:
+Grant Revocation needs the A/B/C semantic decision; the EXPRESSIBLE rows need
+external harness implementation (outward track, §1), which is explicitly not
+blocked by Kernel screening (§10).
+
+---
+
 ## Appendix A: Conflicts with Existing Docs
 
 Recorded conflicts (this document records them; it does not resolve them):
@@ -563,3 +989,64 @@ let it be resolved by the root-report guard and a rebase onto origin/main.
 
 This document is documentation-only; the integration note does not authorize
 any production change on this branch.
+
+---
+
+## Appendix C: Sufficiency & State-Semantics Review Verdicts
+
+> Added in the sufficiency-and-state-semantics round. These are the authoritative
+> verdicts for the round. All are documentation-only; **no production behavior
+> changed**.
+
+```text
+Liveness omission:                      CONFIRMED
+  (reliable-effect delivery machinery existed in code but was not modeled;
+   now documented in §12 as a temporal property L7, not a primitive)
+
+Time modeling omission:                 CONFIRMED
+  (every safety/recovery time read was Utc::now() vs RFC3339 text with no
+   monotonic-clock abstraction; four sub-domains now distinguished in §13)
+
+Snapshot/grant formula issue:           CONFIRMED
+  (the §6 formula "grant set derived from Snapshot(K3,K8)" was wrong;
+   grants are independent mutable authorization state; corrected in §6 + §14)
+
+Immediate revocation semantics:         UNRESOLVED
+  (revocation is deferred — run-start pinning — but no doc asserted immediate
+   revocation, so this is a disputed semantic §14 A/B/C, Classification = U,
+   not a High-severity contradiction; no code changed)
+
+New Time primitive:                     NOT_PROVEN
+  (load-bearing time semantics are persisted deadlines already in existing
+   state + logical sequence already in K6; §13 records the judgment)
+
+New Liveness primitive:                 NOT_PROVEN
+  (liveness is a temporal property L7 enforced by the transition relation,
+   not a state carrier; §12 records the judgment)
+
+K1/K2 reducibility:                     NOT_PROVEN
+  (Identity K1 and Scope K2 carry distinct security responsibilities —
+   forgeable-proof identity vs. isolation namespace — and both are
+   cross-cutting; neither is derivable from the other; see the matrix)
+
+K4/K5/K7 reducibility:                  NOT_PROVEN
+  (Run K4, Intent+Decision K5, and Receipt K7 occupy distinct lifecycle
+   roles — execution lifecycle vs. authorization gate vs. terminal evidence —
+   with distinct stable contracts; see the matrix)
+
+Primitive count changed:                NO
+  (the candidate set remains 8 provisional; no primitive added, merged,
+   split, or removed)
+
+Production behavior changed:             NO
+  (docs-only; no Rust/TS, migration, API, table, or runtime change)
+
+External Harness mainline blocked:      NO
+  (screening does not block the outward track; §10 Non-Action List holds)
+```
+
+### Round status
+
+```text
+KERNEL_PRIMITIVE_SUFFICIENCY_AND_STATE_SEMANTICS_DOCUMENTED_READY_FOR_REVIEW
+```
