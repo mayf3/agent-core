@@ -10,6 +10,7 @@ use anyhow::Result;
 use serde_json::json;
 pub(crate) mod coding_grants;
 pub(crate) mod hook_call;
+mod model_invocation;
 pub mod outbox_dispatcher;
 mod tool_execution;
 mod tool_loop;
@@ -281,13 +282,19 @@ where
 
         // Phase 1: initial LLM call. On failure, record RunFailed and deliver
         // a static notification (never a silent Err).
-        let first = match self.llm.complete(LlmInput {
-            blocks: blocks.clone(),
-            user_text: text.clone(),
-            granted_operations: granted_operations.clone(),
-            provider_tools: provider_tools.clone(),
-            follow_ups: vec![],
-        }) {
+        let first = match self.complete_model_invocation(
+            journal,
+            &run,
+            &session,
+            0,
+            LlmInput {
+                blocks: blocks.clone(),
+                user_text: text.clone(),
+                granted_operations: granted_operations.clone(),
+                provider_tools: provider_tools.clone(),
+                follow_ups: vec![],
+            },
+        ) {
             Ok(llm) => llm,
             Err(_) => {
                 journal.fail_run(&run.id)?;
@@ -310,13 +317,6 @@ where
                 );
             }
         };
-        journal.append_event(
-            JournalEventKind::LlmCompleted,
-            Some(&run.id),
-            Some(&session.id),
-            None,
-            first.journal_payload.clone(),
-        )?;
         // Phase 2: tool recall loop. Follow-up LLM failures are handled
         // internally (tool_loop::handle_followup_llm_failure records RunFailed
         // and returns a static failure LlmOutput).

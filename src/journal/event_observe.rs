@@ -108,7 +108,7 @@ pub fn redact_payload(payload: &Value) -> Value {
         Value::Object(map) => {
             let mut result = serde_json::Map::new();
             for (k, v) in map {
-                if is_sensitive_key(k) {
+                if is_sensitive_key(k) && !is_safe_usage_counter(k, v) {
                     result.insert(k.clone(), Value::String("[REDACTED]".to_string()));
                 } else {
                     result.insert(k.clone(), redact_payload(v));
@@ -119,6 +119,44 @@ pub fn redact_payload(payload: &Value) -> Value {
         Value::Array(arr) => Value::Array(arr.iter().map(redact_payload).collect()),
         other => other.clone(),
     }
+}
+
+#[cfg(test)]
+mod usage_counter_redaction_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn only_numeric_or_null_normalized_usage_counters_bypass_token_redaction() {
+        let redacted = redact_payload(&json!({
+            "input_tokens": 9,
+            "cached_input_tokens": null,
+            "output_tokens": "not-a-counter",
+            "access_token": 7,
+            "nested": {"reasoning_tokens": 2, "api_token": "secret"}
+        }));
+        assert_eq!(redacted["input_tokens"], 9);
+        assert_eq!(redacted["cached_input_tokens"], Value::Null);
+        assert_eq!(redacted["output_tokens"], "[REDACTED]");
+        assert_eq!(redacted["access_token"], "[REDACTED]");
+        assert_eq!(redacted["nested"]["reasoning_tokens"], 2);
+        assert_eq!(redacted["nested"]["api_token"], "[REDACTED]");
+    }
+}
+
+/// Token counters are operational measurements, not credentials. Only these
+/// exact normalized fields may bypass the broad `token` key redaction rule,
+/// and only when their value is numeric or null. Fields such as access_token,
+/// api_token, or a string-valued input_tokens remain redacted.
+fn is_safe_usage_counter(key: &str, value: &Value) -> bool {
+    matches!(
+        key.to_ascii_lowercase().as_str(),
+        "input_tokens"
+            | "cached_input_tokens"
+            | "output_tokens"
+            | "reasoning_tokens"
+            | "total_tokens"
+    ) && (value.is_number() || value.is_null())
 }
 
 fn is_sensitive_key(key: &str) -> bool {
