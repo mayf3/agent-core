@@ -51,7 +51,14 @@ fn live_token_dashboard_model_generation() {
         "request-driven-model-module-v0"
     );
     let candidate = root.join(result["candidate_ref"].as_str().unwrap());
-    let build = Command::new("cargo")
+    let mut build_command = Command::new("cargo");
+    build_command.env_clear();
+    for name in ["PATH", "HOME", "TMPDIR", "CARGO_HOME", "RUSTUP_HOME"] {
+        if let Some(value) = std::env::var_os(name) {
+            build_command.env(name, value);
+        }
+    }
+    let build = build_command
         .args(["build", "--release", "--locked"])
         .current_dir(&candidate)
         .output()
@@ -63,7 +70,9 @@ fn live_token_dashboard_model_generation() {
     );
     let page = r#"{"schema_version":"event.observe.v0","next_cursor":3,"has_more":false,"events":[{"event_id":"one","event_kind":"model.invocation.completed.v0","occurred_at":"2026-07-15T10:00:00Z","run_id":"run-one","payload":{"profile":"default","model":"model-a<img src=x onerror=alert(1)>","latency_ms":100,"input_tokens":10,"cached_input_tokens":2,"output_tokens":5,"reasoning_tokens":1,"total_tokens":16}},{"event_id":"two","event_kind":"model.invocation.completed.v0","occurred_at":"2026-07-15T11:00:00Z","run_id":"run-two","payload":{"profile":"analysis","model":"model-b","latency_ms":300,"input_tokens":20,"cached_input_tokens":3,"output_tokens":8,"reasoning_tokens":2,"total_tokens":30}},{"event_id":"three","event_kind":"model.invocation.failed.v0","occurred_at":"2026-07-15T12:00:00Z","run_id":"run-two","payload":{"profile":"analysis","model":"model-b","latency_ms":50,"error_category":"dependency_unavailable"}}]}"#;
     let binary = candidate.join("target/release/generated-hook-consumer");
-    let mut child = Command::new(binary)
+    let mut candidate_command = Command::new(binary);
+    candidate_command.env_clear();
+    let mut child = candidate_command
         .arg("--profile-contract-test")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
