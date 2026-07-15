@@ -100,10 +100,10 @@ pub(super) fn generate_module(
 pub(super) fn generate_module_with_retry(
     config: &ModelConfig,
     request: &DevelopmentRequest,
-) -> Result<String, GenerationError> {
+) -> Result<(String, usize), GenerationError> {
     for attempt in 0..3 {
         match generate_module(config, request) {
-            Ok(source) => return Ok(source),
+            Ok(source) => return Ok((source, attempt + 1)),
             Err(error) if attempt < 2 && retryable_initial_generation_error(error.code()) => {}
             Err(error) => return Err(error),
         }
