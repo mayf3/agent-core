@@ -40,6 +40,11 @@ up this root together with Kernel Journal backups. A rollout is healthy only
 after the Harness `/health`, Kernel `/health`, active component status, service
 health endpoint, and Journal deployment receipt all agree.
 
+Artifact and state roots must resolve to separate, non-overlapping absolute
+directories outside any Git worktree; `/`, the process working directory, and
+the user's home directory itself are rejected. Startup restricts both root
+directories to the owning user (`0700`).
+
 At startup the Harness validates and reconciles every active record before it
 binds its control listener. A missing healthy or rolled-back service is started
 on its prior port so the Kernel-published URL remains stable; a disabled
