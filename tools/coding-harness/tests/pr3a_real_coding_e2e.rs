@@ -41,12 +41,12 @@ fn authenticated_sentence_creates_real_pending_proposal() -> Result<()> {
     thread::sleep(Duration::from_millis(100));
 
     let journal = JournalStore::in_memory()?;
-    let config = helpers::kcfg(&artifact_root);
+    let config = owner_config(&artifact_root);
     let gateway = Gateway::new(config.clone());
     let session = journal.get_or_create_session(&SessionTarget {
         agent_id: config.agent_id.clone(),
         channel: ChannelKind::Feishu,
-        conversation_key: "oc_pr3a_north_star".to_string(),
+        conversation_key: "feishu:open_id:owner".to_string(),
     })?;
     let snapshot_id = journal.current_registry_snapshot_id()?;
     let run = Run {
@@ -154,7 +154,7 @@ fn same_message_twenty_way_is_exactly_once(
     let session = Arc::new(journal.get_or_create_session(&SessionTarget {
         agent_id: config.agent_id.clone(),
         channel: ChannelKind::Feishu,
-        conversation_key: "oc_pr3a_concurrent".to_string(),
+        conversation_key: "feishu:open_id:owner".to_string(),
     })?);
     let run = Arc::new(Run {
         id: RunId::new(),
@@ -251,12 +251,12 @@ fn same_message_twenty_way_is_exactly_once(
 fn missing_submit_grant_fails_before_hcr_creation() -> Result<()> {
     let artifact_root = unique_temp_dir("pr3a-no-grant");
     let journal = JournalStore::in_memory()?;
-    let config = helpers::kcfg(&artifact_root);
+    let config = owner_config(&artifact_root);
     let gateway = Gateway::new(config.clone());
     let session = journal.get_or_create_session(&SessionTarget {
         agent_id: config.agent_id.clone(),
         channel: ChannelKind::Feishu,
-        conversation_key: "oc_pr3a_no_grant".to_string(),
+        conversation_key: "feishu:open_id:owner".to_string(),
     })?;
     let run = Run {
         id: RunId::new(),
@@ -264,11 +264,11 @@ fn missing_submit_grant_fails_before_hcr_creation() -> Result<()> {
         agent_id: session.agent_id.clone(),
         trigger_event_id: EventId::new(),
         principal: RunPrincipal {
-            principal_id: PrincipalId("feishu:open_id:intruder".to_string()),
-            subject: PrincipalSubject::FeishuOpenId("intruder".to_string()),
+            principal_id: PrincipalId("feishu:open_id:owner".to_string()),
+            subject: PrincipalSubject::FeishuOpenId("owner".to_string()),
             source: PrincipalSource::Feishu,
             grants: vec![],
-            requester_id: Some("intruder".to_string()),
+            requester_id: Some("owner".to_string()),
         },
         parent_run_id: None,
         delegated_by: None,
@@ -315,6 +315,12 @@ fn development_request(
         format!("development:{source_message_id}"),
         CONTRACT_CATALOG_VERSION.to_string(),
     )?)
+}
+
+fn owner_config(artifact_root: &std::path::PathBuf) -> agent_core_kernel::config::KernelConfig {
+    let mut config = helpers::kcfg(artifact_root);
+    config.feishu_coding_owner_id = Some("owner".to_string());
+    config
 }
 
 fn unique_temp_dir(prefix: &str) -> std::path::PathBuf {
