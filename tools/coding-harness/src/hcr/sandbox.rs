@@ -192,8 +192,11 @@ fn wrap_linux_bubblewrap(
     bwrap.arg("/proc");
     bwrap.arg("--dev");
     bwrap.arg("/dev");
-    bwrap.arg("--bind");
-    bwrap.arg("/tmp");
+    // Give the child a private temporary filesystem. Binding the host /tmp
+    // read-write would let candidate code mutate files outside its workspace.
+    // A workspace located below /tmp is bound back explicitly immediately
+    // afterwards, so build output remains available to the Harness.
+    bwrap.arg("--tmpfs");
     bwrap.arg("/tmp");
 
     // Workspace read-write
@@ -414,6 +417,20 @@ mod tests {
             argv.contains(&"--unshare-net".to_string()),
             "Deny: --unshare-net must be present"
         );
+    }
+
+    /// Candidate code gets a private /tmp and must never receive a writable
+    /// bind of the host temporary directory.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn temporary_directory_is_private() {
+        let argv = bwrap_argv_for(NetworkPolicy::Deny);
+        assert!(argv
+            .windows(2)
+            .any(|args| args == ["--tmpfs", "/tmp"]));
+        assert!(!argv
+            .windows(3)
+            .any(|args| args == ["--bind", "/tmp", "/tmp"]));
     }
 
     /// LoopbackOnly must NOT add any network-weakening flag.  It relies
