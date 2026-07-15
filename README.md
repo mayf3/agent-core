@@ -52,6 +52,11 @@ kernel IPC contract.
 - [Phase 0 Plan](docs/phase0-plan.md)
 - [Design Doc](docs/design-doc.html)
 
+Architecture drafts (under `docs/architecture/`):
+
+- [Kernel Primitive Calculus](docs/architecture/kernel-primitive-calculus.md) — draft candidate primitive model (not a refactor plan)
+- [Primitive Screening Matrix](docs/architecture/primitive-screening-matrix.md) — per-concept code evidence and classification
+
 ## Current Commands
 
 ```bash
