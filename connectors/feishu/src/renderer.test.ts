@@ -33,7 +33,7 @@ describe("renderProposalPending", () => {
 });
 
 describe("renderProposalPendingCard", () => {
-  it("renders calculator scope and identity-bound actions", () => {
+  it("renders generic component scope and identity-bound actions", () => {
     const card = renderProposalPendingCard({
       proposal_id: "proposal_abc",
       operation_name: "external.calculator",
@@ -43,7 +43,7 @@ describe("renderProposalPendingCard", () => {
     });
     const raw = JSON.stringify(card);
     assert.match(raw, /external\.calculator/);
-    assert.match(raw, /加 \/ 减 \/ 乘 \/ 除/);
+    assert.match(raw, /组件 \/ 能力/);
     assert.match(raw, /批准/);
     assert.match(raw, /拒绝/);
     assert.match(raw, /approval_abc/);

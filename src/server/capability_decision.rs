@@ -21,15 +21,15 @@ const HOST_FAILURE: &str = "CAPABILITY_HOST_DEPLOY_FAILED";
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct TrustedDecisionBody {
-    decision: String,
-    approval_id: String,
-    decision_nonce: String,
-    principal_id: String,
-    expected_source_snapshot_id: String,
-    candidate_digest: String,
-    artifact_digest: String,
-    manifest_digest: String,
+pub(crate) struct TrustedDecisionBody {
+    pub(crate) decision: String,
+    pub(crate) approval_id: String,
+    pub(crate) decision_nonce: String,
+    pub(crate) principal_id: String,
+    pub(crate) expected_source_snapshot_id: String,
+    pub(crate) candidate_digest: String,
+    pub(crate) artifact_digest: String,
+    pub(crate) manifest_digest: String,
 }
 
 pub(crate) fn handle(
@@ -155,7 +155,7 @@ fn activation_failed(
     Ok(response(proposal_id, &input.approval_id, result))
 }
 
-fn parse_input(body: &Value) -> Result<TrustedDecisionBody> {
+pub(crate) fn parse_input(body: &Value) -> Result<TrustedDecisionBody> {
     let input: TrustedDecisionBody = serde_json::from_value(body.clone())
         .map_err(|_| CapabilityRouteError::InvalidRequest("invalid_trusted_decision".into()))?;
     if !matches!(input.decision.as_str(), "approved" | "rejected")
@@ -181,7 +181,7 @@ fn parse_input(body: &Value) -> Result<TrustedDecisionBody> {
     Ok(input)
 }
 
-fn decision_identity(
+pub(crate) fn decision_identity(
     proposal_id: &str,
     input: &TrustedDecisionBody,
 ) -> Result<TrustedDecisionIdentity> {
@@ -304,7 +304,11 @@ fn valid_host_id(value: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | ':' | '.'))
 }
 
-fn response(proposal_id: &str, approval_id: &str, result: TrustedDecisionResult) -> Value {
+pub(crate) fn response(
+    proposal_id: &str,
+    approval_id: &str,
+    result: TrustedDecisionResult,
+) -> Value {
     let status = match result.status {
         CapabilityApprovalStatus::Approved => "Activated",
         CapabilityApprovalStatus::Rejected => "Rejected",
@@ -323,7 +327,7 @@ fn response(proposal_id: &str, approval_id: &str, result: TrustedDecisionResult)
     })
 }
 
-fn map_trusted_error(error: anyhow::Error) -> anyhow::Error {
+pub(crate) fn map_trusted_error(error: anyhow::Error) -> anyhow::Error {
     let message = error.to_string();
     if message.contains("NOT_FOUND") {
         CapabilityRouteError::NotFound("trusted_approval_not_found".into()).into()
@@ -332,6 +336,8 @@ fn map_trusted_error(error: anyhow::Error) -> anyhow::Error {
         || message.contains("EXPIRED")
         || message.contains("SNAPSHOT_CHANGED")
         || message.contains("ALREADY_REGISTERED")
+        || message.contains("NOT_MONOTONIC")
+        || message.contains("IN_FLIGHT")
     {
         CapabilityRouteError::Conflict("trusted_decision_conflict".into()).into()
     } else if message.contains("MISMATCH") || message.contains("INVALID") {
@@ -345,7 +351,7 @@ fn internal(error: impl std::fmt::Display) -> anyhow::Error {
     CapabilityRouteError::Internal(format!("{error}")).into()
 }
 
-fn retryable_host_error() -> anyhow::Error {
+pub(crate) fn retryable_host_error() -> anyhow::Error {
     CapabilityRouteError::Internal("capability_host_deploy_uncertain".into()).into()
 }
 
