@@ -158,6 +158,43 @@ fn telemetry_request_contract_requires_dimensions_windows_and_runtime_metadata()
 }
 
 #[test]
+fn combined_probe_reports_profile_and_request_failures_together() {
+    let mut telemetry_request = request();
+    telemetry_request.requirements = vec!["Token usage dashboard".into()];
+    let output = json!({
+        "ok": true,
+        "schema_version": "hook-consumer-service-contract-v0",
+        "events_applied": 3,
+        "html_nonempty": true,
+        "html_safe": true,
+        "html_runtime_metadata": false,
+        "html_telemetry_metrics": true,
+        "html_average_latency": true,
+        "rendered": {
+            "by_date": {"2026-07-15": {"input":10,"cached":2,"output":5,"reasoning":1,"latency":50,"failures":1,"unavailable":1}},
+            "by_run": {"run-1": {}},
+            "by_model": {"model-a": {}},
+            "by_profile": {"default": {}},
+            "rolling_windows": {
+                "1_day": {"calls":2,"latency_ms":50,"failures":1,"unavailable":1},
+                "7_day": {"calls":2,"latency_ms":50,"failures":1,"unavailable":1},
+                "30_day": {"calls":2,"latency_ms":50,"failures":1,"unavailable":1}
+            },
+            "telemetry_unavailable": false,
+            "last_observed_cursor": 3,
+            "projection_lag": "caught_up",
+            "component_version": "0.1.0",
+            "health": "ready"
+        }
+    });
+    let error = validate_contracts(&telemetry_request, &output.to_string()).unwrap_err();
+    assert!(error.contains("html_runtime_metadata"));
+    assert!(error.contains("overall-1-day-average-latency=25"));
+    assert!(error.contains("overall-30-day-average-latency=25"));
+    assert!(error.contains("HTML_RUNTIME_METADATA_CONTRACT"));
+}
+
+#[test]
 fn telemetry_request_source_rejects_frozen_ingest_time_windows() {
     let mut telemetry_request = request();
     telemetry_request.requirements = vec!["Token usage dashboard".into()];
