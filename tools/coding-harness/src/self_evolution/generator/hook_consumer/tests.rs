@@ -144,6 +144,17 @@ fn telemetry_request_contract_requires_dimensions_windows_and_runtime_metadata()
         "30day": {"calls": 2, "latency_avg": 25, "unavailable_count": 1, "failures": 1}
     });
     assert!(validate_request_contract(&telemetry_request, &rolling_windows.to_string()).is_ok());
+
+    rolling_windows["rendered"]["rolling_windows"] = Value::Null;
+    rolling_windows["rendered"]["windows"] = json!({
+        "1_day": {"models": {"model-a": {"calls": 1}}, "total": {"calls": 2, "avg_latency_ms": 25, "unavailable_count": 1, "failures": 1}},
+        "7_day": {"models": {"model-a": {"calls": 1}}, "total": {"calls": 2, "avg_latency_ms": 25, "unavailable_count": 1, "failures": 1}},
+        "30_day": {"models": {"model-a": {"calls": 1}}, "total": {"calls": 2, "avg_latency_ms": 25, "unavailable_count": 1, "failures": 1}}
+    });
+    assert!(validate_request_contract(&telemetry_request, &rolling_windows.to_string()).is_ok());
+
+    rolling_windows["rendered"]["windows"]["1_day"]["total"] = Value::Null;
+    assert!(validate_request_contract(&telemetry_request, &rolling_windows.to_string()).is_err());
 }
 
 #[test]
