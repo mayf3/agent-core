@@ -125,7 +125,7 @@ fn do_accept(
     let gate_run = run_all_gates_for_acceptance(&snapshot);
     let results = gate_run.results;
     let outcome = classify_outcome(&results);
-    let (_gate_artifact_ref, artifact_digest) = extract_artifact(&results);
+    let artifact_digest = extract_artifact(&results);
 
     // Persist the exact verified executable bytes in the shared content store.
     // The digest returned by the Artifact gate must match the store's digest.
@@ -142,6 +142,27 @@ fn do_accept(
             return Err("ARTIFACT_STORE_DIGEST_MISMATCH".to_string());
         }
         Some(stored.as_str().to_string())
+    } else {
+        None
+    };
+
+    // Store the exact canonical component manifest that the accepted candidate
+    // was gated against. Kernel later reloads this digest instead of trusting
+    // the pre-acceptance submit response.
+    let component_manifest_digest = if outcome == "CandidatePassed" {
+        let raw = std::fs::read(snapshot.candidate_path.join("manifest.json"))
+            .map_err(|e| format!("COMPONENT_MANIFEST_READ: {e}"))?;
+        let value: Value =
+            serde_json::from_slice(&raw).map_err(|e| format!("COMPONENT_MANIFEST_PARSE: {e}"))?;
+        let canonical =
+            serde_json::to_vec(&value).map_err(|e| format!("COMPONENT_MANIFEST_CANONICAL: {e}"))?;
+        Some(
+            agent_core_kernel::capabilities::store::ContentStore::new(artifact_root.to_path_buf())
+                .store(&canonical)
+                .map_err(|e| format!("COMPONENT_MANIFEST_STORE: {e}"))?
+                .as_str()
+                .to_string(),
+        )
     } else {
         None
     };
@@ -173,6 +194,7 @@ fn do_accept(
         &outcome,
         artifact_ref.as_deref(),
         artifact_digest.as_deref(),
+        component_manifest_digest.as_deref(),
     );
 
     let evidence_bytes = canonical_evidence_bytes(
@@ -184,6 +206,7 @@ fn do_accept(
         &outcome,
         artifact_ref.as_deref(),
         artifact_digest.as_deref(),
+        component_manifest_digest.as_deref(),
     );
     let stored_evidence =
         agent_core_kernel::capabilities::store::ContentStore::new(artifact_root.to_path_buf())
@@ -209,6 +232,7 @@ fn do_accept(
         gate_results: gate_entries,
         artifact_ref,
         artifact_digest,
+        component_manifest_digest,
         evidence_digest,
     })
 }
@@ -231,20 +255,17 @@ fn classify_outcome(results: &[GateResult]) -> String {
     "InfrastructureFailure".into()
 }
 
-fn extract_artifact(results: &[GateResult]) -> (Option<String>, Option<String>) {
+fn extract_artifact(results: &[GateResult]) -> Option<String> {
     for r in results {
         if r.gate_kind == GateKind::Artifact && r.passed {
             let digest = r
                 .computed_artifact_digest
                 .clone()
                 .unwrap_or_else(|| "unknown".into());
-            return (
-                Some("target/release/calculator-harness".into()),
-                Some(digest),
-            );
+            return Some(digest);
         }
     }
-    (None, None)
+    None
 }
 
 fn validate_gate_consistency(
