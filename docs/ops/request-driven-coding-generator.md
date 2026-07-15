@@ -23,9 +23,12 @@ load Feishu, Kernel IPC, Approval, Deployment control, or observer credentials
 into the Coding Harness process.
 
 The Kernel gives `external.coding_task_submit` a bounded fifteen-minute transport
-window. Model calls are individually capped at 75 seconds, compile probes at 60
-seconds, and contract probes at 15 seconds; therefore the initial pass plus all
-four permitted repairs remain inside that outer envelope. Other external
+window. A rejected initial response may be discarded and retried twice without
+returning policy diagnostics to the model. A source that passes source policy
+may then receive at most three diagnostic-guided repairs across four probe
+cycles. Model calls are individually capped at 75 seconds, compile probes at 60
+seconds, and contract probes at 15 seconds. The worst case is six model calls
+plus four probe cycles (750 seconds), inside the outer envelope. Other external
 operations keep the normal Harness timeout.
 
 ## Verification

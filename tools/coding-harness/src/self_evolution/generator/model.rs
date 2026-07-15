@@ -97,6 +97,27 @@ pub(super) fn generate_module(
     )
 }
 
+pub(super) fn generate_module_with_retry(
+    config: &ModelConfig,
+    request: &DevelopmentRequest,
+) -> Result<String, GenerationError> {
+    for attempt in 0..3 {
+        match generate_module(config, request) {
+            Ok(source) => return Ok(source),
+            Err(error) if attempt < 2 && retryable_initial_generation_error(error.code()) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("the final generation attempt always returns")
+}
+
+fn retryable_initial_generation_error(code: &str) -> bool {
+    matches!(
+        code,
+        "GENERATOR_MODEL_UNAVAILABLE" | "GENERATOR_MODEL_RESPONSE_INVALID"
+    ) || code.starts_with("GENERATOR_MODEL_OUTPUT_")
+}
+
 pub(super) fn repair_module(
     config: &ModelConfig,
     request: &DevelopmentRequest,
