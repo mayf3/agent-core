@@ -5,6 +5,8 @@ mod capability_approvals;
 mod capability_proposal_hcr;
 pub mod capability_proposals;
 mod coding_task_submissions;
+pub(crate) mod component_control;
+mod component_registry;
 mod conversation;
 pub mod event_observe;
 pub mod grant_ops;
@@ -27,6 +29,7 @@ mod sqlite_read;
 pub mod test_helpers;
 pub mod trusted_capability_activation;
 mod trusted_capability_validation;
+mod trusted_service_activation;
 mod unknown;
 mod worker;
 

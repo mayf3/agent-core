@@ -1,7 +1,7 @@
 //! Decision-time revalidation of the full Proposal -> HCR trust chain.
 
 use super::activation_core::Binding;
-use super::trusted_capability_activation::{TrustedDecisionIdentity, CALCULATOR};
+use super::trusted_capability_activation::TrustedDecisionIdentity;
 use crate::capabilities::store::Sha256Digest;
 use crate::domain::{AgentId, RunPrincipal};
 use anyhow::{bail, Result};
@@ -109,16 +109,23 @@ fn validate_identity(b: &Binding, i: &TrustedDecisionIdentity, agent: &AgentId) 
         || b.proposal_manifest != i.manifest_digest
         || b.approval_manifest != i.manifest_digest
         || b.proposal_evidence != b.link_evidence
-        || b.link_operation != CALCULATOR
         || b.proposal_expires_at != b.approval_expires_at
     {
         bail!("TRUSTED_APPROVAL_BINDING_MISMATCH");
     }
     let ops: Vec<String> = serde_json::from_str(&b.requested_operations)?;
-    if ops != [CALCULATOR] {
+    if ops != [b.link_operation.clone()] || !safe_target_name(&b.link_operation) {
         bail!("TRUSTED_APPROVAL_OPERATION_MISMATCH");
     }
     Ok(())
+}
+
+fn safe_target_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"._-".contains(&byte)
+        })
 }
 
 fn validate_authoritative_hcr(conn: &Connection, b: &Binding) -> Result<()> {

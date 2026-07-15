@@ -209,9 +209,9 @@ pub fn handle_decision(
     let proposal = journal
         .load_proposal(proposal_id)?
         .ok_or_else(|| CapabilityRouteError::NotFound("proposal_not_found".into()))?;
-    // external.calculator is never allowed through the legacy digest-only
-    // decision path. A missing HCR/Approval link therefore fails closed in
-    // the trusted handler instead of falling back.
+    // HCR-derived proposals are never allowed through the legacy digest-only
+    // path. Their Approval/HCR identities must be revalidated at decision
+    // time and effects must go through their dedicated external harness.
     if proposal.requested_operations == ["external.calculator"] {
         return super::capability_decision::handle(
             journal,
@@ -220,6 +220,9 @@ pub fn handle_decision(
             body,
             config_agent_id,
         );
+    }
+    if journal.load_proposal_hcr_link(proposal_id)?.is_some() {
+        return super::service_decision::handle(journal, store, proposal_id, body, config_agent_id);
     }
     let input: DecisionBody = serde_json::from_value(body.clone())
         .map_err(|e| CapabilityRouteError::InvalidRequest(format!("{e}")))?;
