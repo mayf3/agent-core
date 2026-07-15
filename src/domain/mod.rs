@@ -8,19 +8,25 @@ pub mod capability_approval;
 pub mod capability_change;
 pub mod capability_proposal_link;
 pub mod coding_operations;
+pub mod component_registry;
 pub mod context_block;
+pub mod deployment;
 pub mod harness_change_request;
 pub mod operation;
 pub mod retry;
 pub mod self_evolution;
+pub mod service_manifest;
 pub mod status;
 pub use capability_approval::*;
 pub use capability_proposal_link::*;
+pub use component_registry::*;
 pub use context_block::*;
+pub use deployment::*;
 pub use harness_change_request::*;
 pub use operation::*;
 pub use retry::*;
 pub use self_evolution::*;
+pub use service_manifest::*;
 pub use status::*;
 
 macro_rules! id_type {
@@ -487,6 +493,19 @@ pub enum JournalEventKind {
     CapabilityChangeActivated,
     CapabilityChangeActivationFailed,
     CapabilityChangeExpired,
+    /// An approved managed-service deployment request, before any external effect.
+    DeploymentIntentRecorded,
+    /// Validated terminal receipt returned by the external Deployment Harness.
+    DeploymentReceiptRecorded,
+    /// Managed component binding published into an immutable component snapshot.
+    ComponentRegistered,
+    /// Owner-authorized managed component control intent, recorded before effect.
+    ComponentControlIntentRecorded,
+    /// Validated external receipt for a managed component control effect.
+    ComponentControlReceiptRecorded,
+    /// Managed component lifecycle governance facts.
+    ComponentDisabled,
+    ComponentRolledBack,
     /// External operation grant lifecycle events.
     /// payload: `grant_id`, `operation`, `grantee_principal_id`, `channel`,
     ///          `scope`, `risk`, `snapshot_id`
@@ -556,6 +575,13 @@ impl JournalEventKind {
             Self::ModelInvocationStarted => "model.invocation.started.v0".into(),
             Self::ModelInvocationCompleted => "model.invocation.completed.v0".into(),
             Self::ModelInvocationFailed => "model.invocation.failed.v0".into(),
+            Self::DeploymentIntentRecorded => "deployment.intent.v0".into(),
+            Self::DeploymentReceiptRecorded => "deployment.receipt.v0".into(),
+            Self::ComponentRegistered => "component.registered.v0".into(),
+            Self::ComponentControlIntentRecorded => "component.control.intent.v0".into(),
+            Self::ComponentControlReceiptRecorded => "component.control.receipt.v0".into(),
+            Self::ComponentDisabled => "component.disabled.v0".into(),
+            Self::ComponentRolledBack => "component.rolled_back.v0".into(),
             other => format!("{other:?}"),
         }
     }
