@@ -346,7 +346,7 @@ impl QueuedStub {
 }
 
 const TOOL_CALL_RESPONSE: &str = r#"{"choices":[{"message":{"content":"","tool_calls":[{"id":"call_stub_1","type":"function","function":{"name":"system.status","arguments":"{}"}}]}}],"model":"stub"}"#;
-const TEXT_RESPONSE: &str = r#"{"choices":[{"message":{"content":"The current time was retrieved successfully."}}],"model":"stub"}"#;
+const TEXT_RESPONSE: &str = r#"{"choices":[{"message":{"content":"The current time was retrieved successfully."},"finish_reason":"stop"}],"model":"stub","usage":{"prompt_tokens":13,"completion_tokens":5,"total_tokens":18,"prompt_tokens_details":{"cached_tokens":4},"completion_tokens_details":{"reasoning_tokens":2},"cache_write_tokens":3,"secret_key":"must-not-leak","raw_note":"must-not-leak"}}"#;
 
 #[test]
 fn stub_http_provider_completes_tool_loop() -> Result<()> {
@@ -405,6 +405,29 @@ fn stub_http_provider_completes_tool_loop() -> Result<()> {
         outcome.run_id.0
     );
     let receipt = receipt.unwrap();
+
+    let model_completions: Vec<_> = events
+        .iter()
+        .filter(|event| {
+            event.kind == JournalEventKind::ModelInvocationCompleted
+                && event.run_id.as_ref() == Some(&outcome.run_id)
+        })
+        .collect();
+    assert_eq!(model_completions.len(), 3);
+    let final_model_receipt = model_completions
+        .iter()
+        .find(|event| event.payload["round_index"] == 2)
+        .expect("final model receipt");
+    assert_eq!(final_model_receipt.payload["total_tokens"], 18);
+    assert_eq!(final_model_receipt.payload["estimated_cost"], Value::Null);
+    assert_eq!(
+        final_model_receipt.payload["provider_usage_extensions"]["cache_write_tokens"],
+        3
+    );
+    let model_telemetry = serde_json::to_string(&model_completions)?;
+    assert!(!model_telemetry.contains("what time is it"));
+    assert!(!model_telemetry.contains("must-not-leak"));
+
     // The Receipt must share the correlation_id (invocation_id) with the
     // Approved fact — proving they refer to the same tool invocation.
     let approved = events.iter().find(|e| {
