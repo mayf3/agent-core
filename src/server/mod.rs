@@ -12,12 +12,15 @@ mod coding_delivery;
 mod coding_harness_client;
 pub mod coding_router;
 pub mod coding_task_submit;
+mod component_control;
 mod delivery;
+mod deployment_harness_client;
 mod dispatcher_metrics;
 mod event_observe_http;
 mod harness_change_request;
 pub mod harness_routes;
 mod hcr_acceptance;
+mod service_decision;
 use anyhow::{bail, Result};
 #[cfg(test)]
 pub(crate) use delivery::build_llm_from_config;
@@ -163,7 +166,8 @@ fn handle_connection(
     let method_allows = request.method == "POST"
         || (request.method == "GET"
             && (request.path.starts_with(GET_CAP_PREFIX)
-                || request.path.starts_with("/v1/events")));
+                || request.path.starts_with("/v1/events")
+                || request.path.starts_with("/v1/components/")));
     if !method_allows || !request.path.starts_with("/v1/") {
         return write_json(stream, 404, json!({ "ok": false, "error": "not_found" }));
     }
@@ -181,12 +185,10 @@ fn handle_connection(
     )? {
         return Ok(());
     }
-    // ---- All other /v1/ routes require the IPC bearer token ----
-    if bearer != config.ipc_token.as_str() {
-        return write_json(stream, 401, json!({ "ok": false, "error": "unauthorized" }));
-    } else if path == "/v1/ingress" {
-        handle_ingress(stream, &gateway, &journal, &request)
-    } else if path.starts_with("/v1/events") {
+    // event.observe accepts either the full IPC token or its dedicated,
+    // read-only observer token. The observer token is never accepted by any
+    // mutation route.
+    if path.starts_with("/v1/events") {
         event_observe_http::try_handle_event_observe(
             stream,
             path,
@@ -196,7 +198,13 @@ fn handle_connection(
             config,
             &journal,
         )?;
-        Ok(())
+        return Ok(());
+    }
+    // ---- All other /v1/ routes require the IPC bearer token ----
+    if bearer != config.ipc_token.as_str() {
+        return write_json(stream, 401, json!({ "ok": false, "error": "unauthorized" }));
+    } else if path == "/v1/ingress" {
+        handle_ingress(stream, &gateway, &journal, &request)
     } else if path == "/v1/approve" {
         handle_approval_decision(stream, &gateway, &journal, &request, true)
     } else if path == "/v1/deny" {
@@ -475,6 +483,21 @@ fn validate_capability_tokens(config: &KernelConfig) -> Result<()> {
     if let Some(ref dec) = config.capability_decision_token {
         if dec == &config.ipc_token {
             bail!("capability_token_collision: decision token must differ from IPC token");
+        }
+    }
+    if let Ok(observer) = std::env::var("AGENT_CORE_EVENT_OBSERVE_TOKEN") {
+        let observer = observer.trim();
+        if observer.len() < 32
+            || observer.len() > 512
+            || observer.bytes().any(|byte| byte.is_ascii_whitespace())
+        {
+            bail!("event_observe_token_invalid");
+        }
+        if observer == config.ipc_token
+            || config.capability_submit_token.as_deref() == Some(observer)
+            || config.capability_decision_token.as_deref() == Some(observer)
+        {
+            bail!("event_observe_token_collision");
         }
     }
     Ok(())

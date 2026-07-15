@@ -318,7 +318,11 @@ impl super::JournalStore {
     }
 }
 
-fn validate_pending(conn: &Connection, b: &Binding, i: &TrustedDecisionIdentity) -> Result<()> {
+pub(super) fn validate_pending(
+    conn: &Connection,
+    b: &Binding,
+    i: &TrustedDecisionIdentity,
+) -> Result<()> {
     validate_decidable(b)?;
     let active: String = conn.query_row(
         "SELECT active_snapshot_id FROM registry_state WHERE singleton_id=1",
@@ -331,7 +335,7 @@ fn validate_pending(conn: &Connection, b: &Binding, i: &TrustedDecisionIdentity)
     Ok(())
 }
 
-fn validate_decidable(b: &Binding) -> Result<()> {
+pub(super) fn validate_decidable(b: &Binding) -> Result<()> {
     if b.approval_status != "Pending" || b.proposal_status != "PendingApproval" {
         bail!("APPROVAL_NOT_PENDING");
     }
@@ -342,7 +346,7 @@ fn validate_decidable(b: &Binding) -> Result<()> {
     Ok(())
 }
 
-fn replay_result(
+pub(super) fn replay_result(
     b: &Binding,
     i: &TrustedDecisionIdentity,
     expected: &str,
@@ -372,7 +376,7 @@ fn replay_result(
     Ok(result)
 }
 
-fn persist_terminal(
+pub(super) fn persist_terminal(
     tx: &rusqlite::Transaction<'_>,
     b: &Binding,
     i: &TrustedDecisionIdentity,

@@ -134,6 +134,48 @@ pub(crate) fn try_handle_capability_request(
         return write_response(stream, status, resp_body).map(|_| true);
     }
 
+    if let Some(remainder) = path.strip_prefix("/v1/components/") {
+        let parts: Vec<&str> = remainder.split('/').collect();
+        if method == "GET" && parts.len() == 1 {
+            let authed = crate::server::capability_routes::capability_token_matches(
+                bearer,
+                &config.capability_decision_token,
+            ) || crate::server::capability_routes::capability_token_matches(
+                bearer,
+                &config.capability_submit_token,
+            );
+            if !authed {
+                return write_response(stream, 401, json!({"error":"unauthorized"})).map(|_| true);
+            }
+            let result = crate::server::component_control::observe(journal, parts[0]);
+            let (status, response) =
+                crate::server::capability_routes::map_capability_result(result)?;
+            return write_response(stream, status, response).map(|_| true);
+        }
+        if method == "POST" && parts.len() == 2 && matches!(parts[1], "disable" | "rollback") {
+            if !crate::server::capability_routes::capability_token_matches(
+                bearer,
+                &config.capability_decision_token,
+            ) {
+                return write_response(stream, 401, json!({"error":"unauthorized"})).map(|_| true);
+            }
+            let body: Value = match serde_json::from_slice(body_bytes) {
+                Ok(body) => body,
+                Err(_) => {
+                    return write_response(stream, 400, json!({"error":"invalid_json"}))
+                        .map(|_| true)
+                }
+            };
+            let result = crate::server::component_control::handle(
+                journal, config, parts[0], parts[1], &body,
+            );
+            let (status, response) =
+                crate::server::capability_routes::map_capability_result(result)?;
+            return write_response(stream, status, response).map(|_| true);
+        }
+        return write_response(stream, 404, json!({"error":"not_found"})).map(|_| true);
+    }
+
     Ok(false)
 }
 
