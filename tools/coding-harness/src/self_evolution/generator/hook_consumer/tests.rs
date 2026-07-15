@@ -155,6 +155,20 @@ fn telemetry_request_contract_requires_dimensions_windows_and_runtime_metadata()
 
     rolling_windows["rendered"]["windows"]["1_day"]["total"] = Value::Null;
     assert!(validate_request_contract(&telemetry_request, &rolling_windows.to_string()).is_err());
+
+    rolling_windows["rendered"]["windows"] = Value::Null;
+    for days in [1, 7, 30] {
+        rolling_windows["rendered"][format!("{days}_day")] = json!({
+            "calls": 2,
+            "avg_latency_ms": 25,
+            "unavailable_count": 1,
+            "failures": 1
+        });
+    }
+    assert!(validate_request_contract(&telemetry_request, &rolling_windows.to_string()).is_ok());
+
+    rolling_windows["rendered"]["1_day"]["calls"] = json!(1);
+    assert!(validate_request_contract(&telemetry_request, &rolling_windows.to_string()).is_err());
 }
 
 #[test]
