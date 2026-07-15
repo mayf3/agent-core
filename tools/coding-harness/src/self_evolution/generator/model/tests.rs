@@ -157,8 +157,9 @@ fn initial_generation_accepts_a_safe_third_response() {
             stream.write_all(response.as_bytes()).unwrap();
         }
     });
-    let (generated, attempts) = generate_module_with_retry(&ModelConfig::for_test(endpoint), &request())
-        .expect("the third safe response should be accepted");
+    let (generated, attempts) =
+        generate_module_with_retry(&ModelConfig::for_test(endpoint), &request())
+            .expect("the third safe response should be accepted");
     server.join().unwrap();
     assert_eq!(attempts, 3);
     assert_eq!(
