@@ -27,7 +27,7 @@ pub(crate) fn check(candidate: &CandidateSnapshot, ctx: &GateContext) -> GateRes
     }
     let result = super::run_command_sandboxed(
         &ctx.built_binary,
-        &[],
+        smoke.args,
         &ctx.work_base,
         Duration::from_secs(30),
         &[smoke.input],
