@@ -1,9 +1,6 @@
-//! Fixed `calculator-v0` candidate generator.
-//!
-//! This is deliberately not a general code-generation endpoint.  It accepts
-//! exactly the North Star calculator specification and materialises a fresh,
-//! deterministic candidate workspace below the Harness artifact root.
+//! Frozen calculator fixture for the generic invocable-capability profile.
 
+use agent_core_kernel::domain::{DevelopmentRequest, TargetKind};
 use fs2::FileExt;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -19,6 +16,18 @@ edition = "2021"
 "#;
 
 const CANDIDATE_MANIFEST: &str = r#"{
+  "schema_version": "component-artifact-v1",
+  "component_id": "external.calculator",
+  "kind": "invocable_capability",
+  "profile_id": "invocable-capability-v0",
+  "contract_catalog_version": "contract-catalog-v1",
+  "required_contracts": ["component.invoke.v0"],
+  "requested_permissions": ["component.invoke"],
+  "test_kit": "calculator-fixture-v0",
+  "deployment_profile": "capability-host-v0",
+  "runtime_profile": "process-harness-v1",
+  "healthcheck": "trusted process invocation",
+  "rollback_policy": "reactivate previous content-addressed snapshot",
   "manifest_id": "calculator-v0-candidate",
   "harness_id": "calculator-harness",
   "protocol_version": "external-harness-v1",
@@ -26,7 +35,23 @@ const CANDIDATE_MANIFEST: &str = r#"{
   "operations": ["add", "subtract", "multiply", "divide"],
   "description": "Calculator supporting add, subtract, multiply, and divide.",
   "entry": "target/release/calculator-harness",
-  "artifact_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  "artifact_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "capability": {
+    "operation_name": "external.calculator",
+    "description": "Approved calculator supporting add, subtract, multiply, and divide.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "operation": {"type": "string", "enum": ["add", "subtract", "multiply", "divide"]},
+        "a": {"type": "number"},
+        "b": {"type": "number"}
+      },
+      "required": ["operation", "a", "b"],
+      "additionalProperties": false
+    },
+    "output_schema": {"type": "number"},
+    "idempotent": true
+  }
 }
 "#;
 
@@ -95,49 +120,28 @@ fn respond_error(code: &str) {
 }
 "#;
 
-/// Generate or replay the single allowed calculator candidate.
-pub fn handle_submit(artifact_root: &Path, args: &Value) -> Value {
-    if let Err(code) = validate_spec(args) {
-        return error(code);
+pub fn generate(
+    artifact_root: &Path,
+    request: &DevelopmentRequest,
+) -> Result<Value, std::io::Error> {
+    if !supports(request) {
+        return Err(std::io::Error::other("calculator fixture mismatch"));
     }
-    let idempotency_key = args
-        .get("idempotency_key")
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    if idempotency_key.is_empty() {
-        return error("MISSING_IDEMPOTENCY_KEY");
-    }
-
-    match generate_locked(artifact_root, idempotency_key) {
-        Ok(result) => json!({
-            "protocol_version": "external-harness-v1",
-            "ok": true,
-            "result": result,
-        }),
-        Err(_) => error("CANDIDATE_GENERATION_FAILED"),
-    }
+    generate_locked(artifact_root, &request.idempotency_key, &request.request_id)
 }
 
-fn validate_spec(args: &Value) -> Result<(), &'static str> {
-    let exact = |key: &str, expected: &str| args.get(key).and_then(Value::as_str) == Some(expected);
-    if !exact("kind", "DevelopCapability")
-        || !exact("operation", "external.calculator")
-        || !exact("schema_version", "calculator-v0")
-    {
-        return Err("UNSUPPORTED_CODING_SPEC");
-    }
-    let functions = args
-        .get("functions")
-        .and_then(Value::as_array)
-        .ok_or("INVALID_FUNCTION_SET")?;
-    let actual: Vec<&str> = functions.iter().filter_map(Value::as_str).collect();
-    if actual != ["add", "subtract", "multiply", "divide"] {
-        return Err("INVALID_FUNCTION_SET");
-    }
-    Ok(())
+pub(super) fn supports(request: &DevelopmentRequest) -> bool {
+    request.target_kind == TargetKind::InvocableCapability
+        && request.name == "external.calculator"
+        && request.build_profile == "invocable-capability-v0"
+        && request.required_contracts == ["component.invoke.v0"]
 }
 
-fn generate_locked(artifact_root: &Path, key: &str) -> Result<Value, std::io::Error> {
+fn generate_locked(
+    artifact_root: &Path,
+    key: &str,
+    request_id: &str,
+) -> Result<Value, std::io::Error> {
     let key_hash = hex::encode(Sha256::digest(key.as_bytes()));
     let candidate_id = format!("calculator_{}", &key_hash[..24]);
     let base = artifact_root.join("generated");
@@ -162,59 +166,64 @@ fn generate_locked(artifact_root: &Path, key: &str) -> Result<Value, std::io::Er
     }
     let digest =
         crate::hcr::candidate::compute_digest(&candidate).map_err(std::io::Error::other)?;
+    let component_manifest: Value =
+        serde_json::from_str(CANDIDATE_MANIFEST).map_err(std::io::Error::other)?;
     writeln!(lock, "{digest}")?;
     let _ = lock.unlock();
     Ok(json!({
         "candidate_id": candidate_id,
         "candidate_ref": format!("generated/{candidate_id}/candidate"),
         "candidate_digest": digest,
-        "operation": "external.calculator",
-        "schema_version": "calculator-v0",
+        "request_id": request_id,
+        "component_manifest": component_manifest,
     }))
-}
-
-fn error(code: &str) -> Value {
-    json!({
-        "protocol_version": "external-harness-v1",
-        "ok": false,
-        "error_code": code,
-    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_core_kernel::contract_catalog::CONTRACT_CATALOG_VERSION;
+    use agent_core_kernel::domain::DevelopmentRequestDraft;
+
+    fn calculator_request() -> DevelopmentRequest {
+        let mut draft = DevelopmentRequestDraft::new(
+            TargetKind::InvocableCapability,
+            "external.calculator".into(),
+        );
+        draft.requirements = vec!["four arithmetic operations".into()];
+        draft.required_contracts = vec!["component.invoke.v0".into()];
+        draft.requested_permissions = vec!["component.invoke".into()];
+        draft.acceptance_criteria = vec!["6 * 7 = 42".into()];
+        DevelopmentRequest::from_draft(
+            draft,
+            "principal:test".into(),
+            "scope:test".into(),
+            "message:test".into(),
+            "calculator:test".into(),
+            CONTRACT_CATALOG_VERSION.into(),
+        )
+        .unwrap()
+    }
 
     #[test]
-    fn exact_spec_creates_fresh_candidate_and_replays() {
+    fn fixture_materializes_generic_component_manifest() {
         let root = std::env::temp_dir().join(format!(
-            "calculator_generator_{}_{}",
+            "calculator_fixture_{}_{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ));
-        let args = json!({
-            "kind": "DevelopCapability",
-            "operation": "external.calculator",
-            "functions": ["add", "subtract", "multiply", "divide"],
-            "schema_version": "calculator-v0",
-            "idempotency_key": "message-1",
-        });
-        let first = handle_submit(&root, &args);
-        let second = handle_submit(&root, &args);
-        assert_eq!(first["result"], second["result"]);
-        let rel = first["result"]["candidate_ref"].as_str().unwrap();
-        assert!(root.join(rel).join("src/main.rs").is_file());
-    }
-
-    #[test]
-    fn arbitrary_spec_is_rejected() {
-        let response = handle_submit(
-            Path::new("/tmp"),
-            &json!({"operation":"external.shell","idempotency_key":"x"}),
+        let result = generate(&root, &calculator_request()).unwrap();
+        assert_eq!(
+            result["component_manifest"]["profile_id"],
+            "invocable-capability-v0"
         );
-        assert_eq!(response["ok"], false);
+        assert_eq!(
+            result["component_manifest"]["test_kit"],
+            "calculator-fixture-v0"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 }

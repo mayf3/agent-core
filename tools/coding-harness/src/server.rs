@@ -142,11 +142,17 @@ fn respond_error(stream: &mut TcpStream, status: u16, error_code: &str) {
 }
 
 fn dispatch(config: &CodingConfig, operation: &str, args: &Value) -> Value {
-    // North Star controlled development path.  This intentionally runs
-    // before generic workspace dispatch: callers cannot select a workspace,
-    // backend, model, or arbitrary objective for calculator-v0.
-    if operation == "external.coding_task_submit" && args.get("schema_version").is_some() {
-        return crate::calculator_generator::handle_submit(&config.artifact_root, args);
+    // Generic self-evolution control path. The DevelopmentRequest selects a
+    // catalogued profile; callers cannot select an arbitrary command/backend.
+    if operation == "external.coding_task_submit" && args.get("development_request").is_some() {
+        return crate::self_evolution::handle_submit(&config.artifact_root, args);
+    }
+    if operation == "external.coding_self_evolution_discover" {
+        return json!({
+            "protocol_version": "external-harness-v1",
+            "ok": true,
+            "result": crate::self_evolution::discovery(),
+        });
     }
     // HCR acceptance is another narrow control operation. It resolves the
     // candidate only below artifact_root and must not be forced through the
