@@ -177,6 +177,16 @@ fn fixed_runtime_hard_bounds_projection_growth() {
     assert!(MAIN_RS.contains("component_projection_too_large"));
 }
 
+#[test]
+fn unused_initial_attempts_extend_repairs_without_exceeding_six_model_calls() {
+    assert_eq!(repair_budget(1), 4);
+    assert_eq!(repair_budget(2), 4);
+    assert_eq!(repair_budget(3), 3);
+    for initial_attempts in 1..=3 {
+        assert!(initial_attempts + repair_budget(initial_attempts) <= 6);
+    }
+}
+
 trait ReadText {
     fn read_to_string(&self) -> std::io::Result<String>;
 }
