@@ -47,14 +47,25 @@ Candidate K: 8   (Identity, Scope, Snapshot, Run, Intent+Decision,
                   may demote to an inference rule (see "K8 re-screening"
                   below). The set is therefore 8 (provisional), and is NOT
                   claimed to be proven minimal and irreducible.
-Candidate D: 14  (Agent, Principal, Session, Registry, HCR, Settlement,
+Candidate D: 15  (Agent, Principal, Session, Registry, HCR, Settlement,
                    Capability Proposal, Approval, Decision, InvocationIntent,
-                   Invocation, Hook, ContextBlock, Capability)
+                   Invocation, Hook, ContextBlock, Capability, **Attempt**)
 Candidate E: 6   (Adapter, Connector, Router, Scheduler, External Operation,
                    Workspace/Profile)
 Candidate S: 3   (Registry Snapshot folds into K3; spawn stub; yield stub)
-Candidate U: 0
+Candidate U: 1   (**Grant Revocation timing semantics** — §14 A/B/C dispute;
+                  see new row 31)
+Non-primitive layers: 2  (**Liveness** = temporal property L7 (row 29);
+                          **Time/Clock** = environmental observation L8 (row 30))
 ```
+
+> **Formula correction (sufficiency round):** rows 2 (Principal), 25
+> (Capability), 26 (External Operation), and 27 (Workspace/Profile) previously
+> stated grants are "derived from Snapshot(K3)". That is **wrong** — grants are
+> independent, mutable authorization state (`external_operation_grants`), and
+> `provider_tools_for_grants` **intersects** caller-supplied grants with
+> snapshot definitions. See calculus §14 for the full correction and the
+> deferred-revocation finding. No code was changed.
 
 Note: tallies count *roles*. Some concepts carry more than one role (e.g.
 Registry Snapshot is K3 *and* the Snapshot implementation); the per-row table is
@@ -111,8 +122,8 @@ is **not** claimed to be proven minimal and irreducible.
 | Current owner | Kernel |
 | Durable state | Serialized to JSON in `runs.principal_json` (`migrations/0001_init.sql:19`, `src/journal/sqlite.rs:209`); `principal_id` referenced in grant/HCR/proposal columns |
 | Security invariant | Grants are scoped per-Run; Feishu must not inherit CLI tool permissions (`docs/architecture-rfc.md` §4) |
-| Classification | **D** — Identity(K1) carrying a grant set derived from Snapshot(K3) + Allow Boundary(K8) |
-| Candidate derivation | `Principal ≈ Identity(K1) + grants ⊆ Snapshot(K3) ∩ Allow(K8)` |
+| Classification | **D** — Identity(K1) carrying a **mutable grant set pinned at Run start** (grants are independent authorization state in `external_operation_grants`, minted-against but NOT derived from Snapshot(K3); see calculus §14) |
+| Candidate derivation | `Principal ≈ Identity(K1) + pinned grants ⊆ (external_operation_grants ∩ snapshot.operations)` |
 | External contracts | `principal_id` string format (`cli:local`, `feishu:open_id:...`) is a stable convention |
 | Migration risk | Medium — `principal_json` schema is read by recovery + dispatch |
 | Current decision | **Document** |
@@ -467,8 +478,8 @@ is **not** claimed to be proven minimal and irreducible.
 | Current owner | Kernel (all three) |
 | Durable state | (A) none; (B) proposal/approval/link tables; (C) activation result in `capability_change_approvals` |
 | Security invariant | Kernel re-hashes artifacts from `harness_artifact_root` (`src/config.rs:71-77`); never trusts submitter digests; `DefinitiveDeploymentRejection` marks non-retriable |
-| Classification | **D** — Snapshot(K3) operation row + Allow Boundary(K8) + per-principal grant |
-| Candidate derivation | `Capability ≈ Snapshot(K3) op + Allow(K8) + grant` |
+| Classification | **D** — Snapshot(K3) operation row + **per-principal grant state (independent, mutable)** |
+| Candidate derivation | `Capability ≈ Snapshot(K3) op + grant state (external_operation_grants)` |
 | External contracts | operation names, parameter schemas, deployment result |
 | Migration risk | Medium |
 | Current decision | **Document** |
@@ -483,8 +494,8 @@ is **not** claimed to be proven minimal and irreducible.
 | Current owner | Kernel |
 | Durable state | `external_operation_grants` (append-only; revoked rows retained) |
 | Security invariant | Non-coding/unknown external ops are never auto-granted; revocation is audit-retained (no row deletion) |
-| Classification | **E** — Snapshot(K3) row + Allow Boundary(K8) + per-principal grant |
-| Candidate derivation | `External Operation ≈ Snapshot(K3) row + Allow(K8) + grant` |
+| Classification | **E** — Snapshot(K3) row with `BindingKind::External` + **mutable per-principal grant state** (`external_operation_grants`) |
+| Candidate derivation | `External Operation ≈ Snapshot(K3) row + grant state (external_operation_grants)` |
 | External contracts | operation name strings, grant_id, status strings |
 | Migration risk | Medium |
 | Current decision | **Document** |
@@ -499,12 +510,127 @@ is **not** claimed to be proven minimal and irreducible.
 | Current owner | Kernel (config) + Harness (profile files) |
 | Durable state | None — config rebuilt each boot; profile is files on disk |
 | Security invariant | Credentials are references, not values (`docs/decisions/agent-home-directory-isolation.md` rule 9) |
-| Classification | **E** — Identity(K1) + on-disk profile + Snapshot(K3) of grants (no first-class type today) |
-| Candidate derivation | `Workspace/Profile ≈ Identity(K1) + profile files + Snapshot(K3)` |
+| Classification | **E** — Identity(K1) + on-disk profile + **mutable per-principal grant state** (no first-class type today) |
+| Candidate derivation | `Workspace/Profile ≈ Identity(K1) + profile files + grant state (external_operation_grants)` |
 | External contracts | env var names, `agent.toml`/`AGENT.md` conventions (future, per isolation decision) |
 | Migration risk | Low (no type to migrate yet) |
 | Current decision | **Revisit** (a first-class Profile type is a future multi-agent concern) |
 | Trigger to revisit | Multi-profile collaboration / agent-home-directory isolation is implemented |
+
+---
+
+## Minimality Re-Screening (sufficiency round)
+
+> Added in the sufficiency-and-state-semantics round. **This section only updates
+> evidence; it does NOT crop the candidate set.** No primitive is added, merged,
+> split, or removed. The judgments below use the criteria from calculus §2
+> (non-derivable, security load-bearing, cross-cutting, stable shape) and
+> explicitly **reject** "has/has-not a separate DB table" or "appears in the same
+> call chain" as sufficient evidence of reducibility.
+
+### K1 Identity vs K2 Scope — reducibility NOT PROVEN
+
+| Question | Evidence |
+|---|---|
+| Do K1 and K2 carry distinct security responsibilities? | **Yes.** K1 (`PrincipalId`/`AgentId`/`RunId`/`InvocationId`/`EventId`, `src/domain/mod.rs:37-41`) is *forgeable-proof identity* — who a subject/agent/run is. K2 (`Session` keyed by `(agent_id, channel, conversation_key)`, `migrations/0001_init.sql:1-12`) is an *isolation namespace* — the conversation scope that enforces cross-conversation and cross-Agent default-deny (`docs/decisions/agent-home-directory-isolation.md`). |
+| Is either derivable from the other? | **No.** A Scope references an `agent_id` (K1), but an Identity does not imply a unique Scope (one identity may have many sessions/scopes). Identity answers "who"; Scope answers "where is this isolated." These are orthogonal axes. |
+| Are both cross-cutting? | **Yes.** Every Run, Intent, Journal event, and Receipt carries identity; every Run and Session is scoped. |
+| Verdict | **K1/K2 reducibility: NOT PROVEN.** They remain distinct candidate primitives. |
+
+### K4 Run vs K5 Intent/Decision vs K7 Receipt — reducibility NOT PROVEN
+
+| Question | Evidence |
+|---|---|
+| Do K4, K5, K7 occupy distinct lifecycle roles? | **Yes.** K4 (`Run` + `RunStatus`, `src/domain/mod.rs:146-192`) is the *execution lifecycle* for one scope turn. K5 (`InvocationIntent` + `ApprovedInvocation`, `src/domain/mod.rs:258-284`; `is_allowed`/`evaluate_policy`) is the *authorization gate* — the No-Effect-without-Decision invariant. K7 (`Receipt` + `ReceiptStatus`, `src/domain/mod.rs:286-300`) is *terminal evidence* bound to exactly one invocation. |
+| Is one derivable from another? | **No.** A Run may have zero or many Intents; an Intent requires a Decision but a Decision is not a Run; a Receipt is terminal and binds one invocation, not a Run. They compose (`Invocation ≈ Intent + Decision`, row 7) but are not substitutable. |
+| Distinct stable contracts? | **Yes.** Run id (`run_<uuid>`), RunStatus values, decision id (`decision_<digest>`), invocation id, ReceiptStatus strings, and receipt identity (`hcr_receipt_identities` UNIQUE) are all independent external contracts. |
+| Verdict | **K4/K5/K7 reducibility: NOT PROVEN.** They remain distinct candidate primitives. The judgment deliberately does **not** use "they appear in the same dispatch call chain" as reducibility evidence — co-occurrence in a call chain is explicitly rejected as a criterion. |
+
+### K8 Allow Boundary — status unchanged (provisional/disputed)
+
+The K8 re-screening condition (above) is **not satisfied** this round. The
+§14 finding shows the grant-resolution rule is *run-start pinning of
+`external_operation_grants`*, enforced via `evaluate_policy` reading the frozen
+`run.principal.grants` (`src/gateway/policy.rs:66-101`) — i.e. it **is**
+expressible as a transition invariant over Intent(K5) + Decision(K5) +
+Invocation. That leans toward K8 demoting to an inference rule. However, the
+§14 revocation-timing semantic (A/B/C) is still **UNRESOLVED**, and option C
+(Hybrid: high-risk Effect revalidation) *would* be a grant-resolution rule
+enforced outside the pure Intent→Decision→Invocation transition — which could
+keep K8 independent. **Therefore K8 remains provisional/disputed; no decision
+is forced this round.** The candidate set stays "8 (provisional)".
+
+---
+
+## New Rows (sufficiency round)
+
+> These concepts were investigated this round but are **not** promoted to
+> primitives. They are recorded as derived/internal/environmental so the matrix
+> is complete.
+
+### 28. Attempt (per-dispatch execution attempt)
+
+| Field | Content |
+|---|---|
+| Current concept | The non-terminal execution lifecycle of one outbox dispatch or worker job: the `attempts` counter + the retry/backoff path |
+| Code evidence | `attempts INTEGER` on `outbox_dispatches` (`src/journal/queue.rs:47`) and `worker_jobs` (`src/journal/queue.rs:21`); incremented on lease (`src/journal/outbox.rs:63`, `src/journal/worker.rs:47`); retry decision reads `attempts` vs `RetryPolicy.max_*_attempts` (`src/journal/outbox_queue.rs:415`, `src/journal/worker.rs:230`). **No general `Attempt` type**; only HCR has a first-class `HcrGateAttempt` (`src/domain/harness_change_request.rs:145`, `migrations/0009_hcr_evidence.sql:5-19`). |
+| Current owner | Kernel (internal column) |
+| Durable state | `attempts` column on dispatch/worker rows (derivable from the row's lifecycle) |
+| Security invariant | None of its own — it is internal to reliable-effect delivery |
+| Classification | **D** (derived object / internal implementation structure) |
+| Candidate derivation | `Attempt ≈ non-terminal lifecycle of outbox/worker row (K7 substrate)` |
+| External contracts | None (no stable external contract; HCR gate attempt is a domain-specific generalization) |
+| Migration risk | N/A |
+| Current decision | **Document** — do NOT promote to a primitive; no evidence it carries an independent security invariant |
+| Trigger to revisit | A second domain beyond HCR needs first-class, separately-addressable attempts |
+
+### 29. Liveness (reliable-effect delivery)
+
+| Field | Content |
+|---|---|
+| Current concept | The temporal guarantee that approved effects are delivered at-least-once, retried with backoff, dead-lettered, and reconciled if Unknown |
+| Code evidence | Two parallel state machines: `OutboxDispatchStatus` (`src/domain/status.rs:42-82`) and `WorkerJobStatus` (`src/domain/status.rs:3-40`); lease+reclaim (`src/journal/worker.rs:10-88`, `src/journal/outbox.rs:10-105`); retry/backoff (`src/domain/retry.rs:22-31`); dead-letter (`src/journal/outbox_queue.rs:458-498`); Unknown recovery (`src/journal/unknown.rs:75-146`) |
+| Current owner | Kernel |
+| Durable state | `outbox_dispatches`, `worker_jobs` (state + `attempts`/`available_at`/`locked_until`) |
+| Security invariant | Terminal-transition guard (`TERMINAL_TRANSITION_ERROR`, `src/journal/outbox_queue.rs:8`); at-least-once delivery of approved effects |
+| Classification | **Temporal property (L7)** — NOT a state-carrying primitive. See calculus §11/§12. |
+| Candidate derivation | `Liveness ≈ temporal property over the trace (K6), enforced by the transition relation (L3)` |
+| External contracts | OutboxDispatchStatus / WorkerJobStatus string values |
+| Migration risk | N/A (no object to migrate) |
+| Current decision | **Document** — liveness is a temporal property, not a primitive; no Liveness primitive added. Reliable delivery ≠ external Scheduler/Cron. |
+| Trigger to revisit | A liveness requirement cannot be expressed as a transition invariant over existing state |
+
+### 30. Time / Clock
+
+| Field | Content |
+|---|---|
+| Current concept | Wall-clock reads (`Utc::now()`) and persisted deadlines used by safety/recovery decisions |
+| Code evidence | Every persisted deadline is `Utc::now()` vs RFC3339 `TEXT`: approval TTL (`src/journal/approval.rs:36-59`), lease `locked_until` (`src/journal/worker.rs:43`, `src/journal/outbox.rs:58`), retry `available_at` (`src/journal/outbox_queue.rs:420-426`), proposal/approval `expires_at` (`src/server/capability_routes.rs:236`, `src/journal/capability_activation.rs:64-69`). Logical ordering is the Journal `sequence` (`migrations/0001_init.sql:34`, hashed in `src/journal/hash_chain.rs:3-13`). |
+| Current owner | Kernel (reads host clock) |
+| Durable state | Deadlines stored as `TEXT` columns on existing rows (not a separate Time object) |
+| Security invariant | None of its own — deadlines are values compared in transition guards |
+| Classification | **Environmental observation (L8)** + persisted deadlines already in existing state — NOT a primitive. See calculus §13. |
+| Candidate derivation | `Time ≈ persisted deadlines (values in existing state) + logical sequence (K6) + host clock read (L8)` |
+| External contracts | RFC3339 timestamp format convention |
+| Migration risk | N/A (no Time object to migrate) |
+| Current decision | **Document** — no Time primitive added; no Clock implemented. Four sub-domains distinguished (logical order / observation / duration / deadline). |
+| Trigger to revisit | A verifiable/monotonic clock is required for lease safety under clock skew |
+
+### 31. Grant Revocation (timing semantics)
+
+| Field | Content |
+|---|---|
+| Current concept | The mechanism and timing of revoking an `external_operation_grants` row |
+| Code evidence | Revocation is a `status` transition active→revoked (`src/journal/grant_ops.rs:192-224`); `revoked_at` is an audit stamp. Grants loaded **once at Run creation** (`src/runtime/hook_call.rs:236-255`) and frozen into `run.principal.grants`; effect dispatch reads the frozen copy via pure `evaluate_policy` (`src/gateway/policy.rs:66-101`); the live grant table is NOT re-read at dispatch. HCR revalidation (`src/hcr/revalidate.rs:34-130+`) does not touch the grant table. |
+| Current owner | Kernel |
+| Durable state | `external_operation_grants` (append-only; revoked rows retained) |
+| Security invariant | Revocation is audit-retained (no row deletion); partial unique index on `status='active'` (`migrations/0006:44-49`) |
+| Classification | **U** — disputed / under-evidenced semantic (see calculus §14) |
+| Candidate derivation | Revocation is expressible with current candidates; the **timing** (A run-start pinning / B effect-time revalidation / C hybrid) is UNRESOLVED. |
+| External contracts | grant_id, status strings, revoked_at |
+| Migration risk | N/A (no code changed this round) |
+| Current decision | **Revisit / hold** — behavior stays A (deferred); B and C are NOT implemented; no primitive is needed for any option. Requires a separately-reviewed ADR to decide A/B/C. |
+| Trigger to revisit | An explicit revocation-latency requirement (e.g. "revoke within N seconds across in-flight Runs") is demanded |
 
 ---
 
