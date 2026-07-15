@@ -40,6 +40,15 @@ up this root together with Kernel Journal backups. A rollout is healthy only
 after the Harness `/health`, Kernel `/health`, active component status, service
 health endpoint, and Journal deployment receipt all agree.
 
+At startup the Harness validates and reconciles every active record before it
+binds its control listener. A missing healthy or rolled-back service is started
+on its prior port so the Kernel-published URL remains stable; a disabled
+service is never restarted. Recovery fails closed if the port is occupied or
+the persisted manifest, receipt, executable path, instance identity, or
+endpoint is inconsistent. Managed services must return the three runtime
+identity headers documented in `managed-service-lifecycle-v0.md` on a healthy
+response.
+
 Rollback uses the retained previous artifact and starts it to readiness before
 stopping the current process. Disable stops the managed process and records the
 disabled state. Both operations persist the last typed control receipt in the

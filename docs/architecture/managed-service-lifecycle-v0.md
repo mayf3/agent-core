@@ -19,7 +19,8 @@ candidate, or passes Kernel/Feishu secrets to one.
 6. The loopback-only Deployment Harness loads the manifest and executable from
    CAS, starts the executable directly (never through a shell), supplies only
    the observer credential and managed-service environment, and waits for the
-   declared health check.
+   declared health check. Readiness is bound to component, version, and a fresh
+   process-instance identity; an unrelated listener cannot satisfy it.
 7. Kernel accepts only an exactly bound healthy receipt. One transaction stores
    the receipt, creates an immutable Component Registry Snapshot, advances the
    component-state CAS, settles Approval and Proposal, and appends
@@ -51,6 +52,16 @@ distinct from IPC, proposal-submit, and decision tokens. Deployment Harness
 receives this read-only token but never receives the Kernel SQLite path, IPC
 token, Feishu credentials, model credentials, or approval token. A service
 keeps its own cursor and rebuildable projection below its managed state path.
+
+The `managed-service-v0` runtime contract requires every successful health
+response to echo `COMPONENT_ID`, `COMPONENT_VERSION`, and
+`SERVICE_INSTANCE_ID` in the `X-Agent-Core-Component`,
+`X-Agent-Core-Version`, and `X-Agent-Core-Instance` headers. The Harness
+reconciles active records before accepting control traffic. After a Harness or
+host restart it restores a missing process on the same published port, keeping
+the immutable Component Registry endpoint valid. Process termination verifies
+both process-group leadership and the installed executable path; a persisted
+PID alone is never authority to signal a process.
 
 ## Component Registry
 

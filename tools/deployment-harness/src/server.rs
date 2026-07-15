@@ -13,6 +13,7 @@ const MAX_BODY: usize = 128 * 1024;
 
 pub fn serve(config: DeploymentHarnessConfig) -> Result<()> {
     config.validate()?;
+    manager::reconcile(&config)?;
     let listener = TcpListener::bind(config.listen_addr)?;
     serve_listener(listener, config)
 }
