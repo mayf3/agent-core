@@ -178,6 +178,7 @@ pub fn handle(
         "candidate_digest": validated.candidate_digest,
         "artifact_ref": validated.artifact_ref,
         "artifact_digest": validated.artifact_digest,
+        "component_manifest_digest": validated.component_manifest_digest,
         "evidence_digest": validated.evidence_digest,
         "gate_count": validated.gate_count,
     });
@@ -260,6 +261,7 @@ pub fn handle(
         "candidate_digest": validated.candidate_digest,
         "artifact_ref": validated.artifact_ref,
         "artifact_digest": validated.artifact_digest,
+        "component_manifest_digest": validated.component_manifest_digest,
         "evidence_digest": validated.evidence_digest,
         "settlement_id": settlement_id,
         "settlement_result": format!("{:?}", settlement),

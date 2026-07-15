@@ -2,6 +2,7 @@ pub mod adapters;
 pub mod capabilities;
 pub mod config;
 pub mod context;
+pub mod contract_catalog;
 pub mod data_dir;
 pub mod domain;
 pub mod gateway;

@@ -65,21 +65,45 @@ pub fn builtin_specs() -> Vec<OperationSpec> {
         OperationSpec {
             name: crate::domain::operation::external::TASK_SUBMIT.into(),
             risk: Risk::Write,
-            description: "Submit a controlled coding harness development task.".into(),
+            description: "Submit a catalogued Generic DevelopmentRequest to the Coding Harness."
+                .into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "session_id": {"type": "string"},
-                    "kind": {"type": "string", "enum": ["DevelopCapability"]},
-                    "operation": {"type": "string", "enum": ["external.calculator"]},
-                    "functions": {
-                        "type": "array",
-                        "items": {"type": "string", "enum": ["add", "subtract", "multiply", "divide"]}
+                    "development_request": {
+                        "type": "object",
+                        "properties": {
+                            "request_id": {"type": "string"},
+                            "source_subject": {"type": "string"},
+                            "source_scope": {"type": "string"},
+                            "source_message_id": {"type": "string"},
+                            "target_kind": {"type": "string", "enum": [
+                                "invocable_capability", "hook_consumer_service", "context_provider",
+                                "context_transformer", "scheduled_worker", "scheduler_service",
+                                "ingress_router", "multi_run_orchestrator", "connector_extension"
+                            ]},
+                            "name": {"type": "string"},
+                            "requirements": {"type": "array", "items": {"type": "string"}},
+                            "required_contracts": {"type": "array", "items": {"type": "string"}},
+                            "requested_permissions": {"type": "array", "items": {"type": "string"}},
+                            "build_profile": {"type": "string"},
+                            "deployment_profile": {"type": "string"},
+                            "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
+                            "idempotency_key": {"type": "string"},
+                            "contract_catalog_version": {"type": "string"}
+                        },
+                        "required": [
+                            "request_id", "source_subject", "source_scope", "source_message_id",
+                            "target_kind", "name", "requirements", "required_contracts",
+                            "requested_permissions", "build_profile", "deployment_profile",
+                            "acceptance_criteria", "idempotency_key", "contract_catalog_version"
+                        ],
+                        "additionalProperties": false
                     },
-                    "schema_version": {"type": "string", "enum": ["calculator-v0"]},
                     "idempotency_key": {"type": "string"}
                 },
-                "required": ["session_id", "kind", "operation", "functions", "schema_version", "idempotency_key"],
+                "required": ["session_id", "development_request", "idempotency_key"],
                 "additionalProperties": false,
             }),
             idempotent: true,
@@ -89,7 +113,8 @@ pub fn builtin_specs() -> Vec<OperationSpec> {
         OperationSpec {
             name: crate::domain::operation::external::HCR_ACCEPT.into(),
             risk: Risk::Write,
-            description: "Run the fixed five-gate HCR candidate acceptance flow.".into(),
+            description: "Run the component-profile five-gate HCR candidate acceptance flow."
+                .into(),
             parameters: json!({
                 "type": "object",
                 "properties": {

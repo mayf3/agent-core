@@ -63,6 +63,7 @@ pub struct AcceptanceResponse {
     pub gate_results: Vec<GateResultEntry>,
     pub artifact_ref: Option<String>,
     pub artifact_digest: Option<String>,
+    pub component_manifest_digest: Option<String>,
     pub evidence_digest: String,
 }
 
@@ -97,6 +98,7 @@ pub fn compute_evidence_digest(
     overall_outcome: &str,
     artifact_ref: Option<&str>,
     artifact_digest: Option<&str>,
+    component_manifest_digest: Option<&str>,
 ) -> String {
     let bytes = canonical_evidence_bytes(
         harness_execution_id,
@@ -107,6 +109,7 @@ pub fn compute_evidence_digest(
         overall_outcome,
         artifact_ref,
         artifact_digest,
+        component_manifest_digest,
     );
     let hex = hex::encode(Sha256::digest(&bytes));
     format!("sha256:{hex}")
@@ -122,6 +125,7 @@ pub fn canonical_evidence_bytes(
     overall_outcome: &str,
     artifact_ref: Option<&str>,
     artifact_digest: Option<&str>,
+    component_manifest_digest: Option<&str>,
 ) -> Vec<u8> {
     let evidence = serde_json::json!({
         "harness_execution_id": harness_execution_id,
@@ -132,6 +136,7 @@ pub fn canonical_evidence_bytes(
         "overall_outcome": overall_outcome,
         "artifact_ref": artifact_ref,
         "artifact_digest": artifact_digest,
+        "component_manifest_digest": component_manifest_digest,
     });
     serde_json::to_vec(&evidence).unwrap_or_default()
 }
