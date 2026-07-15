@@ -3,6 +3,7 @@
 #![cfg(target_os = "linux")]
 
 use agent_core_kernel::capabilities::store::{ContentStore, Sha256Digest};
+use agent_core_kernel::contract_catalog::CONTRACT_CATALOG_VERSION;
 use agent_core_kernel::domain::capability_change::ProposalStatus;
 use agent_core_kernel::domain::*;
 use agent_core_kernel::gateway::Gateway;
@@ -73,12 +74,17 @@ fn authenticated_sentence_creates_real_pending_proposal() -> Result<()> {
     };
     journal.insert_run(&run)?;
 
-    let intent = coding_router::parse_coding_intent("开发一个 external.calculator，支持加减乘除")?;
+    let request = development_request(
+        "开发一个 external.calculator，支持加减乘除",
+        &run,
+        &session,
+        "om_pr3a_real_message",
+    )?;
     let result = coding_task_submit::handle_coding_task_submit(
         &journal,
         &gateway,
         &config,
-        &intent,
+        &request,
         &run,
         &session,
         "om_pr3a_real_message",
@@ -174,8 +180,11 @@ fn same_message_twenty_way_is_exactly_once(
         mode: RunMode::Default,
     });
     journal.insert_run(&run)?;
-    let intent = Arc::new(coding_router::parse_coding_intent(
+    let request = Arc::new(development_request(
         "开发一个 external.calculator，支持加减乘除",
+        &run,
+        &session,
+        "om_pr3a_twenty_way",
     )?);
     let config = Arc::new(config);
     let barrier = Arc::new(Barrier::new(20));
@@ -184,7 +193,7 @@ fn same_message_twenty_way_is_exactly_once(
         let journal = Arc::clone(&journal);
         let gateway = Arc::clone(&gateway);
         let config = Arc::clone(&config);
-        let intent = Arc::clone(&intent);
+        let request = Arc::clone(&request);
         let run = Arc::clone(&run);
         let session = Arc::clone(&session);
         let barrier = Arc::clone(&barrier);
@@ -194,7 +203,7 @@ fn same_message_twenty_way_is_exactly_once(
                 &journal,
                 &gateway,
                 &config,
-                &intent,
+                request.as_ref(),
                 &run,
                 &session,
                 "om_pr3a_twenty_way",
@@ -270,12 +279,17 @@ fn missing_submit_grant_fails_before_hcr_creation() -> Result<()> {
         mode: RunMode::Default,
     };
     journal.insert_run(&run)?;
-    let intent = coding_router::parse_coding_intent("开发计算器，实现四则运算")?;
+    let request = development_request(
+        "开发计算器，实现四则运算",
+        &run,
+        &session,
+        "om_pr3a_intruder",
+    )?;
     let error = coding_task_submit::handle_coding_task_submit(
         &journal,
         &gateway,
         &config,
-        &intent,
+        &request,
         &run,
         &session,
         "om_pr3a_intruder",
@@ -284,6 +298,23 @@ fn missing_submit_grant_fails_before_hcr_creation() -> Result<()> {
     assert!(error.to_string().contains("capability_not_enabled"));
     assert_eq!(journal.harness_change_request_count()?, 0);
     Ok(())
+}
+
+fn development_request(
+    text: &str,
+    run: &Run,
+    session: &Session,
+    source_message_id: &str,
+) -> Result<DevelopmentRequest> {
+    let intent = coding_router::parse_coding_intent(text)?;
+    Ok(DevelopmentRequest::from_draft(
+        intent.development_request,
+        run.principal.principal_id.0.clone(),
+        session.id.0.clone(),
+        source_message_id.to_string(),
+        format!("development:{source_message_id}"),
+        CONTRACT_CATALOG_VERSION.to_string(),
+    )?)
 }
 
 fn unique_temp_dir(prefix: &str) -> std::path::PathBuf {
