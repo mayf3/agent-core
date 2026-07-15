@@ -28,8 +28,11 @@ returning policy diagnostics to the model. A source that passes source policy
 may then receive three diagnostic-guided repairs, or four when the initial
 stage used fewer than all three attempts. Model calls are individually capped
 at 75 seconds, compile probes at 60 seconds, and contract probes at 15 seconds.
-The worst case is six model calls plus five probe cycles (825 seconds), inside
-the outer envelope. Other external operations keep the normal Harness timeout.
+An invalid or policy-rejected repair response may also be discarded and retried
+without returning its rejection diagnostics to the model; every such retry
+consumes the same six-call shared budget. The worst case is six model calls plus
+five probe cycles (825 seconds), inside the outer envelope. Other external
+operations keep the normal Harness timeout.
 
 ## Verification
 
