@@ -105,11 +105,30 @@ fn initial_generation_retries_only_discardable_model_failures() {
         "GENERATOR_MODEL_OUTPUT_UNSAFE",
         "GENERATOR_MODEL_OUTPUT_INTERFACE_MISMATCH",
     ] {
-        assert!(retryable_initial_generation_error(code));
+        assert!(retry::retryable_model_output_error(code));
     }
-    assert!(!retryable_initial_generation_error(
+    assert!(!retry::retryable_model_output_error(
         "GENERATOR_MODEL_NOT_CONFIGURED"
     ));
+}
+
+#[test]
+fn rejected_repair_output_uses_the_remaining_shared_attempt() {
+    let mut calls = 0;
+    let (source, attempts) = retry::retry_model_output(2, || {
+        calls += 1;
+        if calls == 1 {
+            Err(GenerationError::new(
+                "GENERATOR_MODEL_OUTPUT_INTERFACE_MISMATCH",
+            ))
+        } else {
+            Ok(safe_source().to_string())
+        }
+    })
+    .unwrap();
+    assert_eq!(attempts, 2);
+    assert_eq!(calls, 2);
+    assert_eq!(source, safe_source());
 }
 
 #[test]

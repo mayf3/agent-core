@@ -53,11 +53,14 @@ pub(super) fn generate(
     } else {
         let config = ModelConfig::from_env()?;
         let (mut source, initial_attempts) = model::generate_module_with_retry(&config, request)?;
+        let mut model_calls = initial_attempts;
         let max_repairs = repair_budget(initial_attempts);
         for repair_round in 0..=max_repairs {
             match compile_probe(&base, &candidate_id, request, &source) {
                 Ok(()) => break,
-                Err(CompileProbeError::Candidate(diagnostics)) if repair_round < max_repairs => {
+                Err(CompileProbeError::Candidate(diagnostics))
+                    if repair_round < max_repairs && model_calls < 6 =>
+                {
                     #[cfg(debug_assertions)]
                     eprintln!(
                         "generator compile probe failed before repair {}:\n{}",
@@ -66,7 +69,15 @@ pub(super) fn generate(
                     );
                     let diagnostics =
                         sanitize_model_diagnostics(&diagnostics, &base, &candidate_id);
-                    source = model::repair_module(&config, request, &source, &diagnostics)?;
+                    let (repaired, attempts) = model::repair_module_with_retry(
+                        &config,
+                        request,
+                        &source,
+                        &diagnostics,
+                        6 - model_calls,
+                    )?;
+                    model_calls += attempts;
+                    source = repaired;
                 }
                 Err(CompileProbeError::Candidate(_diagnostics)) => {
                     #[cfg(debug_assertions)]
