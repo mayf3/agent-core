@@ -7,6 +7,16 @@ use std::time::Duration;
 
 pub trait LlmClient {
     fn complete(&self, input: LlmInput) -> Result<LlmOutput>;
+
+    /// Bounded metadata available before the request starts. Implementations
+    /// that do not represent a network model may keep the safe defaults.
+    fn provider_hint(&self) -> &str {
+        "unknown"
+    }
+
+    fn model_hint(&self) -> &str {
+        "unknown"
+    }
 }
 
 pub struct LlmInput {
@@ -112,6 +122,14 @@ impl<T: LlmClient + ?Sized> LlmClient for Box<T> {
     fn complete(&self, input: LlmInput) -> Result<LlmOutput> {
         (**self).complete(input)
     }
+
+    fn provider_hint(&self) -> &str {
+        (**self).provider_hint()
+    }
+
+    fn model_hint(&self) -> &str {
+        (**self).model_hint()
+    }
 }
 
 pub struct LocalEchoLlm;
@@ -130,6 +148,14 @@ impl LlmClient for LocalEchoLlm {
             }),
             provider_turn: None,
         })
+    }
+
+    fn provider_hint(&self) -> &str {
+        "local"
+    }
+
+    fn model_hint(&self) -> &str {
+        "local-echo"
     }
 }
 
@@ -209,6 +235,14 @@ impl LlmClient for OpenAiCompatibleLlm {
                 ))
             }
         }
+    }
+
+    fn provider_hint(&self) -> &str {
+        "openai-compatible"
+    }
+
+    fn model_hint(&self) -> &str {
+        &self.primary.model
     }
 }
 
@@ -422,6 +456,7 @@ fn success_output(
             "context_blocks": context_blocks,
             "status": "ok",
             "usage": sanitize_usage(value.get("usage")),
+            "finish_reason": value.pointer("/choices/0/finish_reason").and_then(Value::as_str),
             "tool_call": parsing::audit_tool_call(&tool_call),
         }),
         tool_call,
@@ -458,17 +493,6 @@ fn serialize_system_context(blocks: &[ContextBlock]) -> String {
         .join("\n\n")
 }
 
-fn sanitize_usage(value: Option<&Value>) -> Value {
-    let Some(value) = value else {
-        return Value::Null;
-    };
-    json!({
-        "prompt_tokens": value.get("prompt_tokens").and_then(Value::as_i64),
-        "completion_tokens": value.get("completion_tokens").and_then(Value::as_i64),
-        "total_tokens": value.get("total_tokens").and_then(Value::as_i64),
-    })
-}
-
 fn empty_to_null(value: &str) -> Value {
     if value.is_empty() {
         Value::Null
@@ -495,5 +519,8 @@ fn is_zai_endpoint(base_url: &str) -> bool {
 }
 
 mod parsing;
+mod usage;
+use usage::sanitize_usage;
+pub use usage::ModelUsage;
 #[cfg(test)]
 mod tests;

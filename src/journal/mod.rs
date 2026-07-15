@@ -13,6 +13,7 @@ mod harness_change_requests;
 pub mod harness_ops;
 pub(crate) mod hash_chain;
 mod hcr_settlement;
+mod model_invocation;
 mod outbox;
 mod outbox_queue;
 mod queue;

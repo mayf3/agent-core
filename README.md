@@ -57,6 +57,7 @@ Architecture drafts (under `docs/architecture/`):
 - [Kernel Primitive Calculus](docs/architecture/kernel-primitive-calculus.md) — draft candidate primitive model (not a refactor plan)
 - [Primitive Screening Matrix](docs/architecture/primitive-screening-matrix.md) — per-concept code evidence and classification
 - [Generic Self-Evolution V1](docs/architecture/generic-self-evolution-v1.md) — governed DevelopmentRequest, Contract Catalog, Component Profiles, and candidate binding
+- [Model Invocation Telemetry V0](docs/architecture/model-invocation-telemetry-v0.md) — replay-safe Journal facts for real model usage through `event.observe.v0`
 
 ## Current Commands
 
