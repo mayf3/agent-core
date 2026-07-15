@@ -130,11 +130,20 @@ fn telemetry_request_contract_requires_dimensions_windows_and_runtime_metadata()
     });
     assert!(validate_request_contract(&telemetry_request, &output.to_string()).is_ok());
 
-    let mut missing_run = output;
+    let mut missing_run = output.clone();
     missing_run["rendered"]["by_run"] = json!({"unknown": {}});
     let error =
         validate_request_contract(&telemetry_request, &missing_run.to_string()).unwrap_err();
     assert!(error.contains("run-1"));
+
+    let mut rolling_windows = output;
+    rolling_windows["rendered"]["overall"] = Value::Null;
+    rolling_windows["rendered"]["rolling_windows"] = json!({
+        "1day": {"calls": 2, "latency_avg": 25, "unavailable_count": 1, "failures": 1},
+        "7day": {"calls": 2, "latency_avg": 25, "unavailable_count": 1, "failures": 1},
+        "30day": {"calls": 2, "latency_avg": 25, "unavailable_count": 1, "failures": 1}
+    });
+    assert!(validate_request_contract(&telemetry_request, &rolling_windows.to_string()).is_ok());
 }
 
 #[test]
