@@ -80,22 +80,26 @@ pub(super) fn validate_request_contract(
         if !has_positive_overall_window(rendered, days) {
             missing.push(format!("positive-overall-{days}-day-window"));
         }
-        if !overall_window_satisfies(rendered, days, |window| {
+        if !requested_overall_window_satisfies(rendered, days, |window| {
             counter_equals(window, &["calls", "call_count", "invocations"], 2.0)
         }) {
             missing.push(format!("overall-{days}-day-call-count=2"));
         }
-        if !overall_window_satisfies(rendered, days, |window| {
-            counter_equals(window, &["avg_latency", "average_latency"], 25.0)
+        if !requested_overall_window_satisfies(rendered, days, |window| {
+            counter_equals(
+                window,
+                &["avg_latency", "average_latency", "latency_avg"],
+                25.0,
+            )
         }) {
             missing.push(format!("overall-{days}-day-average-latency=25"));
         }
-        if !overall_window_satisfies(rendered, days, |window| {
+        if !requested_overall_window_satisfies(rendered, days, |window| {
             has_positive_counter(window, &["unavailable"])
         }) {
             missing.push(format!("positive-overall-{days}-day-unavailable"));
         }
-        if !overall_window_satisfies(rendered, days, |window| {
+        if !requested_overall_window_satisfies(rendered, days, |window| {
             has_positive_counter(window, &["failure", "fail_count", "failures"])
         }) {
             missing.push(format!("positive-overall-{days}-day-failure"));
@@ -115,7 +119,7 @@ pub(super) fn validate_request_contract(
         Ok(())
     } else {
         Err(format!(
-            "REQUEST_CONTRACT_FAILED missing={}\nPATH_CONTRACT: run dimension comes from top-level event.run_id; model and profile dimensions come from event.payload.model and event.payload.profile.\nRENDERED_OUTPUT:\n{}",
+            "REQUEST_CONTRACT_FAILED missing={}\nPATH_CONTRACT: run dimension comes from top-level event.run_id; model and profile dimensions come from event.payload.model and event.payload.profile.\nWINDOW_CONTRACT: expose overall/global/summary/total windows, or a top-level rolling_windows object, with distinct 1_day, 7_day, and 30_day objects. Each window must include calls=2, avg_latency_ms or latency_avg=25, failures=1, and a positive unavailable counter.\nRENDERED_OUTPUT:\n{}",
             missing.join(","),
             truncate_diagnostics(&rendered_text),
         ))
@@ -200,7 +204,23 @@ fn has_window_key(value: &Value, days: u64) -> bool {
 }
 
 fn has_positive_overall_window(value: &Value, days: u64) -> bool {
-    overall_window_satisfies(value, days, contains_positive_number)
+    requested_overall_window_satisfies(value, days, contains_positive_number)
+}
+
+fn requested_overall_window_satisfies<F>(value: &Value, days: u64, check: F) -> bool
+where
+    F: Fn(&Value) -> bool + Copy,
+{
+    let top_level_rolling_windows = value.as_object().is_some_and(|map| {
+        map.iter().any(|(key, value)| {
+            matches!(
+                key.to_lowercase().as_str(),
+                "rolling_window" | "rolling_windows"
+            )
+                && window_below_satisfies(value, days, check)
+        })
+    });
+    top_level_rolling_windows || overall_window_satisfies(value, days, check)
 }
 
 fn overall_window_satisfies<F>(value: &Value, days: u64, check: F) -> bool
