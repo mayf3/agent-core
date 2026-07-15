@@ -52,11 +52,12 @@ pub(super) fn generate(
         load_existing(request, &candidate_id, &candidate)
     } else {
         let config = ModelConfig::from_env()?;
-        let mut source = model::generate_module_with_retry(&config, request)?;
-        for repair_round in 0..=3 {
+        let (mut source, initial_attempts) = model::generate_module_with_retry(&config, request)?;
+        let max_repairs = repair_budget(initial_attempts);
+        for repair_round in 0..=max_repairs {
             match compile_probe(&base, &candidate_id, request, &source) {
                 Ok(()) => break,
-                Err(CompileProbeError::Candidate(diagnostics)) if repair_round < 3 => {
+                Err(CompileProbeError::Candidate(diagnostics)) if repair_round < max_repairs => {
                     #[cfg(debug_assertions)]
                     eprintln!(
                         "generator compile probe failed before repair {}:\n{}",
@@ -87,6 +88,10 @@ pub(super) fn generate(
     }
     let _ = FileExt::unlock(&lock);
     result
+}
+
+fn repair_budget(initial_attempts: usize) -> usize {
+    if initial_attempts < 3 { 4 } else { 3 }
 }
 
 enum CompileProbeError {
