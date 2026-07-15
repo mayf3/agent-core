@@ -1,9 +1,9 @@
 mod cache;
 mod contract;
 
-use self::contract::{
-    validate_profile_contract, validate_request_contract, validate_request_source,
-};
+#[cfg(test)]
+use self::contract::validate_request_contract;
+use self::contract::{validate_contracts, validate_request_source};
 use super::model::{self, ModelConfig};
 use super::GenerationError;
 use agent_core_kernel::domain::{DevelopmentRequest, TargetKind};
@@ -102,7 +102,11 @@ pub(super) fn generate(
 }
 
 fn repair_budget(initial_attempts: usize) -> usize {
-    if initial_attempts < 3 { 4 } else { 3 }
+    if initial_attempts < 3 {
+        4
+    } else {
+        3
+    }
 }
 
 enum CompileProbeError {
@@ -218,8 +222,7 @@ fn compile_probe(
                 truncate_diagnostics(&contract.stderr),
             )));
         }
-        validate_profile_contract(&contract.stdout).map_err(CompileProbeError::Candidate)?;
-        validate_request_contract(request, &contract.stdout).map_err(CompileProbeError::Candidate)
+        validate_contracts(request, &contract.stdout).map_err(CompileProbeError::Candidate)
     })();
     #[cfg(debug_assertions)]
     let keep_probe = std::env::var("CODING_GENERATOR_TEST_KEEP_PROBES").as_deref() == Ok("1");
@@ -283,8 +286,7 @@ fn host_contract_probe(
             truncate_diagnostics(&String::from_utf8_lossy(&output.stderr)),
         )));
     }
-    validate_profile_contract(&stdout).map_err(CompileProbeError::Candidate)?;
-    validate_request_contract(request, &stdout).map_err(CompileProbeError::Candidate)
+    validate_contracts(request, &stdout).map_err(CompileProbeError::Candidate)
 }
 
 fn truncate_diagnostics(value: &str) -> String {

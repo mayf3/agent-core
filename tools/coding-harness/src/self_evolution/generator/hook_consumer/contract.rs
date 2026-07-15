@@ -22,9 +22,27 @@ pub(super) fn validate_profile_contract(stdout: &str) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!(
-            "PROFILE_CONTRACT_TEST_FAILED missing={}\nPROFILE_OUTPUT:\n{}",
+            "PROFILE_CONTRACT_TEST_FAILED missing={}\nHTML_RUNTIME_METADATA_CONTRACT: render_html must visibly include the supplied runtime component_id, component_version, health, projection_lag, and telemetry_unavailable values.\nPROFILE_OUTPUT:\n{}",
             missing.join(","),
             truncate_diagnostics(stdout),
+        ))
+    }
+}
+
+pub(super) fn validate_contracts(request: &DevelopmentRequest, stdout: &str) -> Result<(), String> {
+    let mut failures = Vec::new();
+    if let Err(error) = validate_profile_contract(stdout) {
+        failures.push(error);
+    }
+    if let Err(error) = validate_request_contract(request, stdout) {
+        failures.push(error);
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "COMBINED_CONTRACT_PROBE_FAILED\n{}",
+            failures.join("\n---\n")
         ))
     }
 }
@@ -212,15 +230,12 @@ where
     F: Fn(&Value) -> bool + Copy,
 {
     let top_level_windows = value.as_object().is_some_and(|map| {
-        map.iter().any(|(key, value)| {
-            match key.to_lowercase().as_str() {
-                "rolling_window" | "rolling_windows" => {
-                    window_below_satisfies(value, days, check)
-                }
+        map.iter()
+            .any(|(key, value)| match key.to_lowercase().as_str() {
+                "rolling_window" | "rolling_windows" => window_below_satisfies(value, days, check),
                 "windows" => window_with_named_overall_satisfies(value, days, check),
                 _ => false,
-            }
-        })
+            })
     });
     top_level_windows || overall_window_satisfies(value, days, check)
 }

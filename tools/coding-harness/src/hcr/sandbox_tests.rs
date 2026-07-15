@@ -53,9 +53,7 @@ fn deny_policy_unshares_net_explicitly() {
 #[test]
 fn temporary_directory_is_private() {
     let argv = bwrap_argv_for(NetworkPolicy::Deny);
-    assert!(argv
-        .windows(2)
-        .any(|args| args == ["--tmpfs", "/tmp"]));
+    assert!(argv.windows(2).any(|args| args == ["--tmpfs", "/tmp"]));
     assert!(!argv
         .windows(3)
         .any(|args| args == ["--bind", "/tmp", "/tmp"]));
