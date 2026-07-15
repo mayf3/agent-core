@@ -1,5 +1,6 @@
 pub mod artifact_manifest;
 mod component_profile;
+mod generator;
 
 use agent_core_kernel::contract_catalog::ContractCatalog;
 use agent_core_kernel::domain::{ComponentLifecycleState, DevelopmentRequest, TargetKind};
@@ -31,9 +32,10 @@ pub fn handle_submit(artifact_root: &Path, args: &Value) -> Value {
         Ok(plan) => plan,
         Err(code) => return error(&code),
     };
-    let generated = crate::fixtures::generate(artifact_root, &request)
-        .ok_or("GENERATOR_NOT_CONFIGURED_FOR_PROFILE")
-        .and_then(|result| result.map_err(|_| "CANDIDATE_GENERATION_FAILED"));
+    let generated = match crate::fixtures::generate(artifact_root, &request) {
+        Some(result) => result.map_err(|_| "CANDIDATE_GENERATION_FAILED"),
+        None => generator::generate(artifact_root, &request).map_err(|error| error.code()),
+    };
     match generated {
         Ok(mut result) => {
             result["development_plan"] = serde_json::to_value(plan).unwrap_or(Value::Null);

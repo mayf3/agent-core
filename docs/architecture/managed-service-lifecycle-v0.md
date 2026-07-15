@@ -84,3 +84,24 @@ artifact cannot be selected. A pending deployment or control effect owns the
 component until its replay settles, and an already settled control decision is
 returned from the Journal before the Harness can be contacted again. This
 prevents delayed rollback deliveries from mutating a later component version.
+
+## Generated runtime contract
+
+The request-driven `hook-consumer-service-v0` generator combines a fixed,
+Harness-owned runtime with one model-generated pure projection module. The
+runtime is solely responsible for authenticated loopback `event.observe.v0`
+polling, monotonic cursor checks, an atomically persisted rebuildable
+projection, and read-only `/`, `/api/state`, and `/health` routes. It exposes
+component version, observer readiness, telemetry availability, last cursor,
+last observation time, and projection lag to the generated renderers.
+Every object created through the runtime aggregation helper is capped at 2,048
+keys, with deterministic eviction before insertion, and the atomically
+persisted projection is capped at 16 MiB. Exceeding the outer bound makes the
+observer unhealthy instead of growing service state without limit.
+
+The model-generated module receives redacted observed events and cannot access
+the observer token, environment, filesystem, network, process APIs, or Kernel
+database. The runtime supplies a strict Content Security Policy and component
+identity headers. Missing telemetry counters remain distinguishable from
+observed zero, and unknown future event kinds must be ignored without blocking
+cursor progress.

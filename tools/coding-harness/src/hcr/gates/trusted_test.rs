@@ -134,6 +134,14 @@ mod tests {
         assert!(source.contains("multiply"));
         assert!(source.contains("divide_by_zero"));
     }
+
+    #[test]
+    fn hook_consumer_contract_source_is_embedded_in_the_harness() {
+        let source =
+            crate::fixtures::trusted_test_source("hook-consumer-service-contract-v0").unwrap();
+        assert!(source.contains("future.observed.fact.v9"));
+        assert!(source.contains("events_applied"));
+    }
 }
 
 fn run_trusted_test(

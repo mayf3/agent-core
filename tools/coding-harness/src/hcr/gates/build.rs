@@ -61,16 +61,17 @@ pub(crate) fn check(candidate: &CandidateSnapshot, ctx: &GateContext) -> GateRes
             .unwrap_or_default()
     });
 
-    // Run cargo build with mandatory sandbox (B2: fail-closed)
+    // Run cargo build with mandatory sandbox (B2: fail-closed). Generated
+    // profiles carry a frozen lockfile; legacy stdlib-only fixtures predate it.
+    let mut cargo_args = vec!["cargo", "build", "--release"];
+    if build_source.join("Cargo.lock").is_file() {
+        cargo_args.push("--locked");
+    }
+    let manifest_arg = manifest_path.to_string_lossy().to_string();
+    cargo_args.extend(["--manifest-path", manifest_arg.as_str()]);
     let result = super::run_command_sandboxed(
         std::path::Path::new("/usr/bin/env"),
-        &[
-            "cargo",
-            "build",
-            "--release",
-            "--manifest-path",
-            &manifest_path.to_string_lossy(),
-        ],
+        &cargo_args,
         target_dir,
         Duration::from_secs(180),
         &[],
