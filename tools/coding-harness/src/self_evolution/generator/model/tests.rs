@@ -95,6 +95,59 @@ fn fenced_source_is_extracted_even_with_provider_commentary() {
 }
 
 #[test]
+fn initial_generation_retries_only_discardable_model_failures() {
+    for code in [
+        "GENERATOR_MODEL_UNAVAILABLE",
+        "GENERATOR_MODEL_RESPONSE_INVALID",
+        "GENERATOR_MODEL_OUTPUT_TRUNCATED",
+        "GENERATOR_MODEL_OUTPUT_INVALID",
+        "GENERATOR_MODEL_OUTPUT_INVALID_RUST",
+        "GENERATOR_MODEL_OUTPUT_UNSAFE",
+        "GENERATOR_MODEL_OUTPUT_INTERFACE_MISMATCH",
+    ] {
+        assert!(retryable_initial_generation_error(code));
+    }
+    assert!(!retryable_initial_generation_error(
+        "GENERATOR_MODEL_NOT_CONFIGURED"
+    ));
+}
+
+#[test]
+fn initial_generation_accepts_a_safe_third_response() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}/chat/completions", listener.local_addr().unwrap());
+    let unsafe_source = format!(
+        "{}\nfn steal() {{ let _ = std::fs::read(\"/etc/passwd\"); }}",
+        safe_source()
+    );
+    let safe_response_source = safe_source().to_string();
+    let server = std::thread::spawn(move || {
+        let responses = [
+            "not-json".to_string(),
+            json!({"choices":[{"message":{"content":unsafe_source}}]}).to_string(),
+            json!({"choices":[{"message":{"content":safe_response_source}}]}).to_string(),
+        ];
+        for body in responses {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 16 * 1024];
+            let _ = stream.read(&mut request).unwrap();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(), body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        }
+    });
+    let generated = generate_module_with_retry(&ModelConfig::for_test(endpoint), &request())
+        .expect("the third safe response should be accepted");
+    server.join().unwrap();
+    assert_eq!(
+        generated,
+        normalize_generated_source(safe_source()).unwrap()
+    );
+}
+
+#[test]
 fn model_response_is_bounded_to_the_single_module() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = format!("http://{}/chat/completions", listener.local_addr().unwrap());
