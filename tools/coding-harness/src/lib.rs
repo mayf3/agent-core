@@ -1,9 +1,10 @@
-pub mod calculator_generator;
 pub mod capability;
 pub mod config;
+pub mod fixtures;
 pub mod hcr;
 pub mod operation_specs;
 pub mod paths;
+pub mod self_evolution;
 pub mod server;
 pub mod tasks;
 pub mod workspace;

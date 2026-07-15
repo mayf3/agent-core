@@ -190,20 +190,27 @@ fn coding_manifest_registration_chain_preserves_schema() {
             .and_then(|v| v.as_bool()),
         Some(false)
     );
-    let operation = submit_params
-        .pointer("/properties/operation")
-        .unwrap()
-        .get("enum")
-        .unwrap()
-        .as_array()
+    assert_eq!(
+        submit_params.pointer("/required").unwrap(),
+        &serde_json::json!(["session_id", "development_request", "idempotency_key"])
+    );
+    let request = submit_params
+        .pointer("/properties/development_request")
         .unwrap();
     assert_eq!(
-        operation
-            .iter()
-            .filter_map(|v| v.as_str())
-            .collect::<Vec<_>>(),
-        vec!["external.calculator"]
+        request
+            .get("additionalProperties")
+            .and_then(|v| v.as_bool()),
+        Some(false)
     );
+    assert!(request
+        .pointer("/properties/target_kind/enum")
+        .and_then(|v| v.as_array())
+        .is_some_and(|values| values.len() == 9));
+    assert!(request
+        .pointer("/required")
+        .and_then(|v| v.as_array())
+        .is_some_and(|values| values.contains(&serde_json::json!("contract_catalog_version"))));
     let ts_params = fn_tool("external.coding_task_status")
         .get("function")
         .unwrap()
@@ -460,20 +467,27 @@ fn coding_manifest_llm_input_receives_complete_tool_definitions() {
             .and_then(|v| v.as_bool()),
         Some(false)
     );
-    let operation = submit_params
-        .pointer("/properties/operation")
-        .unwrap()
-        .get("enum")
-        .unwrap()
-        .as_array()
+    assert_eq!(
+        submit_params.pointer("/required").unwrap(),
+        &serde_json::json!(["session_id", "development_request", "idempotency_key"])
+    );
+    let request = submit_params
+        .pointer("/properties/development_request")
         .unwrap();
     assert_eq!(
-        operation
-            .iter()
-            .filter_map(|v| v.as_str())
-            .collect::<Vec<_>>(),
-        vec!["external.calculator"]
+        request
+            .get("additionalProperties")
+            .and_then(|v| v.as_bool()),
+        Some(false)
     );
+    assert!(request
+        .pointer("/properties/target_kind/enum")
+        .and_then(|v| v.as_array())
+        .is_some_and(|values| values.len() == 9));
+    assert!(request
+        .pointer("/required")
+        .and_then(|v| v.as_array())
+        .is_some_and(|values| values.contains(&serde_json::json!("contract_catalog_version"))));
     let ts_params = fn_tool("external.coding_task_status")
         .get("function")
         .unwrap()

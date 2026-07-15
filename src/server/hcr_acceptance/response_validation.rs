@@ -29,6 +29,7 @@ pub struct ValidatedResponse {
     pub candidate_digest: String,
     pub artifact_ref: Option<String>,
     pub artifact_digest: Option<String>,
+    pub component_manifest_digest: Option<String>,
     pub evidence_digest: String,
     pub gate_count: usize,
 }
@@ -136,6 +137,10 @@ pub fn validate_harness_response(
         }
         _ => None,
     };
+    let component_manifest_digest = match overall_outcome {
+        "CandidatePassed" => Some(valid_sha256(r, "component_manifest_digest")?.to_string()),
+        _ => None,
+    };
 
     // ── 7. Artifact ref must be a controlled relative path ──
     let artifact_ref = r
@@ -163,6 +168,7 @@ pub fn validate_harness_response(
         candidate_digest: candidate_digest.to_string(),
         artifact_ref,
         artifact_digest,
+        component_manifest_digest,
         evidence_digest: evidence_digest.to_string(),
         gate_count: gates.len(),
     })
@@ -206,5 +212,85 @@ fn valid_outcome<'a>(v: &'a Value) -> Result<&'a str, String> {
     match s {
         "CandidatePassed" | "CandidateFailed" | "InfrastructureFailure" => Ok(s),
         _ => Err(format!("invalid outcome: {s}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn context() -> RequestContext {
+        RequestContext {
+            hcr_id: "hcr_test".into(),
+            claim_id: "claim_test".into(),
+            run_id: "run_test".into(),
+            principal_id: "principal_test".into(),
+            gateway_session_id: "session_test".into(),
+            registry_snapshot_id: "snapshot_test".into(),
+            operation: "external.coding_hcr_accept".into(),
+            idempotency_key: "accept:test".into(),
+        }
+    }
+
+    fn passed_response() -> Value {
+        let ctx = context();
+        json!({
+            "result": {
+                "hcr_id": ctx.hcr_id,
+                "claim_id": ctx.claim_id,
+                "run_id": ctx.run_id,
+                "principal_id": ctx.principal_id,
+                "gateway_session_id": ctx.gateway_session_id,
+                "registry_snapshot_id": ctx.registry_snapshot_id,
+                "operation": ctx.operation,
+                "idempotency_key": ctx.idempotency_key,
+                "harness_execution_id": "hex_test",
+                "candidate_id": "candidate_test",
+                "candidate_digest": format!("sha256:{}", "1".repeat(64)),
+                "evidence_digest": format!("sha256:{}", "2".repeat(64)),
+                "overall_outcome": "CandidatePassed",
+                "artifact_ref": "candidate/target/release/component",
+                "artifact_digest": format!("sha256:{}", "3".repeat(64)),
+                "component_manifest_digest": format!("sha256:{}", "4".repeat(64)),
+                "gate_results": [
+                    {"gate_kind":"scaffold", "passed":true},
+                    {"gate_kind":"build", "passed":true},
+                    {"gate_kind":"trusted_test", "passed":true},
+                    {"gate_kind":"trusted_smoke", "passed":true},
+                    {"gate_kind":"artifact", "passed":true}
+                ]
+            }
+        })
+    }
+
+    #[test]
+    fn passed_candidate_binds_a_real_component_manifest_digest() {
+        let validated = validate_harness_response(&passed_response(), &context()).unwrap();
+        assert_eq!(
+            validated.component_manifest_digest.as_deref(),
+            Some(format!("sha256:{}", "4".repeat(64)).as_str())
+        );
+    }
+
+    #[test]
+    fn passed_candidate_without_component_manifest_digest_is_rejected() {
+        let mut response = passed_response();
+        response["result"]
+            .as_object_mut()
+            .unwrap()
+            .remove("component_manifest_digest");
+        assert!(validate_harness_response(&response, &context())
+            .unwrap_err()
+            .contains("component_manifest_digest"));
+    }
+
+    #[test]
+    fn passed_candidate_with_non_digest_component_manifest_is_rejected() {
+        let mut response = passed_response();
+        response["result"]["component_manifest_digest"] = json!("verified");
+        assert!(validate_harness_response(&response, &context())
+            .unwrap_err()
+            .contains("does not start with sha256"));
     }
 }

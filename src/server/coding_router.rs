@@ -1,124 +1,249 @@
-//! Fixed-rule Coding Intent Router.
+//! Compatibility router for Generic DevelopmentRequest V1.
 //!
-//! Parses authenticated user messages into structured `CodingIntent` values.
-//! Only supports the North Star "develop external.calculator" intent with
-//! a small set of synonyms. All other requests are rejected.
-//!
-//! This is NOT an LLM router — it uses deterministic keyword matching.
+//! The router recognizes a development verb plus Contract Catalog references,
+//! derives a component kind/profile, and emits a data-only draft. It does not
+//! execute code or mint Kernel intents. The old calculator sentence is kept as
+//! a fixture adapter and follows the same generic request path.
 
+use crate::contract_catalog::ContractCatalog;
+use crate::domain::{DevelopmentRequestDraft, TargetKind};
 use anyhow::{bail, Result};
+use sha2::{Digest, Sha256};
 
-/// The kind of coding development intent recognized by the router.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CodingIntentKind {
-    /// Request to develop a new capability via the coding harness.
-    DevelopCapability,
+    DevelopComponent,
 }
 
-/// Structured specification parsed from a user message.
 #[derive(Debug, Clone)]
 pub struct CodingIntent {
     pub kind: CodingIntentKind,
-    /// The target capability operation, e.g. "external.calculator".
+    pub development_request: DevelopmentRequestDraft,
+    /// Compatibility fields used only by the frozen calculator E2E.
     pub operation: String,
-    /// Sub-functions the capability supports, e.g. ["add", "subtract"].
     pub functions: Vec<String>,
-    /// Schema version for the structured generator, e.g. "calculator-v0".
     pub schema_version: String,
 }
 
-/// Parse a user message into a structured CodingIntent.
-///
-/// Only the North Star calculator development intent is supported.
-/// All other messages return an error.
 pub fn parse_coding_intent(text: &str) -> Result<CodingIntent> {
+    let normalized = normalize(text)?;
+    if contains_shell_pattern(&normalized) {
+        bail!("SHELL_LIKE_REQUEST_REJECTED");
+    }
+    if contains_override_attempt(&normalized) {
+        bail!("OPERATION_OVERRIDE_REJECTED");
+    }
+    if !contains_development_verb(&normalized) {
+        bail!("UNSUPPORTED_CODING_REQUEST");
+    }
+
+    if is_calculator_fixture_request(&normalized) {
+        let mut draft = DevelopmentRequestDraft::new(
+            TargetKind::InvocableCapability,
+            "external.calculator".to_string(),
+        );
+        draft.requirements = vec![
+            "provide add, subtract, multiply, and divide operations".to_string(),
+            "implement the component.invoke.v0 process contract".to_string(),
+        ];
+        draft.required_contracts = vec!["component.invoke.v0".to_string()];
+        draft.requested_permissions = vec!["component.invoke".to_string()];
+        draft.acceptance_criteria = vec![
+            "trusted calculator fixture tests pass".to_string(),
+            "multiply 6 by 7 returns 42".to_string(),
+            "divide by zero returns a structured error".to_string(),
+        ];
+        return Ok(CodingIntent {
+            kind: CodingIntentKind::DevelopComponent,
+            development_request: draft,
+            operation: "external.calculator".to_string(),
+            functions: ["add", "subtract", "multiply", "divide"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            schema_version: "calculator-fixture-v0".to_string(),
+        });
+    }
+
+    let catalog = ContractCatalog::v1();
+    let required_contracts: Vec<String> = catalog
+        .contracts
+        .iter()
+        .filter(|contract| normalized.contains(&contract.contract_id))
+        .map(|contract| contract.contract_id.clone())
+        .collect();
+    if required_contracts.is_empty() {
+        bail!("DEVELOPMENT_REQUEST_REQUIRES_KNOWN_CONTRACT");
+    }
+    let target_kind = infer_target_kind(&normalized, &required_contracts)?;
+    let name = extract_component_name(text);
+    let mut draft = DevelopmentRequestDraft::new(target_kind, name.clone());
+    draft.requirements = split_requirements(text);
+    draft.acceptance_criteria = draft.requirements.clone();
+    draft.required_contracts = required_contracts;
+    draft.requested_permissions = permissions_for(&catalog, &draft.required_contracts);
+
+    Ok(CodingIntent {
+        kind: CodingIntentKind::DevelopComponent,
+        development_request: draft,
+        operation: name,
+        functions: Vec::new(),
+        schema_version: target_kind.component_profile().to_string(),
+    })
+}
+
+fn normalize(text: &str) -> Result<String> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         bail!("EMPTY_REQUEST");
     }
-
-    // Normalize: lowercase, collapse whitespace.
-    let normalized = trimmed.to_lowercase();
-    let words: Vec<&str> = normalized.split_whitespace().collect();
-    if words.is_empty() {
-        bail!("EMPTY_REQUEST");
-    }
-
-    // Check for shell-like patterns that must be rejected.
-    if contains_shell_pattern(&normalized) {
-        bail!("SHELL_LIKE_REQUEST_REJECTED");
-    }
-
-    // Check for explicit operation override attempts.
-    if contains_override_attempt(&normalized) {
-        bail!("OPERATION_OVERRIDE_REJECTED");
-    }
-
-    // Match North Star: "开发一个 external.calculator，支持加减乘除"
-    // Supported synonyms:
-    //   - 开发/创建/开发一个/创建一个 (develop/create)
-    //   - external.calculator / calculator
-    //   - 支持/实现/包含 (support/implement/include)
-    //   - 加减乘除 / 四则运算 / add,subtract,multiply,divide
-    if is_calculator_development(&normalized) {
-        return Ok(CodingIntent {
-            kind: CodingIntentKind::DevelopCapability,
-            operation: "external.calculator".to_string(),
-            functions: vec![
-                "add".to_string(),
-                "subtract".to_string(),
-                "multiply".to_string(),
-                "divide".to_string(),
-            ],
-            schema_version: "calculator-v0".to_string(),
-        });
-    }
-
-    bail!("UNSUPPORTED_CODING_REQUEST");
+    Ok(trimmed.to_lowercase())
 }
 
-/// Check if the normalized text matches the calculator development pattern.
-fn is_calculator_development(text: &str) -> bool {
-    // Must contain a development keyword.
-    let has_develop = text.contains("开发")
-        || text.contains("创建")
-        || text.contains("develop")
-        || text.contains("create");
-
-    // Must reference calculator.
-    let has_calculator =
-        text.contains("calculator") || text.contains("计算器") || text.contains("计算");
-
-    // Must reference at least one of the four operations or "四则".
-    let has_operations = text.contains("加")
-        || text.contains("减")
-        || text.contains("乘")
-        || text.contains("除")
-        || text.contains("add")
-        || text.contains("subtract")
-        || text.contains("multiply")
-        || text.contains("divide")
-        || text.contains("四则")
-        || text.contains("arithmetic");
-
-    has_develop && has_calculator && has_operations
+fn infer_target_kind(text: &str, contracts: &[String]) -> Result<TargetKind> {
+    let has = |id: &str| contracts.iter().any(|value| value == id);
+    if has("event.observe.v0") {
+        return Ok(TargetKind::HookConsumerService);
+    }
+    if has("context.compress.v0") || has("context.prepare.v0") {
+        return Ok(TargetKind::ContextTransformer);
+    }
+    if has("context.load.v0") {
+        return Ok(TargetKind::ContextProvider);
+    }
+    if has("route.proposal.v0") {
+        return Ok(TargetKind::IngressRouter);
+    }
+    if has("run.create.v0") {
+        if text.contains("multi") || text.contains("多个") || text.contains("多 run") {
+            return Ok(TargetKind::MultiRunOrchestrator);
+        }
+        if text.contains("scheduler") || text.contains("调度服务") {
+            return Ok(TargetKind::SchedulerService);
+        }
+        return Ok(TargetKind::ScheduledWorker);
+    }
+    if has("feishu.reply.v0") {
+        return Ok(TargetKind::ConnectorExtension);
+    }
+    if has("component.invoke.v0") {
+        return Ok(TargetKind::InvocableCapability);
+    }
+    if has("deployment.effect.v0") {
+        return Ok(TargetKind::HookConsumerService);
+    }
+    bail!("DEVELOPMENT_REQUEST_TARGET_KIND_AMBIGUOUS")
 }
 
-/// Detect shell-like command patterns that must be rejected.
+fn permissions_for(catalog: &ContractCatalog, contracts: &[String]) -> Vec<String> {
+    let mut values = Vec::new();
+    for id in contracts {
+        if let Some(contract) = catalog.get(id) {
+            for permission in &contract.permissions {
+                if !values.contains(permission) {
+                    values.push(permission.clone());
+                }
+            }
+        }
+    }
+    values
+}
+
+fn extract_component_name(text: &str) -> String {
+    let lower = text.to_lowercase();
+    let prefixes = ["开发一个", "创建一个", "develop a", "create a"];
+    let mut candidate = text.trim();
+    for prefix in prefixes {
+        if let Some(index) = lower.find(prefix) {
+            candidate = &text[index + prefix.len()..];
+            break;
+        }
+    }
+    candidate = candidate
+        .split(['，', ',', '\n', '。'])
+        .next()
+        .unwrap_or(candidate)
+        .trim();
+    if let Some(external) = candidate
+        .split_whitespace()
+        .find(|word| word.starts_with("external."))
+    {
+        return external
+            .trim_matches(|value: char| {
+                !value.is_ascii_alphanumeric() && value != '.' && value != '_'
+            })
+            .to_lowercase();
+    }
+    let mut slug = String::new();
+    let mut separator = false;
+    for byte in candidate.bytes() {
+        if byte.is_ascii_alphanumeric() {
+            if separator && !slug.is_empty() {
+                slug.push('-');
+            }
+            slug.push((byte as char).to_ascii_lowercase());
+            separator = false;
+        } else {
+            separator = true;
+        }
+    }
+    let slug = slug.trim_matches('-');
+    if !slug.is_empty() {
+        return slug.to_string();
+    }
+    let digest = hex::encode(Sha256::digest(candidate.as_bytes()));
+    format!("component-{}", &digest[..16])
+}
+
+fn split_requirements(text: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    for item in text.split(['，', ',', '\n', '。']) {
+        let value = item.trim();
+        if !value.is_empty() && !values.iter().any(|existing| existing == value) {
+            values.push(value.to_string());
+        }
+    }
+    if values.is_empty() {
+        values.push(text.trim().to_string());
+    }
+    values
+}
+
+fn contains_development_verb(text: &str) -> bool {
+    ["开发", "创建", "develop", "create"]
+        .iter()
+        .any(|value| text.contains(value))
+}
+
+fn is_calculator_fixture_request(text: &str) -> bool {
+    let calculator = text.contains("calculator") || text.contains("计算器");
+    let arithmetic = [
+        "加减乘除",
+        "四则",
+        "add",
+        "subtract",
+        "multiply",
+        "divide",
+        "arithmetic",
+    ]
+    .iter()
+    .any(|value| text.contains(value));
+    calculator && arithmetic
+}
+
 fn contains_shell_pattern(text: &str) -> bool {
-    let dangerous = [
+    [
         "`", "$(", "; ", "| ", "&&", "||", "> ", ">> ", "rm ", "sudo ", "chmod ", "chown ",
         "wget ", "curl ", "/bin/", "/usr/", "/etc/", "~/.", "../",
-    ];
-    dangerous.iter().any(|p| text.contains(p))
+    ]
+    .iter()
+    .any(|value| text.contains(value))
 }
 
-/// Detect attempts to override the control operation.
-/// Only blocks direct references to the control operation name,
-/// not legitimate references to target capabilities like "external.calculator".
 fn contains_override_attempt(text: &str) -> bool {
-    let overrides = ["operation=", "operation:", "coding_task_submit"];
-    overrides.iter().any(|p| text.contains(p))
+    ["operation=", "operation:", "coding_task_submit"]
+        .iter()
+        .any(|value| text.contains(value))
 }
 
 #[cfg(test)]
@@ -126,79 +251,47 @@ mod tests {
     use super::*;
 
     #[test]
-    fn north_star_sentence_routes_to_coding_submit() {
+    fn calculator_is_a_compatibility_fixture_on_the_generic_profile() {
         let intent = parse_coding_intent("开发一个 external.calculator，支持加减乘除").unwrap();
-        assert_eq!(intent.kind, CodingIntentKind::DevelopCapability);
+        assert_eq!(intent.kind, CodingIntentKind::DevelopComponent);
         assert_eq!(intent.operation, "external.calculator");
-        assert_eq!(intent.functions.len(), 4);
-        assert!(intent.functions.contains(&"add".to_string()));
-        assert!(intent.functions.contains(&"multiply".to_string()));
-        assert_eq!(intent.schema_version, "calculator-v0");
+        assert_eq!(
+            intent.development_request.target_kind,
+            TargetKind::InvocableCapability
+        );
+        assert_eq!(
+            intent.development_request.build_profile,
+            "invocable-capability-v0"
+        );
+        assert_eq!(intent.schema_version, "calculator-fixture-v0");
     }
 
     #[test]
-    fn calculator_synonym_routes_to_same_spec() {
-        let cases = vec![
-            "创建一个 external.calculator，支持加减乘除",
-            "帮我开发计算器能力，支持加减乘除",
-            "develop an external.calculator with add subtract multiply divide",
-            "create a calculator with arithmetic operations",
-            "开发计算器，实现四则运算",
-        ];
-        for msg in cases {
-            let intent = parse_coding_intent(msg).unwrap();
-            assert_eq!(intent.operation, "external.calculator", "failed for: {msg}");
-            assert_eq!(intent.functions.len(), 4, "failed for: {msg}");
-            assert_eq!(intent.schema_version, "calculator-v0", "failed for: {msg}");
+    fn event_observer_request_selects_hook_consumer_profile() {
+        let intent = parse_coding_intent(
+            "开发一个 Token 使用量 Dashboard，\n通过 event.observe.v0 获取数据，\n按日期、Run、模型和 Profile 展示 Token 用量。",
+        )
+        .unwrap();
+        let draft = intent.development_request;
+        assert_eq!(draft.target_kind, TargetKind::HookConsumerService);
+        assert_eq!(draft.name, "token-dashboard");
+        assert_eq!(draft.build_profile, "hook-consumer-service-v0");
+        assert_eq!(draft.deployment_profile, "managed-service-v0");
+        assert_eq!(draft.required_contracts, ["event.observe.v0"]);
+        assert_eq!(draft.requested_permissions, ["journal.observe"]);
+    }
+
+    #[test]
+    fn unsupported_request_without_a_known_contract_is_rejected() {
+        for text in ["开发一个浏览器", "create a web server"] {
+            assert!(parse_coding_intent(text).is_err(), "accepted: {text}");
         }
     }
 
     #[test]
-    fn unsupported_capability_is_rejected() {
-        let cases = vec![
-            "开发一个浏览器",
-            "开发一个 external.chatgpt",
-            "帮我创建一个 database",
-            "create a web server",
-        ];
-        for msg in cases {
-            let err = parse_coding_intent(msg).unwrap_err();
-            assert!(
-                err.to_string().contains("UNSUPPORTED"),
-                "expected UNSUPPORTED for: {msg}, got: {err}"
-            );
-        }
-    }
-
-    #[test]
-    fn shell_like_text_is_rejected() {
-        let cases = vec![
-            "开发一个 external.calculator； rm -rf /",
-            "create calculator && sudo ls",
-            "develop calculator | bash",
-        ];
-        for msg in cases {
-            let err = parse_coding_intent(msg).unwrap_err();
-            assert!(
-                err.to_string().contains("SHELL_LIKE") || err.to_string().contains("UNSUPPORTED"),
-                "expected rejection for: {msg}, got: {err}"
-            );
-        }
-    }
-
-    #[test]
-    fn caller_cannot_override_control_operation() {
-        let cases = vec![
-            "开发一个 external.coding_task_submit",
-            "create a coding_task_submit",
-        ];
-        for msg in cases {
-            let err = parse_coding_intent(msg).unwrap_err();
-            assert!(
-                err.to_string().contains("OVERRIDE") || err.to_string().contains("UNSUPPORTED"),
-                "expected rejection for: {msg}, got: {err}"
-            );
-        }
+    fn shell_and_control_operation_overrides_are_rejected() {
+        assert!(parse_coding_intent("开发一个 calculator && sudo ls").is_err());
+        assert!(parse_coding_intent("开发一个 external.coding_task_submit").is_err());
     }
 
     #[test]

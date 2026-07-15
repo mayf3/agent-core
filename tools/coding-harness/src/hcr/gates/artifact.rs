@@ -1,175 +1,56 @@
-//! Artifact acceptance gate.
-//!
-//! Validates that the built artifact exists, the manifest is parseable,
-//! operation is `external.calculator`, and — critically — that the
-//! **real artifact content digest** matches the manifest's declared
-//! digest (B1). Format-only digest checks are insufficient.
-//!
-//! Also checks: no path escape, no symlink artifact, entry file exists.
-//!
-//! Failure is `CandidateFailed`; infra failures are `InfrastructureFailure`.
+//! Generic component artifact gate with real content-digest verification.
 
 use std::path::Path;
 
 use super::{CandidateSnapshot, GateContext, GateKind, GateResult};
 use crate::hcr::executor::CleanupStatus;
+use crate::self_evolution::artifact_manifest::CandidateArtifactManifest;
 
-/// Run the artifact gate against the given candidate snapshot.
-///
-/// Checks:
-/// 1. Manifest exists and is parseable
-/// 2. Manifest operation = external.calculator
-/// 3. Entry file exists (from build output), not a symlink
-/// 4. **Real artifact content SHA-256 matches manifest declaration** (B1)
-/// 5. No path escape
+const DIGEST_PLACEHOLDER: &str =
+    "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+
 pub(crate) fn check(candidate: &CandidateSnapshot, ctx: &GateContext) -> GateResult {
-    let candidate_path = &candidate.candidate_path;
-    let mut errors: Vec<String> = Vec::new();
-
-    // 1. Parse manifest
-    let manifest_path = candidate_path.join("manifest.json");
-    let manifest = match std::fs::read_to_string(&manifest_path) {
-        Ok(c) => match serde_json::from_str::<serde_json::Value>(&c) {
-            Ok(v) => v,
-            Err(e) => {
-                return fail(
-                    GateKind::Artifact,
-                    true,
-                    "ARTIFACT_MANIFEST_PARSE_FAILED",
-                    &format!("manifest parse error: {e}"),
-                    candidate,
-                );
-            }
-        },
-        Err(e) => {
-            return fail(
-                GateKind::Artifact,
-                true,
-                "ARTIFACT_MANIFEST_MISSING",
-                &format!("manifest read error: {e}"),
-                candidate,
-            );
-        }
+    let manifest = match CandidateArtifactManifest::load(&candidate.candidate_path) {
+        Ok(manifest) => manifest,
+        Err(error) => return fail(candidate, true, "ARTIFACT_MANIFEST_INVALID", &error),
     };
-
-    // 2. Check operation
-    let operation = manifest["operation"].as_str().unwrap_or("");
-    if operation != "external.calculator" {
+    let artifact = if ctx.built_binary.exists() {
+        ctx.built_binary.clone()
+    } else {
+        candidate.candidate_path.join(&manifest.entry)
+    };
+    if !artifact.exists() {
+        return fail(
+            candidate,
+            false,
+            "ARTIFACT_ENTRY_NOT_FOUND",
+            &format!("entry file not found: {}", artifact.display()),
+        );
+    }
+    let mut errors = Vec::new();
+    if artifact.is_symlink() {
+        errors.push(format!("entry is a symlink: {}", artifact.display()));
+    } else if !artifact.is_file() {
         errors.push(format!(
-            "operation is '{operation}', expected 'external.calculator'"
+            "entry is not a regular file: {}",
+            artifact.display()
+        ));
+    }
+    if !path_is_within_allowed_root(&artifact, &candidate.candidate_path, &ctx.work_base) {
+        errors.push(format!(
+            "entry path escapes allowed roots: {}",
+            artifact.display()
         ));
     }
 
-    // 3. Find entry file — prefer the built binary from work dir
-    let declared_digest = manifest["artifact_digest"].as_str().map(|s| s.to_string());
-
-    let entry_path = if let Some(entry) = manifest["entry"].as_str() {
-        if entry.contains("..") {
-            errors.push(format!("entry path contains parent traversal: {entry}"));
-            None
-        } else if Path::new(entry).is_absolute() {
-            errors.push(format!("entry path is absolute: {entry}"));
-            None
-        } else {
-            let fp = if ctx.built_binary.exists() {
-                ctx.built_binary.clone()
-            } else {
-                candidate_path.join(entry)
-            };
-            Some(fp)
-        }
-    } else {
-        errors.push("manifest missing 'entry' field".into());
-        None
-    };
-
-    // 4. Verify real artifact digest (B1)
-    let mut computed_artifact_digest: Option<String> = None;
-    let artifact_digest_verified = match (&entry_path, &declared_digest) {
-        (Some(ep), Some(declared)) => {
-            if !ep.exists() {
-                // Entry not found — likely Build gate didn't produce it.
-                // This is infrastructure failure, not candidate failure.
-                return GateResult {
-                    gate_kind: GateKind::Artifact,
-                    passed: false,
-                    is_candidate_failure: false,
-                    exit_code: -1,
-                    timed_out: false,
-                    child_cleanup: CleanupStatus::Confirmed,
-                    error_code: Some("ARTIFACT_ENTRY_NOT_FOUND".into()),
-                    stdout: String::new(),
-                    stderr: format!("entry file not found: {}", ep.display()),
-                    candidate_id: candidate.candidate_id.clone(),
-                    candidate_digest: candidate.candidate_digest.clone(),
-                    candidate_digest_preserved: false,
-                    computed_artifact_digest: None,
-                };
-            } else if ep.is_symlink() {
-                errors.push(format!("entry is a symlink, rejecting: {}", ep.display()));
-                false
-            } else if !ep.is_file() {
-                errors.push(format!("entry is not a regular file: {}", ep.display()));
-                false
-            } else {
-                // Compute real content digest
-                let computed = compute_file_digest(ep);
-                if *declared
-                    != "sha256:0000000000000000000000000000000000000000000000000000000000000000"
-                    && *declared != computed
-                {
-                    errors.push(format!(
-                        "artifact digest mismatch: declared={declared}, computed={computed}"
-                    ));
-                    false
-                } else {
-                    // Digest matches — real content verified
-                    computed_artifact_digest = Some(computed.clone());
-                    true
-                }
-            }
-        }
-        (None, _) => false,
-        (_, None) => {
-            errors.push("manifest missing 'artifact_digest' field".into());
-            false
-        }
-    };
-
-    // 5. Check no path escape
-    if let Some(ref ep) = entry_path {
-        if ep.exists() {
-            // Reject symlinks at the entry path (already checked above, but
-            // also check for symlink components in the resolved path)
-            if let Ok(resolved) = ep.canonicalize() {
-                let candidate_canon = candidate_path.canonicalize().ok();
-                let work_canon = ctx.work_base.canonicalize().ok();
-                let in_candidate = candidate_canon
-                    .as_ref()
-                    .map(|c| resolved.starts_with(c))
-                    .unwrap_or(false);
-                let in_work = work_canon
-                    .as_ref()
-                    .map(|c| resolved.starts_with(c))
-                    .unwrap_or(false);
-                if !in_candidate && !in_work {
-                    errors.push(format!("entry path escapes allowed dirs: {resolved:?}"));
-                }
-            }
-        }
+    let computed = compute_file_digest(&artifact);
+    if manifest.artifact_digest != DIGEST_PLACEHOLDER && manifest.artifact_digest != computed {
+        errors.push(format!(
+            "artifact digest mismatch: declared={}, computed={computed}",
+            manifest.artifact_digest
+        ));
     }
-
-    let passed = errors.is_empty() && artifact_digest_verified;
-    let error_code = if !passed {
-        if !artifact_digest_verified {
-            Some("ARTIFACT_DIGEST_MISMATCH".into())
-        } else {
-            Some("ARTIFACT_FAILED".into())
-        }
-    } else {
-        None
-    };
-
+    let passed = errors.is_empty();
     GateResult {
         gate_kind: GateKind::Artifact,
         passed,
@@ -177,11 +58,11 @@ pub(crate) fn check(candidate: &CandidateSnapshot, ctx: &GateContext) -> GateRes
         exit_code: if passed { 0 } else { -1 },
         timed_out: false,
         child_cleanup: CleanupStatus::Confirmed,
-        error_code,
+        error_code: (!passed).then(|| "ARTIFACT_DIGEST_MISMATCH".into()),
         stdout: if passed {
             format!(
-                "artifact_digest_verified=true\nartifact_digest={}",
-                computed_artifact_digest.as_deref().unwrap_or("unknown")
+                "component_id={}\nprofile_id={}\nartifact_digest_verified=true\nartifact_digest={computed}",
+                manifest.component_id, manifest.profile_id
             )
         } else {
             String::new()
@@ -190,38 +71,43 @@ pub(crate) fn check(candidate: &CandidateSnapshot, ctx: &GateContext) -> GateRes
         candidate_id: candidate.candidate_id.clone(),
         candidate_digest: candidate.candidate_digest.clone(),
         candidate_digest_preserved: false,
-        computed_artifact_digest: computed_artifact_digest.clone(),
+        computed_artifact_digest: passed.then_some(computed),
     }
 }
 
-/// Compute the SHA-256 digest of a file.
-fn compute_file_digest(path: &Path) -> String {
-    use sha2::{Digest, Sha256};
-    let data = std::fs::read(path).unwrap_or_default();
-    let mut hasher = Sha256::new();
-    hasher.update(&data);
-    let hex = hex::encode(hasher.finalize());
-    format!("sha256:{hex}")
+fn path_is_within_allowed_root(path: &Path, candidate: &Path, work: &Path) -> bool {
+    let Ok(resolved) = path.canonicalize() else {
+        return false;
+    };
+    [candidate, work].iter().any(|root| {
+        root.canonicalize()
+            .map(|root| resolved.starts_with(root))
+            .unwrap_or(false)
+    })
 }
 
-/// Helper to create a quick failure result.
+fn compute_file_digest(path: &Path) -> String {
+    use sha2::{Digest, Sha256};
+    let bytes = std::fs::read(path).unwrap_or_default();
+    format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
+}
+
 fn fail(
-    kind: GateKind,
-    is_candidate_failure: bool,
-    error_code: &str,
-    message: &str,
     candidate: &CandidateSnapshot,
+    is_candidate_failure: bool,
+    code: &str,
+    message: &str,
 ) -> GateResult {
     GateResult {
-        gate_kind: kind,
+        gate_kind: GateKind::Artifact,
         passed: false,
         is_candidate_failure,
         exit_code: -1,
         timed_out: false,
         child_cleanup: CleanupStatus::Confirmed,
-        error_code: Some(error_code.to_string()),
+        error_code: Some(code.into()),
         stdout: String::new(),
-        stderr: message.to_string(),
+        stderr: message.into(),
         candidate_id: candidate.candidate_id.clone(),
         candidate_digest: candidate.candidate_digest.clone(),
         candidate_digest_preserved: false,
