@@ -5,6 +5,7 @@ use agent_core_kernel::domain::{
 };
 use deployment_harness::config::DeploymentHarnessConfig;
 use deployment_harness::manager;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 fn config(root: &TempDir) -> DeploymentHarnessConfig {
@@ -118,6 +119,25 @@ fn deploy_replay_upgrade_rollback_and_disable() {
     let replay = manager::deploy(&config, &serde_json::to_vec(&v1_intent).unwrap()).unwrap();
     assert!(replay.replayed);
     assert_eq!(replay.deployment_id, first.deployment_id);
+
+    let active_path = config
+        .state_root
+        .join("components/fixture-service/active.json");
+    let active: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&active_path).unwrap()).unwrap();
+    let pid = active["pid"].as_u64().unwrap() as i32;
+    unsafe {
+        libc::kill(-pid, libc::SIGTERM);
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while manager::status(&config, "fixture-service").unwrap()["health_status"] == "ready" {
+        assert!(Instant::now() < deadline, "fixture did not stop");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    manager::reconcile(&config).unwrap();
+    let recovered = manager::status(&config, "fixture-service").unwrap();
+    assert_eq!(recovered["health_status"], "ready");
+    assert_eq!(recovered["endpoint"], first.endpoint);
 
     let upgraded = manager::deploy(&config, &serde_json::to_vec(&v2_intent).unwrap()).unwrap();
     assert_eq!(upgraded.version, "0.2.0");

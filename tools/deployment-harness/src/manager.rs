@@ -25,6 +25,7 @@ struct DeploymentRecord {
     executable_path: String,
     pid: u32,
     port: u16,
+    instance_id: String,
     status: String,
     #[serde(default)]
     last_control_receipt: Option<ComponentControlReceipt>,
@@ -38,6 +39,7 @@ pub fn deploy(config: &DeploymentHarnessConfig, body: &[u8]) -> Result<Deploymen
     let _lock = lock_component(config, &manifest.component_id)?;
     let active = load_active(config, &manifest.component_id)?;
     if let Some(existing) = &active {
+        validate_record(config, existing)?;
         if existing.intent == intent {
             let mut receipt = existing.receipt.clone();
             if existing.status == "healthy" && record_is_healthy(existing) {
@@ -74,6 +76,7 @@ pub fn deploy(config: &DeploymentHarnessConfig, body: &[u8]) -> Result<Deploymen
         &component_root.join(&manifest.state_path),
         &manifest.healthcheck.path,
         Duration::from_millis(manifest.healthcheck.timeout_ms),
+        None,
     )?;
     let log_ref = relative_log_ref(config, &started.log_path)?;
     let previous_artifact_digest = active
@@ -102,7 +105,7 @@ pub fn deploy(config: &DeploymentHarnessConfig, body: &[u8]) -> Result<Deploymen
     };
     receipt.receipt_id = receipt.expected_receipt_id();
     if let Err(error) = receipt.validate_for(&intent, &manifest.component_id) {
-        process::stop(started.pid);
+        process::stop(started.pid, &executable);
         return Err(error);
     }
     let record = DeploymentRecord {
@@ -112,15 +115,20 @@ pub fn deploy(config: &DeploymentHarnessConfig, body: &[u8]) -> Result<Deploymen
         executable_path: executable.to_string_lossy().into_owned(),
         pid: started.pid,
         port: started.port,
+        instance_id: started.instance_id,
         status: "healthy".into(),
         last_control_receipt: None,
     };
     if let Err(error) = persist_record(config, &record) {
-        process::stop(started.pid);
+        process::stop(started.pid, &executable);
         return Err(error);
     }
     if let Some(previous) = active {
-        process::stop(previous.pid);
+        if !stop_record(&previous) {
+            persist_active(config, &previous)?;
+            process::stop(started.pid, &executable);
+            bail!("SERVICE_PREVIOUS_STOP_FAILED");
+        }
     }
     Ok(receipt)
 }
@@ -129,6 +137,7 @@ pub fn status(config: &DeploymentHarnessConfig, component_id: &str) -> Result<Va
     validate_component_id(component_id)?;
     let record =
         load_active(config, component_id)?.ok_or_else(|| anyhow!("COMPONENT_NOT_DEPLOYED"))?;
+    validate_record(config, &record)?;
     let ready = record.status != "disabled" && record_is_healthy(&record);
     Ok(json!({
         "protocol_version": DEPLOYMENT_PROTOCOL,
@@ -153,11 +162,14 @@ pub fn disable(
     let _lock = lock_component(config, component_id)?;
     let mut record =
         load_active(config, component_id)?.ok_or_else(|| anyhow!("COMPONENT_NOT_DEPLOYED"))?;
+    validate_record(config, &record)?;
     if let Some(receipt) = replay_control(&record, "disable", decision_id, component_id)? {
         return Ok(receipt);
     }
     if record.status != "disabled" {
-        process::stop(record.pid);
+        if !stop_record(&record) {
+            bail!("SERVICE_STOP_FAILED");
+        }
         record.status = "disabled".into();
     }
     let receipt = control_receipt("disable", decision_id, &record, "disabled", "unavailable");
@@ -175,6 +187,7 @@ pub fn rollback(
     let _lock = lock_component(config, component_id)?;
     let current =
         load_active(config, component_id)?.ok_or_else(|| anyhow!("COMPONENT_NOT_DEPLOYED"))?;
+    validate_record(config, &current)?;
     if let Some(receipt) = replay_control(&current, "rollback", decision_id, component_id)? {
         return Ok(receipt);
     }
@@ -185,6 +198,7 @@ pub fn rollback(
         .ok_or_else(|| anyhow!("ROLLBACK_TARGET_MISSING"))?;
     let mut previous = load_record_by_artifact(config, component_id, previous_digest)?
         .ok_or_else(|| anyhow!("ROLLBACK_TARGET_NOT_FOUND"))?;
+    validate_record(config, &previous)?;
     let executable = PathBuf::from(&previous.executable_path);
     let started = process::start(
         config,
@@ -194,9 +208,11 @@ pub fn rollback(
         &component_root(config, component_id).join(&previous.manifest.state_path),
         &previous.manifest.healthcheck.path,
         Duration::from_millis(previous.manifest.healthcheck.timeout_ms),
+        None,
     )?;
     previous.pid = started.pid;
     previous.port = started.port;
+    previous.instance_id = started.instance_id;
     previous.status = "rolled_back".into();
     previous.receipt.endpoint = started.endpoint;
     previous.receipt.health_status = "ready".into();
@@ -205,10 +221,14 @@ pub fn rollback(
     let receipt = control_receipt("rollback", decision_id, &previous, "rolled_back", "ready");
     previous.last_control_receipt = Some(receipt.clone());
     if let Err(error) = persist_active(config, &previous) {
-        process::stop(started.pid);
+        process::stop(started.pid, &executable);
         return Err(error);
     }
-    process::stop(current.pid);
+    if !stop_record(&current) {
+        persist_active(config, &current)?;
+        process::stop(started.pid, &executable);
+        bail!("SERVICE_PREVIOUS_STOP_FAILED");
+    }
     Ok(receipt)
 }
 
@@ -237,7 +257,97 @@ fn record_is_healthy(record: &DeploymentRecord) -> bool {
         &format!("127.0.0.1:{}", record.port),
         &record.manifest.healthcheck.path,
         Duration::from_millis(500),
+        &record.manifest.component_id,
+        &record.manifest.version,
+        &record.instance_id,
     )
+}
+
+fn stop_record(record: &DeploymentRecord) -> bool {
+    let stopped = process::stop(record.pid, Path::new(&record.executable_path));
+    stopped || !record_is_healthy(record)
+}
+
+/// Restore every approved active service after a Harness or host restart.
+/// Recovery is fail-closed and reuses the published port so the immutable
+/// Kernel component snapshot remains a valid routing fact.
+pub fn reconcile(config: &DeploymentHarnessConfig) -> Result<()> {
+    let components_root = config.state_root.join("components");
+    let entries = match std::fs::read_dir(&components_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    for entry in entries {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let component_id = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| anyhow!("COMPONENT_ID_INVALID"))?;
+        validate_component_id(&component_id)?;
+        let _lock = lock_component(config, &component_id)?;
+        let Some(mut record) = load_active(config, &component_id)? else {
+            continue;
+        };
+        validate_record(config, &record)?;
+        if record.status == "disabled" || record_is_healthy(&record) {
+            continue;
+        }
+        let executable = PathBuf::from(&record.executable_path);
+        let started = process::start(
+            config,
+            &record.manifest.component_id,
+            &record.manifest.version,
+            &executable,
+            &component_root(config, &component_id).join(&record.manifest.state_path),
+            &record.manifest.healthcheck.path,
+            Duration::from_millis(record.manifest.healthcheck.timeout_ms),
+            Some(record.port),
+        )?;
+        if started.endpoint != record.receipt.endpoint {
+            process::stop(started.pid, &executable);
+            bail!("SERVICE_RECOVERY_ENDPOINT_CHANGED");
+        }
+        record.pid = started.pid;
+        record.instance_id = started.instance_id;
+        if let Err(error) = persist_active(config, &record) {
+            process::stop(record.pid, &executable);
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+fn validate_record(config: &DeploymentHarnessConfig, record: &DeploymentRecord) -> Result<()> {
+    record.intent.validate()?;
+    record.manifest.validate()?;
+    record
+        .receipt
+        .validate_for(&record.intent, &record.manifest.component_id)?;
+    if !matches!(
+        record.status.as_str(),
+        "healthy" | "rolled_back" | "disabled"
+    ) || record.instance_id.len() != 73
+        || !record.instance_id.starts_with("instance_")
+        || !record.instance_id[9..]
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        || record.receipt.endpoint != format!("http://127.0.0.1:{}", record.port)
+    {
+        bail!("DEPLOYMENT_RECORD_INVALID");
+    }
+    let expected = component_root(config, &record.manifest.component_id)
+        .join("versions")
+        .join(&record.manifest.version)
+        .join(digest_suffix(&record.manifest.artifact_digest))
+        .join(&record.manifest.entrypoint);
+    if Path::new(&record.executable_path) != expected {
+        bail!("DEPLOYMENT_RECORD_EXECUTABLE_INVALID");
+    }
+    Ok(())
 }
 
 fn persist_record(config: &DeploymentHarnessConfig, record: &DeploymentRecord) -> Result<()> {
