@@ -1,0 +1,149 @@
+use serde_json::Value;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+const MAX_KEYS_PER_OBJECT: usize = 2_048;
+
+pub fn value_string(value: &Value, path: &[&str]) -> Option<String> {
+    let mut current = value;
+    for part in path {
+        current = current.get(*part)?;
+    }
+    current.as_str().map(str::to_string)
+}
+
+pub fn value_u64(value: &Value, path: &[&str]) -> Option<u64> {
+    let mut current = value;
+    for part in path {
+        current = current.get(*part)?;
+    }
+    current.as_u64()
+}
+
+pub fn value_display(value: &Value, path: &[&str]) -> Option<String> {
+    let mut current = value;
+    for part in path {
+        current = current.get(*part)?;
+    }
+    match current {
+        Value::String(value) => Some(value.clone()),
+        Value::Number(value) => Some(value.to_string()),
+        Value::Bool(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+pub fn ensure_object_path<'a>(
+    value: &'a mut Value,
+    path: &[&str],
+) -> &'a mut serde_json::Map<String, Value> {
+    let mut current = value;
+    for part in path {
+        if !current.is_object() {
+            *current = serde_json::json!({});
+        }
+        let map = current.as_object_mut().expect("object was initialized");
+        if !map.contains_key(*part) && map.len() >= MAX_KEYS_PER_OBJECT {
+            if let Some(evicted) = map.keys().next().cloned() {
+                map.remove(&evicted);
+            }
+        }
+        current = map
+            .entry((*part).to_string())
+            .or_insert_with(|| serde_json::json!({}));
+    }
+    if !current.is_object() {
+        *current = serde_json::json!({});
+    }
+    current.as_object_mut().expect("object was initialized")
+}
+
+pub fn increment_u64(map: &mut serde_json::Map<String, Value>, key: &str, amount: u64) {
+    let current = map.get(key).and_then(Value::as_u64).unwrap_or(0);
+    map.insert(
+        key.to_string(),
+        serde_json::json!(current.saturating_add(amount)),
+    );
+}
+
+pub fn event_date(event: &Value) -> Option<String> {
+    let value = event.get("occurred_at")?.as_str()?;
+    let date = value.get(..10)?;
+    parse_date(date).map(|_| date.to_string())
+}
+
+pub fn today_utc() -> String {
+    let days = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        / 86_400;
+    let (year, month, day) = civil_from_days(days as i64);
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
+pub fn within_days(date: &str, today: &str, days: u64) -> bool {
+    let Some((year, month, day)) = parse_date(date) else {
+        return false;
+    };
+    let Some((today_year, today_month, today_day)) = parse_date(today) else {
+        return false;
+    };
+    let value = days_from_civil(year, month, day);
+    let current = days_from_civil(today_year, today_month, today_day);
+    value <= current && current - value < days as i64
+}
+
+pub fn html_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+fn parse_date(value: &str) -> Option<(i32, u32, u32)> {
+    if value.len() != 10 || &value[4..5] != "-" || &value[7..8] != "-" {
+        return None;
+    }
+    let year = value[..4].parse().ok()?;
+    let month = value[5..7].parse().ok()?;
+    let day = value[8..].parse().ok()?;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    Some((year, month, day))
+}
+
+fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
+    let year = year as i64 - i64::from(month <= 2);
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let year_of_era = year - era * 400;
+    let month = month as i64;
+    let day_of_year =
+        (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day as i64 - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
+fn civil_from_days(days: i64) -> (i32, u32, u32) {
+    let days = days + 719_468;
+    let era = if days >= 0 {
+        days
+    } else {
+        days - 146_096
+    } / 146_097;
+    let day_of_era = days - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    (
+        (year + i64::from(month <= 2)) as i32,
+        month as u32,
+        day as u32,
+    )
+}
