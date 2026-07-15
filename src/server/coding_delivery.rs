@@ -1,5 +1,6 @@
 //! Production ingress wiring for the fixed Coding Intent Router.
 
+use crate::contract_catalog::CONTRACT_CATALOG_VERSION;
 use crate::domain::*;
 use crate::gateway::Gateway;
 use crate::journal::JournalStore;
@@ -47,6 +48,14 @@ pub fn deliver<L: LlmClient + 'static>(
     let snapshot_id = journal.current_registry_snapshot_id()?;
     let snapshot = journal.load_registry_snapshot(&snapshot_id)?;
     let run = runtime.create_run(journal, &session, &event, &snapshot_id, &snapshot);
+    let development_request = DevelopmentRequest::from_draft(
+        coding_intent.development_request,
+        run.principal.principal_id.0.clone(),
+        session.id.0.clone(),
+        source_message_id.clone(),
+        format!("development:{source_message_id}"),
+        CONTRACT_CATALOG_VERSION.to_string(),
+    )?;
     journal.insert_run(&run)?;
     journal.append_event(
         JournalEventKind::RunStarted,
@@ -57,7 +66,11 @@ pub fn deliver<L: LlmClient + 'static>(
             "run_id": run.id.0,
             "trigger_event_id": run.trigger_event_id.0,
             "principal_id": run.principal.principal_id.0,
-            "route": "calculator-v0",
+            "route": "generic-development-v1",
+            "development_request_id": development_request.request_id,
+            "target_kind": development_request.target_kind,
+            "component_profile": development_request.build_profile,
+            "contract_catalog_version": development_request.contract_catalog_version,
         }),
     )?;
 
@@ -65,14 +78,16 @@ pub fn deliver<L: LlmClient + 'static>(
         journal,
         gateway,
         runtime.config(),
-        &coding_intent,
+        &development_request,
         &run,
         &session,
         &source_message_id,
     ) {
         Ok(result) => (
             format!(
-                "开发与五项验收已完成，等待批准。\nProposal：{}\nArtifact：{}",
+                "通用开发与五项验收已完成，等待批准。\nDevelopmentRequest：{}\nProfile：{}\nProposal：{}\nArtifact：{}",
+                result.development_request_id,
+                result.component_profile,
                 result.proposal_id,
                 short_digest(&result.artifact_digest),
             ),
@@ -88,7 +103,8 @@ pub fn deliver<L: LlmClient + 'static>(
                 Some(&source_message_id),
                 json!({
                     "run_id": run.id.0,
-                    "route": "calculator-v0",
+                    "route": "generic-development-v1",
+                    "development_request_id": development_request.request_id,
                     "error_category": safe_category(&error),
                 }),
             )?;

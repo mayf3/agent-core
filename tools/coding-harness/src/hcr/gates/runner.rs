@@ -2,6 +2,7 @@
 
 use super::{artifact, build, scaffold, trusted_smoke, trusted_test, GateKind, GateResult};
 use crate::hcr::candidate::{verify_digest, CandidateSnapshot};
+use crate::self_evolution::artifact_manifest::CandidateArtifactManifest;
 use std::path::PathBuf;
 
 /// Shared context passed between gates during execution.
@@ -11,14 +12,23 @@ pub(crate) struct GateContext {
     pub build_source: PathBuf,
     pub build_target: PathBuf,
     pub built_binary: PathBuf,
+    pub test_kit: String,
 }
 
 impl GateContext {
     pub fn new(work_base: PathBuf, _candidate: &CandidateSnapshot) -> Self {
+        let manifest = CandidateArtifactManifest::load(&_candidate.candidate_path).ok();
+        let entry = manifest
+            .as_ref()
+            .map(|manifest| manifest.entry.clone())
+            .unwrap_or_else(|| PathBuf::from("target/release/invalid-component"));
         Self {
             build_source: work_base.join("build_src"),
             build_target: work_base.join("target"),
-            built_binary: work_base.join("target/release/calculator-harness"),
+            built_binary: work_base.join(&entry),
+            test_kit: manifest
+                .map(|manifest| manifest.test_kit)
+                .unwrap_or_default(),
             work_base,
         }
     }

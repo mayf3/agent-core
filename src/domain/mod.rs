@@ -12,6 +12,7 @@ pub mod context_block;
 pub mod harness_change_request;
 pub mod operation;
 pub mod retry;
+pub mod self_evolution;
 pub mod status;
 pub use capability_approval::*;
 pub use capability_proposal_link::*;
@@ -19,6 +20,7 @@ pub use context_block::*;
 pub use harness_change_request::*;
 pub use operation::*;
 pub use retry::*;
+pub use self_evolution::*;
 pub use status::*;
 
 macro_rules! id_type {
