@@ -229,6 +229,14 @@ fn requested_overall_window_satisfies<F>(value: &Value, days: u64, check: F) -> 
 where
     F: Fn(&Value) -> bool + Copy,
 {
+    let direct_window_set = value.as_object().is_some_and(|map| {
+        [1, 7, 30].iter().all(|required_days| {
+            map.keys()
+                .any(|key| window_key_matches(key, *required_days))
+        }) && map
+            .iter()
+            .any(|(key, window)| window_key_matches(key, days) && check(window))
+    });
     let top_level_windows = value.as_object().is_some_and(|map| {
         map.iter()
             .any(|(key, value)| match key.to_lowercase().as_str() {
@@ -237,7 +245,7 @@ where
                 _ => false,
             })
     });
-    top_level_windows || overall_window_satisfies(value, days, check)
+    direct_window_set || top_level_windows || overall_window_satisfies(value, days, check)
 }
 
 fn window_with_named_overall_satisfies<F>(value: &Value, days: u64, check: F) -> bool
