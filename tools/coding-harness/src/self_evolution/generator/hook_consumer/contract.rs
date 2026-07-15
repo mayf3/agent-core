@@ -119,7 +119,7 @@ pub(super) fn validate_request_contract(
         Ok(())
     } else {
         Err(format!(
-            "REQUEST_CONTRACT_FAILED missing={}\nPATH_CONTRACT: run dimension comes from top-level event.run_id; model and profile dimensions come from event.payload.model and event.payload.profile.\nWINDOW_CONTRACT: expose overall/global/summary/total windows, or a top-level rolling_windows object, with distinct 1_day, 7_day, and 30_day objects. Each window must include calls=2, avg_latency_ms or latency_avg=25, failures=1, and a positive unavailable counter.\nRENDERED_OUTPUT:\n{}",
+            "REQUEST_CONTRACT_FAILED missing={}\nPATH_CONTRACT: run dimension comes from top-level event.run_id; model and profile dimensions come from event.payload.model and event.payload.profile.\nWINDOW_CONTRACT: expose overall/global/summary/total windows, a top-level rolling_windows object, or top-level windows whose distinct 1_day, 7_day, and 30_day objects each contain total/overall/summary/global. Each overall window must include calls=2, avg_latency_ms or latency_avg=25, failures=1, and a positive unavailable counter.\nRENDERED_OUTPUT:\n{}",
             missing.join(","),
             truncate_diagnostics(&rendered_text),
         ))
@@ -211,16 +211,37 @@ fn requested_overall_window_satisfies<F>(value: &Value, days: u64, check: F) -> 
 where
     F: Fn(&Value) -> bool + Copy,
 {
-    let top_level_rolling_windows = value.as_object().is_some_and(|map| {
+    let top_level_windows = value.as_object().is_some_and(|map| {
         map.iter().any(|(key, value)| {
-            matches!(
-                key.to_lowercase().as_str(),
-                "rolling_window" | "rolling_windows"
-            )
-                && window_below_satisfies(value, days, check)
+            match key.to_lowercase().as_str() {
+                "rolling_window" | "rolling_windows" => {
+                    window_below_satisfies(value, days, check)
+                }
+                "windows" => window_with_named_overall_satisfies(value, days, check),
+                _ => false,
+            }
         })
     });
-    top_level_rolling_windows || overall_window_satisfies(value, days, check)
+    top_level_windows || overall_window_satisfies(value, days, check)
+}
+
+fn window_with_named_overall_satisfies<F>(value: &Value, days: u64, check: F) -> bool
+where
+    F: Fn(&Value) -> bool + Copy,
+{
+    value.as_object().is_some_and(|windows| {
+        windows.iter().any(|(key, window)| {
+            window_key_matches(key, days)
+                && window.as_object().is_some_and(|fields| {
+                    fields.iter().any(|(key, value)| {
+                        matches!(
+                            key.to_lowercase().as_str(),
+                            "overall" | "global" | "summary" | "total"
+                        ) && check(value)
+                    })
+                })
+        })
+    })
 }
 
 fn overall_window_satisfies<F>(value: &Value, days: u64, check: F) -> bool
