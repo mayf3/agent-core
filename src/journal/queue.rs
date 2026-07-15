@@ -135,7 +135,7 @@ pub(crate) fn append_event_tx(
     let event_id = EventId::new();
     let created_at = Utc::now();
     let payload_json = serde_json::to_string(&payload)?;
-    let kind_text = format!("{:?}", kind);
+    let kind_text = kind.storage_name();
     let previous = tx
         .query_row(
             "SELECT sequence, hash FROM journal_events ORDER BY sequence DESC LIMIT 1",

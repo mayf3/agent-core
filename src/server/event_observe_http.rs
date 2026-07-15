@@ -15,7 +15,8 @@
 //! | `session_id`   | string  | Exact session ID filter                            |
 //! | `principal_id` | string  | Exact principal ID filter (resolved via runs JOIN) |
 //!
-//! Authentication: Bearer token matching `AGENT_CORE_IPC_TOKEN`.
+//! Authentication: Bearer token matching `AGENT_CORE_IPC_TOKEN` or the
+//! observer-only `AGENT_CORE_EVENT_OBSERVE_TOKEN`.
 //!
 //! ## Response
 //!
@@ -66,8 +67,15 @@ pub(crate) fn try_handle_event_observe(
         return Ok(false);
     }
 
-    // Require IPC auth
-    if bearer != config.ipc_token.as_str() {
+    // The dedicated observer credential is deliberately scoped to this
+    // handler; the outer server never accepts it for mutation routes.
+    if !observer_token_matches(
+        bearer,
+        config.ipc_token.as_str(),
+        std::env::var("AGENT_CORE_EVENT_OBSERVE_TOKEN")
+            .ok()
+            .as_deref(),
+    ) {
         return write_response(stream, 401, json!({"ok": false, "error": "unauthorized"}))
             .map(|_| true);
     }
@@ -99,6 +107,14 @@ pub(crate) fn try_handle_event_observe(
             write_response(stream, status, json!({"ok": false, "error": err_key})).map(|_| true)
         }
     }
+}
+
+fn observer_token_matches(bearer: &str, ipc_token: &str, observer_token: Option<&str>) -> bool {
+    bearer == ipc_token
+        || observer_token
+            .map(str::trim)
+            .filter(|token| token.len() >= 32)
+            .is_some_and(|token| bearer == token)
 }
 
 // ---------------------------------------------------------------------------
@@ -222,4 +238,18 @@ fn write_response(stream: &mut TcpStream, status: u16, body: Value) -> Result<()
     );
     stream.write_all(response.as_bytes())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod auth_tests {
+    use super::observer_token_matches;
+
+    #[test]
+    fn observer_credential_is_read_scope_only_input() {
+        let observer = "o".repeat(32);
+        assert!(observer_token_matches("ipc", "ipc", Some(&observer)));
+        assert!(observer_token_matches(&observer, "ipc", Some(&observer)));
+        assert!(!observer_token_matches("other", "ipc", Some(&observer)));
+        assert!(!observer_token_matches("weak", "ipc", Some("weak")));
+    }
 }

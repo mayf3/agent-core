@@ -268,7 +268,7 @@ fn validate_caller_fields(
         || proposal.evidence_digest != link.evidence_digest
         || proposal.expected_active_snapshot_id != link.source_registry_snapshot_id
         || proposal.requested_operations != [link.operation.clone()]
-        || link.operation != "external.calculator"
+        || !safe_target_name(&link.operation)
     {
         bail!("PROPOSAL_LINK_FIELD_MISMATCH");
     }
@@ -294,6 +294,14 @@ fn validate_caller_fields(
         crate::capabilities::store::Sha256Digest::parse(digest)?;
     }
     Ok(())
+}
+
+fn safe_target_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"._-".contains(&byte)
+        })
 }
 
 fn insert_proposal(

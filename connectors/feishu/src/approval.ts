@@ -66,6 +66,7 @@ export interface ApprovalResult {
   decisionId?: string;
   activatedSnapshotId?: string;
   hostDeploymentId?: string;
+  componentUrl?: string;
 }
 
 export interface ProposalDecision {
@@ -341,6 +342,10 @@ export async function executeProposalDecision(
       return { ok: false, replyText: "审批服务返回格式异常", proposalInfo: proposal };
     }
     if (decisionInput.kind === "approve") {
+      const componentUrl = typeof data.component_url === "string" &&
+        /^http:\/\/(127\.0\.0\.1|\[::1\]):\d+$/.test(data.component_url)
+        ? data.component_url
+        : undefined;
       return {
         ok: true,
         replyText: renderDecisionApproved({
@@ -348,11 +353,13 @@ export async function executeProposalDecision(
           decision_id: data.decision_id,
           activated_snapshot_id: data.activated_snapshot_id,
           manifest_id: proposal.manifest_id,
+          component_url: componentUrl,
         }),
         proposalInfo: proposal,
         decisionId: data.decision_id,
         activatedSnapshotId: data.activated_snapshot_id,
         hostDeploymentId: data.host_deployment_id,
+        componentUrl,
       };
     }
     return {
@@ -401,9 +408,6 @@ export async function sendPendingProposalCardReply(
   const proposal = await fetchProposal(config, presentation.proposal_id);
   if (proposal.status !== "PendingApproval" || proposal.approval.status !== "Pending") {
     throw new Error("proposal_not_pending");
-  }
-  if (proposal.operation_name !== "external.calculator") {
-    throw new Error("unsupported_proposal_operation");
   }
   const card = renderProposalPendingCard({
     proposal_id: proposal.proposal_id,
@@ -473,6 +477,7 @@ export async function handleProposalCardAction(config: ApprovalConfig, raw: unkn
         proposal_id: action.proposalId,
         decision_id: result.decisionId,
         activated_snapshot_id: result.activatedSnapshotId,
+        component_url: result.componentUrl,
       }),
     },
   };
