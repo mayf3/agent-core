@@ -1,6 +1,6 @@
 use super::{
     parsing::{self},
-    tool_call_id_hash, EndpointChoice, ToolCallResult, ToolNameMap, ToolNameMode,
+    sanitize_usage, tool_call_id_hash, EndpointChoice, ToolCallResult, ToolNameMap, ToolNameMode,
 };
 use serde_json::json;
 
@@ -256,4 +256,53 @@ fn oversized_provider_id_is_malformed() {
         ToolCallResult::Malformed(_)
     ));
     assert!(parsed.provider_turn.is_none());
+}
+
+#[test]
+fn usage_normalizes_cached_reasoning_cost_and_provider_extensions() {
+    let usage = sanitize_usage(Some(&json!({
+        "prompt_tokens": 120,
+        "completion_tokens": 30,
+        "total_tokens": 150,
+        "prompt_tokens_details": {"cached_tokens": 40},
+        "completion_tokens_details": {"reasoning_tokens": 12},
+        "estimated_cost": 0.0042,
+        "cache_write_tokens": 9,
+        "provider_counters": {"batch_hits": 2}
+    })));
+    assert_eq!(usage["input_tokens"], 120);
+    assert_eq!(usage["cached_input_tokens"], 40);
+    assert_eq!(usage["output_tokens"], 30);
+    assert_eq!(usage["reasoning_tokens"], 12);
+    assert_eq!(usage["total_tokens"], 150);
+    assert_eq!(usage["estimated_cost"], 0.0042);
+    assert_eq!(usage["provider_usage_extensions"]["cache_write_tokens"], 9);
+    assert_eq!(
+        usage["provider_usage_extensions"]["provider_counters"]["batch_hits"],
+        2
+    );
+}
+
+#[test]
+fn malformed_usage_and_secret_extensions_fail_closed() {
+    let usage = sanitize_usage(Some(&json!({
+        "prompt_tokens": "not-a-number",
+        "completion_tokens": -3,
+        "total_tokens": 1.5,
+        "api_key": "sk-test-secret",
+        "access_token": 12345,
+        "provider_note": "prompt text must not be copied",
+        "safe_counter": 7
+    })));
+    assert!(usage["input_tokens"].is_null());
+    assert!(usage["output_tokens"].is_null());
+    assert!(usage["total_tokens"].is_null());
+    assert!(usage["estimated_cost"].is_null());
+    let extensions = usage["provider_usage_extensions"].as_object().unwrap();
+    assert_eq!(extensions.get("safe_counter"), Some(&json!(7)));
+    assert!(!extensions.contains_key("api_key"));
+    assert!(!extensions.contains_key("access_token"));
+    assert!(!extensions.contains_key("provider_note"));
+    assert!(!usage.to_string().contains("sk-test-secret"));
+    assert!(!usage.to_string().contains("prompt text"));
 }

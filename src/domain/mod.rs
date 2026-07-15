@@ -410,6 +410,16 @@ pub enum JournalEventKind {
     RunStarted,
     ContextBuilt,
     LlmCompleted,
+    /// A real model invocation was started. Stored as the versioned external
+    /// fact name `model.invocation.started.v0` rather than the Rust variant
+    /// name so event.observe consumers can bind to a stable contract.
+    ModelInvocationStarted,
+    /// Terminal success fact for a model invocation. The payload contains
+    /// normalized provider usage but never prompt or response content.
+    ModelInvocationCompleted,
+    /// Terminal failure fact for a model invocation. Error details are reduced
+    /// to a bounded category and never contain provider response bodies.
+    ModelInvocationFailed,
     /// Model emitted a valid or malformed tool call, before validation. The
     /// payload contains only bounded operation metadata and an internal id.
     ToolCallIssued,
@@ -535,4 +545,18 @@ pub enum JournalEventKind {
     /// arguments) consecutively, indicating a loop. Only applies to the coding
     /// harness mutating set. payload: `run_id`, `operation`, `turn_index`
     ToolLoopDetected,
+}
+
+impl JournalEventKind {
+    /// Stable text persisted into the Journal and exposed by event.observe.
+    /// Existing event names remain unchanged; model telemetry uses explicit
+    /// versioned contract identifiers.
+    pub fn storage_name(&self) -> String {
+        match self {
+            Self::ModelInvocationStarted => "model.invocation.started.v0".into(),
+            Self::ModelInvocationCompleted => "model.invocation.completed.v0".into(),
+            Self::ModelInvocationFailed => "model.invocation.failed.v0".into(),
+            other => format!("{other:?}"),
+        }
+    }
 }
