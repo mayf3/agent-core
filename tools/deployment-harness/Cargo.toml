@@ -24,3 +24,7 @@ path = "src/bin/fixture_service.rs"
 [[bin]]
 name = "deployment-fixture-service-v2"
 path = "src/bin/fixture_service.rs"
+
+[profile.dev]
+debug = 0
+strip = "symbols"
