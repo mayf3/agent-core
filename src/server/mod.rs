@@ -14,6 +14,7 @@ pub mod coding_router;
 pub mod coding_task_submit;
 mod delivery;
 mod dispatcher_metrics;
+mod event_observe_http;
 mod harness_change_request;
 pub mod harness_routes;
 mod hcr_acceptance;
@@ -157,10 +158,12 @@ fn handle_connection(
             )?,
         );
     }
-    // Non-health routes require POST /v1/ or GET /v1/capability-change-proposals/
+    // Non-health routes require POST /v1/ or GET /v1/capability-change-proposals/ or GET /v1/events
     const GET_CAP_PREFIX: &str = "/v1/capability-change-proposals/";
     let method_allows = request.method == "POST"
-        || (request.method == "GET" && request.path.starts_with(GET_CAP_PREFIX));
+        || (request.method == "GET"
+            && (request.path.starts_with(GET_CAP_PREFIX)
+                || request.path.starts_with("/v1/events")));
     if !method_allows || !request.path.starts_with("/v1/") {
         return write_json(stream, 404, json!({ "ok": false, "error": "not_found" }));
     }
@@ -183,6 +186,17 @@ fn handle_connection(
         return write_json(stream, 401, json!({ "ok": false, "error": "unauthorized" }));
     } else if path == "/v1/ingress" {
         handle_ingress(stream, &gateway, &journal, &request)
+    } else if path.starts_with("/v1/events") {
+        event_observe_http::try_handle_event_observe(
+            stream,
+            path,
+            &request.method,
+            bearer,
+            &request.body,
+            config,
+            &journal,
+        )?;
+        Ok(())
     } else if path == "/v1/approve" {
         handle_approval_decision(stream, &gateway, &journal, &request, true)
     } else if path == "/v1/deny" {
