@@ -1,10 +1,29 @@
 {
+  "schema_version": "component-artifact-v1",
+  "component_id": "external.calculator",
+  "kind": "invocable_capability",
+  "profile_id": "invocable-capability-v0",
+  "contract_catalog_version": "contract-catalog-v1",
+  "required_contracts": ["component.invoke.v0"],
+  "requested_permissions": ["component.invoke"],
+  "test_kit": "calculator-fixture-v0",
+  "deployment_profile": "capability-host-v0",
+  "runtime_profile": "process-harness-v1",
+  "healthcheck": "trusted process invocation",
+  "rollback_policy": "reactivate previous content-addressed snapshot",
   "manifest_id": "calculator-acceptance-v1",
   "harness_id": "calculator-harness",
   "protocol_version": "external-harness-v1",
   "operation": "external.calculator",
   "operations": ["add", "subtract", "multiply", "divide"],
   "description": "A simple calculator supporting add, subtract, multiply, and divide.",
+  "capability": {
+    "operation_name": "external.calculator",
+    "description": "A simple calculator supporting add, subtract, multiply, and divide.",
+    "input_schema": {"type": "object"},
+    "output_schema": {"type": "number"},
+    "idempotent": true
+  },
   "entry": "target/release/calculator-harness",
   "artifact_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
 }

@@ -1,4 +1,4 @@
-//! Restart-safe seeding of the two narrow PR3A control operations.
+//! Restart-safe seeding of the governed Coding Harness control operations.
 
 use crate::registry::snapshot::RegistrySnapshot;
 use crate::registry::store::builtin_specs;
@@ -32,8 +32,9 @@ impl super::JournalStore {
             return Ok(false);
         }
         // An older deployment may already have a general-purpose operation
-        // with the same name. Replace it with the narrow trusted control spec;
-        // retaining the old binding/schema would silently bypass PR3A.
+        // with the same name. Replace it with the current governed control spec;
+        // retaining the old binding/schema would silently bypass request and
+        // acceptance bindings.
         let mut specs: Vec<_> = current
             .operations
             .iter()
