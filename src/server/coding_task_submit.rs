@@ -279,7 +279,7 @@ fn execute_new_submission(
     append_invocation_approved(journal, run, session, &approved)?;
     let result = coding_harness_client::execute(
         &approved,
-        Duration::from_millis(config.harness_read_timeout_ms.max(30_000)),
+        Duration::from_millis(config.harness_read_timeout_ms.max(900_000)),
     )?;
     let submitted = validate_submit_result(&result, request)?;
     journal.append_event(
