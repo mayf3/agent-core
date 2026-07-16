@@ -140,7 +140,7 @@ fn calculator_vertical_e2e() -> Result<()> {
         g_local,
         kc_local,
         "external.coding_workspace_exec",
-        json!({"workspace_id":"test","command":"rustc","args":["calc_server.rs","-o","calculator-server"],
+        json!({"workspace_id":"test","command":"rustc","args":["calc_server.rs","-C","opt-level=z","-C","strip=symbols","-o","calculator-server"],
                "relative_cwd":".","timeout_seconds":60,"max_output_bytes":65536}),
     )?;
     let bin = if ws.join("calculator-server").is_file() {

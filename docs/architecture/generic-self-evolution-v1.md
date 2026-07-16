@@ -81,6 +81,32 @@ The existing calculator is retained as the first ordinary fixture for the
 vectors through the fixture registry so the prior live path remains covered
 without defining the generic protocol.
 
+## Request-driven Hook Consumer generation
+
+`hook-consumer-service-v0` is the first non-fixture implementation of the
+generic path. The Coding Harness sends only the request specification (not its
+principal, scope, source message, credentials, or host configuration) to an
+OpenAI-compatible code model. The model may implement four pure projection and
+rendering functions. A fixed Harness-owned runtime implements event polling,
+cursor persistence, read-only HTTP, identity headers, health, and telemetry
+metadata.
+
+The generated mutable surface is exactly `src/component.rs`. Source policy
+parses the module as Rust and rejects extra public APIs, host/network/process/
+environment access, unsafe/FFI code, includes, custom macros, scripts, and
+imports outside the supplied JSON/helpers/collection prelude. The candidate has
+a frozen dependency lock and is compiled in an isolated, network-denied probe.
+Compiler or profile-contract failures may drive at most four model repair
+passes. A probe or cleanup infrastructure failure is never reclassified as a
+candidate failure and never relaxes isolation.
+
+Only after the isolated compile and profile contract pass does the Harness
+atomically materialize a request-bound candidate. Its manifest records the
+DevelopmentRequest id, model name, module digest, test kit, and mutable surface.
+The ordinary five HCR gates still run afterward and bind the accepted artifact;
+the generation probe is not a substitute for Proposal, Approval, deployment,
+or receipt validation.
+
 ## Lifecycle, primitive gaps, and repair
 
 The component lifecycle is governed as:
@@ -104,6 +130,5 @@ primitive gap.
 `DependencyUnavailable`, and binds evidence, reproduction, the current artifact
 digest, requested fix, risk delta, and rollback target.
 
-Long-running service installation remains outside this phase. It must use a
-separate Deployment Harness and `deployment.effect.v0`; the Kernel must not run
-caller-selected shell commands.
+Long-running service installation uses the separate Deployment Harness and
+`deployment.effect.v0`; the Kernel never runs caller-selected shell commands.

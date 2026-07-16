@@ -58,7 +58,11 @@ pub fn execute(approved: &ApprovedInvocation, timeout: Duration) -> Result<Value
     if value.get("protocol_version").and_then(Value::as_str) != Some("external-harness-v1")
         || value.get("ok").and_then(Value::as_bool) != Some(true)
     {
-        bail!("CODING_HARNESS_SUBMIT_FAILED");
+        let harness_code = value
+            .get("error_code")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        bail!("CODING_HARNESS_SUBMIT_FAILED:{}", harness_code);
     }
     value
         .get("result")

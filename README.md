@@ -61,6 +61,7 @@ Architecture drafts (under `docs/architecture/`):
 - [Managed Service Lifecycle V0](docs/architecture/managed-service-lifecycle-v0.md) — external Hook Consumer Service deployment, component snapshots, and governed controls
 - [External Orchestration Boundary](docs/architecture/external-orchestration-boundary.md) — Kernel vs External Harness boundary: planning, routing, multi-agent, acceptance, and repair strategy all live outside the Kernel
 - [Deployment Harness Operations](docs/ops/deployment-harness.md) — loopback deployment service configuration, health, upgrade, disable, and rollback
+- [Request-driven Coding Generator](docs/ops/request-driven-coding-generator.md) — model-generated Hook Consumer candidates, isolated repair probes, and operational boundaries
 
 ## Current Commands
 

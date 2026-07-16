@@ -251,16 +251,21 @@ fn generate_id() -> String {
     format!("candidate_{pid}_{nanos}")
 }
 
-#[cfg(test)]
+	#[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Helper: create a standard test source with two files.
+    fn create_standard_source(base: &Path) {
+        std::fs::create_dir_all(base.join("src")).unwrap();
+        std::fs::write(base.join("Cargo.toml"), b"[package]\nname = \"test\"\n").unwrap();
+        std::fs::write(base.join("src/main.rs"), b"fn main() {}").unwrap();
+    }
 
     #[test]
     fn snapshot_creates_readonly_copy() {
         let tmp = std::env::temp_dir().join(format!("hcr_cand_test_{}", std::process::id()));
-        std::fs::create_dir_all(tmp.join("src")).unwrap();
-        std::fs::write(tmp.join("Cargo.toml"), b"[package]\nname = \"test\"\n").unwrap();
-        std::fs::write(tmp.join("src/main.rs"), b"fn main() {}").unwrap();
+        create_standard_source(&tmp);
 
         let base = std::env::temp_dir().join(format!("hcr_base_{}", std::process::id()));
         let snapshot = snapshot_candidate(&tmp, &base).unwrap();
@@ -287,9 +292,7 @@ mod tests {
     #[test]
     fn digest_changes_when_file_modified() {
         let tmp = std::env::temp_dir().join(format!("hcr_digest_test_{}", std::process::id()));
-        std::fs::create_dir_all(tmp.join("src")).unwrap();
-        std::fs::write(tmp.join("Cargo.toml"), b"[package]\nname = \"test\"\n").unwrap();
-        std::fs::write(tmp.join("src/main.rs"), b"fn main() {}").unwrap();
+        create_standard_source(&tmp);
 
         let base = std::env::temp_dir().join(format!("hcr_base_digest_{}", std::process::id()));
         let snapshot = snapshot_candidate(&tmp, &base).unwrap();
@@ -337,6 +340,133 @@ mod tests {
         let base = std::env::temp_dir().join(format!("hcr_err_test_{}", std::process::id()));
         let result = snapshot_candidate(Path::new("/nonexistent/path"), &base);
         assert!(result.is_err());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ── Stable digest tests ─────────────────────────────────────────
+
+    /// Same source content in different absolute paths must produce the
+    /// same digest. The candidate digest operates on relative paths and
+    /// file content, not absolute locations.
+    #[test]
+    fn same_source_different_paths_same_digest() {
+        let dir_a = std::env::temp_dir()
+            .join(format!("hcr_stable_a_{}", std::process::id()));
+        let dir_b = std::env::temp_dir()
+            .join(format!("hcr_stable_b_{}", std::process::id()));
+
+        create_standard_source(&dir_a);
+        create_standard_source(&dir_b);
+
+        let digest_a = compute_digest(&dir_a).unwrap();
+        let digest_b = compute_digest(&dir_b).unwrap();
+
+        assert_eq!(
+            digest_a, digest_b,
+            "identical source in different directories must produce same digest"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir_a);
+        let _ = std::fs::remove_dir_all(&dir_b);
+    }
+
+    /// Same source content in different temp directories (simulating
+    /// different workspaces) must produce the same digest.
+    #[test]
+    fn same_source_different_temp_dirs_same_digest() {
+        let temp_a = std::env::temp_dir()
+            .join(format!("hcr_tmp_a_{}", std::process::id()));
+        let temp_b = std::env::temp_dir()
+            .join(format!("hcr_tmp_b_{}", std::process::id()));
+
+        create_standard_source(&temp_a);
+        create_standard_source(&temp_b);
+
+        let digest_a = compute_digest(&temp_a).unwrap();
+        let digest_b = compute_digest(&temp_b).unwrap();
+
+        assert_eq!(
+            digest_a, digest_b,
+            "same source in different temp dirs must produce same digest"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_a);
+        let _ = std::fs::remove_dir_all(&temp_b);
+    }
+
+    /// Digest must be determined solely by source content, not by the
+    /// time of computation.
+    #[test]
+    fn digest_is_deterministic_over_time() {
+        let tmp = std::env::temp_dir()
+            .join(format!("hcr_time_test_{}", std::process::id()));
+        create_standard_source(&tmp);
+
+        let digest_first = compute_digest(&tmp).unwrap();
+
+        // Sleep briefly to ensure a measurable time delta.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        // Recompute — must be identical.
+        let digest_second = compute_digest(&tmp).unwrap();
+
+        assert_eq!(
+            digest_first, digest_second,
+            "digest must be deterministic over time"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Changing a single byte in the source must produce a different digest.
+    #[test]
+    fn single_byte_change_alters_digest() {
+        let tmp = std::env::temp_dir()
+            .join(format!("hcr_byte_test_{}", std::process::id()));
+        create_standard_source(&tmp);
+
+        let digest_original = compute_digest(&tmp).unwrap();
+
+        // Change one byte in the main.rs file.
+        let main_rs = tmp.join("src/main.rs");
+        let mut content = std::fs::read(&main_rs).unwrap();
+        content[0] = content[0].wrapping_add(1); // flip the first byte
+        std::fs::write(&main_rs, &content).unwrap();
+
+        let digest_modified = compute_digest(&tmp).unwrap();
+
+        assert_ne!(
+            digest_original, digest_modified,
+            "single-byte change must alter digest"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// The compute_digest function must produce the same result whether
+    /// called from a candidate snapshot or directly on the source tree
+    /// (same content → same digest regardless of container).
+    #[test]
+    fn same_content_same_digest_across_snapshot_boundary() {
+        let tmp = std::env::temp_dir()
+            .join(format!("hcr_boundary_test_{}", std::process::id()));
+        create_standard_source(&tmp);
+
+        // Digest the source directly.
+        let direct_digest = compute_digest(&tmp).unwrap();
+
+        // Digest through a snapshot.
+        let base = std::env::temp_dir()
+            .join(format!("hcr_boundary_base_{}", std::process::id()));
+        let snapshot = snapshot_candidate(&tmp, &base).unwrap();
+        let snapshot_digest = compute_digest(&snapshot.candidate_path).unwrap();
+
+        assert_eq!(
+            direct_digest, snapshot_digest,
+            "same content must have same digest across snapshot boundary"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
         let _ = std::fs::remove_dir_all(&base);
     }
 }
