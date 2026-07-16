@@ -1050,3 +1050,405 @@ External Harness mainline blocked:      NO
 ```text
 KERNEL_PRIMITIVE_SUFFICIENCY_AND_STATE_SEMANTICS_DOCUMENTED_READY_FOR_REVIEW
 ```
+
+---
+
+# 16. 关键边界：内核不理解"怎么做"
+
+本节是本文件的强约束，不是建议。
+
+## 16.1 内核只负责治理事实，不负责工作方法
+
+内核可以知道：
+
+```text
+谁提出请求
+请求属于哪次运行和隔离范围
+请求调用哪个受信任的外部执行器
+请求哪些权限
+是否允许
+实际执行了什么
+执行结果和证据是什么
+当前启用哪个版本
+```
+
+内核不得理解：
+
+```text
+为什么需要这个功能
+如何拆任务
+先让哪个角色执行
+采用什么研发方法
+如何设计页面
+如何生成代码
+如何修复编译错误
+如何判断业务需求是否完成
+多 Agent 如何分工和收敛
+```
+
+一句话概括：
+
+```text
+Kernel 负责：
+谁、哪次运行、是否允许、执行了什么、结果是什么、启用了哪个版本。
+
+External Harness 负责：
+想做什么、怎么做、让谁做、怎么验收、失败后怎么办。
+```
+
+## 16.2 开发计划不是内核原语
+
+开发计划、任务拆解、角色安排和执行顺序全部属于外部规划与编排。
+
+正确链路：
+
+```text
+用户请求
+→ 外部路由/规划 Harness
+→ 外部生成开发方案
+→ 外部多 Run / 多角色编排
+→ Coding Harness
+→ 外部验收 Harness
+→ 候选产物
+→ 内核治理批准、部署授权、结果记录和版本切换
+```
+
+内核不需要保存计划内容，也不需要理解计划结构。
+
+在确有审计需要时，内核最多可以记录一个不透明引用：
+
+```text
+plan_ref
+plan_digest
+```
+
+其含义仅是：
+
+```text
+"本次批准或执行引用了这一份外部制品"
+```
+
+内核不得解析计划步骤、角色、依赖图或业务目标。
+
+如果最终只需绑定：
+
+```text
+原始请求
+候选产物
+验收证据
+批准结果
+部署回执
+```
+
+则连 `plan_ref` 都不必记录。
+
+## 16.3 验收规则不属于内核
+
+业务验收属于外部验收 Harness。
+
+例如 Token Dashboard 的：
+
+```text
+今日 / 7 日 / 30 日
+按 Run / 模型 / Profile 聚合
+Token、延迟、失败、不可用
+页面展示
+```
+
+都不应成为 Kernel 知识。
+
+内核只处理：
+
+```text
+由哪个受信任 Harness 执行验收
+验收是否成功
+验收证据摘要
+证据绑定哪个候选产物
+```
+
+业务验收包可以是：
+
+- 固定版本的外部测试制品；
+- 外部规划器根据需求生成的测试制品；
+- 多 Agent 编排产生并由独立角色审查的验收制品。
+
+无论来源如何，都不进入 Kernel 成为一等概念。
+
+---
+
+# 17. 路由、规划和多 Agent 必须外置
+
+## 17.1 自然语言路由
+
+内核中的路由逻辑只能保留最小安全兜底：
+
+```text
+明确批准
+明确拒绝
+明确状态查询
+明确调用已注册能力
+无法识别时转交外部 Router
+```
+
+内核不得长期承担：
+
+```text
+理解自然语言开发需求
+从用户话语推断 Contract
+选择组件类型
+计算业务权限
+拆分需求
+选择研发角色
+```
+
+这些属于外部 Router / Planner Harness。
+
+外部 Router 只能返回声明式建议，不能直接创建真实执行意图、授予权限或修改注册表。
+
+## 17.2 多 Agent
+
+多 Agent 不是 Kernel 原语。
+
+它是外部编排器对多个普通 Run 的组合：
+
+```text
+同一模型或 Runtime
++ 不同 Workspace
++ 不同上下文
++ 不同 AGENTS.md
++ 不同权限
++ 不同记忆范围
++ 多个相互引用的 Run
+```
+
+内核只需要看到：
+
+```text
+多个独立 Run
+每个 Run 的身份、范围、快照和权限
+输入输出引用
+真实调用与回执
+```
+
+内核不需要知道：
+
+```text
+Planner Agent
+Coding Agent
+Audit Agent
+Deploy Agent
+主持人
+专家
+投票
+共识
+```
+
+这些角色和协作策略全部属于外部编排。
+
+## 17.3 修复与自我进化编排
+
+观察、诊断、修复、重试、回退策略也应外置：
+
+```text
+Observer Harness
+→ 发现异常
+→ 外部 Diagnoser
+→ 产生 Repair Request
+→ 外部编排调用 Coding / Audit / Deploy
+→ 候选修复
+→ 内核治理批准与结果记录
+```
+
+内核不得内建：
+
+```text
+SelfRepairManager
+AutoFixAgent
+RepairWorkflow
+```
+
+作为产品级模块。
+
+---
+
+# 18. Catalog、Profile 与模板的归属
+
+## 18.1 内核接口定义
+
+内核必须定义并公开自己真实提供的稳定接口：
+
+```text
+事件读取
+执行意图提交
+批准与决定
+回执格式
+组件启用/禁用/回滚
+权限要求
+接口版本
+```
+
+这是 Kernel 的对外边界，因此接口定义权属于 Kernel。
+
+## 18.2 接口如何被组合
+
+以下内容应外置：
+
+```text
+哪些接口适合完成某个需求
+示例代码
+SDK
+项目模板
+测试工具
+业务验收
+如何组合多个接口
+```
+
+这些属于 Coding Harness、Planner Harness 和外部开发资料。
+
+## 18.3 组件模板
+
+"长期服务模板""一次性工具模板""上下文处理模板"等，属于外部 Harness。
+
+内核不得内建业务化模板名称，例如：
+
+```text
+token-dashboard-v0
+memory-service-v0
+router-service-v0
+```
+
+内核最多关心外部效果的最低治理差异，例如：
+
+```text
+一次性调用
+长期运行服务
+```
+
+即使这一差异，也应尽可能通过受信任 Deployment Harness 的强类型回执表达，而不是让 Kernel 理解服务业务。
+
+---
+
+# 19. 防止 Kernel 膨胀的判定规则
+
+任何新设计进入 Kernel 前，必须回答：
+
+1. 如果完全放在外部 Harness，是否会导致安全边界可被绕过？
+2. Kernel 是否必须亲自验证这一事实，而不能相信外部回报？
+3. 该概念是否长期稳定，与具体产品和工作方法无关？
+4. 是否无法由现有身份、范围、运行、意图、决定、调用、回执和快照组合表达？
+5. 是否只是为了让当前实现更方便？
+
+判断规则：
+
+```text
+如果只是为了理解需求、规划工作、安排角色、生成代码、
+设计测试、选择模型、重试修复或展示产品，
+则必须外置。
+```
+
+```text
+如果只是为了审计某个外部结果，
+优先记录不透明摘要或回执，
+而不是让 Kernel 理解该外部制品。
+```
+
+```text
+如果现有治理链可以表达，
+禁止新增 Kernel 产品概念。
+```
+
+---
+
+# 20. 对当前 Token Dashboard 路线的具体约束
+
+通用长期服务 Harness 只负责：
+
+```text
+受限代码生成或加载
+隔离编译
+沙箱
+事件读取
+游标
+状态保存
+只读 HTTP
+健康检查
+进程恢复
+部署与回滚
+```
+
+Token Dashboard 的具体业务要求：
+
+```text
+Token 字段
+时间窗口
+按 Run / 模型 / Profile 聚合
+延迟与失败
+页面布局和显示
+```
+
+必须属于外部需求规划与验收包。
+
+因此应明确区分：
+
+```text
+通用长期服务 Harness
+≠
+Token Dashboard 验收包
+```
+
+当前第一个 North Star 可以使用一个固定的外部 Token Dashboard 验收包，以确保结果可信。
+
+后续可由外部 Planner 或多 Agent 编排动态产生验收包，但仍不进入 Kernel。
+
+---
+
+# 21. 新的强制 Non-Action List
+
+除非出现经过证明的安全原语缺口，否则不得在 Kernel 中新增：
+
+```text
+Plan
+DevelopmentPlan
+AcceptancePlan
+Planner
+AgentRole
+MultiAgent
+Workflow
+RepairManager
+Dashboard
+MemoryStrategy
+CompressionStrategy
+SchedulerBusinessRule
+ModelSelectionStrategy
+```
+
+这些名词可以存在于外部 Harness 的 API、制品和文档中，但不是 Kernel 一等概念。
+
+此列表是 §10（Screen Only, Do Not Slim）Non-Action List 的补充约束，并非替代。
+
+---
+
+# 22. 更新后的最终决策 && Final Direction
+
+## 22.1 最终决策
+
+```text
+DECISION:
+Keep Kernel ignorant of plans and orchestration.
+Keep natural-language understanding outside Kernel.
+Keep business acceptance outside Kernel.
+Keep multi-agent roles and collaboration outside Kernel.
+Keep repair strategy outside Kernel.
+Kernel may bind opaque artifact digests without understanding artifact semantics.
+Kernel publishes stable interfaces; external Harnesses discover and compose them.
+Prefer external orchestration over new Kernel concepts.
+```
+
+## 22.2 最终边界
+
+> 内核不是研发总监、项目经理、验收专家或多 Agent 协调器。
+> 内核只是一个不可绕过的身份、事实、授权、执行、证据和版本治理边界。
+
+## 22.3 最终方向
+
+> Agent Core 的价值不在于内建多少"Agent 功能"，而在于少量不可绕过的事实、授权、快照、执行和证据原语，能够安全组合出不断自我开发、自我观察和自我修复的外部组件生态。
