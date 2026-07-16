@@ -4,10 +4,10 @@ use agent_core_kernel::domain::DevelopmentRequestDraft;
 use std::path::PathBuf;
 use std::process::Command;
 
-fn request() -> DevelopmentRequest {
+fn request(name: &str) -> DevelopmentRequest {
     let mut draft = DevelopmentRequestDraft::new(
         TargetKind::HookConsumerService,
-        "request-driven-observer".into(),
+        name.into(),
     );
     draft.requirements = vec!["display observed facts".into()];
     draft.required_contracts = vec!["event.observe.v0".into()];
@@ -43,7 +43,7 @@ fn temp_root(label: &str) -> PathBuf {
 fn materialized_candidate_is_request_bound_and_replay_stable() {
     let root = temp_root("materialize");
     std::fs::create_dir_all(&root).unwrap();
-    let request = request();
+    let request = request("test-observer");
     let first = materialize(&root, "candidate-test", &request, source(), "model-test").unwrap();
     let second = load_existing(
         &request,
@@ -83,7 +83,7 @@ fn cached_candidate_rejects_fixed_runtime_and_manifest_tampering() {
     for tamper in ["runtime", "manifest"] {
         let root = temp_root(tamper);
         std::fs::create_dir_all(&root).unwrap();
-        let request = request();
+        let request = request("test-observer");
         materialize(&root, "candidate-test", &request, source(), "model-test").unwrap();
         let candidate = root.join("candidate-test/candidate");
         if tamper == "runtime" {
@@ -98,147 +98,6 @@ fn cached_candidate_rejects_fixed_runtime_and_manifest_tampering() {
         assert!(load_existing(&request, "candidate-test", &candidate).is_err());
         let _ = std::fs::remove_dir_all(root);
     }
-}
-
-#[test]
-fn telemetry_request_contract_requires_dimensions_windows_and_runtime_metadata() {
-    let mut telemetry_request = request();
-    telemetry_request.requirements = vec!["Token usage dashboard".into()];
-    let output = json!({
-        "rendered": {
-            "by_date": {"2026-07-15": {"input":10,"cached":2,"output":5,"reasoning":1,"latency":20,"failures":1}},
-            "by_run": {"run-1": {}},
-            "by_model": {"model-a": {}},
-            "by_profile": {"default": {}},
-            "today_1d": {},
-            "last_7_days": {},
-            "last_30_days": {},
-            "overall": {
-                "today_1d": {"calls": 2, "avg_latency_ms": 25, "unavailable": 1, "failures": 1},
-                "last_7_days": {"calls": 2, "avg_latency_ms": 25, "unavailable": 1, "failures": 1},
-                "last_30_days": {"calls": 2, "avg_latency_ms": 25, "unavailable": 1, "failures": 1}
-            },
-            "unavailable": {"input": 1},
-            "telemetry_unavailable": false,
-            "last_observed_cursor": 3,
-            "projection_lag": "caught_up",
-            "component_version": "0.1.0",
-            "health": "ready"
-        },
-        "html_telemetry_metrics": true,
-        "html_average_latency": true
-    });
-    assert!(validate_request_contract(&telemetry_request, &output.to_string()).is_ok());
-
-    let mut missing_run = output.clone();
-    missing_run["rendered"]["by_run"] = json!({"unknown": {}});
-    let error =
-        validate_request_contract(&telemetry_request, &missing_run.to_string()).unwrap_err();
-    assert!(error.contains("run-1"));
-
-    let mut rolling_windows = output;
-    rolling_windows["rendered"]["overall"] = Value::Null;
-    rolling_windows["rendered"]["rolling_windows"] = json!({
-        "1day": {"calls": 2, "latency_avg": 25, "unavailable_count": 1, "failures": 1},
-        "7day": {"calls": 2, "latency_avg": 25, "unavailable_count": 1, "failures": 1},
-        "30day": {"calls": 2, "latency_avg": 25, "unavailable_count": 1, "failures": 1}
-    });
-    assert!(validate_request_contract(&telemetry_request, &rolling_windows.to_string()).is_ok());
-
-    rolling_windows["rendered"]["rolling_windows"] = Value::Null;
-    rolling_windows["rendered"]["windows"] = json!({
-        "1_day": {"models": {"model-a": {"calls": 1}}, "total": {"calls": 2, "avg_latency_ms": 25, "unavailable_count": 1, "failures": 1}},
-        "7_day": {"models": {"model-a": {"calls": 1}}, "total": {"calls": 2, "avg_latency_ms": 25, "unavailable_count": 1, "failures": 1}},
-        "30_day": {"models": {"model-a": {"calls": 1}}, "total": {"calls": 2, "avg_latency_ms": 25, "unavailable_count": 1, "failures": 1}}
-    });
-    assert!(validate_request_contract(&telemetry_request, &rolling_windows.to_string()).is_ok());
-
-    rolling_windows["rendered"]["windows"]["1_day"]["total"] = Value::Null;
-    assert!(validate_request_contract(&telemetry_request, &rolling_windows.to_string()).is_err());
-
-    rolling_windows["rendered"]["windows"] = Value::Null;
-    for days in [1, 7, 30] {
-        rolling_windows["rendered"][format!("{days}_day")] = json!({
-            "calls": 2,
-            "avg_latency_ms": 25,
-            "unavailable_count": 1,
-            "failures": 1
-        });
-    }
-    assert!(validate_request_contract(&telemetry_request, &rolling_windows.to_string()).is_ok());
-
-    rolling_windows["rendered"]["1_day"]["calls"] = json!(1);
-    assert!(validate_request_contract(&telemetry_request, &rolling_windows.to_string()).is_err());
-}
-
-#[test]
-fn combined_probe_reports_profile_and_request_failures_together() {
-    let mut telemetry_request = request();
-    telemetry_request.requirements = vec!["Token usage dashboard".into()];
-    let output = json!({
-        "ok": true,
-        "schema_version": "hook-consumer-service-contract-v0",
-        "events_applied": 3,
-        "html_nonempty": true,
-        "html_safe": true,
-        "html_runtime_metadata": false,
-        "html_telemetry_metrics": true,
-        "html_average_latency": true,
-        "rendered": {
-            "by_date": {"2026-07-15": {"input":10,"cached":2,"output":5,"reasoning":1,"latency":50,"failures":1,"unavailable":1}},
-            "by_run": {"run-1": {}},
-            "by_model": {"model-a": {}},
-            "by_profile": {"default": {}},
-            "rolling_windows": {
-                "1_day": {"calls":2,"latency_ms":50,"failures":1,"unavailable":1},
-                "7_day": {"calls":2,"latency_ms":50,"failures":1,"unavailable":1},
-                "30_day": {"calls":2,"latency_ms":50,"failures":1,"unavailable":1}
-            },
-            "telemetry_unavailable": false,
-            "last_observed_cursor": 3,
-            "projection_lag": "caught_up",
-            "component_version": "0.1.0",
-            "health": "ready"
-        }
-    });
-    let error = validate_contracts(&telemetry_request, &output.to_string()).unwrap_err();
-    assert!(error.contains("html_runtime_metadata"));
-    assert!(error.contains("overall-1-day-average-latency=25"));
-    assert!(error.contains("overall-30-day-average-latency=25"));
-    assert!(error.contains("HTML_RUNTIME_METADATA_CONTRACT"));
-}
-
-#[test]
-fn telemetry_request_source_rejects_frozen_ingest_time_windows() {
-    let mut telemetry_request = request();
-    telemetry_request.requirements = vec!["Token usage dashboard".into()];
-    let frozen = source().replace(
-        "let _ = event;",
-        "let _ = within_days(\"2026-07-15\", \"2026-07-15\", 30); let _ = event;",
-    );
-    assert!(validate_request_source(&telemetry_request, &frozen)
-        .unwrap_err()
-        .contains("rolling windows"));
-    assert!(validate_request_source(&telemetry_request, source()).is_ok());
-
-    let host_clock = source().replace("let _ = event;", "let _ = today_utc(); let _ = event;");
-    assert!(validate_request_source(&telemetry_request, &host_clock)
-        .unwrap_err()
-        .contains("runtime.today_utc"));
-}
-
-#[test]
-fn repair_diagnostics_do_not_disclose_host_path_or_candidate_key() {
-    let base = Path::new("/private/operator/artifacts/generated");
-    let sanitized = sanitize_model_diagnostics(
-        "/private/operator/artifacts/generated/.candidate-secret/src/component.rs",
-        base,
-        "candidate-secret",
-    );
-    assert_eq!(
-        sanitized,
-        "<generator-root>/.<candidate-id>/src/component.rs"
-    );
 }
 
 #[test]
@@ -287,40 +146,195 @@ fn generic_prompt_contains_no_product_terms() {
     }
 }
 
-/// Cross-request isolation: a non-Token request must not fail on Token-specific fields.
+/// The public spec is NOT embedded in SYSTEM_PROMPT.
 #[test]
-fn non_token_request_does_not_fail_on_token_fields() {
-    let mut generic_request = request();
-    // A hook consumer that DOES NOT mention "token" in criteria
-    generic_request.requirements = vec!["display failure events by category".into()];
-    generic_request.acceptance_criteria = vec!["read-only failure page".into()];
+fn public_spec_not_in_system_prompt() {
+    let prompt = crate::self_evolution::generator::model::SYSTEM_PROMPT;
+    assert!(!prompt.contains("ACCEPTANCE_KIT_PUBLIC_SPEC_BEGIN"));
+    assert!(!prompt.contains("token-dashboard-v0"));
+    assert!(!prompt.contains("failure-event-viewer-v0"));
+}
 
-    // Minimal valid output with only generic runtime metadata (no token fields)
-    let output = json!({
-        "rendered": {
-            "events_by_category": {"timeout": 5, "error": 3},
-            "telemetry_unavailable": false,
-            "last_observed_cursor": 8,
-            "projection_lag": "caught_up",
-            "component_version": "0.1.0",
-            "health": "ready"
-        }
-    });
-    // Must pass validation without Token-specific fields
+/// The public spec is injected via the user prompt section, not the system prompt.
+#[test]
+fn public_spec_appears_in_user_prompt_not_system_prompt() {
+    // Check that SYSTEM_PROMPT does not contain spec markers
+    assert!(!crate::self_evolution::generator::model::SYSTEM_PROMPT
+        .contains("ACCEPTANCE_KIT_PUBLIC_SPEC_BEGIN"));
+
+    // Verify the helper function generates the section
+    let mut req = request("token-dashboard");
+    req.acceptance_kit_ref = Some("token-dashboard-v0".into());
+    let section = crate::self_evolution::generator::model::public_spec_section(&req);
+    assert!(section.contains("ACCEPTANCE_KIT_PUBLIC_SPEC_BEGIN"));
+    assert!(section.contains("token-dashboard-v0"));
+
+    // Without a kit ref, no spec section
+    let req_no_kit = request("generic-observer");
+    let empty_section = crate::self_evolution::generator::model::public_spec_section(&req_no_kit);
+    assert!(empty_section.is_empty());
+}
+
+/// Private verifier (validation logic) must NOT be exposed to the model.
+/// Verify that the public spec contains no implementation details.
+#[test]
+fn private_verifier_not_exposed_in_public_spec() {
+    for kit in [
+        crate::self_evolution::acceptance_kit::AcceptanceKitId::TokenDashboardV0,
+        crate::self_evolution::acceptance_kit::AcceptanceKitId::FailureEventViewerV0,
+    ] {
+        let spec = kit.public_spec();
+        let text = serde_json::to_string(&spec).unwrap();
+        // The public spec should not contain validation logic or code
+        assert!(!text.contains("fn verify"));
+        assert!(!text.contains("has_positive_counter"));
+        assert!(!text.contains("within_days("));
+        assert!(!text.contains("unsafe"));
+        assert!(!text.contains("std::"));
+    }
+}
+
+/// Token Dashboard and non-Token kits must not cross-pollute.
+#[test]
+fn token_and_non_token_kits_dont_cross_pollute() {
+    let token_kit = crate::self_evolution::acceptance_kit::AcceptanceKitId::TokenDashboardV0;
+    let viewer_kit = crate::self_evolution::acceptance_kit::AcceptanceKitId::FailureEventViewerV0;
+
+    // Token spec contains telemetry fields
+    let token_spec = serde_json::to_string(&token_kit.public_spec()).unwrap().to_lowercase();
+    assert!(token_spec.contains("rolling_windows") || token_spec.contains("input_tokens"));
+
+    // Failure viewer spec schema must NOT contain telemetry fields
+    let viewer_schema = serde_json::to_string(
+        &viewer_kit.public_spec()["output_json_schema"]
+    ).unwrap().to_lowercase();
+    assert!(!viewer_schema.contains("rolling_windows"));
+    assert!(!viewer_schema.contains("input_tokens"));
+    assert!(!viewer_schema.contains("by_profile"));
+
+    // Verifying a token-contaminated output against non-token kit must fail.
+    let contaminated = r#"{"ok":true,"schema_version":"hook-consumer-service-contract-v0","events_applied":3,"html_nonempty":true,"html_safe":true,"html_runtime_metadata":true,"rendered":{"rolling_windows":{"1_day":{"calls":2}},"telemetry_unavailable":false,"last_observed_cursor":3,"projection_lag":"caught_up","component_version":"0.1.0","health":"ready"}}"#;
+    let viewer_req = request("failure-viewer");
     assert!(
-        validate_request_contract(&generic_request, &output.to_string()).is_ok(),
-        "non-Token request must pass without Token Dashboard fields"
+        viewer_kit.verify(&viewer_req, "", contaminated).is_err(),
+        "FailureEventViewer must reject output with token fields"
     );
 }
 
-/// Token Dashboard request must fail when Token fields are missing.
+/// Substring "token" must NOT auto-select Token Dashboard kit.
 #[test]
-fn token_request_requires_token_fields() {
-    let mut token_request = request();
-    token_request.requirements = vec!["Token usage dashboard".into()];
+fn substring_token_does_not_select_token_kit() {
+    // Request with "token" in requirements but NO acceptance_kit_ref
+    let mut req = request("auth-token-service");
+    req.requirements = vec!["manage auth tokens".into()];
+    req.acceptance_criteria = vec!["token refresh works".into()];
+    req.acceptance_kit_ref = None;
 
+    // Must NOT resolve to TokenDashboardV0
+    let result = crate::self_evolution::acceptance_kit::AcceptanceKitId::resolve(&req);
+    assert_eq!(
+        result,
+        Err("ACCEPTANCE_KIT_SELECTION_REQUIRED"),
+        "substring 'token' in requirements must not select the token kit"
+    );
+}
+
+/// Auth token in name does not match telemetry kit.
+#[test]
+fn auth_token_name_does_not_match_telemetry_kit() {
+    let mut req = request("auth-token-manager");
+    req.acceptance_kit_ref = Some("auth-token-v0".into());
+    assert_eq!(
+        crate::self_evolution::acceptance_kit::AcceptanceKitId::resolve(&req),
+        Err("ACCEPTANCE_KIT_SELECTION_REQUIRED")
+    );
+}
+
+/// Public spec digest changes when spec content changes.
+#[test]
+fn public_spec_change_alters_kit_digest() {
+    let token = crate::self_evolution::acceptance_kit::AcceptanceKitId::TokenDashboardV0;
+    let viewer = crate::self_evolution::acceptance_kit::AcceptanceKitId::FailureEventViewerV0;
+
+    // Different kits have different spec digests
+    assert_ne!(token.public_spec_digest(), viewer.public_spec_digest());
+    assert_ne!(token.combined_kit_digest(), viewer.combined_kit_digest());
+}
+
+/// Acceptance diagnostics must NOT expose private test data.
+#[test]
+fn acceptance_diagnostics_only_expose_public_constraints() {
+    let token_kit = crate::self_evolution::acceptance_kit::AcceptanceKitId::TokenDashboardV0;
+    let mut req = request("token-dashboard");
+    req.acceptance_kit_ref = Some("token-dashboard-v0".into());
+
+    // Empty output should produce diagnostics with constraint info only
+    let empty_output = r#"{"ok":false,"rendered":{}}"#;
+    let result = token_kit.verify(&req, "", empty_output);
+    assert!(result.is_err());
+    let diagnostics = result.unwrap_err();
+    // Diagnostics must not contain host paths, secrets, or private data
+    assert!(!diagnostics.contains("/private/"));
+    assert!(!diagnostics.contains("/tmp/"));
+    assert!(!diagnostics.contains("secret"));
+    assert!(!diagnostics.contains("api_key"));
+    assert!(!diagnostics.contains("password"));
+    // Should contain constraint information
+    assert!(diagnostics.contains("ACCEPTANCE") || diagnostics.contains("CONTRACT") || diagnostics.contains("missing"));
+}
+
+/// Validate contracts: a request with no kit ref returns ACCEPTANCE_KIT_SELECTION_REQUIRED.
+#[test]
+fn validate_contracts_without_kit_ref_fails_selection_required() {
+    let req = request("generic-observer");
+    let valid_output = r#"{"ok":true,"schema_version":"hook-consumer-service-contract-v0","events_applied":3,"html_nonempty":true,"html_safe":true,"html_runtime_metadata":true,"rendered":{"telemetry_unavailable":false,"last_observed_cursor":3,"projection_lag":"caught_up","component_version":"0.1.0","health":"ready"}}"#;
+    let result = contract::validate_contracts(&req, valid_output);
+    assert!(
+        result.is_err(),
+        "must fail without acceptance_kit_ref"
+    );
+    assert!(
+        result.unwrap_err().contains("ACCEPTANCE_KIT_SELECTION_REQUIRED"),
+        "must return ACCEPTANCE_KIT_SELECTION_REQUIRED"
+    );
+}
+
+/// Validate source without kit ref fails.
+#[test]
+fn validate_source_without_kit_ref_fails() {
+    let req = request("generic-observer");
+    let result = contract::validate_source(&req, source());
+    assert!(result.is_err());
+    assert!(
+        result.unwrap_err().contains("ACCEPTANCE_KIT_SELECTION_REQUIRED")
+    );
+}
+
+/// Combined probe reports profile failures correctly when using token kit.
+#[test]
+fn combined_probe_reports_profile_failures_with_token_kit() {
+    let mut token_req = request("token-dashboard");
+    token_req.requirements = vec!["Token usage dashboard".into()];
+    token_req.acceptance_kit_ref = Some("token-dashboard-v0".into());
     let output = json!({
+        "ok": true,
+        "schema_version": "hook-consumer-service-contract-v0",
+        "events_applied": 3,
+        "html_nonempty": true,
+        "html_safe": true,
+        "html_runtime_metadata": false,
+        "html_telemetry_metrics": true,
+        "html_average_latency": true,
         "rendered": {
+            "by_date": {"2026-07-15": {"input":10,"cached":2,"output":5,"reasoning":1,"latency":50,"failures":1,"unavailable":1}},
+            "by_run": {"run-1": {}},
+            "by_model": {"model-a": {}},
+            "by_profile": {"default": {}},
+            "rolling_windows": {
+                "1_day": {"calls":2,"latency_ms":50,"failures":1,"unavailable":1},
+                "7_day": {"calls":2,"latency_ms":50,"failures":1,"unavailable":1},
+                "30_day": {"calls":2,"latency_ms":50,"failures":1,"unavailable":1}
+            },
             "telemetry_unavailable": false,
             "last_observed_cursor": 3,
             "projection_lag": "caught_up",
@@ -328,25 +342,23 @@ fn token_request_requires_token_fields() {
             "health": "ready"
         }
     });
-    let error = validate_request_contract(&token_request, &output.to_string()).unwrap_err();
-    assert!(error.contains("GENERATOR_ACCEPTANCE_REPAIR_EXHAUSTED"));
-    assert!(error.contains("run-1"));
-    assert!(error.contains("model-a"));
+    let error = contract::validate_contracts(&token_req, &output.to_string()).unwrap_err();
+    // Profile contract failure: html_runtime_metadata is false
+    assert!(error.contains("html_runtime_metadata"));
+    assert!(error.contains("PROFILE_CONTRACT_TEST_FAILED"));
 }
 
-/// Acceptance failure produces no side effects (tested via error code only).
+/// Repair diagnostics don't disclose host path or candidate key.
 #[test]
-fn acceptance_failure_does_not_produce_candidate() {
-    let mut token_request = request();
-    token_request.requirements = vec!["Token usage dashboard".into()];
-    let output = json!({"rendered": {"health": "ready", "telemetry_unavailable": false}});
-    let error = validate_request_contract(&token_request, &output.to_string()).unwrap_err();
-    assert!(
-        error.contains("GENERATOR_ACCEPTANCE_REPAIR_EXHAUSTED"),
-        "acceptance failure must use ACCEPTANCE_REPAIR_EXHAUSTED, not COMPILE"
+fn repair_diagnostics_do_not_disclose_host_path_or_candidate_key() {
+    let base = Path::new("/private/operator/artifacts/generated");
+    let sanitized = sanitize_model_diagnostics(
+        "/private/operator/artifacts/generated/.candidate-secret/src/component.rs",
+        base,
+        "candidate-secret",
     );
-    assert!(
-        !error.contains("COMPILE"),
-        "acceptance failure must not be classified as compile failure"
+    assert_eq!(
+        sanitized,
+        "<generator-root>/.<candidate-id>/src/component.rs"
     );
 }

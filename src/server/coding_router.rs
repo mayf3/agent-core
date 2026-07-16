@@ -82,6 +82,7 @@ pub fn parse_coding_intent(text: &str) -> Result<CodingIntent> {
     draft.acceptance_criteria = draft.requirements.clone();
     draft.required_contracts = required_contracts;
     draft.requested_permissions = permissions_for(&catalog, &draft.required_contracts);
+    draft.acceptance_kit_ref = kit_for_component(&name).map(str::to_string);
 
     Ok(CodingIntent {
         kind: CodingIntentKind::DevelopComponent,
@@ -244,6 +245,17 @@ fn contains_override_attempt(text: &str) -> bool {
     ["operation=", "operation:", "coding_task_submit"]
         .iter()
         .any(|value| text.contains(value))
+}
+
+/// Map a component name to an explicit Acceptance Kit reference.
+/// Uses exact name matching only — never substring matching on "token".
+/// Returns None for components without a dedicated kit (the harness will
+/// return ACCEPTANCE_KIT_SELECTION_REQUIRED).
+fn kit_for_component(name: &str) -> Option<&'static str> {
+    match name {
+        "token-dashboard" => Some("token-dashboard-v0"),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

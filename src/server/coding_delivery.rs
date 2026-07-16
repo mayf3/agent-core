@@ -266,11 +266,15 @@ mod tests {
     #[test]
     fn harness_error_codes_map_to_stable_categories() {
         assert_eq!(
-            safe_category(&anyhow!("CODING_HARNESS_SUBMIT_FAILED:GENERATOR_MODEL_NOT_CONFIGURED")),
+            safe_category(&anyhow!(
+                "CODING_HARNESS_SUBMIT_FAILED:GENERATOR_MODEL_NOT_CONFIGURED"
+            )),
             "generator_model_not_configured"
         );
         assert_eq!(
-            safe_category(&anyhow!("CODING_HARNESS_SUBMIT_FAILED:GENERATOR_NOT_CONFIGURED_FOR_PROFILE")),
+            safe_category(&anyhow!(
+                "CODING_HARNESS_SUBMIT_FAILED:GENERATOR_NOT_CONFIGURED_FOR_PROFILE"
+            )),
             "generator_not_configured"
         );
     }

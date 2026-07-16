@@ -92,10 +92,11 @@ pub(super) fn generate_module(
         "component_profile": request.build_profile,
         "acceptance_criteria": request.acceptance_criteria,
     });
+    let spec_section = public_spec_section(request);
     complete_module(
         config,
         format!(
-            "DEVELOPMENT_REQUEST_JSON_BEGIN\n{}\nDEVELOPMENT_REQUEST_JSON_END",
+            "{spec_section}DEVELOPMENT_REQUEST_JSON_BEGIN\n{}\nDEVELOPMENT_REQUEST_JSON_END",
             specification
         ),
     )
@@ -114,15 +115,37 @@ pub(super) fn repair_module(
         "component_profile": request.build_profile,
         "acceptance_criteria": request.acceptance_criteria,
     });
+    let spec_section = public_spec_section(request);
     complete_module(
         config,
         format!(
-            "The previous module passed the security/source policy but failed the isolated Rust compile, profile, or request-contract probe. Correct every reported defect while preserving the request, every behavior that already passed, and the four-function interface. When diagnostics contain multiple contract sections, repair all of them together; do not remove previously correct dimensions, metrics, rolling-window totals, runtime metadata, or HTML safety. For Rust E0499, finish each state-derived mutable reference in a separate lexical scope before acquiring the next; never pass two simultaneous state child references to one helper. Return the complete replacement module only.\n\nDEVELOPMENT_REQUEST_JSON_BEGIN\n{}\nDEVELOPMENT_REQUEST_JSON_END\n\nPROBE_DIAGNOSTICS_BEGIN\n{}\nPROBE_DIAGNOSTICS_END\n\nPREVIOUS_MODULE_BEGIN\n{}\nPREVIOUS_MODULE_END",
+            "{spec_section}The previous module passed the security/source policy but failed the isolated Rust compile, profile, or request-contract probe. Correct every reported defect while preserving the request, every behavior that already passed, and the four-function interface. When diagnostics contain multiple contract sections, repair all of them together; do not remove previously correct dimensions, metrics, rolling-window totals, runtime metadata, or HTML safety. For Rust E0499, finish each state-derived mutable reference in a separate lexical scope before acquiring the next; never pass two simultaneous state child references to one helper. Return the complete replacement module only.\n\nDEVELOPMENT_REQUEST_JSON_BEGIN\n{}\nDEVELOPMENT_REQUEST_JSON_END\n\nPROBE_DIAGNOSTICS_BEGIN\n{}\nPROBE_DIAGNOSTICS_END\n\nPREVIOUS_MODULE_BEGIN\n{}\nPREVIOUS_MODULE_END",
             specification,
             bounded(compiler_diagnostics, 16 * 1024),
             bounded(previous_source, 96 * 1024),
         ),
     )
+}
+
+/// Build the public specification section for the model prompt.
+///
+/// The public spec is injected per-request (not in SYSTEM_PROMPT) and
+/// describes the output contract the model must follow. When no kit
+/// is resolved, no spec section is added (the request may still be
+/// processed by a fixture rather than the model).
+pub(super) fn public_spec_section(request: &DevelopmentRequest) -> String {
+    match crate::self_evolution::acceptance_kit::AcceptanceKitId::resolve(request) {
+        Ok(kit) => {
+            let spec = kit.public_spec();
+            let spec_json = serde_json::to_string_pretty(&spec)
+                .unwrap_or_else(|_| "{}".to_string());
+            format!(
+                "ACCEPTANCE_KIT_PUBLIC_SPEC_BEGIN\n{}\nACCEPTANCE_KIT_PUBLIC_SPEC_END\n\n",
+                spec_json
+            )
+        }
+        Err(_) => String::new(),
+    }
 }
 
 fn complete_module(config: &ModelConfig, user_prompt: String) -> Result<String, GenerationError> {
