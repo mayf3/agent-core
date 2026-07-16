@@ -1,9 +1,7 @@
 mod cache;
 mod contract;
 
-#[cfg(test)]
-use self::contract::validate_request_contract;
-use self::contract::{validate_contracts, validate_request_source};
+use self::contract::validate_contracts;
 use super::model::{self, ModelConfig};
 use super::GenerationError;
 use agent_core_kernel::domain::{DevelopmentRequest, TargetKind};
@@ -84,6 +82,10 @@ pub(super) fn generate(
                     eprintln!("generator probe repair exhausted:\n{diagnostics}");
                     let error_code = if diagnostics.contains("GENERATOR_ACCEPTANCE_REPAIR_EXHAUSTED") {
                         "GENERATOR_ACCEPTANCE_REPAIR_EXHAUSTED"
+                    } else if diagnostics.contains("ACCEPTANCE_KIT_SELECTION_REQUIRED") {
+                        "ACCEPTANCE_KIT_SELECTION_REQUIRED"
+                    } else if diagnostics.contains("CROSS_KIT_CONTAMINATION_FAILED") {
+                        "GENERATOR_ACCEPTANCE_REPAIR_EXHAUSTED"
                     } else {
                         "GENERATOR_COMPILE_REPAIR_EXHAUSTED"
                     };
@@ -126,7 +128,7 @@ fn compile_probe(
     source: &str,
 ) -> Result<(), CompileProbeError> {
     model::validate_generated_source(source).map_err(|_| CompileProbeError::Infrastructure)?;
-    validate_request_source(request, source).map_err(CompileProbeError::Candidate)?;
+    contract::validate_source(request, source).map_err(CompileProbeError::Candidate)?;
     let probe = base.join(format!(
         ".{candidate_id}.compile-probe.{}.{}",
         std::process::id(),

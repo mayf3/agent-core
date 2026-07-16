@@ -1,3 +1,4 @@
+pub mod acceptance_kit;
 pub mod artifact_manifest;
 mod component_profile;
 mod generator;
