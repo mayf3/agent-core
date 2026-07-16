@@ -190,12 +190,36 @@ fn safe_category(error: &anyhow::Error) -> &'static str {
         "generator_model_not_configured"
     } else if message.contains("SUBMIT_FAILED:GENERATOR_NOT_CONFIGURED_FOR_PROFILE") {
         "generator_not_configured"
+    } else if message.contains("SUBMIT_FAILED:CANDIDATE_GENERATION_FAILED") {
+        "candidate_generation_failed"
+    } else if message.contains("GENERATOR_COMPILE_REPAIR_EXHAUSTED")
+        || message.contains("SUBMIT_FAILED:GENERATOR_COMPILE_REPAIR_EXHAUSTED")
+    {
+        "generator_repair_exhausted"
+    } else if message.contains("GENERATOR_MODEL_OUTPUT_INVALID")
+        || message.contains("GENERATOR_MODEL_RESPONSE_INVALID")
+    {
+        "model_output_invalid"
+    } else if message.contains("GENERATOR_MODEL_OUTPUT_UNSAFE") {
+        "model_output_unsafe"
+    } else if message.contains("GENERATOR_MODEL_OUTPUT_TRUNCATED") {
+        "model_output_truncated"
+    } else if message.contains("GENERATOR_MODEL_UNAVAILABLE") {
+        "generator_model_unavailable"
+    } else if message.contains("GENERATOR_COMPILE_PROBE_INFRASTRUCTURE_FAILURE") {
+        "generator_infrastructure_failure"
+    } else if message.contains("PROFILE_GENERATOR_NOT_IMPLEMENTED") {
+        "profile_generator_not_implemented"
     } else if message.contains("SUBMIT_FAILED:UNKNOWN_COMPONENT_PROFILE") {
         "unknown_component_profile"
     } else if message.contains("SUBMIT_FAILED:INVALID_DEVELOPMENT_REQUEST") {
         "invalid_development_request"
-    } else if message.contains("SUBMIT_FAILED:CANDIDATE_GENERATION_FAILED") {
-        "candidate_generation_failed"
+    } else if message.contains("HCR_INFRASTRUCTURE_FAILURE") {
+        "hcr_infrastructure_failure"
+    } else if message.contains("HCR_CANDIDATE_FAILURE") {
+        "hcr_candidate_failure"
+    } else if message.contains("SETTLEMENT_FAILED") {
+        "settlement_failed"
     } else {
         "coding_flow_failed"
     }
@@ -203,18 +227,38 @@ fn safe_category(error: &anyhow::Error) -> &'static str {
 
 fn user_facing_error(error: &anyhow::Error) -> &'static str {
     let message = error.to_string();
-    if message.contains("SUBMIT_FAILED:GENERATOR_MODEL_NOT_CONFIGURED") {
+    if message.contains("GENERATOR_MODEL_NOT_CONFIGURED") {
         "开发请求已进入 Coding Harness，但模型生成服务尚未配置。"
-    } else if message.contains("SUBMIT_FAILED:GENERATOR_NOT_CONFIGURED_FOR_PROFILE") {
+    } else if message.contains("GENERATOR_NOT_CONFIGURED_FOR_PROFILE") {
         "Coding Harness 不支持该组件类型的生成（Profile 未配置）。"
+    } else if message.contains("GENERATOR_COMPILE_REPAIR_EXHAUSTED") {
+        "代码生成已完成，但候选程序在编译修复次数耗尽后仍未通过。"
+    } else if message.contains("GENERATOR_MODEL_OUTPUT_UNSAFE") {
+        "候选程序违反安全限制，已安全拒绝，未创建部署提案。"
+    } else if message.contains("GENERATOR_MODEL_OUTPUT_TRUNCATED") {
+        "模型输出被截断，生成不完整，请重试。"
+    } else if message.contains("GENERATOR_MODEL_UNAVAILABLE")
+        || message.contains("GENERATOR_COMPILE_PROBE_INFRASTRUCTURE_FAILURE")
+    {
+        "模型生成服务暂时不可用，请稍后重试。"
+    } else if message.contains("CANDIDATE_GENERATION_FAILED")
+        || message.contains("CANDIDATE_REJECTED")
+    {
+        "候选组件生成失败。"
     } else if message.contains("SUBMIT_FAILED:UNKNOWN_COMPONENT_PROFILE") {
         "未知的组件 Profile。"
     } else if message.contains("SUBMIT_FAILED:INVALID_DEVELOPMENT_REQUEST") {
         "开发请求格式无效。"
-    } else if message.contains("SUBMIT_FAILED:CANDIDATE_GENERATION_FAILED") {
-        "候选组件生成失败。"
     } else if message.contains("CODING_HARNESS_CONNECT_FAILED") {
         "无法连接到 Coding Harness。"
+    } else if message.contains("HCR_INFRASTRUCTURE_FAILURE")
+        || message.contains("HCR_CANDIDATE_FAILURE")
+    {
+        "五项门禁验证失败。"
+    } else if message.contains("SETTLEMENT_FAILED") {
+        "最终结算失败。"
+    } else if message.contains("PROFILE_GENERATOR_NOT_IMPLEMENTED") {
+        "该组件类型的生成器尚未实现。"
     } else {
         "请稍后重试。"
     }
