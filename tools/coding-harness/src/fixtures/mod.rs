@@ -1,4 +1,5 @@
 mod calculator;
+#[cfg(feature = "test-fixtures")]
 mod hook_consumer;
 
 use agent_core_kernel::domain::DevelopmentRequest;
@@ -20,6 +21,15 @@ pub struct SmokeCase {
 /// Ordinary deterministic fixtures share the same Generic DevelopmentRequest
 /// entrypoint as generated components. A fixture may claim only requests that
 /// match its catalogued profile and immutable identity.
+///
+/// # Production safety
+///
+/// Only the calculator fixture is available in release builds. The hook-consumer
+/// fixture is gated behind the `test-fixtures` feature (Cargo.toml) so that
+/// real Token Dashboard requests always go through the model generator and
+/// never receive a pre-built fixture candidate. Gate infrastructure (manifest
+/// validation, trusted-test source, smoke case) remains unconditionally
+/// available because it is used by the formal gate pipeline.
 pub fn generate(
     artifact_root: &Path,
     request: &DevelopmentRequest,
@@ -27,6 +37,7 @@ pub fn generate(
     if calculator::supports(request) {
         return Some(calculator::generate(artifact_root, request));
     }
+    #[cfg(feature = "test-fixtures")]
     if hook_consumer::supports(request) {
         return Some(hook_consumer::generate(artifact_root, request));
     }

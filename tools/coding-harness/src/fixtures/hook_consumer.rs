@@ -472,14 +472,19 @@ mod tests {
         .unwrap()
     }
 
-    #[test]
-    fn fixture_materializes_hook_consumer_manifest() {
-        let root = std::env::temp_dir().join(format!(
-            "hook_fix_test_{}_{}",
+    fn unique_root(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "hook_fix_{}_{}_{}",
+            label,
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
-        ));
+        ))
+    }
+
+    #[test]
+    fn fixture_materializes_hook_consumer_manifest() {
+        let root = unique_root("manifest");
         let result = generate(&root, &hook_consumer_request()).unwrap();
         let m = &result["component_manifest"];
         assert_eq!(m["profile_id"], "hook-consumer-service-v0");
@@ -490,5 +495,76 @@ mod tests {
             assert!(p.join(f).exists(), "missing {f}");
         }
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Same request + same source → same digest across different root dirs.
+    #[test]
+    fn candidate_digest_is_stable_across_different_directories() {
+        let request = hook_consumer_request();
+        let root1 = unique_root("stable1");
+        let root2 = unique_root("stable2");
+        let r1 = generate(&root1, &request).unwrap();
+        let r2 = generate(&root2, &request).unwrap();
+        assert_eq!(
+            r1["candidate_digest"], r2["candidate_digest"],
+            "digest must be stable across different artifact roots"
+        );
+        let _ = std::fs::remove_dir_all(root1);
+        let _ = std::fs::remove_dir_all(root2);
+    }
+
+    /// Same request + same source → same digest at different times.
+    #[test]
+    fn candidate_digest_is_stable_across_time() {
+        let request = hook_consumer_request();
+        let root = unique_root("time");
+        let r1 = generate(&root, &request).unwrap();
+        // Re-generate into the same root (second call hits cached path).
+        let r2 = generate(&root, &request).unwrap();
+        assert_eq!(
+            r1["candidate_digest"], r2["candidate_digest"],
+            "digest must match across cached re-generation"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+
+    /// Different development_message_id → different request_id →
+    /// different specification.json content → different digest.
+    #[test]
+    fn different_request_different_digest() {
+        use agent_core_kernel::domain::DevelopmentRequestDraft;
+        let draft = |msg: &str| -> DevelopmentRequest {
+            let mut d = DevelopmentRequestDraft::new(
+                TargetKind::HookConsumerService,
+                "token-dashboard".into(),
+            );
+            d.requirements = vec!["token usage dashboard via event.observe.v0".into()];
+            d.required_contracts = vec!["event.observe.v0".into()];
+            d.requested_permissions = vec!["journal.observe".into()];
+            d.acceptance_criteria = vec!["projects token totals from observed events".into()];
+            DevelopmentRequest::from_draft(
+                d,
+                "principal:test".into(),
+                "scope:test".into(),
+                "message:test".into(),
+                msg.into(),
+                CONTRACT_CATALOG_VERSION.into(),
+            )
+            .unwrap()
+        };
+        let req1 = draft("development:test-a");
+        let req2 = draft("development:test-b");
+
+        let root1 = unique_root("diff1");
+        let root2 = unique_root("diff2");
+        let r1 = generate(&root1, &req1).unwrap();
+        let r2 = generate(&root2, &req2).unwrap();
+        assert_ne!(
+            r1["candidate_digest"], r2["candidate_digest"],
+            "different requests must produce different digests"
+        );
+        let _ = std::fs::remove_dir_all(root1);
+        let _ = std::fs::remove_dir_all(root2);
     }
 }

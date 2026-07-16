@@ -3,6 +3,9 @@ name = "coding-harness"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+test-fixtures = []
+
 [dependencies]
 agent-core-kernel = { path = "../.." }
 anyhow = "1"

@@ -1,5 +1,8 @@
 //! Hook Consumer HCR Five Gates acceptance test.
 //!
+//! Requires: `cargo test --features test-fixtures --test hook_consumer_gates_e2e`
+//!
+#![cfg(feature = "test-fixtures")]
 //! Generates a hook-consumer-service candidate from the deterministic fixture,
 //! snapshots it, and runs the formal Five Gates (Scaffold, Build, TrustedTest,
 //! TrustedSmoke, Artifact). Records receipts and evidence for every gate.
