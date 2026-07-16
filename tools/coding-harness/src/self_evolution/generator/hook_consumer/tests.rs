@@ -277,11 +277,11 @@ fn generic_prompt_contains_no_product_terms() {
     ];
     for term in &forbidden {
         assert!(
-            !super::super::super::model::SYSTEM_PROMPT.contains(term),
+            !crate::self_evolution::generator::model::SYSTEM_PROMPT.contains(term),
             "generic prompt must not contain product term: {term}"
         );
         assert!(
-            !super::super::super::model::SYSTEM_PROMPT.contains(&term.to_lowercase()),
+            !crate::self_evolution::generator::model::SYSTEM_PROMPT.contains(&term.to_lowercase()),
             "generic prompt must not contain product term (lowercase): {term}"
         );
     }
