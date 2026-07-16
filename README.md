@@ -59,6 +59,7 @@ Architecture drafts (under `docs/architecture/`):
 - [Generic Self-Evolution V1](docs/architecture/generic-self-evolution-v1.md) — governed DevelopmentRequest, Contract Catalog, Component Profiles, and candidate binding
 - [Model Invocation Telemetry V0](docs/architecture/model-invocation-telemetry-v0.md) — replay-safe Journal facts for real model usage through `event.observe.v0`
 - [Managed Service Lifecycle V0](docs/architecture/managed-service-lifecycle-v0.md) — external Hook Consumer Service deployment, component snapshots, and governed controls
+- [External Orchestration Boundary](docs/architecture/external-orchestration-boundary.md) — Kernel vs External Harness boundary: planning, routing, multi-agent, acceptance, and repair strategy all live outside the Kernel
 - [Deployment Harness Operations](docs/ops/deployment-harness.md) — loopback deployment service configuration, health, upgrade, disable, and rollback
 
 ## Current Commands
