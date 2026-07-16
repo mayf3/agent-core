@@ -267,3 +267,86 @@ impl ReadText for PathBuf {
         std::fs::read_to_string(self)
     }
 }
+
+/// Generic SYSTEM_PROMPT contains no Token Dashboard product terms.
+#[test]
+fn generic_prompt_contains_no_product_terms() {
+    let forbidden = [
+        "rolling_windows", "by_model", "by_profile", "run-1", "model-a",
+        "input_tokens", "cached_tokens", "reasoning_tokens", "Token Dashboard",
+    ];
+    for term in &forbidden {
+        assert!(
+            !super::super::super::model::SYSTEM_PROMPT.contains(term),
+            "generic prompt must not contain product term: {term}"
+        );
+        assert!(
+            !super::super::super::model::SYSTEM_PROMPT.contains(&term.to_lowercase()),
+            "generic prompt must not contain product term (lowercase): {term}"
+        );
+    }
+}
+
+/// Cross-request isolation: a non-Token request must not fail on Token-specific fields.
+#[test]
+fn non_token_request_does_not_fail_on_token_fields() {
+    let mut generic_request = request();
+    // A hook consumer that DOES NOT mention "token" in criteria
+    generic_request.requirements = vec!["display failure events by category".into()];
+    generic_request.acceptance_criteria = vec!["read-only failure page".into()];
+
+    // Minimal valid output with only generic runtime metadata (no token fields)
+    let output = json!({
+        "rendered": {
+            "events_by_category": {"timeout": 5, "error": 3},
+            "telemetry_unavailable": false,
+            "last_observed_cursor": 8,
+            "projection_lag": "caught_up",
+            "component_version": "0.1.0",
+            "health": "ready"
+        }
+    });
+    // Must pass validation without Token-specific fields
+    assert!(
+        validate_request_contract(&generic_request, &output.to_string()).is_ok(),
+        "non-Token request must pass without Token Dashboard fields"
+    );
+}
+
+/// Token Dashboard request must fail when Token fields are missing.
+#[test]
+fn token_request_requires_token_fields() {
+    let mut token_request = request();
+    token_request.requirements = vec!["Token usage dashboard".into()];
+
+    let output = json!({
+        "rendered": {
+            "telemetry_unavailable": false,
+            "last_observed_cursor": 3,
+            "projection_lag": "caught_up",
+            "component_version": "0.1.0",
+            "health": "ready"
+        }
+    });
+    let error = validate_request_contract(&token_request, &output.to_string()).unwrap_err();
+    assert!(error.contains("GENERATOR_ACCEPTANCE_REPAIR_EXHAUSTED"));
+    assert!(error.contains("run-1"));
+    assert!(error.contains("model-a"));
+}
+
+/// Acceptance failure produces no side effects (tested via error code only).
+#[test]
+fn acceptance_failure_does_not_produce_candidate() {
+    let mut token_request = request();
+    token_request.requirements = vec!["Token usage dashboard".into()];
+    let output = json!({"rendered": {"health": "ready", "telemetry_unavailable": false}});
+    let error = validate_request_contract(&token_request, &output.to_string()).unwrap_err();
+    assert!(
+        error.contains("GENERATOR_ACCEPTANCE_REPAIR_EXHAUSTED"),
+        "acceptance failure must use ACCEPTANCE_REPAIR_EXHAUSTED, not COMPILE"
+    );
+    assert!(
+        !error.contains("COMPILE"),
+        "acceptance failure must not be classified as compile failure"
+    );
+}

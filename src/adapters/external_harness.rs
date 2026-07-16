@@ -297,6 +297,9 @@ pub fn execute_external_harness_with_config(
             | "UNKNOWN_COMPONENT_PROFILE"
             | "INVALID_DEVELOPMENT_REQUEST"
             | "UNSUPPORTED_TARGET_KIND" => "generator_config",
+            "GENERATOR_ACCEPTANCE_REPAIR_EXHAUSTED" => "acceptance_exhausted",
+            "GENERATOR_COMPILE_REPAIR_EXHAUSTED" => "compile_exhausted",
+            "GENERATOR_MODEL_OUTPUT_UNSAFE" => "model_output_unsafe",
             "HARNESS_UNAVAILABLE" | "CONNECTION_REFUSED" | "TIMEOUT" => "harness_unavailable",
             "CANDIDATE_REJECTED" | "CANDIDATE_GENERATION_FAILED" => "candidate_failed",
             "HCR_INFRASTRUCTURE_FAILURE" | "SETTLEMENT_FAILED" => "hcr_infrastructure",
