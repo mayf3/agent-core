@@ -278,8 +278,10 @@ pub fn execute_external_harness_with_config(
             occurred_at: Utc::now(),
         })
     } else {
-        // Harness returned ok=false. Always use fixed error_category.
-        // Optionally include a bounded harness error_code in a non-authoritative field.
+        // Harness returned ok=false. Map known harness error codes to
+        // stable error categories so the kernel's error routing preserves
+        // actionable diagnostics instead of lumping everything into
+        // "harness_failed". Unknown codes fall back to the generic category.
         let raw_code = harness_response
             .get("error_code")
             .and_then(Value::as_str)
@@ -289,7 +291,18 @@ pub fn execute_external_harness_with_config(
             .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
             .take(64)
             .collect();
-        let mut output = serde_json::json!({"error_category": "harness_failed"});
+        let category = match bounded.as_str() {
+            "GENERATOR_MODEL_NOT_CONFIGURED"
+            | "GENERATOR_NOT_CONFIGURED_FOR_PROFILE"
+            | "UNKNOWN_COMPONENT_PROFILE"
+            | "INVALID_DEVELOPMENT_REQUEST"
+            | "UNSUPPORTED_TARGET_KIND" => "generator_config",
+            "HARNESS_UNAVAILABLE" | "CONNECTION_REFUSED" | "TIMEOUT" => "harness_unavailable",
+            "CANDIDATE_REJECTED" | "CANDIDATE_GENERATION_FAILED" => "candidate_failed",
+            "HCR_INFRASTRUCTURE_FAILURE" | "SETTLEMENT_FAILED" => "hcr_infrastructure",
+            _ => "harness_failed",
+        };
+        let mut output = serde_json::json!({"error_category": category});
         if !bounded.is_empty() {
             output["harness_error_code"] = json!(bounded);
         }
