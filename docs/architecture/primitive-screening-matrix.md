@@ -683,3 +683,167 @@ deleted this round.**
 ### Is Registry a Versioned Component Binding Snapshot (kept as-is)?
 Yes (rows 11, 12). Registry ≈ Snapshot catalogue + Allow Boundary; Registry
 Snapshot is K3. **Registry is not generalized this round.**
+
+---
+
+## External Orchestration Boundary — New Screening Entries (external-orchestration-boundary round)
+
+> These entries are added to document the boundary between Kernel and External
+> Harness. **No row below authorizes a code change.** Each entry records what the
+> concept would be in the candidate model and which side of the boundary it belongs
+> to. Full boundary rationale is in
+> [`external-orchestration-boundary.md`](./external-orchestration-boundary.md) and
+> `kernel-primitive-calculus.md` §16–§22.
+
+### 32. Natural Language Router
+
+| Field | Content |
+|---|---|
+| Current concept | Understanding natural language development requests and mapping them to components/contracts |
+| Code evidence | No general NL router exists; current fixed matchers in `src/server/calculator_router.rs` and `src/server/coding_router.rs` are North Star scaffolding only |
+| Current owner | Kernel (scaffold only — concept is external by design) |
+| Durable state | None |
+| Security invariant | Router only produces a Proposal; Kernel validates + creates the real Intent/Run |
+| Classification | **E** — external Harness |
+| Candidate derivation | `NL Router ≈ external Propose(§4) component bound at ingress` |
+| Boundary note | Kernel may keep minimal safe fallback (explicit approve/deny/status/unknown → external Router); must not absorb NL understanding |
+| Current decision | **Revisit** — keep external by design; fixed matchers exist as scaffold only |
+
+### 33. Development Plan (开发计划)
+
+| Field | Content |
+|---|---|
+| Current concept | Task decomposition, role assignment, execution order for a development request |
+| Code evidence | No Kernel type or table. Current calculator-specific flow hardcodes the plan in Coding Harness logic |
+| Current owner | None in Kernel — external Harness concept |
+| Durable state | None in Kernel |
+| Security invariant | N/A — plan is an external artifact; Kernel never parses plan content |
+| Classification | **E** — external artifact, not a Kernel primitive |
+| Candidate derivation | `DevelopmentPlan ≈ external artifact referenced by opaque_ref + digest (if audit requires)` |
+| Boundary note | Kernel may at most store `plan_ref` + `plan_digest` for audit prevention of substitution; Kernel never interprets plan steps, roles, dependency graph, or business goals |
+| Current decision | **Document** — explicitly NOT a Kernel concept; do not add any Kernel type |
+
+### 34. Acceptance Plan / Acceptance Kit (验收计划/验收包)
+
+| Field | Content |
+|---|---|
+| Current concept | Business acceptance criteria, test cases, and verification process for a delivered artifact |
+| Code evidence | No Kernel type or table. Acceptance is performed by external Harness |
+| Current owner | External Harness |
+| Durable state | None in Kernel |
+| Security invariant | Kernel only verifies: acceptance executed by trusted Harness, acceptance result binds correct candidate, acceptance evidence digest is complete |
+| Classification | **E** — external Harness |
+| Candidate derivation | `AcceptancePlan ≈ external artifact; AcceptanceResult ≈ external evidence digest bound to candidate artifact` |
+| Boundary note | Token Dashboard example: 1/7/30 day windows, per-Run/model/Profile aggregation, latency/failure/page display — all external acceptance kit, not Kernel knowledge |
+| Current decision | **Document** — explicitly NOT a Kernel concept |
+
+### 35. Multi-Agent (多 Agent)
+
+| Field | Content |
+|---|---|
+| Current concept | Multiple agents with different roles collaborating on a task |
+| Code evidence | `agent_id` foreign key on sessions/runs, `correlation_id` on journal events (`src/domain/mod.rs:376`); `spawn`/`yield` stubs disabled |
+| Current owner | External Harness (orchestration concept) |
+| Durable state | Existing: agent_id, RunPrincipal, correlation_id — sufficient anchors |
+| Security invariant | Each Run has its own identity, scope, snapshot, and grants; cross-Run correlation is handled by external orchestrator |
+| Classification | **E** — external orchestration of multiple ordinary Runs |
+| Candidate derivation | `MultiAgent ≈ external orchestrator + N × Run(Profileᵢ) + correlation/input/output references` |
+| Boundary note | Kernel only sees independent Runs; kernel does NOT understand Planner/Coding/Audit/Deploy Agent roles, voting, consensus, or collaboration strategies |
+| Current decision | **Document** — Multi-Agent is NOT a Kernel primitive |
+
+### 36. Agent Role (角色定义)
+
+| Field | Content |
+|---|---|
+| Current concept | Distinct agent roles such as Coding Agent, Audit Agent, Deploy Agent |
+| Code evidence | No Kernel `AgentRole` type. Roles are defined by different AGENTS.md profiles, Workspace handles, Context bindings, and Grant sets |
+| Current owner | External Harness — Profile / AGENTS.md |
+| Durable state | Profile files on disk (`agents/main/AGENT.md`); no Kernel table |
+| Security invariant | Role differentiation is achieved through different Instruction Artifacts, Workspace Handles, Context Bindings, Grant Sets, and Memory Scopes — all external |
+| Classification | **E** — external Profile / AGENTS.md |
+| Candidate derivation | `AgentRole ≈ ProfileBinding × Scope × Snapshot × Run` (same Runtime and model; different external profile and context) |
+| Current decision | **Document** — AgentRole is NOT a Kernel concept |
+
+### 37. Repair Workflow (修复流程)
+
+| Field | Content |
+|---|---|
+| Current concept | Observing failures, diagnosing root cause, reproducing, patching, testing, proposing fix, deploying, verifying, rolling back on regression |
+| Code evidence | No Kernel `RepairManager` or `RepairWorkflow` type. External Evolution Harness loop described in `kernel-primitive-calculus.md` §8 |
+| Current owner | External Observer / Repair Harness |
+| Durable state | Kernel contributes: fact events (K6), pinned Snapshots (K3), Decisions (K5), Receipts (K7) |
+| Security invariant | Repair loop is external; Kernel never bypasses its own approval/journal path |
+| Classification | **E** — external Observer / Repair Harness |
+| Candidate derivation | `RepairWorkflow ≈ Observe(K6) → Diagnose → Propose → Decision(K5) → Effect → Receipt(K7) → new Snapshot(K3)` |
+| Boundary note | Kernel must NOT internalize SelfRepairManager, AutoFixAgent, or RepairWorkflow as first-class modules |
+| Current decision | **Document** — repair workflow is external orchestration, not a Kernel primitive |
+
+### 38. Component Profile
+
+| Field | Content |
+|---|---|
+| Current concept | A template/spec for what an external component can be: invocable capability, hook consumer service, context provider, etc. |
+| Code evidence | Profile definitions in `generic-self-evolution-v1.md` and Coding Harness logic. First-class profiles are in design stage; not yet a Kernel type |
+| Current owner | Coding Harness / Deployment Harness |
+| Durable state | None in Kernel (component manifests are external artifacts) |
+| Security invariant | Kernel cares about the governance difference between one-shot invocation and long-running service, not the business profile name |
+| Classification | **E** — Coding/Deployment Harness |
+| Candidate derivation | `ComponentProfile ≈ external template + build/gate/deploy/sandbox/permissions` |
+| Boundary note | Kernel must NOT internalize business profile names like `token-dashboard-v0` or `memory-service-v0` |
+| Current decision | **Document** — Component Profiles are external Harness concerns |
+
+### 39. Contract Composition and Examples (Contract 组合和示例)
+
+| Field | Content |
+|---|---|
+| Current concept | What contracts suit a given requirement, sample code, SDK, project templates, test kits, and how to compose multiple Kernel interfaces |
+| Code evidence | No Kernel type. Contract Catalog is a design-stage concept |
+| Current owner | External development system (Coding Harness, Planner Harness) |
+| Durable state | None in Kernel |
+| Security invariant | N/A — discovery, composition guidance, and examples are external material |
+| Classification | **E** — external development system |
+| Candidate derivation | `ContractComposition ≈ external material about Kernel interfaces` |
+| Boundary note | Kernel publishes stable interface schemas; everything else (discovery, examples, SDK, templates) is external |
+| Current decision | **Document** — contract composition and examples belong to external development systems |
+
+### 40. Kernel Interface Schema (Kernel 接口 Schema)
+
+| Field | Content |
+|---|---|
+| Current concept | The stable interface definitions the Kernel exposes: event reading, intent submission, approval/decision, receipt format, component enable/disable/rollback, permission requirements, interface versions |
+| Code evidence | Interface schemas defined across `src/domain/`, `src/gateway/`, `src/hook/types.rs`, `src/adapters/` |
+| Current owner | Kernel — interface definition rights belong to the Kernel boundary |
+| Durable state | Implicit in Kernel code and contracts |
+| Security invariant | The Kernel's stable interface is its external boundary; schema changes require governance |
+| Classification | **K** (Kernel stable boundary) |
+| Candidate derivation | `KernelInterfaceSchema ≈ the Kernel's defined and published stable interface contracts` |
+| Boundary note | This is the ONE thing that stays inside the Kernel boundary — the interface schemas themselves. How they are combined, discovered, and used is external |
+| Current decision | **Keep** — Kernel owns its stable interface schemas |
+
+### Opaque Reference and Digest Rule
+
+When the Kernel needs to prevent external artifact substitution for audit or
+approval binding purposes, it may store:
+
+```text
+opaque_ref
+digest
+```
+
+The meaning is strictly limited to:
+
+```text
+"this approval/execution references that external artifact"
+```
+
+The Kernel:
+
+- **may** store `opaque_ref` and `digest` for binding external plans, acceptance
+  kits, or proposals;
+- **must not** parse, interpret, or understand the content of the referenced
+  artifact;
+- **must not** treat the external artifact structure as a Kernel primitive.
+
+This rule is enforced by the boundary decisions in §16–§22 of
+[`kernel-primitive-calculus.md`](./kernel-primitive-calculus.md) and in
+[`external-orchestration-boundary.md`](./external-orchestration-boundary.md).
