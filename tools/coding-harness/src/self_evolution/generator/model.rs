@@ -32,7 +32,21 @@ Always unwrap optional strings explicitly with unwrap_or_else(|| "unknown".to_st
 
 Use ensure_object_path and increment_u64 for nested mutable aggregates. Pass the complete path in one ensure_object_path call; it returns a Map and must not be passed to a helper expecting &mut Value. Complete each state sub-map mutation in its own lexical scope before borrowing a different state path; never hold two mutable references derived from state at the same time. Do not call unwrap() or expect() on event, state, aggregate, or runtime lookups; malformed or missing shapes must be repaired to an object or ignored rather than panicking. Use value_display for runtime values that may be strings, numbers, or booleans, including telemetry_unavailable, last_observed_cursor, and projection_lag.
 
-event.observe.v0 model telemetry envelopes use top-level event_kind model.invocation.completed.v0 or model.invocation.failed.v0 and a top-level run_id (never payload.run or payload.run_id). The completed payload can contain profile, provider, model, latency_ms, input_tokens, cached_input_tokens, output_tokens, reasoning_tokens, total_tokens and null values. A telemetry UI must never estimate missing counters; track a positive unavailable count for every missing token counter, including failed invocations, in the matching daily and dimensional aggregates rather than treating it as observed zero. Call count and average latency include both completed and failed invocations when latency is present; failure count is additional, not a replacement for call count. If the request concerns token/model usage, preserve unavailable values, include input/cached/output/reasoning totals, call count, average latency, failure count, daily plus distinct current overall 1-day, 7-day, and 30-day totals, and group by every requested dimension. Rolling windows must be derived at render time from bounded daily aggregates and runtime today_utc; never freeze a rolling-window total when an event is ingested, and use runtime.today_utc rather than the host clock while rendering. render_json and render_html must also expose the supplied runtime health, component version, cursor, lag, and telemetry-unavailable status. Unknown future events and fields must be ignored safely. Keep bounded aggregates only; never retain complete raw events or unbounded per-event history. Escape all event-derived text before inserting it into HTML. Produce a useful read-only page with no script or external assets."#;
+	event.observe.v0 model telemetry envelopes use top-level event_kind model.invocation.completed.v0 or model.invocation.failed.v0 and a top-level run_id (never payload.run or payload.run_id). The completed payload can contain profile, provider, model, latency_ms, input_tokens, cached_input_tokens, output_tokens, reasoning_tokens, total_tokens and null values.
+
+The render_json output MUST include ALL of the following:
+- A top-level "rolling_windows" object with "1_day", "7_day", and "30_day" keys.
+  Each window object contains:
+  - "overall" with: calls (integer), avg_latency_ms or latency_avg (float), failures (integer), unavailable (positive integer)
+  - "by_model" mapping model names to objects with call count and per-model totals
+  - "by_profile" mapping profile names to objects with call count and per-profile totals
+- A top-level "totals" object with input_tokens, cached_input_tokens, output_tokens, reasoning_tokens, total_tokens, call_count, failures, unavailable
+- A top-level "runtime" object from the supplied runtime parameter (health, version, cursor, lag, telemetry_unavailable)
+- The values "run-1", "model-a", "default" must appear in the rendered output under appropriate keys
+
+Rolling windows must be derived at render time from bounded daily aggregates and runtime today_utc; never freeze a rolling-window total when an event is ingested, and use runtime.today_utc rather than the host clock while rendering. Unknown future events and fields must be ignored safely. Keep bounded aggregates only; never retain complete raw events or unbounded per-event history.
+
+render_html must expose all the same information as render_json in readable HTML with no script or external assets, and must contain the telemetry metric names (input, cached, output, reasoning, latency, failure) and runtime metadata values (component_id, version, health, lag, telemetry_unavailable). Escape all event-derived text before inserting it into HTML."#;
 
 #[derive(Debug, Clone)]
 pub(super) struct ModelConfig {
