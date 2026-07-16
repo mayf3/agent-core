@@ -108,7 +108,7 @@ pub fn deliver<L: LlmClient + 'static>(
                     "error_category": safe_category(&error),
                 }),
             )?;
-            (format!("开发未完成：{}", safe_category(&error)), true, None)
+            (format!("开发未完成：{}\n原因：{}", safe_category(&error), user_facing_error(&error)), true, None)
         }
     };
 
@@ -186,8 +186,37 @@ fn safe_category(error: &anyhow::Error) -> &'static str {
         "coding_harness_unavailable"
     } else if message.contains("SANDBOX") {
         "linux_sandbox_unavailable"
+    } else if message.contains("SUBMIT_FAILED:GENERATOR_MODEL_NOT_CONFIGURED") {
+        "generator_model_not_configured"
+    } else if message.contains("SUBMIT_FAILED:GENERATOR_NOT_CONFIGURED_FOR_PROFILE") {
+        "generator_not_configured"
+    } else if message.contains("SUBMIT_FAILED:UNKNOWN_COMPONENT_PROFILE") {
+        "unknown_component_profile"
+    } else if message.contains("SUBMIT_FAILED:INVALID_DEVELOPMENT_REQUEST") {
+        "invalid_development_request"
+    } else if message.contains("SUBMIT_FAILED:CANDIDATE_GENERATION_FAILED") {
+        "candidate_generation_failed"
     } else {
         "coding_flow_failed"
+    }
+}
+
+fn user_facing_error(error: &anyhow::Error) -> &'static str {
+    let message = error.to_string();
+    if message.contains("SUBMIT_FAILED:GENERATOR_MODEL_NOT_CONFIGURED") {
+        "开发请求已进入 Coding Harness，但模型生成服务尚未配置。"
+    } else if message.contains("SUBMIT_FAILED:GENERATOR_NOT_CONFIGURED_FOR_PROFILE") {
+        "Coding Harness 不支持该组件类型的生成（Profile 未配置）。"
+    } else if message.contains("SUBMIT_FAILED:UNKNOWN_COMPONENT_PROFILE") {
+        "未知的组件 Profile。"
+    } else if message.contains("SUBMIT_FAILED:INVALID_DEVELOPMENT_REQUEST") {
+        "开发请求格式无效。"
+    } else if message.contains("SUBMIT_FAILED:CANDIDATE_GENERATION_FAILED") {
+        "候选组件生成失败。"
+    } else if message.contains("CODING_HARNESS_CONNECT_FAILED") {
+        "无法连接到 Coding Harness。"
+    } else {
+        "请稍后重试。"
     }
 }
 
@@ -205,6 +234,26 @@ mod tests {
         assert_eq!(
             safe_category(&anyhow!("CANDIDATE_NOT_ACCEPTED")),
             "candidate_rejected"
+        );
+    }
+
+    #[test]
+    fn harness_error_codes_map_to_stable_categories() {
+        assert_eq!(
+            safe_category(&anyhow!("CODING_HARNESS_SUBMIT_FAILED:GENERATOR_MODEL_NOT_CONFIGURED")),
+            "generator_model_not_configured"
+        );
+        assert_eq!(
+            safe_category(&anyhow!("CODING_HARNESS_SUBMIT_FAILED:GENERATOR_NOT_CONFIGURED_FOR_PROFILE")),
+            "generator_not_configured"
+        );
+    }
+
+    #[test]
+    fn unknown_error_falls_back_to_coding_flow_failed() {
+        assert_eq!(
+            safe_category(&anyhow!("UNKNOWN_ERROR_SOMETHING_ELSE")),
+            "coding_flow_failed"
         );
     }
 }
