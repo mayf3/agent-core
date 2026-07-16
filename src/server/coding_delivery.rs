@@ -196,6 +196,20 @@ fn safe_category(error: &anyhow::Error) -> &'static str {
         "invalid_development_request"
     } else if message.contains("SUBMIT_FAILED:CANDIDATE_GENERATION_FAILED") {
         "candidate_generation_failed"
+    } else if message.contains("GENERATOR_ACCEPTANCE_REPAIR_EXHAUSTED") {
+        "acceptance_repair_exhausted"
+    } else if message.contains("GENERATOR_COMPILE_REPAIR_EXHAUSTED") {
+        "generator_repair_exhausted"
+    } else if message.contains("GENERATOR_MODEL_OUTPUT_UNSAFE") {
+        "model_output_unsafe"
+    } else if message.contains("GENERATOR_MODEL_OUTPUT_TRUNCATED") {
+        "model_output_truncated"
+    } else if message.contains("GENERATOR_MODEL_UNAVAILABLE") {
+        "generator_model_unavailable"
+    } else if message.contains("GENERATOR_MODEL_OUTPUT_INVALID") {
+        "model_output_invalid"
+    } else if message.contains("GENERATOR_COMPILE_PROBE_INFRASTRUCTURE_FAILURE") {
+        "generator_infrastructure_failure"
     } else {
         "coding_flow_failed"
     }
@@ -213,6 +227,18 @@ fn user_facing_error(error: &anyhow::Error) -> &'static str {
         "开发请求格式无效。"
     } else if message.contains("SUBMIT_FAILED:CANDIDATE_GENERATION_FAILED") {
         "候选组件生成失败。"
+    } else if message.contains("GENERATOR_ACCEPTANCE_REPAIR_EXHAUSTED") {
+        "候选程序未通过业务验收，已安全停止，未创建部署提案。"
+    } else if message.contains("GENERATOR_COMPILE_REPAIR_EXHAUSTED") {
+        "代码生成已完成，但候选程序在编译修复次数耗尽后仍未通过。"
+    } else if message.contains("GENERATOR_MODEL_OUTPUT_UNSAFE") {
+        "候选程序违反安全限制，已安全拒绝，未创建部署提案。"
+    } else if message.contains("GENERATOR_MODEL_OUTPUT_TRUNCATED") {
+        "模型输出被截断，生成不完整，请重试。"
+    } else if message.contains("GENERATOR_MODEL_UNAVAILABLE")
+        || message.contains("GENERATOR_COMPILE_PROBE_INFRASTRUCTURE_FAILURE")
+    {
+        "模型生成服务暂时不可用，请稍后重试。"
     } else if message.contains("CODING_HARNESS_CONNECT_FAILED") {
         "无法连接到 Coding Harness。"
     } else {

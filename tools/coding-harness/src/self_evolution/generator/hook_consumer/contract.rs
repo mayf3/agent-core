@@ -51,9 +51,6 @@ pub(super) fn validate_request_contract(
     request: &DevelopmentRequest,
     stdout: &str,
 ) -> Result<(), String> {
-    if !request_requires_model_telemetry(request) {
-        return Ok(());
-    }
     let output: Value = serde_json::from_str(stdout.trim())
         .map_err(|_| "REQUEST_CONTRACT_OUTPUT_INVALID".to_string())?;
     let rendered = output
@@ -63,18 +60,8 @@ pub(super) fn validate_request_contract(
         .map_err(|_| "REQUEST_CONTRACT_RENDERED_INVALID".to_string())?
         .to_lowercase();
     let mut missing = Vec::new();
+    // Generic runtime metadata — applies to every hook consumer service.
     for (label, aliases) in [
-        ("run-1", &["run-1"][..]),
-        ("model-a", &["model-a"][..]),
-        ("default", &["default"][..]),
-        ("2026-07-15", &["2026-07-15"][..]),
-        ("input", &["input"][..]),
-        ("cached", &["cached"][..]),
-        ("output", &["output"][..]),
-        ("reasoning", &["reasoning"][..]),
-        ("latency", &["latency"][..]),
-        ("failure", &["failure", "fail_count", "failures"][..]),
-        ("unavailable", &["unavailable"][..]),
         ("telemetry_unavailable", &["telemetry_unavailable"][..]),
         ("last_observed_cursor", &["last_observed_cursor"][..]),
         ("projection_lag", &["projection_lag"][..]),
@@ -85,62 +72,92 @@ pub(super) fn validate_request_contract(
             missing.push(label.to_string());
         }
     }
-    if !has_positive_counter(rendered, &["unavailable"]) {
-        missing.push("positive-unavailable-counter".into());
-    }
-    if !has_positive_counter(rendered, &["failure", "fail_count", "failures"]) {
-        missing.push("positive-failure-counter".into());
-    }
-    for days in [1, 7, 30] {
-        if !has_window_key(rendered, days) {
-            missing.push(format!("{days}-day-window"));
+    // Request-driven acceptance: when the development criteria reference
+    // "token" (Token Dashboard pattern), validate telemetry-specific fields.
+    if request_requires_model_telemetry(request) {
+        for (label, aliases) in [
+            ("run-1", &["run-1"][..]),
+            ("model-a", &["model-a"][..]),
+            ("default", &["default"][..]),
+            ("2026-07-15", &["2026-07-15"][..]),
+            ("input", &["input"][..]),
+            ("cached", &["cached"][..]),
+            ("output", &["output"][..]),
+            ("reasoning", &["reasoning"][..]),
+            ("latency", &["latency"][..]),
+            ("failure", &["failure", "fail_count", "failures"][..]),
+            ("unavailable", &["unavailable"][..]),
+        ] {
+            if !aliases.iter().any(|marker| rendered_text.contains(marker)) {
+                missing.push(label.to_string());
+            }
         }
-        if !has_positive_overall_window(rendered, days) {
-            missing.push(format!("positive-overall-{days}-day-window"));
+        if !has_positive_counter(rendered, &["unavailable"]) {
+            missing.push("positive-unavailable-counter".into());
         }
-        if !requested_overall_window_satisfies(rendered, days, |window| {
-            counter_equals(window, &["calls", "call_count", "invocations"], 2.0)
-        }) {
-            missing.push(format!("overall-{days}-day-call-count=2"));
+        if !has_positive_counter(rendered, &["failure", "fail_count", "failures"]) {
+            missing.push("positive-failure-counter".into());
         }
-        if !requested_overall_window_satisfies(rendered, days, |window| {
-            counter_equals(
-                window,
-                &["avg_latency", "average_latency", "latency_avg"],
-                25.0,
-            )
-        }) {
-            missing.push(format!("overall-{days}-day-average-latency=25"));
+        for days in [1, 7, 30] {
+            if !has_window_key(rendered, days) {
+                missing.push(format!("{days}-day-window"));
+            }
+            if !has_positive_overall_window(rendered, days) {
+                missing.push(format!("positive-overall-{days}-day-window"));
+            }
+            if !requested_overall_window_satisfies(rendered, days, |window| {
+                counter_equals(window, &["calls", "call_count", "invocations"], 2.0)
+            }) {
+                missing.push(format!("overall-{days}-day-call-count=2"));
+            }
+            if !requested_overall_window_satisfies(rendered, days, |window| {
+                counter_equals(
+                    window,
+                    &["avg_latency", "average_latency", "latency_avg"],
+                    25.0,
+                )
+            }) {
+                missing.push(format!("overall-{days}-day-average-latency=25"));
+            }
+            if !requested_overall_window_satisfies(rendered, days, |window| {
+                has_positive_counter(window, &["unavailable"])
+            }) {
+                missing.push(format!("positive-overall-{days}-day-unavailable"));
+            }
+            if !requested_overall_window_satisfies(rendered, days, |window| {
+                has_positive_counter(window, &["failure", "fail_count", "failures"])
+            }) {
+                missing.push(format!("positive-overall-{days}-day-failure"));
+            }
         }
-        if !requested_overall_window_satisfies(rendered, days, |window| {
-            has_positive_counter(window, &["unavailable"])
-        }) {
-            missing.push(format!("positive-overall-{days}-day-unavailable"));
+        if output
+            .get("html_telemetry_metrics")
+            .and_then(Value::as_bool)
+            != Some(true)
+        {
+            missing.push("html-telemetry-metrics".into());
         }
-        if !requested_overall_window_satisfies(rendered, days, |window| {
-            has_positive_counter(window, &["failure", "fail_count", "failures"])
-        }) {
-            missing.push(format!("positive-overall-{days}-day-failure"));
+        if output.get("html_average_latency").and_then(Value::as_bool) != Some(true) {
+            missing.push("html-average-latency".into());
         }
-    }
-    if output
-        .get("html_telemetry_metrics")
-        .and_then(Value::as_bool)
-        != Some(true)
-    {
-        missing.push("html-telemetry-metrics".into());
-    }
-    if output.get("html_average_latency").and_then(Value::as_bool) != Some(true) {
-        missing.push("html-average-latency".into());
     }
     if missing.is_empty() {
         Ok(())
     } else {
         Err(format!(
-            "REQUEST_CONTRACT_FAILED missing={}\nPATH_CONTRACT: run dimension comes from top-level event.run_id; model and profile dimensions come from event.payload.model and event.payload.profile.\nWINDOW_CONTRACT: expose overall/global/summary/total windows, a top-level rolling_windows object, or top-level windows whose distinct 1_day, 7_day, and 30_day objects each contain total/overall/summary/global. Each overall window must include calls=2, avg_latency_ms or latency_avg=25, failures=1, and a positive unavailable counter.\nRENDERED_OUTPUT:\n{}",
+            "GENERATOR_ACCEPTANCE_REPAIR_EXHAUSTED missing={}\n{}",
             missing.join(","),
-            truncate_diagnostics(&rendered_text),
+            acceptance_hint(request)
         ))
+    }
+}
+
+/// Provide a diagnostic hint based on the request's acceptance criteria.
+fn acceptance_hint(request: &DevelopmentRequest) -> &'static str {
+    if request_requires_model_telemetry(request) {
+        "PATH_CONTRACT: run dimension comes from top-level event.run_id; model and profile dimensions come from event.payload.model and event.payload.profile.\nWINDOW_CONTRACT: expose overall/global/summary/total windows, a top-level rolling_windows object, or top-level windows whose distinct 1_day, 7_day, and 30_day objects each contain total/overall/summary/global. Each overall window must include calls=2, avg_latency_ms or latency_avg=25, failures=1, and a positive unavailable counter."
+    } else {
+        "RENDER_CONTRACT: render_json must return a Value containing all relevant application state. render_html must return a readable HTML page that visibly includes the supplied runtime metadata (component_id, component_version, health, projection_lag, telemetry_unavailable)."
     }
 }
 

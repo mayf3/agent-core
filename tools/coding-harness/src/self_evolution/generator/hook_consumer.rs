@@ -79,10 +79,15 @@ pub(super) fn generate(
                     model_calls += attempts;
                     source = repaired;
                 }
-                Err(CompileProbeError::Candidate(_diagnostics)) => {
+                Err(CompileProbeError::Candidate(diagnostics)) => {
                     #[cfg(debug_assertions)]
-                    eprintln!("generator compile repair exhausted:\n{_diagnostics}");
-                    return Err(GenerationError::new("GENERATOR_COMPILE_REPAIR_EXHAUSTED"));
+                    eprintln!("generator probe repair exhausted:\n{diagnostics}");
+                    let error_code = if diagnostics.contains("GENERATOR_ACCEPTANCE_REPAIR_EXHAUSTED") {
+                        "GENERATOR_ACCEPTANCE_REPAIR_EXHAUSTED"
+                    } else {
+                        "GENERATOR_COMPILE_REPAIR_EXHAUSTED"
+                    };
+                    return Err(GenerationError::new(error_code));
                 }
                 Err(CompileProbeError::Infrastructure) => {
                     return Err(GenerationError::new(
