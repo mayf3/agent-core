@@ -1,4 +1,5 @@
 mod calculator;
+mod hook_consumer;
 
 use agent_core_kernel::domain::DevelopmentRequest;
 use serde_json::Value;
@@ -25,6 +26,9 @@ pub fn generate(
 ) -> Option<Result<Value, std::io::Error>> {
     if calculator::supports(request) {
         return Some(calculator::generate(artifact_root, request));
+    }
+    if hook_consumer::supports(request) {
+        return Some(hook_consumer::generate(artifact_root, request));
     }
     None
 }
