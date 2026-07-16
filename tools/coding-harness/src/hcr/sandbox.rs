@@ -192,8 +192,11 @@ fn wrap_linux_bubblewrap(
     bwrap.arg("/proc");
     bwrap.arg("--dev");
     bwrap.arg("/dev");
-    bwrap.arg("--bind");
-    bwrap.arg("/tmp");
+    // Give the child a private temporary filesystem. Binding the host /tmp
+    // read-write would let candidate code mutate files outside its workspace.
+    // A workspace located below /tmp is bound back explicitly immediately
+    // afterwards, so build output remains available to the Harness.
+    bwrap.arg("--tmpfs");
     bwrap.arg("/tmp");
 
     // Workspace read-write
@@ -352,163 +355,5 @@ pub fn describe_sandbox_status() -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::path::PathBuf;
-
-    #[test]
-    fn detect_backend_never_panics() {
-        // detect() should always return a valid value, never panic
-        let backend = SandboxBackend::detect();
-        match backend {
-            SandboxBackend::LinuxBubblewrap | SandboxBackend::Unavailable => {} // all valid
-        }
-    }
-
-    // N-1 network isolation regression tests.
-    //
-    // On macOS `wrap_linux_bubblewrap` returns `Unavailable` (see the
-    // non-Linux fallback), so the argv assertions only run on Linux. The
-    // macOS profile tests above cover the seatbelt string generator.
-
-    /// Helper: wrap a no-op command and collect the resulting bwrap argv.
-    #[cfg(target_os = "linux")]
-    fn bwrap_argv_for(policy: NetworkPolicy) -> Vec<String> {
-        let config = SandboxConfig {
-            workspace_root: PathBuf::from("/tmp/test-ws"),
-            home_dir: PathBuf::from("/tmp/test-ws/.hcr-home"),
-            real_home: PathBuf::from("/home/someuser"),
-            agent_core_repo: None,
-            network_policy: policy,
-        };
-        let backend = SandboxBackend::LinuxBubblewrap;
-        let mut cmd = StdCommand::new("/bin/true");
-        let wrapped = wrap_with_sandbox(&mut cmd, &config, &backend).expect("wrap succeeds");
-        wrapped
-            .get_args()
-            .map(|a| a.to_string_lossy().into_owned())
-            .collect()
-    }
-
-    /// Both policies MUST move the child into its own network namespace
-    /// via `--unshare-all`, so neither can reach the guest host loopback.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn both_policies_isolate_network_namespace() {
-        for policy in [NetworkPolicy::Deny, NetworkPolicy::LoopbackOnly] {
-            let argv = bwrap_argv_for(policy.clone());
-            assert!(
-                argv.contains(&"--unshare-all".to_string()),
-                "{policy:?}: --unshare-all must always be present (network isolation)"
-            );
-        }
-    }
-
-    /// Deny adds `--unshare-net` (defence in depth, redundant with
-    /// `--unshare-all`) — so even the namespace's own loopback is down.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn deny_policy_unshares_net_explicitly() {
-        let argv = bwrap_argv_for(NetworkPolicy::Deny);
-        assert!(
-            argv.contains(&"--unshare-net".to_string()),
-            "Deny: --unshare-net must be present"
-        );
-    }
-
-    /// LoopbackOnly must NOT add any network-weakening flag.  It relies
-    /// solely on `--unshare-all` for isolation; the only thing reachable
-    /// is the namespace's own loopback interface.  There is deliberately
-    /// no flag that re-shares the host/guest network namespace.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn loopback_only_never_weakens_isolation() {
-        let argv = bwrap_argv_for(NetworkPolicy::LoopbackOnly);
-        assert!(
-            !argv.contains(&"--unshare-net".to_string()),
-            "LoopbackOnly must not add --unshare-net (its loopback is the namespace's own)"
-        );
-        assert!(
-            !argv.iter().any(|a| a.starts_with("--share-net")),
-            "LoopbackOnly must never add a --share-net style weakening flag"
-        );
-        assert!(
-            argv.contains(&"--unshare-all".to_string()),
-            "LoopbackOnly still requires --unshare-all for namespace isolation"
-        );
-    }
-
-    #[test]
-    fn generate_macos_profile_contains_workspace() {
-        let config = SandboxConfig {
-            workspace_root: PathBuf::from("/tmp/test-ws"),
-            home_dir: PathBuf::from("/tmp/test-ws/.hcr-home"),
-            real_home: PathBuf::from("/Users/testuser"),
-            agent_core_repo: Some(PathBuf::from("/Users/testuser/project/agent-core")),
-            network_policy: NetworkPolicy::Deny,
-        };
-        let profile = generate_macos_sb_profile(&config);
-
-        // Profile contains workspace and home
-        assert!(profile.contains("/tmp/test-ws"));
-        assert!(profile.contains("/tmp/test-ws/.hcr-home"));
-
-        // No broad file-read allow (HCR v0: macOS sandbox unavailable)
-        assert!(!profile.contains("(allow file-read* (subpath \"/\"))"));
-
-        // H3: deny network* for Deny policy
-        assert!(profile.contains("(deny network*)"));
-        assert!(!profile.contains("remote ip \"localhost:*\""));
-
-        // Core operations
-        assert!(profile.contains("(allow process-exec)"));
-        assert!(profile.contains("(allow process-fork)"));
-
-        // No debug noise
-        assert!(!profile.contains("(debug deny)"));
-    }
-
-    #[test]
-    fn generate_macos_profile_loopback() {
-        let config = SandboxConfig {
-            workspace_root: PathBuf::from("/tmp/test-ws"),
-            home_dir: PathBuf::from("/tmp/test-ws/.hcr-home"),
-            real_home: PathBuf::from("/Users/testuser"),
-            agent_core_repo: None,
-            network_policy: NetworkPolicy::LoopbackOnly,
-        };
-        let profile = generate_macos_sb_profile(&config);
-
-        // H3: LoopbackOnly uses (deny network*) then (allow network* (remote ip ...))
-        assert!(profile.contains("(deny network*)"));
-        assert!(profile.contains("(allow network* (remote ip \"localhost:*\"))"));
-
-        // H3 fix: no longer uses (local ip ...) or bare IP literals
-        assert!(!profile.contains("(local ip"));
-        assert!(!profile.contains("\"127.0.0.1\""));
-        assert!(!profile.contains("\"::1\""));
-    }
-
-    #[test]
-    fn unavailable_backend_fails_closed() {
-        // Test that Unavailable returns SandboxUnavailable error
-        let backend = SandboxBackend::Unavailable;
-        let mut cmd = StdCommand::new("echo");
-        let config = SandboxConfig {
-            workspace_root: PathBuf::from("/tmp/ws"),
-            home_dir: PathBuf::from("/tmp/ws/home"),
-            real_home: PathBuf::from("/Users/user"),
-            agent_core_repo: None,
-            network_policy: NetworkPolicy::Deny,
-        };
-        let result = wrap_with_sandbox(&mut cmd, &config, &backend);
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().error_code(), "HCR_SANDBOX_UNAVAILABLE");
-    }
-
-    #[test]
-    fn describe_sandbox_never_empty() {
-        let desc = describe_sandbox_status();
-        assert!(!desc.is_empty());
-    }
-}
+#[path = "sandbox_tests.rs"]
+mod tests;

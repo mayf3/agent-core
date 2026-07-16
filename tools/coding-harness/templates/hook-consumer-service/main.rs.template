@@ -1,0 +1,402 @@
+mod component {
+__COMPONENT_PRELUDE__
+    include!("component.rs");
+}
+
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::io::{Read, Write};
+use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+const MAX_HTTP_BYTES: usize = 8 * 1024 * 1024;
+const MAX_PROJECTION_BYTES: usize = 16 * 1024 * 1024;
+const PROJECTION_FILE: &str = "projection.json";
+
+#[derive(Clone, Serialize, Deserialize)]
+struct PersistedProjection {
+    cursor: i64,
+    projection: Value,
+    last_observed_at: Option<String>,
+}
+
+#[derive(Clone, Default)]
+struct ObserverStatus {
+    ever_ready: bool,
+    has_more: bool,
+    last_error: Option<String>,
+}
+
+fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--profile-contract-test") {
+        contract_test_mode();
+        return;
+    }
+    if let Err(error) = serve() {
+        eprintln!("managed_service_failed:{error}");
+        std::process::exit(1);
+    }
+}
+
+fn serve() -> Result<(), String> {
+    let listen = required_env("SERVICE_LISTEN_ADDR")?;
+    let state_dir = PathBuf::from(required_env("SERVICE_STATE_DIR")?);
+    let observe_url = required_env("EVENT_OBSERVE_URL")?;
+    let observe_token = required_env("EVENT_OBSERVE_TOKEN")?;
+    let component_id = required_env("COMPONENT_ID")?;
+    let component_version = required_env("COMPONENT_VERSION")?;
+    let instance_id = required_env("SERVICE_INSTANCE_ID")?;
+    for value in [&component_id, &component_version, &instance_id] {
+        if value.contains(['\r', '\n']) {
+            return Err("invalid_identity".into());
+        }
+    }
+    std::fs::create_dir_all(&state_dir).map_err(|_| "state_directory_unavailable")?;
+    let persisted = Arc::new(Mutex::new(load_projection(&state_dir)?));
+    let status = Arc::new(Mutex::new(ObserverStatus::default()));
+    let observer_projection = Arc::clone(&persisted);
+    let observer_status = Arc::clone(&status);
+    let observer_state_dir = state_dir.clone();
+    std::thread::spawn(move || loop {
+        let result = poll_once(
+            &observe_url,
+            &observe_token,
+            &observer_state_dir,
+            &observer_projection,
+        );
+        if let Ok(mut current) = observer_status.lock() {
+            match result {
+                Ok(has_more) => {
+                    current.ever_ready = true;
+                    current.has_more = has_more;
+                    current.last_error = None;
+                }
+                Err(code) => current.last_error = Some(code),
+            }
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    });
+
+    let listener = TcpListener::bind(&listen).map_err(|_| "listen_failed")?;
+    for incoming in listener.incoming() {
+        let Ok(mut stream) = incoming else { continue };
+        respond(
+            &mut stream,
+            &component_id,
+            &component_version,
+            &instance_id,
+            &persisted,
+            &status,
+        );
+    }
+    Ok(())
+}
+
+fn required_env(name: &str) -> Result<String, String> {
+    std::env::var(name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| format!("missing_{name}"))
+}
+
+fn load_projection(state_dir: &Path) -> Result<PersistedProjection, String> {
+    let path = state_dir.join(PROJECTION_FILE);
+    if !path.exists() {
+        return Ok(PersistedProjection {
+            cursor: 0,
+            projection: component::initial_state(),
+            last_observed_at: None,
+        });
+    }
+    let bytes = std::fs::read(path).map_err(|_| "projection_read_failed")?;
+    serde_json::from_slice(&bytes).map_err(|_| "projection_corrupt".into())
+}
+
+fn poll_once(
+    observe_url: &str,
+    token: &str,
+    state_dir: &Path,
+    shared: &Arc<Mutex<PersistedProjection>>,
+) -> Result<bool, String> {
+    let current = shared
+        .lock()
+        .map_err(|_| "projection_lock_failed")?
+        .clone();
+    let separator = if observe_url.contains('?') { '&' } else { '?' };
+    let url = format!("{observe_url}{separator}cursor={}&limit=1000", current.cursor);
+    let page = http_get_json(&url, token)?;
+    if page.get("schema_version").and_then(Value::as_str) != Some("event.observe.v0") {
+        return Err("observer_schema_mismatch".into());
+    }
+    let events = page
+        .get("events")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "observer_events_invalid".to_string())?;
+    let next_cursor = page
+        .get("next_cursor")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| "observer_cursor_invalid".to_string())?;
+    if next_cursor < current.cursor {
+        return Err("observer_cursor_regressed".into());
+    }
+    let mut next = current;
+    let apply = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        for event in events {
+            component::apply_event(&mut next.projection, event);
+            next.last_observed_at = event
+                .get("occurred_at")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .or(next.last_observed_at.clone());
+        }
+    }));
+    if apply.is_err() {
+        return Err("component_projection_failed".into());
+    }
+    if serde_json::to_vec(&next)
+        .map_err(|_| "projection_encode_failed")?
+        .len()
+        > MAX_PROJECTION_BYTES
+    {
+        return Err("component_projection_too_large".into());
+    }
+    next.cursor = next_cursor;
+    persist_projection(state_dir, &next)?;
+    *shared.lock().map_err(|_| "projection_lock_failed")? = next;
+    Ok(page
+        .get("has_more")
+        .and_then(Value::as_bool)
+        .unwrap_or(false))
+}
+
+fn persist_projection(state_dir: &Path, projection: &PersistedProjection) -> Result<(), String> {
+    let bytes = serde_json::to_vec(projection).map_err(|_| "projection_encode_failed")?;
+    let path = state_dir.join(PROJECTION_FILE);
+    let temporary = state_dir.join(format!(".{PROJECTION_FILE}.{}.tmp", std::process::id()));
+    let _ = std::fs::remove_file(&temporary);
+    let mut file = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temporary)
+        .map_err(|_| "projection_write_failed")?;
+    file.write_all(&bytes)
+        .and_then(|_| file.sync_all())
+        .map_err(|_| "projection_write_failed")?;
+    std::fs::rename(&temporary, &path).map_err(|_| "projection_commit_failed")?;
+    std::fs::File::open(state_dir)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|_| "projection_sync_failed")?;
+    Ok(())
+}
+
+fn http_get_json(url: &str, token: &str) -> Result<Value, String> {
+    if token.contains(['\r', '\n']) {
+        return Err("observer_token_invalid".into());
+    }
+    let (address, path) = parse_loopback_url(url)?;
+    let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(2))
+        .map_err(|_| "observer_connect_failed")?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .map_err(|_| "observer_timeout_setup_failed")?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .map_err(|_| "observer_timeout_setup_failed")?;
+    let request = format!(
+        "GET {path} HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n"
+    );
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|_| "observer_write_failed")?;
+    let mut response = Vec::new();
+    stream
+        .take(MAX_HTTP_BYTES as u64 + 1)
+        .read_to_end(&mut response)
+        .map_err(|_| "observer_read_failed")?;
+    if response.len() > MAX_HTTP_BYTES {
+        return Err("observer_response_too_large".into());
+    }
+    let header_end = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or_else(|| "observer_http_invalid".to_string())?;
+    let headers = std::str::from_utf8(&response[..header_end])
+        .map_err(|_| "observer_http_invalid")?;
+    if !headers.starts_with("HTTP/1.1 200 ") {
+        return Err("observer_http_failed".into());
+    }
+    serde_json::from_slice(&response[header_end + 4..]).map_err(|_| "observer_json_invalid".into())
+}
+
+fn parse_loopback_url(url: &str) -> Result<(SocketAddr, String), String> {
+    let rest = url
+        .strip_prefix("http://")
+        .ok_or_else(|| "observer_url_invalid".to_string())?;
+    let (authority, suffix) = rest.split_once('/').unwrap_or((rest, ""));
+    let address: SocketAddr = authority
+        .parse()
+        .map_err(|_| "observer_url_invalid".to_string())?;
+    if !address.ip().is_loopback() || matches!(address.ip(), IpAddr::V6(_)) {
+        return Err("observer_url_not_loopback".into());
+    }
+    Ok((address, format!("/{suffix}")))
+}
+
+fn respond(
+    stream: &mut TcpStream,
+    component_id: &str,
+    version: &str,
+    instance: &str,
+    projection: &Arc<Mutex<PersistedProjection>>,
+    status: &Arc<Mutex<ObserverStatus>>,
+) {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+    let mut request = [0u8; 4096];
+    let Ok(read) = stream.read(&mut request) else { return };
+    let first_line = String::from_utf8_lossy(&request[..read])
+        .lines()
+        .next()
+        .unwrap_or("")
+        .to_string();
+    let snapshot = match projection.lock() {
+        Ok(value) => value.clone(),
+        Err(_) => return,
+    };
+    let observer = match status.lock() {
+        Ok(value) => value.clone(),
+        Err(_) => return,
+    };
+    let runtime = runtime_value(component_id, version, &snapshot, &observer);
+    let (status_line, content_type, body) = if first_line.starts_with("GET /health ") {
+        let ready = observer.ever_ready;
+        (
+            if ready { "200 OK" } else { "503 Service Unavailable" },
+            "application/json; charset=utf-8",
+            serde_json::to_string(&runtime).unwrap_or_else(|_| "{}".into()),
+        )
+    } else if first_line.starts_with("GET /api/state ") {
+        let rendered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            component::render_json(&snapshot.projection, &runtime)
+        }));
+        match rendered {
+            Ok(value) => (
+                "200 OK",
+                "application/json; charset=utf-8",
+                serde_json::to_string(&value).unwrap_or_else(|_| "{}".into()),
+            ),
+            Err(_) => (
+                "500 Internal Server Error",
+                "application/json; charset=utf-8",
+                "{\"error\":\"render_failed\"}".into(),
+            ),
+        }
+    } else if first_line.starts_with("GET / ") {
+        let rendered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            component::render_html(&snapshot.projection, &runtime)
+        }));
+        match rendered {
+            Ok(value) => ("200 OK", "text/html; charset=utf-8", value),
+            Err(_) => (
+                "500 Internal Server Error",
+                "text/plain; charset=utf-8",
+                "render_failed".into(),
+            ),
+        }
+    } else {
+        (
+            "404 Not Found",
+            "application/json; charset=utf-8",
+            "{\"error\":\"not_found\"}".into(),
+        )
+    };
+    let head = format!(
+        "HTTP/1.1 {status_line}\r\nContent-Type: {content_type}\r\nX-Agent-Core-Component: {component_id}\r\nX-Agent-Core-Version: {version}\r\nX-Agent-Core-Instance: {instance}\r\nContent-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; img-src 'none'; form-action 'none'; frame-ancestors 'none'\r\nX-Content-Type-Options: nosniff\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    let _ = stream.write_all(head.as_bytes());
+    let _ = stream.write_all(body.as_bytes());
+}
+
+fn runtime_value(
+    component_id: &str,
+    version: &str,
+    projection: &PersistedProjection,
+    observer: &ObserverStatus,
+) -> Value {
+    json!({
+        "component_id": component_id,
+        "component_version": version,
+        "health": if observer.ever_ready { "ready" } else { "starting" },
+        "telemetry_unavailable": !observer.ever_ready || observer.last_error.is_some(),
+        "last_observed_cursor": projection.cursor,
+        "projection_lag": if !observer.ever_ready { "unknown" } else if observer.has_more { "backlog" } else { "caught_up" },
+        "last_observed_at": projection.last_observed_at,
+        "today_utc": support::today_utc(),
+        "observer_error": observer.last_error,
+    })
+}
+
+fn contract_test_mode() {
+    let mut input = String::new();
+    if std::io::stdin().read_to_string(&mut input).is_err() {
+        std::process::exit(1);
+    }
+    let Ok(page) = serde_json::from_str::<Value>(&input) else {
+        std::process::exit(1);
+    };
+    let Some(events) = page.get("events").and_then(Value::as_array) else {
+        std::process::exit(1);
+    };
+    let mut state = component::initial_state();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        for event in events {
+            component::apply_event(&mut state, event);
+        }
+        let runtime = json!({
+            "component_id":"contract-test",
+            "component_version":"0.0.0",
+            "health":"ready",
+            "telemetry_unavailable":false,
+            "last_observed_cursor":events.len(),
+            "projection_lag":"caught_up",
+            "last_observed_at":"2026-07-15T12:00:00Z",
+            "today_utc":"2026-07-15"
+        });
+        let rendered = component::render_json(&state, &runtime);
+        let html = component::render_html(&state, &runtime);
+        let html_lower = html.to_lowercase();
+        let html_safe = !html_lower.contains("<script")
+            && !html_lower.contains("javascript:")
+            && !html.contains("<img src=x onerror=alert(1)>");
+        let html_runtime_metadata = ["contract-test", "0.0.0", "ready", "caught_up", "false"]
+            .iter()
+            .all(|marker| html_lower.contains(marker));
+        let html_telemetry_metrics = [
+            "input", "cached", "output", "reasoning", "latency", "failure",
+        ]
+        .iter()
+        .all(|marker| html_lower.contains(marker));
+        let html_average_latency = html_lower.contains("average")
+            || html_lower.contains("avg")
+            || html_lower.contains("平均");
+        json!({
+            "ok": true,
+            "schema_version": "hook-consumer-service-contract-v0",
+            "events_applied": events.len(),
+            "rendered": rendered,
+            "html_nonempty": !html.trim().is_empty(),
+            "html_safe": html_safe,
+            "html_runtime_metadata": html_runtime_metadata,
+            "html_telemetry_metrics": html_telemetry_metrics,
+            "html_average_latency": html_average_latency
+        })
+    }));
+    match result {
+        Ok(value) => println!("{value}"),
+        Err(_) => std::process::exit(1),
+    }
+}
+
+pub mod support;
