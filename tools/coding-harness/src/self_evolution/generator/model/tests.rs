@@ -233,8 +233,8 @@ fn retry_exhaustion_returns_last_discardable_error() {
 }
 
 #[test]
-fn retry_unsafe_output_stops_early_and_does_not_retry() {
-    // Unsafe output should NOT be retried
+fn retry_unsafe_output_is_retryable_and_exhausts_budget() {
+    // Unsafe output IS retryable (model may fix on retry)
     let mut calls = 0;
     let error = retry::retry_model_output(3, || {
         calls += 1;
@@ -242,7 +242,7 @@ fn retry_unsafe_output_stops_early_and_does_not_retry() {
     })
     .unwrap_err();
     assert_eq!(error.code(), "GENERATOR_MODEL_OUTPUT_UNSAFE");
-    assert_eq!(calls, 1, "unsafe should stop immediately without retry");
+    assert_eq!(calls, 3, "unsafe is retryable, should exhaust budget");
 }
 
 #[test]
