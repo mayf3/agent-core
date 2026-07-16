@@ -19,7 +19,11 @@ fn target_dir() -> std::path::PathBuf {
     assert!(output.status.success(), "cargo metadata failed");
     let meta: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("valid cargo metadata JSON");
-    std::path::PathBuf::from(meta["target_directory"].as_str().expect("target_directory present"))
+    std::path::PathBuf::from(
+        meta["target_directory"]
+            .as_str()
+            .expect("target_directory present"),
+    )
 }
 
 /// Release build with `test-fixtures` must be REJECTED by the build.rs guard.
@@ -74,8 +78,7 @@ fn release_build_has_no_hook_consumer_symbol() {
         .find(|p| {
             let fname = p.file_name().unwrap_or_default();
             let name = fname.to_string_lossy();
-            name.starts_with("libcoding_harness")
-                || name.starts_with("coding_harness")
+            name.starts_with("libcoding_harness") || name.starts_with("coding_harness")
         })
         .expect("coding-harness release artifact found in target/release");
 
@@ -137,7 +140,10 @@ fn no_env_var_enables_test_fixtures() {
         ])
         .status()
         .expect("cargo build failed");
-    assert!(status.success(), "release build without --features must succeed");
+    assert!(
+        status.success(),
+        "release build without --features must succeed"
+    );
 
     let release_dir = target_dir().join("release");
     let harness_artifact = std::fs::read_dir(&release_dir)
@@ -147,8 +153,7 @@ fn no_env_var_enables_test_fixtures() {
         .find(|p| {
             let fname = p.file_name().unwrap_or_default();
             let name = fname.to_string_lossy();
-            name.starts_with("libcoding_harness")
-                || name.starts_with("coding_harness")
+            name.starts_with("libcoding_harness") || name.starts_with("coding_harness")
         })
         .expect("coding-harness release artifact found");
 
