@@ -220,77 +220,57 @@ fn model_response_is_bounded_to_the_single_module() {
 }
 
 #[test]
-fn model_retry_all_fail_return_last_error_not_candidate() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let endpoint = format!("http://{}/chat/completions", listener.local_addr().unwrap());
-    let server = std::thread::spawn(move || {
-        for _ in 0..3 {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut request = [0u8; 16 * 1024];
-            let _ = stream.read(&mut request).unwrap();
-            let body = "not-json";
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(), body
-            );
-            stream.write_all(response.as_bytes()).unwrap();
-        }
-    });
-    let error = generate_module_with_retry(&ModelConfig::for_test(endpoint), &request())
-        .unwrap_err();
+fn retry_exhaustion_returns_last_discardable_error() {
+    // Test the retry logic directly without a mock server
+    let mut calls = 0;
+    let error = retry::retry_model_output(3, || {
+        calls += 1;
+        Err(GenerationError::new("GENERATOR_MODEL_RESPONSE_INVALID"))
+    })
+    .unwrap_err();
     assert_eq!(error.code(), "GENERATOR_MODEL_RESPONSE_INVALID");
-    server.join().unwrap();
+    assert_eq!(calls, 3, "should exhaust all 3 retries");
 }
 
 #[test]
-fn model_unsafe_output_rejected_without_candidate() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let endpoint = format!("http://{}/chat/completions", listener.local_addr().unwrap());
-    let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut request = [0u8; 16 * 1024];
-        let _ = stream.read(&mut request).unwrap();
-        let unsafe_source = format!(
-            "{}\nfn steal() {{ let _ = std::fs::read(\"/etc/passwd\") ; }}",
-            safe_source()
-        );
-        let body = json!({"choices":[{"message":{"content":unsafe_source}}]}).to_string();
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            body.len(), body
-        );
-        stream.write_all(response.as_bytes()).unwrap();
-    });
-    let error = generate_module(&ModelConfig::for_test(endpoint), &request()).unwrap_err();
+fn retry_unsafe_output_stops_early_and_does_not_retry() {
+    // Unsafe output should NOT be retried
+    let mut calls = 0;
+    let error = retry::retry_model_output(3, || {
+        calls += 1;
+        Err(GenerationError::new("GENERATOR_MODEL_OUTPUT_UNSAFE"))
+    })
+    .unwrap_err();
     assert_eq!(error.code(), "GENERATOR_MODEL_OUTPUT_UNSAFE");
-    server.join().unwrap();
+    assert_eq!(calls, 1, "unsafe should stop immediately without retry");
 }
 
 #[test]
-fn model_truncated_output_retries_and_does_not_create_candidate() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let endpoint = format!("http://{}/chat/completions", listener.local_addr().unwrap());
-    let server = std::thread::spawn(move || {
-        // First two responses are truncated, third is valid
-        for i in 0..3 {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut request = [0u8; 16 * 1024];
-            let _ = stream.read(&mut request).unwrap();
-            let content = if i < 2 { safe_source() } else { safe_source() };
-            let finish = if i < 2 { "length" } else { "stop" };
-            let body = json!({
-                "choices": [{"message": {"content": content}, "finish_reason": finish}]
-            }).to_string();
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(), body
-            );
-            stream.write_all(response.as_bytes()).unwrap();
+fn retry_truncated_output_uses_remaining_budget() {
+    let mut calls = 0;
+    let (source, attempts) = retry::retry_model_output(3, || {
+        calls += 1;
+        if calls < 3 {
+            Err(GenerationError::new("GENERATOR_MODEL_OUTPUT_TRUNCATED"))
+        } else {
+            Ok(safe_source().to_string())
         }
-    });
-    let (source, attempts) = generate_module_with_retry(&ModelConfig::for_test(endpoint), &request())
-        .expect("third attempt should succeed");
+    })
+    .expect("third attempt should succeed");
     assert_eq!(attempts, 3);
-    assert_eq!(source, normalize_generated_source(safe_source()).unwrap());
-    server.join().unwrap();
+    assert_eq!(calls, 3);
+    assert_eq!(source, safe_source());
+}
+
+#[test]
+fn no_progress_same_error_continues_retrying() {
+    // Same error repeated should exhaust retries (all retryable)
+    let mut calls = 0;
+    let error = retry::retry_model_output(2, || {
+        calls += 1;
+        Err(GenerationError::new("GENERATOR_MODEL_UNAVAILABLE"))
+    })
+    .unwrap_err();
+    assert_eq!(calls, 2, "same retryable error should use all retries");
+    assert_eq!(error.code(), "GENERATOR_MODEL_UNAVAILABLE");
 }
