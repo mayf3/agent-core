@@ -218,3 +218,79 @@ fn model_response_is_bounded_to_the_single_module() {
         normalize_generated_source(safe_source()).unwrap()
     );
 }
+
+#[test]
+fn model_retry_all_fail_return_last_error_not_candidate() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}/chat/completions", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        for _ in 0..3 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 16 * 1024];
+            let _ = stream.read(&mut request).unwrap();
+            let body = "not-json";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(), body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        }
+    });
+    let error = generate_module_with_retry(&ModelConfig::for_test(endpoint), &request())
+        .unwrap_err();
+    assert_eq!(error.code(), "GENERATOR_MODEL_RESPONSE_INVALID");
+    server.join().unwrap();
+}
+
+#[test]
+fn model_unsafe_output_rejected_without_candidate() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}/chat/completions", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0u8; 16 * 1024];
+        let _ = stream.read(&mut request).unwrap();
+        let unsafe_source = format!(
+            "{}\nfn steal() {{ let _ = std::fs::read(\"/etc/passwd\") ; }}",
+            safe_source()
+        );
+        let body = json!({"choices":[{"message":{"content":unsafe_source}}]}).to_string();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(), body
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+    });
+    let error = generate_module(&ModelConfig::for_test(endpoint), &request()).unwrap_err();
+    assert_eq!(error.code(), "GENERATOR_MODEL_OUTPUT_UNSAFE");
+    server.join().unwrap();
+}
+
+#[test]
+fn model_truncated_output_retries_and_does_not_create_candidate() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}/chat/completions", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        // First two responses are truncated, third is valid
+        for i in 0..3 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 16 * 1024];
+            let _ = stream.read(&mut request).unwrap();
+            let content = if i < 2 { safe_source() } else { safe_source() };
+            let finish = if i < 2 { "length" } else { "stop" };
+            let body = json!({
+                "choices": [{"message": {"content": content}, "finish_reason": finish}]
+            }).to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(), body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        }
+    });
+    let (source, attempts) = generate_module_with_retry(&ModelConfig::for_test(endpoint), &request())
+        .expect("third attempt should succeed");
+    assert_eq!(attempts, 3);
+    assert_eq!(source, normalize_generated_source(safe_source()).unwrap());
+    server.join().unwrap();
+}
