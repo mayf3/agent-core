@@ -280,7 +280,12 @@ fn append_log(path: &Path) -> Result<File> {
     Ok(OpenOptions::new().create(true).append(true).open(path)?)
 }
 
-unsafe fn lower_soft_limit(resource: libc::c_int, maximum: u64) -> std::io::Result<()> {
+#[cfg(target_os = "linux")]
+type RlimitResource = libc::c_uint;
+#[cfg(not(target_os = "linux"))]
+type RlimitResource = libc::c_int;
+
+unsafe fn lower_soft_limit(resource: RlimitResource, maximum: u64) -> std::io::Result<()> {
     let mut limit = libc::rlimit {
         rlim_cur: 0,
         rlim_max: 0,

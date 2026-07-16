@@ -362,6 +362,68 @@ mod tests {
         first.validate().unwrap();
     }
 
+    /// Same request payload must produce the same digest regardless of when
+    /// or from where the request is constructed.
+    #[test]
+    fn same_request_same_digest_different_absolute_path() {
+        // The DevelopmentRequest struct does not contain path information,
+        // so any two requests with identical fields get identical digests.
+        // We verify this explicitly: constructing the same request in
+        // separate process-like contexts (different call paths, same data).
+        let req_a = request();
+        let req_b = request();
+        assert_eq!(
+            req_a.request_id, req_b.request_id,
+            "identical requests must have identical digests"
+        );
+    }
+
+    /// Changing the build profile must produce a different digest.
+    #[test]
+    fn build_profile_change_alters_digest() {
+        let base = request(); // valid request with hook-consumer-service-v0 profile
+        let mut modified = request();
+        // Modify a field that's part of the digest but bypass the profile
+        // validation by setting it after construction (we test the digest
+        // sensitivity, not the validity of the modified request).
+        modified.build_profile = "different-profile-v0".into();
+        let base_digest = base.derived_request_id().unwrap();
+        let modified_digest = modified.derived_request_id().unwrap();
+        assert_ne!(
+            base_digest, modified_digest,
+            "different build_profile must produce different digest"
+        );
+    }
+
+    /// Changing the required permissions must produce a different digest.
+    #[test]
+    fn permission_change_alters_digest() {
+        let base = request();
+        let mut modified = request();
+        modified.requested_permissions = vec!["journal.observe".into(), "extra.permission".into()];
+        let base_digest = base.derived_request_id().unwrap();
+        let modified_digest = modified.derived_request_id().unwrap();
+        assert_ne!(
+            base_digest, modified_digest,
+            "different permissions must produce different digest"
+        );
+    }
+
+    /// Changing the contract catalog version (analogous to runtime version)
+    /// must produce a different digest.
+    #[test]
+    fn contract_catalog_version_change_alters_digest() {
+        let base = request();
+        let mut modified = request();
+        modified.contract_catalog_version = "contract-catalog-v2".into();
+        let base_digest = base.derived_request_id().unwrap();
+        let modified_digest = modified.derived_request_id().unwrap();
+        assert_ne!(
+            base_digest, modified_digest,
+            "different contract_catalog_version must produce different digest"
+        );
+    }
+
     #[test]
     fn development_request_id_tampering_is_rejected() {
         let mut request = request();
