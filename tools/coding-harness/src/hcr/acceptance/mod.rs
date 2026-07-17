@@ -2,15 +2,19 @@
 //!
 //! Receives a candidate reference, snapshots it, runs all five
 //! acceptance gates under OS file lock (H7), persists the result
-//! atomically, and returns a structured response with artifact
-//! and evidence digests (H4/H5).
+//! atomically, and returns a structured `ExternalReceiptEnvelope`
+//! with the detailed acceptance response alongside.
 
 pub mod execution_store;
 pub mod protocol;
+pub mod verification_receipt;
 
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use agent_core_kernel::domain::external_receipt_envelope::{
+    compute_external_receipt_digest, ExternalOutcome, ExternalReceiptEnvelope, SCHEMA_VERSION,
+};
 use serde_json::Value;
 
 use super::candidate::snapshot_candidate;
@@ -46,9 +50,13 @@ pub fn handle_accept(artifact_root: &Path, args: &Value) -> Value {
         Some(c) if !c.is_empty() => c,
         _ => return err_json("MISSING_CANDIDATE_REF"),
     };
+    let invocation_intent_id = get_str(args, "invocation_intent_id").unwrap_or("");
 
     if idempotency_key.is_empty() {
         return err_json("MISSING_IDEMPOTENCY_KEY");
+    }
+    if invocation_intent_id.is_empty() {
+        return err_json("MISSING_INVOCATION_INTENT_ID");
     }
 
     let fingerprint = compute_fingerprint(
@@ -84,7 +92,14 @@ pub fn handle_accept(artifact_root: &Path, args: &Value) -> Value {
         )
         .and_then(|resp| serde_json::to_value(resp).map_err(|e| e.to_string()))
     }) {
-        Ok(result) => ok_json(&result),
+        Ok(result) => {
+            // Deserialize the AcceptanceResponse to build the envelope
+            let acceptance: AcceptanceResponse = match serde_json::from_value(result.clone()) {
+                Ok(a) => a,
+                Err(e) => return err_json(&format!("ENVELOPE_SERIALIZATION: {e}")),
+            };
+            ok_envelope_json(&acceptance, &invocation_intent_id, result)
+        }
         Err(execution_store::ExecutionStoreError::FingerprintMismatch(_)) => {
             err_json("IDEMPOTENCY_CONFLICT")
         }
@@ -237,6 +252,74 @@ fn do_accept(
     })
 }
 
+/// Wrap the acceptance response in an `ExternalReceiptEnvelope`.
+fn ok_envelope_json(
+    acceptance: &AcceptanceResponse,
+    invocation_intent_id: &str,
+    detailed_result: Value,
+) -> Value {
+    // Map the harness outcome to the envelope's ExternalOutcome
+    let outcome = match acceptance.overall_outcome.as_str() {
+        "CandidatePassed" => ExternalOutcome::Passed,
+        _ => ExternalOutcome::Failed,
+    };
+
+    // Compute opaque_payload_digest as SHA-256 of the full AcceptanceResponse JSON.
+    // This binds the detailed acceptance data without the Kernel parsing it.
+    let resp_bytes = serde_json::to_vec(acceptance).unwrap_or_default();
+    use sha2::{Digest, Sha256};
+    let opaque_payload_digest = format!("sha256:{}", hex::encode(Sha256::digest(&resp_bytes)));
+
+    // Build the envelope
+    let env = ExternalReceiptEnvelope {
+        schema_version: SCHEMA_VERSION.to_string(),
+        invocation_intent_id: invocation_intent_id.to_string(),
+        issuer: "coding-harness".to_string(),
+        subject_digest: acceptance.candidate_digest.clone(),
+        outcome,
+        evidence_digest: acceptance.evidence_digest.clone(),
+        opaque_payload_digest: Some(opaque_payload_digest),
+        receipt_digest: String::new(), // will be set below
+    };
+
+    // Compute receipt_digest BEFORE serialization
+    let receipt_digest = compute_external_receipt_digest(
+        &env.schema_version,
+        &env.invocation_intent_id,
+        &env.issuer,
+        &env.subject_digest,
+        env.outcome,
+        &env.evidence_digest,
+        env.opaque_payload_digest.as_deref(),
+    );
+
+    // Build the response: envelope + detailed fields for Kernel persistence
+    let envelope_value = serde_json::json!({
+        "schema_version": env.schema_version,
+        "invocation_intent_id": env.invocation_intent_id,
+        "issuer": env.issuer,
+        "subject_digest": env.subject_digest,
+        "outcome": env.outcome,
+        "evidence_digest": env.evidence_digest,
+        "opaque_payload_digest": env.opaque_payload_digest,
+        "receipt_digest": receipt_digest,
+    });
+
+    // Merge envelope fields with detailed response fields
+    let mut result = detailed_result;
+    if let Some(obj) = result.as_object_mut() {
+        for (k, v) in envelope_value.as_object().unwrap() {
+            obj.insert(k.clone(), v.clone());
+        }
+    }
+
+    serde_json::json!({
+        "protocol_version": "external-harness-v1",
+        "ok": true,
+        "result": result,
+    })
+}
+
 fn sha256_prefix(s: &str) -> String {
     use sha2::{Digest, Sha256};
     hex::encode(Sha256::digest(s.as_bytes()))[..16].to_string()
@@ -327,9 +410,6 @@ fn get_str<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
     v.get(key).and_then(|v| v.as_str())
 }
 
-fn ok_json(v: &Value) -> Value {
-    serde_json::json!({"protocol_version":"external-harness-v1","ok":true,"result":v})
-}
 fn err_json(code: &str) -> Value {
     serde_json::json!({"protocol_version":"external-harness-v1","ok":false,"error_code":code})
 }

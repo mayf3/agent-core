@@ -3,6 +3,10 @@
 //! Uses the `hcr_receipt_identities` table with a UNIQUE constraint on
 //! (hcr_id, claim_id, run_id, idempotency_key). All operations happen
 //! inside a `BEGIN IMMEDIATE` transaction for cross-connection safety.
+//!
+//! The `payload_digest` column stores the `receipt_digest` from the
+//! `ExternalReceiptEnvelope`. The old `compute_payload_digest()` function
+//! is removed — the envelope's receipt_digest provides content integrity.
 
 use crate::domain::*;
 use crate::journal::JournalStore;
@@ -15,41 +19,6 @@ pub enum AppendReceiptResult {
     Appended,
     Duplicate,
     Conflict(String),
-}
-
-/// Canonical payload digest for receipt identity comparison.
-pub fn compute_payload_digest(
-    hcr_id: &str,
-    claim_id: &str,
-    run_id: &str,
-    principal_id: &str,
-    gateway_session_id: &str,
-    registry_snapshot_id: &str,
-    operation: &str,
-    idempotency_key: &str,
-    harness_execution_id: &str,
-    overall_outcome: &str,
-    candidate_digest: &str,
-    artifact_ref: Option<&str>,
-    artifact_digest: Option<&str>,
-    evidence_digest: &str,
-    gate_summaries: &[(&str, bool)],
-) -> String {
-    use sha2::{Digest, Sha256};
-    let canonical = serde_json::json!({
-        "hcr_id": hcr_id, "claim_id": claim_id, "run_id": run_id,
-        "principal_id": principal_id, "gateway_session_id": gateway_session_id,
-        "registry_snapshot_id": registry_snapshot_id, "operation": operation,
-        "idempotency_key": idempotency_key,
-        "harness_execution_id": harness_execution_id,
-        "overall_outcome": overall_outcome, "candidate_digest": candidate_digest,
-        "artifact_ref": artifact_ref, "artifact_digest": artifact_digest,
-        "evidence_digest": evidence_digest,
-        "gate_summaries": gate_summaries,
-    });
-    let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
-    let hex = hex::encode(Sha256::digest(&bytes));
-    format!("sha256:{hex}")
 }
 
 /// Append a receipt or detect duplicate/conflict atomically.
@@ -122,8 +91,8 @@ pub fn append_or_compare_receipt(
         "INSERT INTO hcr_receipt_identities
          (hcr_id, claim_id, run_id, idempotency_key, payload_digest, receipt_event_id,
           harness_execution_id, overall_outcome, candidate_id, invocation_id, candidate_digest,
-          artifact_ref, artifact_digest, evidence_digest, created_at)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14, ?15)",
+          artifact_ref, artifact_digest, evidence_digest, receipt_digest, opaque_payload_digest, created_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
         params![
             hcr_id,
             claim_id,
@@ -139,6 +108,8 @@ pub fn append_or_compare_receipt(
             identity_fields.artifact_ref,
             identity_fields.artifact_digest,
             identity_fields.evidence_digest,
+            identity_fields.receipt_digest,
+            identity_fields.opaque_payload_digest,
             chrono::Utc::now().to_rfc3339(),
         ],
     );
@@ -198,6 +169,10 @@ pub struct ReceiptIdentityFields {
     pub artifact_ref: Option<String>,
     pub artifact_digest: Option<String>,
     pub evidence_digest: String,
+    /// The receipt_digest from the ExternalReceiptEnvelope.
+    pub receipt_digest: String,
+    /// The opaque_payload_digest from the ExternalReceiptEnvelope.
+    pub opaque_payload_digest: Option<String>,
 }
 
 // ── JournalStore extensions ──
