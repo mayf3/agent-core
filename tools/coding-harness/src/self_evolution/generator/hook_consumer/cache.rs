@@ -1,5 +1,6 @@
 use super::{model, DevelopmentRequest, GenerationError, Value};
 use super::{CARGO_LOCK, CARGO_TOML, ENTRY, MAIN_RS, SUPPORT_RS, TEST_KIT};
+use crate::self_evolution::acceptance_selector::AcceptanceSelection;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::path::Path;
@@ -8,6 +9,7 @@ pub(super) fn component_manifest(
     request: &DevelopmentRequest,
     source_digest: &str,
     model_name: &str,
+    selection: &AcceptanceSelection,
 ) -> Value {
     json!({
         "schema_version": "component-artifact-v1",
@@ -21,6 +23,8 @@ pub(super) fn component_manifest(
         "deployment_profile": request.deployment_profile,
         "entry": ENTRY,
         "artifact_digest": format!("sha256:{}", "0".repeat(64)),
+        "acceptance_bundle_ref": selection.bundle_ref,
+        "acceptance_bundle_digest": selection.bundle_digest,
         "service": {
             "version": "0.1.0",
             "healthcheck_path": "/health"
@@ -55,6 +59,7 @@ pub(super) fn validate(
     request: &DevelopmentRequest,
     source: &str,
     manifest: &Value,
+    selection: &AcceptanceSelection,
 ) -> Result<(), GenerationError> {
     let model_name = manifest
         .pointer("/generation/model")
@@ -64,7 +69,7 @@ pub(super) fn validate(
         })
         .ok_or_else(cache_invalid)?;
     let source_digest = format!("sha256:{}", hex::encode(Sha256::digest(source.as_bytes())));
-    if manifest != &component_manifest(request, &source_digest, model_name) {
+    if manifest != &component_manifest(request, &source_digest, model_name, selection) {
         return Err(cache_invalid());
     }
 

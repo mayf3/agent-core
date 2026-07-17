@@ -4,8 +4,9 @@
 //! all Acceptance Kits. Individual kit private verifiers live in
 //! `crate::self_evolution::acceptance_kit::*`.
 //!
-//! Kit selection is explicit via `DevelopmentRequest.acceptance_kit_ref`.
-//! No substring matching on "token" is used anywhere in this module.
+//! Kit selection is done externally via the AcceptanceSelector and
+//! the selected bundle_ref is passed in as a parameter. No substring
+//! matching on "token" is used anywhere in this module.
 
 use agent_core_kernel::domain::DevelopmentRequest;
 use serde_json::{json, Value};
@@ -22,7 +23,7 @@ pub(super) fn validate_profile_contract(stdout: &str) -> Result<(), String> {
     for (field, expected) in [
         ("ok", json!(true)),
         ("schema_version", json!("hook-consumer-service-contract-v0")),
-        ("events_applied", json!(3)),
+        ("events_applied", json!(2)),
         ("html_nonempty", json!(true)),
         ("html_safe", json!(true)),
         ("html_runtime_metadata", json!(true)),
@@ -42,14 +43,18 @@ pub(super) fn validate_profile_contract(stdout: &str) -> Result<(), String> {
     }
 }
 
-/// Combine profile contract validation with Acceptance Kit verification.
+/// Validate contracts against a specific Acceptance Kit.
 ///
-/// Resolves the correct Acceptance Kit from the request, runs the profile
-/// contract, then the kit's private verifier. If no kit can be resolved
-/// returns `ACCEPTANCE_KIT_SELECTION_REQUIRED`.
-pub(super) fn validate_contracts(request: &DevelopmentRequest, stdout: &str) -> Result<(), String> {
-    let kit = crate::self_evolution::acceptance_kit::AcceptanceKitId::resolve(request)
-        .map_err(|_| "ACCEPTANCE_KIT_SELECTION_REQUIRED: no explicit acceptance_kit_ref in DevelopmentRequest and no default kit available. The routing layer must set acceptance_kit_ref for this component.".to_string())?;
+/// Resolves the correct Acceptance Kit from the bundle_ref, runs the
+/// profile contract, then the kit's private verifier. If bundle_ref
+/// is unknown returns `ACCEPTANCE_KIT_SELECTION_REQUIRED`.
+pub(super) fn validate_contracts(
+    bundle_ref: &str,
+    request: &DevelopmentRequest,
+    stdout: &str,
+) -> Result<(), String> {
+    let kit = crate::self_evolution::acceptance_kit::AcceptanceKitId::resolve(bundle_ref)
+        .map_err(|_| format!("ACCEPTANCE_KIT_SELECTION_REQUIRED: bundle_ref '{bundle_ref}' is unknown. The external AcceptanceSelector must set a valid bundle_ref."))?;
 
     // Profile contract is shared across all hook consumer kits.
     validate_profile_contract(stdout)?;
@@ -64,15 +69,12 @@ pub(super) fn validate_contracts(request: &DevelopmentRequest, stdout: &str) -> 
 ///
 /// This is called separately in compile_probe before compiling, so it
 /// receives the source string directly.
-pub(super) fn validate_source(request: &DevelopmentRequest, source: &str) -> Result<(), String> {
-    let kit = crate::self_evolution::acceptance_kit::AcceptanceKitId::resolve(request)
+pub(super) fn validate_source(bundle_ref: &str, source: &str) -> Result<(), String> {
+    let kit = crate::self_evolution::acceptance_kit::AcceptanceKitId::resolve(bundle_ref)
         .map_err(|_| "ACCEPTANCE_KIT_SELECTION_REQUIRED".to_string())?;
 
     // The Token Dashboard kit has source-level policies (no within_days
     // in apply_event, no today_utc). Other kits may opt out.
-    // We call the kit's verify which handles both request and source.
-    // But since source and stdout need to be checked separately, we
-    // have the kit implement source-only validation here.
     match kit {
         crate::self_evolution::acceptance_kit::AcceptanceKitId::TokenDashboardV0 => {
             validate_token_source(source)

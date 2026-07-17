@@ -134,15 +134,20 @@ pub(super) fn repair_module(
 /// is resolved, no spec section is added (the request may still be
 /// processed by a fixture rather than the model).
 pub(super) fn public_spec_section(request: &DevelopmentRequest) -> String {
-    match crate::self_evolution::acceptance_kit::AcceptanceKitId::resolve(request) {
-        Ok(kit) => {
-            let spec = kit.public_spec();
-            let spec_json = serde_json::to_string_pretty(&spec)
-                .unwrap_or_else(|_| "{}".to_string());
-            format!(
-                "ACCEPTANCE_KIT_PUBLIC_SPEC_BEGIN\n{}\nACCEPTANCE_KIT_PUBLIC_SPEC_END\n\n",
-                spec_json
-            )
+    match crate::self_evolution::acceptance_selector::select(request) {
+        Ok(selection) => {
+            match crate::self_evolution::acceptance_kit::AcceptanceKitId::resolve(&selection.bundle_ref) {
+                Ok(kit) => {
+                    let spec = kit.public_spec();
+                    let spec_json = serde_json::to_string_pretty(&spec)
+                        .unwrap_or_else(|_| "{}".to_string());
+                    format!(
+                        "ACCEPTANCE_KIT_PUBLIC_SPEC_BEGIN\n{}\nACCEPTANCE_KIT_PUBLIC_SPEC_END\n\n",
+                        spec_json
+                    )
+                }
+                Err(_) => String::new(),
+            }
         }
         Err(_) => String::new(),
     }

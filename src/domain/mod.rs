@@ -11,6 +11,8 @@ pub mod coding_operations;
 pub mod component_registry;
 pub mod context_block;
 pub mod deployment;
+pub mod external_execution_failure;
+pub mod external_receipt_envelope;
 pub mod harness_change_request;
 pub mod operation;
 pub mod retry;

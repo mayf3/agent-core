@@ -386,10 +386,10 @@ fn harness_error_code_is_mapped_to_fixed_category() -> Result<()> {
         .collect();
     assert_eq!(r.len(), 1);
     assert_eq!(r[0].payload["status"], "Failed");
-    assert_eq!(r[0].payload["output"]["error_category"], "harness_failed");
     assert_eq!(
-        r[0].payload["output"]["harness_error_code"],
-        "custom_db_error_123"
+        r[0].payload["output"]["error_category"],
+        "external_infrastructure_failure"
     );
+    assert_eq!(r[0].payload["output"]["detail_code"], "custom_db_error_123");
     Ok(())
 }
