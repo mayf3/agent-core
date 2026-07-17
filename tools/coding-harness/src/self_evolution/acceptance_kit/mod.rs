@@ -5,15 +5,18 @@
 //! - A `private_verifier` (Rust code, never exposed to the model).
 //! - Digests that bind both: changing either invalidates existing candidates.
 //!
-//! Kit selection uses explicit `acceptance_kit_ref` from the DevelopmentRequest.
-//! No substring matching on "token" is used anywhere in this module.
+//! Kit selection is done by the external AcceptanceSelector, which provides
+//! a bundle_ref string. The Kernel never sets acceptance_kit_ref.
 
 mod token_dashboard;
 mod failure_event_viewer;
+mod shared_verifier_engine;
 
 use agent_core_kernel::domain::DevelopmentRequest;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+
+pub use shared_verifier_engine::constraint_diagnostic;
 
 /// Known Acceptance Kit identifiers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,24 +88,18 @@ impl AcceptanceKitId {
         format!("kit_sha256:{}", hex::encode(hasher.finalize()))
     }
 
-    /// Resolve an AcceptanceKitId from a DevelopmentRequest.
+    /// Resolve an AcceptanceKitId from a bundle reference string.
     ///
-    /// Uses `acceptance_kit_ref` if present (exact match against known IDs).
-    /// Never uses substring matching on "token" or any other heuristic.
-    /// Returns `Err("ACCEPTANCE_KIT_SELECTION_REQUIRED")` when no unambiguous
-    /// kit can be selected.
-    pub fn resolve(request: &DevelopmentRequest) -> Result<Self, &'static str> {
-        match request.acceptance_kit_ref.as_deref() {
-            Some("token-dashboard-v0") => Ok(Self::TokenDashboardV0),
-            Some("failure-event-viewer-v0") => Ok(Self::FailureEventViewerV0),
-            Some(_other) => {
-                // Unknown kit ref — could be a future kit not yet implemented.
-                Err("ACCEPTANCE_KIT_SELECTION_REQUIRED")
-            }
-            None => {
-                // No acceptance_kit_ref was set by the routing layer.
-                Err("ACCEPTANCE_KIT_SELECTION_REQUIRED")
-            }
+    /// Uses exact match against known bundle refs. Never uses substring
+    /// matching on "token" or any other heuristic. The bundle_ref is
+    /// provided by the external AcceptanceSelector, not by the Kernel.
+    /// Returns `Err("ACCEPTANCE_KIT_SELECTION_REQUIRED")` when no
+    /// known kit matches the ref.
+    pub fn resolve(bundle_ref: &str) -> Result<Self, &'static str> {
+        match bundle_ref {
+            "token-dashboard-v0" => Ok(Self::TokenDashboardV0),
+            "failure-event-viewer-v0" => Ok(Self::FailureEventViewerV0),
+            _ => Err("ACCEPTANCE_KIT_SELECTION_REQUIRED"),
         }
     }
 
@@ -126,18 +123,6 @@ impl AcceptanceKitId {
             }
         }
     }
-}
-
-/// Format constraint diagnostic for model-visible structured feedback.
-pub fn constraint_diagnostic(
-    constraint_id: &str,
-    path: &str,
-    expected: &str,
-    actual: &str,
-) -> String {
-    format!(
-        "ACCEPTANCE_CONSTRAINT: {constraint_id}\nPATH: {path}\nEXPECTED: {expected}\nACTUAL: {actual}"
-    )
 }
 
 #[cfg(test)]
@@ -192,58 +177,31 @@ mod tests {
     }
 
     #[test]
-    fn resolve_acceptance_kit_ref_selects_correct_kit() {
-        let mut req = hook_consumer_request("token-dashboard");
-        req.acceptance_kit_ref = Some("token-dashboard-v0".into());
+    fn resolve_known_bundle_refs_selects_correct_kit() {
         assert_eq!(
-            AcceptanceKitId::resolve(&req).unwrap(),
+            AcceptanceKitId::resolve("token-dashboard-v0").unwrap(),
             AcceptanceKitId::TokenDashboardV0
         );
-
-        let mut req2 = hook_consumer_request("failure-viewer");
-        req2.acceptance_kit_ref = Some("failure-event-viewer-v0".into());
         assert_eq!(
-            AcceptanceKitId::resolve(&req2).unwrap(),
+            AcceptanceKitId::resolve("failure-event-viewer-v0").unwrap(),
             AcceptanceKitId::FailureEventViewerV0
         );
     }
 
     #[test]
-    fn resolve_without_acceptance_kit_ref_returns_selection_required() {
-        let req = hook_consumer_request("token-dashboard");
+    fn resolve_unknown_bundle_ref_returns_selection_required() {
         assert_eq!(
-            AcceptanceKitId::resolve(&req),
+            AcceptanceKitId::resolve("unknown-kit-v0"),
             Err("ACCEPTANCE_KIT_SELECTION_REQUIRED")
         );
     }
 
-    #[test]
-    fn resolve_unknown_kit_ref_returns_selection_required() {
-        let mut req = hook_consumer_request("custom-component");
-        req.acceptance_kit_ref = Some("unknown-kit-v0".into());
-        assert_eq!(
-            AcceptanceKitId::resolve(&req),
-            Err("ACCEPTANCE_KIT_SELECTION_REQUIRED")
-        );
-    }
-
-    /// Verify that an "auth token" request doesn't accidentally match the
+    /// Verify that an "auth token" ref doesn't accidentally match the
     /// token-dashboard kit (no substring matching).
     #[test]
-    fn auth_token_request_does_not_match_telemetry_kit() {
-        let mut req = hook_consumer_request("auth-token-manager");
-        // Even though name contains "token" as substring, without an explicit
-        // acceptance_kit_ref it must NOT resolve to TokenDashboardV0.
-        req.acceptance_kit_ref = None;
+    fn auth_token_ref_does_not_match_telemetry_kit() {
         assert_eq!(
-            AcceptanceKitId::resolve(&req),
-            Err("ACCEPTANCE_KIT_SELECTION_REQUIRED")
-        );
-
-        // Even setting it to something containing "token" but not an exact match
-        req.acceptance_kit_ref = Some("auth-token-v0".into());
-        assert_eq!(
-            AcceptanceKitId::resolve(&req),
+            AcceptanceKitId::resolve("auth-token-v0"),
             Err("ACCEPTANCE_KIT_SELECTION_REQUIRED")
         );
     }
@@ -261,7 +219,7 @@ mod tests {
     #[test]
     fn failure_viewer_public_spec_contains_no_token_terms() {
         let spec = AcceptanceKitId::FailureEventViewerV0.public_spec();
-        let text = serde_json::to_string(&spec).unwrap().to_lowercase();
+        let _text = serde_json::to_string(&spec).unwrap().to_lowercase();
         // Check output_json_schema and html_contract don't contain token fields
         let schema = serde_json::to_string(&spec["output_json_schema"]).unwrap().to_lowercase();
         let html = serde_json::to_string(&spec["html_contract"]).unwrap().to_lowercase();

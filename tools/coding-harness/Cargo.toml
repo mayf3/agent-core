@@ -21,6 +21,10 @@ ureq = { version = "3.3.0", features = ["json"] }
 libc = "0.2"
 fs2 = "0.4.3"
 
+[build-dependencies]
+sha2 = "0.10"
+hex = "0.4"
+
 [[bin]]
 name = "calculator-artifact"
 path = "src/bin/calculator.rs"

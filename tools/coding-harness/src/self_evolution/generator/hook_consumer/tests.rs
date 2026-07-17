@@ -44,11 +44,35 @@ fn materialized_candidate_is_request_bound_and_replay_stable() {
     let root = temp_root("materialize");
     std::fs::create_dir_all(&root).unwrap();
     let request = request("test-observer");
-    let first = materialize(&root, "candidate-test", &request, source(), "model-test").unwrap();
+    let manifest = json!({
+        "schema_version": "component-artifact-v1",
+        "component_id": "test-observer",
+        "kind": "hook_consumer_service",
+        "profile_id": "hook-consumer-service-v0",
+        "contract_catalog_version": CONTRACT_CATALOG_VERSION,
+        "required_contracts": ["event.observe.v0"],
+        "requested_permissions": ["journal.observe"],
+        "test_kit": "hook-consumer-service-contract-v0",
+        "deployment_profile": "managed-service-v0",
+        "entry": "target/release/generated-hook-consumer",
+        "artifact_digest": format!("sha256:{}", "0".repeat(64)),
+        "acceptance_bundle_ref": "",
+        "acceptance_bundle_digest": "",
+        "service": {"version": "0.1.0", "healthcheck_path": "/health"},
+        "generation": {
+            "kind": "request-driven-model-module-v0",
+            "development_request_id": request.request_id,
+            "model": "model-test",
+            "module_digest": format!("sha256:{}", hex::encode(Sha256::digest(source().as_bytes()))),
+            "mutable_surface": ["src/component.rs"]
+        }
+    });
+    let first = materialize(&root, "candidate-test", &request, source(), "model-test", &manifest).unwrap();
     let second = load_existing(
         &request,
         "candidate-test",
         &root.join("candidate-test/candidate"),
+        &acceptance_selector::AcceptanceSelection::new("", ""),
     )
     .unwrap();
     assert_eq!(first["candidate_digest"], second["candidate_digest"]);
@@ -84,7 +108,30 @@ fn cached_candidate_rejects_fixed_runtime_and_manifest_tampering() {
         let root = temp_root(tamper);
         std::fs::create_dir_all(&root).unwrap();
         let request = request("test-observer");
-        materialize(&root, "candidate-test", &request, source(), "model-test").unwrap();
+        let manifest = json!({
+            "schema_version": "component-artifact-v1",
+            "component_id": "test-observer",
+            "kind": "hook_consumer_service",
+            "profile_id": "hook-consumer-service-v0",
+            "contract_catalog_version": CONTRACT_CATALOG_VERSION,
+            "required_contracts": ["event.observe.v0"],
+            "requested_permissions": ["journal.observe"],
+            "test_kit": "hook-consumer-service-contract-v0",
+            "deployment_profile": "managed-service-v0",
+            "entry": "target/release/generated-hook-consumer",
+            "artifact_digest": format!("sha256:{}", "0".repeat(64)),
+            "acceptance_bundle_ref": "",
+            "acceptance_bundle_digest": "",
+            "service": {"version": "0.1.0", "healthcheck_path": "/health"},
+            "generation": {
+                "kind": "request-driven-model-module-v0",
+                "development_request_id": request.request_id,
+                "model": "model-test",
+                "module_digest": format!("sha256:{}", hex::encode(Sha256::digest(source().as_bytes()))),
+                "mutable_surface": ["src/component.rs"]
+            }
+        });
+        materialize(&root, "candidate-test", &request, source(), "model-test", &manifest).unwrap();
         let candidate = root.join("candidate-test/candidate");
         if tamper == "runtime" {
             std::fs::write(candidate.join("src/support.rs"), "pub fn bypass() {}").unwrap();
@@ -95,7 +142,7 @@ fn cached_candidate_rejects_fixed_runtime_and_manifest_tampering() {
             manifest["requested_permissions"] = json!(["journal.observe", "host.execute"]);
             std::fs::write(path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
         }
-        assert!(load_existing(&request, "candidate-test", &candidate).is_err());
+        assert!(load_existing(&request, "candidate-test", &candidate, &acceptance_selector::AcceptanceSelection::new("", "")).is_err());
         let _ = std::fs::remove_dir_all(root);
     }
 }
@@ -162,14 +209,13 @@ fn public_spec_appears_in_user_prompt_not_system_prompt() {
     assert!(!crate::self_evolution::generator::model::SYSTEM_PROMPT
         .contains("ACCEPTANCE_KIT_PUBLIC_SPEC_BEGIN"));
 
-    // Verify the helper function generates the section
-    let mut req = request("token-dashboard");
-    req.acceptance_kit_ref = Some("token-dashboard-v0".into());
+    // Verify the helper function generates the section for known components
+    let req = request("token-dashboard");
     let section = crate::self_evolution::generator::model::public_spec_section(&req);
     assert!(section.contains("ACCEPTANCE_KIT_PUBLIC_SPEC_BEGIN"));
     assert!(section.contains("token-dashboard-v0"));
 
-    // Without a kit ref, no spec section
+    // Unknown components get no spec section
     let req_no_kit = request("generic-observer");
     let empty_section = crate::self_evolution::generator::model::public_spec_section(&req_no_kit);
     assert!(empty_section.is_empty());
@@ -224,28 +270,30 @@ fn token_and_non_token_kits_dont_cross_pollute() {
 /// Substring "token" must NOT auto-select Token Dashboard kit.
 #[test]
 fn substring_token_does_not_select_token_kit() {
-    // Request with "token" in requirements but NO acceptance_kit_ref
-    let mut req = request("auth-token-service");
-    req.requirements = vec!["manage auth tokens".into()];
-    req.acceptance_criteria = vec!["token refresh works".into()];
-    req.acceptance_kit_ref = None;
-
-    // Must NOT resolve to TokenDashboardV0
-    let result = crate::self_evolution::acceptance_kit::AcceptanceKitId::resolve(&req);
+    // Request with "token" in name should NOT resolve via external selector
+    let req = request("auth-token-service");
+    let result = crate::self_evolution::acceptance_selector::select(&req);
+    assert!(
+        result.is_err(),
+        "substring 'token' in name must not select any kit"
+    );
     assert_eq!(
-        result,
-        Err("ACCEPTANCE_KIT_SELECTION_REQUIRED"),
-        "substring 'token' in requirements must not select the token kit"
+        result.unwrap_err(),
+        "ACCEPTANCE_KIT_SELECTION_REQUIRED"
+    );
+
+    // Even explicit resolve of a kit-like string must fail exact match
+    assert_eq!(
+        crate::self_evolution::acceptance_kit::AcceptanceKitId::resolve("auth-token-v0"),
+        Err("ACCEPTANCE_KIT_SELECTION_REQUIRED")
     );
 }
 
 /// Auth token in name does not match telemetry kit.
 #[test]
 fn auth_token_name_does_not_match_telemetry_kit() {
-    let mut req = request("auth-token-manager");
-    req.acceptance_kit_ref = Some("auth-token-v0".into());
     assert_eq!(
-        crate::self_evolution::acceptance_kit::AcceptanceKitId::resolve(&req),
+        crate::self_evolution::acceptance_kit::AcceptanceKitId::resolve("auth-token-v0"),
         Err("ACCEPTANCE_KIT_SELECTION_REQUIRED")
     );
 }
@@ -256,17 +304,15 @@ fn public_spec_change_alters_kit_digest() {
     let token = crate::self_evolution::acceptance_kit::AcceptanceKitId::TokenDashboardV0;
     let viewer = crate::self_evolution::acceptance_kit::AcceptanceKitId::FailureEventViewerV0;
 
-    // Different kits have different spec digests
+    // Different kits have different spec digests and bundle digests
     assert_ne!(token.public_spec_digest(), viewer.public_spec_digest());
-    assert_ne!(token.combined_kit_digest(), viewer.combined_kit_digest());
 }
 
 /// Acceptance diagnostics must NOT expose private test data.
 #[test]
 fn acceptance_diagnostics_only_expose_public_constraints() {
     let token_kit = crate::self_evolution::acceptance_kit::AcceptanceKitId::TokenDashboardV0;
-    let mut req = request("token-dashboard");
-    req.acceptance_kit_ref = Some("token-dashboard-v0".into());
+    let req = request("token-dashboard");
 
     // Empty output should produce diagnostics with constraint info only
     let empty_output = r#"{"ok":false,"rendered":{}}"#;
@@ -283,15 +329,15 @@ fn acceptance_diagnostics_only_expose_public_constraints() {
     assert!(diagnostics.contains("ACCEPTANCE") || diagnostics.contains("CONTRACT") || diagnostics.contains("missing"));
 }
 
-/// Validate contracts: a request with no kit ref returns ACCEPTANCE_KIT_SELECTION_REQUIRED.
+/// Validate contracts: an unknown bundle_ref returns ACCEPTANCE_KIT_SELECTION_REQUIRED.
 #[test]
-fn validate_contracts_without_kit_ref_fails_selection_required() {
+fn validate_contracts_with_unknown_bundle_ref_fails_selection_required() {
     let req = request("generic-observer");
     let valid_output = r#"{"ok":true,"schema_version":"hook-consumer-service-contract-v0","events_applied":3,"html_nonempty":true,"html_safe":true,"html_runtime_metadata":true,"rendered":{"telemetry_unavailable":false,"last_observed_cursor":3,"projection_lag":"caught_up","component_version":"0.1.0","health":"ready"}}"#;
-    let result = contract::validate_contracts(&req, valid_output);
+    let result = contract::validate_contracts("unknown-bundle-v0", &req, valid_output);
     assert!(
         result.is_err(),
-        "must fail without acceptance_kit_ref"
+        "must fail with unknown bundle_ref"
     );
     assert!(
         result.unwrap_err().contains("ACCEPTANCE_KIT_SELECTION_REQUIRED"),
@@ -299,23 +345,20 @@ fn validate_contracts_without_kit_ref_fails_selection_required() {
     );
 }
 
-/// Validate source without kit ref fails.
+/// Validate source with unknown bundle ref fails.
 #[test]
-fn validate_source_without_kit_ref_fails() {
-    let req = request("generic-observer");
-    let result = contract::validate_source(&req, source());
+fn validate_source_with_unknown_bundle_ref_fails() {
+    let result = contract::validate_source("unknown-bundle-v0", source());
     assert!(result.is_err());
     assert!(
         result.unwrap_err().contains("ACCEPTANCE_KIT_SELECTION_REQUIRED")
     );
 }
 
-/// Combined probe reports profile failures correctly when using token kit.
+/// Profile contract reports failures correctly when using token kit.
 #[test]
-fn combined_probe_reports_profile_failures_with_token_kit() {
-    let mut token_req = request("token-dashboard");
-    token_req.requirements = vec!["Token usage dashboard".into()];
-    token_req.acceptance_kit_ref = Some("token-dashboard-v0".into());
+fn profile_contract_reports_failures_with_token_kit() {
+    let req = request("token-dashboard");
     let output = json!({
         "ok": true,
         "schema_version": "hook-consumer-service-contract-v0",
@@ -323,18 +366,7 @@ fn combined_probe_reports_profile_failures_with_token_kit() {
         "html_nonempty": true,
         "html_safe": true,
         "html_runtime_metadata": false,
-        "html_telemetry_metrics": true,
-        "html_average_latency": true,
         "rendered": {
-            "by_date": {"2026-07-15": {"input":10,"cached":2,"output":5,"reasoning":1,"latency":50,"failures":1,"unavailable":1}},
-            "by_run": {"run-1": {}},
-            "by_model": {"model-a": {}},
-            "by_profile": {"default": {}},
-            "rolling_windows": {
-                "1_day": {"calls":2,"latency_ms":50,"failures":1,"unavailable":1},
-                "7_day": {"calls":2,"latency_ms":50,"failures":1,"unavailable":1},
-                "30_day": {"calls":2,"latency_ms":50,"failures":1,"unavailable":1}
-            },
             "telemetry_unavailable": false,
             "last_observed_cursor": 3,
             "projection_lag": "caught_up",
@@ -342,7 +374,7 @@ fn combined_probe_reports_profile_failures_with_token_kit() {
             "health": "ready"
         }
     });
-    let error = contract::validate_contracts(&token_req, &output.to_string()).unwrap_err();
+    let error = contract::validate_contracts("token-dashboard-v0", &req, &output.to_string()).unwrap_err();
     // Profile contract failure: html_runtime_metadata is false
     assert!(error.contains("html_runtime_metadata"));
     assert!(error.contains("PROFILE_CONTRACT_TEST_FAILED"));

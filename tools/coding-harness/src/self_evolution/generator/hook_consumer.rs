@@ -1,9 +1,11 @@
 mod cache;
 mod contract;
 
-use self::contract::validate_contracts;
+use self::contract::validate_profile_contract;
 use super::model::{self, ModelConfig};
 use super::GenerationError;
+use crate::self_evolution::acceptance_kit::AcceptanceKitId;
+use crate::self_evolution::acceptance_selector;
 use agent_core_kernel::domain::{DevelopmentRequest, TargetKind};
 use fs2::FileExt;
 use serde_json::{json, Value};
@@ -20,7 +22,17 @@ const SUPPORT_RS: &str =
     include_str!("../../../templates/hook-consumer-service/support.rs.template");
 const TEST_KIT: &str = "hook-consumer-service-contract-v0";
 const ENTRY: &str = "target/release/generated-hook-consumer";
-const COMPILE_PROBE_INPUT: &str = r#"{"schema_version":"event.observe.v0","next_cursor":3,"has_more":false,"events":[{"event_id":"completed-1","event_kind":"model.invocation.completed.v0","occurred_at":"2026-07-15T10:00:00Z","run_id":"run-1","payload":{"profile":"default","provider":"test","model":"model-a<img src=x onerror=alert(1)>","latency_ms":20,"input_tokens":10,"cached_input_tokens":2,"output_tokens":5,"reasoning_tokens":1,"total_tokens":16}},{"event_id":"failed-1","event_kind":"model.invocation.failed.v0","occurred_at":"2026-07-15T11:00:00Z","run_id":"run-2","payload":{"profile":"analysis","provider":"test","model":"model-b","latency_ms":30,"error_category":"dependency_unavailable"}},{"event_id":"future-1","event_kind":"future.observed.fact.v9","occurred_at":"2026-07-15T12:00:00Z","payload":{"unknown":{"nested":true}}}]}"#;
+
+/// Generic compile probe input for runtime profile contract testing.
+///
+/// Contains only event.observe.v0 envelope fields and generic event types.
+/// No model invocation business fields (tokens, latency, model names, etc.).
+/// This ensures the generic probe tests only:
+/// - Event envelope parsing
+/// - Cursor handling
+/// - Unknown field tolerance
+/// - Stable JSON/HTML output without crashing
+const COMPILE_PROBE_INPUT: &str = r#"{"schema_version":"event.observe.v0","next_cursor":2,"has_more":false,"events":[{"event_id":"evt-1","event_kind":"example.event.v0","occurred_at":"2026-07-15T10:00:00Z","run_id":"run-1","payload":{"value":1,"label":"example"}},{"event_id":"future-1","event_kind":"future.observed.fact.v9","occurred_at":"2026-07-15T12:00:00Z","payload":{"unknown":{"nested":true}}}]}"#;
 
 pub(super) fn generate(
     artifact_root: &Path,
@@ -32,6 +44,13 @@ pub(super) fn generate(
     {
         return Err(GenerationError::new("GENERATOR_NOT_CONFIGURED_FOR_PROFILE"));
     }
+
+    // 1. Resolve acceptance bundle via external selector
+    let selection = acceptance_selector::select(request)
+        .map_err(|_| GenerationError::new("ACCEPTANCE_KIT_SELECTION_REQUIRED"))?;
+    let kit = AcceptanceKitId::resolve(&selection.bundle_ref)
+        .map_err(|_| GenerationError::new("ACCEPTANCE_KIT_SELECTION_REQUIRED"))?;
+
     let base = artifact_root.join("generated");
     std::fs::create_dir_all(&base)?;
     let key_hash = hex::encode(Sha256::digest(request.idempotency_key.as_bytes()));
@@ -47,22 +66,33 @@ pub(super) fn generate(
     let candidate_root = base.join(&candidate_id);
     let candidate = candidate_root.join("candidate");
     let result = if candidate.is_dir() {
-        load_existing(request, &candidate_id, &candidate)
+        // For cache validation we create a selection from the manifest's stored values
+        let manifest_bytes = std::fs::read(candidate.join("manifest.json")).ok();
+        let stored_selection = manifest_bytes.as_ref().and_then(|bytes| {
+            serde_json::from_slice::<Value>(bytes).ok().and_then(|v| {
+                let bundle_ref = v.get("acceptance_bundle_ref")?.as_str()?.to_string();
+                let bundle_digest = v.get("acceptance_bundle_digest")?.as_str()?.to_string();
+                Some(acceptance_selector::AcceptanceSelection::new(&bundle_ref, &bundle_digest))
+            })
+        }).unwrap_or(acceptance_selector::AcceptanceSelection::new("", ""));
+        load_existing(request, &candidate_id, &candidate, &stored_selection)
     } else {
         let config = ModelConfig::from_env()?;
         let (mut source, initial_attempts) = model::generate_module_with_retry(&config, request)?;
         let mut model_calls = initial_attempts;
-        let max_repairs = repair_budget(initial_attempts);
-        for repair_round in 0..=max_repairs {
+        let _max_repairs = repair_budget(initial_attempts);
+
+        // 2. Compile + profile contract loop (no kit verify here)
+        let compile_stdout = loop {
             match compile_probe(&base, &candidate_id, request, &source) {
-                Ok(()) => break,
+                Ok(stdout) => break stdout,
                 Err(CompileProbeError::Candidate(diagnostics))
-                    if repair_round < max_repairs && model_calls < 6 =>
+                    if model_calls < 6 =>
                 {
                     #[cfg(debug_assertions)]
                     eprintln!(
                         "generator compile probe failed before repair {}:\n{}",
-                        repair_round + 1,
+                        model_calls,
                         diagnostics
                     );
                     let diagnostics =
@@ -80,16 +110,7 @@ pub(super) fn generate(
                 Err(CompileProbeError::Candidate(diagnostics)) => {
                     #[cfg(debug_assertions)]
                     eprintln!("generator probe repair exhausted:\n{diagnostics}");
-                    let error_code = if diagnostics.contains("GENERATOR_ACCEPTANCE_REPAIR_EXHAUSTED") {
-                        "GENERATOR_ACCEPTANCE_REPAIR_EXHAUSTED"
-                    } else if diagnostics.contains("ACCEPTANCE_KIT_SELECTION_REQUIRED") {
-                        "ACCEPTANCE_KIT_SELECTION_REQUIRED"
-                    } else if diagnostics.contains("CROSS_KIT_CONTAMINATION_FAILED") {
-                        "GENERATOR_ACCEPTANCE_REPAIR_EXHAUSTED"
-                    } else {
-                        "GENERATOR_COMPILE_REPAIR_EXHAUSTED"
-                    };
-                    return Err(GenerationError::new(error_code));
+                    return Err(GenerationError::new("GENERATOR_COMPILE_REPAIR_EXHAUSTED"));
                 }
                 Err(CompileProbeError::Infrastructure) => {
                     return Err(GenerationError::new(
@@ -97,8 +118,21 @@ pub(super) fn generate(
                     ));
                 }
             }
+        };
+
+        // 3. Freeze candidate bytes and compute future digest
+        let source_digest = format!("sha256:{}", hex::encode(Sha256::digest(source.as_bytes())));
+        let component_manifest = cache::component_manifest(request, &source_digest, config.model(), &selection);
+
+        // 4. Kit-specific acceptance verification
+        if let Err(diagnostics) = kit.verify(request, &source, &compile_stdout) {
+            #[cfg(debug_assertions)]
+            eprintln!("generator acceptance verify failed:\n{diagnostics}");
+            return Err(GenerationError::new("GENERATOR_ACCEPTANCE_REPAIR_EXHAUSTED"));
         }
-        materialize(&base, &candidate_id, request, &source, config.model())
+
+        // 5. All checks passed — materialize exact frozen bytes
+        materialize(&base, &candidate_id, request, &source, config.model(), &component_manifest)
     };
     if let Ok(value) = &result {
         writeln!(lock, "{}", value["candidate_digest"].as_str().unwrap_or(""))?;
@@ -121,14 +155,22 @@ enum CompileProbeError {
     Infrastructure,
 }
 
+/// Run the compile probe: validate source, compile with templates, run
+/// the binary with generic probe input, and verify the profile contract.
+///
+/// Returns the probe binary's stdout on success. Does NOT run kit-specific
+/// verification — that happens separately in generate() after this passes.
 fn compile_probe(
     base: &Path,
     candidate_id: &str,
     request: &DevelopmentRequest,
     source: &str,
-) -> Result<(), CompileProbeError> {
+) -> Result<String, CompileProbeError> {
     model::validate_generated_source(source).map_err(|_| CompileProbeError::Infrastructure)?;
-    contract::validate_source(request, source).map_err(CompileProbeError::Candidate)?;
+    contract::validate_source(&crate::self_evolution::acceptance_selector::select(request)
+        .map_err(|_| CompileProbeError::Candidate("ACCEPTANCE_KIT_SELECTION_REQUIRED".into()))?
+        .bundle_ref, source)
+        .map_err(CompileProbeError::Candidate)?;
     let probe = base.join(format!(
         ".{candidate_id}.compile-probe.{}.{}",
         std::process::id(),
@@ -173,7 +215,6 @@ fn compile_probe(
             }
             return host_contract_probe(
                 &probe.join("target/debug/generated-hook-consumer"),
-                request,
             );
         }
 
@@ -229,7 +270,9 @@ fn compile_probe(
                 truncate_diagnostics(&contract.stderr),
             )));
         }
-        validate_contracts(request, &contract.stdout).map_err(CompileProbeError::Candidate)
+        // Only profile contract check here — no kit-specific verify
+        validate_profile_contract(&contract.stdout).map_err(CompileProbeError::Candidate)?;
+        Ok(contract.stdout)
     })();
     #[cfg(debug_assertions)]
     let keep_probe = std::env::var("CODING_GENERATOR_TEST_KEEP_PROBES").as_deref() == Ok("1");
@@ -246,8 +289,7 @@ fn compile_probe(
 #[cfg(all(target_os = "macos", debug_assertions))]
 fn host_contract_probe(
     binary: &Path,
-    request: &DevelopmentRequest,
-) -> Result<(), CompileProbeError> {
+) -> Result<String, CompileProbeError> {
     use std::os::unix::process::CommandExt;
     use std::process::Stdio;
 
@@ -293,7 +335,8 @@ fn host_contract_probe(
             truncate_diagnostics(&String::from_utf8_lossy(&output.stderr)),
         )));
     }
-    validate_contracts(request, &stdout).map_err(CompileProbeError::Candidate)
+    validate_profile_contract(&stdout).map_err(CompileProbeError::Candidate)?;
+    Ok(stdout.to_string())
 }
 
 fn truncate_diagnostics(value: &str) -> String {
@@ -317,10 +360,9 @@ fn materialize(
     request: &DevelopmentRequest,
     source: &str,
     model_name: &str,
+    component_manifest: &Value,
 ) -> Result<Value, GenerationError> {
     model::validate_generated_source(source)?;
-    let source_digest = format!("sha256:{}", hex::encode(Sha256::digest(source.as_bytes())));
-    let component_manifest = cache::component_manifest(request, &source_digest, model_name);
     let specification = cache::specification(request);
 
     let temp = base.join(format!(
@@ -339,7 +381,7 @@ fn materialize(
     write_file(&candidate.join("src/component.rs"), source.as_bytes())?;
     write_file(
         &candidate.join("manifest.json"),
-        &serde_json::to_vec_pretty(&component_manifest)
+        &serde_json::to_vec_pretty(component_manifest)
             .map_err(|_| GenerationError::new("CANDIDATE_GENERATION_FAILED"))?,
     )?;
     write_file(
@@ -356,6 +398,14 @@ fn materialize(
         request,
         candidate_id,
         &base.join(candidate_id).join("candidate"),
+        &acceptance_selector::AcceptanceSelection::new(
+            component_manifest.get("acceptance_bundle_ref")
+                .and_then(Value::as_str)
+                .unwrap_or(""),
+            component_manifest.get("acceptance_bundle_digest")
+                .and_then(Value::as_str)
+                .unwrap_or(""),
+        ),
     )
 }
 
@@ -363,6 +413,7 @@ fn load_existing(
     request: &DevelopmentRequest,
     candidate_id: &str,
     candidate: &Path,
+    selection: &acceptance_selector::AcceptanceSelection,
 ) -> Result<Value, GenerationError> {
     let manifest_bytes = std::fs::read(candidate.join("manifest.json"))?;
     let component_manifest: Value = serde_json::from_slice(&manifest_bytes)
@@ -389,7 +440,7 @@ fn load_existing(
     {
         return Err(GenerationError::new("CANDIDATE_CACHE_INVALID"));
     }
-    cache::validate(candidate, request, &source, &component_manifest)?;
+    cache::validate(candidate, request, &source, &component_manifest, selection)?;
     let digest = crate::hcr::candidate::compute_digest(candidate)
         .map_err(|_| GenerationError::new("CANDIDATE_GENERATION_FAILED"))?;
     Ok(json!({

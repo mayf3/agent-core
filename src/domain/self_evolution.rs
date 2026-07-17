@@ -55,17 +55,6 @@ pub struct DevelopmentRequest {
     pub acceptance_criteria: Vec<String>,
     pub idempotency_key: String,
     pub contract_catalog_version: String,
-    /// Explicit Acceptance Kit identifier set by the routing or planning
-    /// layer. The Coding Harness uses this to select the matching kit
-    /// (public spec + private verifier). Must be a known kit ID when present.
-    /// Never derived from substring matching on request text.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub acceptance_kit_ref: Option<String>,
-    /// Digest of the combined Acceptance Kit (public_spec + private_verifier).
-    /// Set by the Coding Harness during kit resolution and bound to the
-    /// candidate. The kernel records it for audit but does not interpret it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub acceptance_kit_digest: Option<String>,
 }
 
 impl DevelopmentRequest {
@@ -92,8 +81,6 @@ impl DevelopmentRequest {
             acceptance_criteria: draft.acceptance_criteria,
             idempotency_key,
             contract_catalog_version,
-            acceptance_kit_ref: draft.acceptance_kit_ref,
-            acceptance_kit_digest: None,
         };
         request.validate_body()?;
         request.request_id = request.derived_request_id()?;
@@ -162,9 +149,6 @@ pub struct DevelopmentRequestDraft {
     pub build_profile: String,
     pub deployment_profile: String,
     pub acceptance_criteria: Vec<String>,
-    /// Optional explicit Acceptance Kit reference. Set by the routing layer
-    /// based on the component name, not from substring matching on user text.
-    pub acceptance_kit_ref: Option<String>,
 }
 
 impl DevelopmentRequestDraft {
@@ -178,7 +162,6 @@ impl DevelopmentRequestDraft {
             build_profile: target_kind.component_profile().to_string(),
             deployment_profile: target_kind.deployment_profile().to_string(),
             acceptance_criteria: Vec::new(),
-            acceptance_kit_ref: None,
         }
     }
 }
