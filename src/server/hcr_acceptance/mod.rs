@@ -2,9 +2,12 @@
 //!
 //! `POST /v1/hcr/:hcr_id/accept`
 //!
-//! Orchestrates the full HCR acceptance flow with strict response
-//! validation (H2), atomic receipt append-or-compare (H3), and
-//! real artifact/evidence digest handling (H4/H5).
+//! Orchestrates the full HCR acceptance flow with strict envelope
+//! validation (H1), mechanical ExternalReceiptEnvelope validation (H2),
+//! and atomic receipt append-or-compare (H3/H6).
+//!
+//! The production path ONLY accepts ExternalReceiptEnvelope from the
+//! Coding Harness. Raw JSON bypass is prohibited.
 
 pub mod gate_evidence;
 pub mod receipt;
@@ -121,7 +124,7 @@ pub fn handle(
     };
     let approved = gateway.approve_invocation(intent.clone(), &run, &session, &snapshot)?;
 
-    // 5. Call Harness
+    // 5. Call Harness — passes invocation_intent_id for envelope binding
     let harness_response = call_harness_accept(
         config,
         &approved,
@@ -135,7 +138,67 @@ pub fn handle(
         &snapshot_id,
     )?;
 
-    // 6. Validate Harness response (H2)
+    // ── 6. ExternalReceiptEnvelope validation (H1/H2) ─────────────────────
+    //
+    // PRODUCTION PATH: only ExternalReceiptEnvelope is accepted.
+    // Raw JSON bypass is prohibited.
+    let result_value = harness_response.get("result").unwrap_or(&harness_response);
+
+    let envelope: ExternalReceiptEnvelope = match serde_json::from_value(result_value.clone()) {
+        Ok(env) => env,
+        Err(e) => {
+            bail!("ENVELOPE_DESERIALIZATION_FAILED: {e}");
+        }
+    };
+
+    // 6a. Validate envelope structure
+    if let Err(e) = envelope.validate_structure() {
+        bail!("ENVELOPE_VALIDATION_FAILED: {e}");
+    }
+
+    // 6b. Independently recompute receipt_digest
+    if let Err(e) = envelope.verify_receipt_digest() {
+        bail!("RECEIPT_DIGEST_MISMATCH: {e}");
+    }
+
+    // 6c. Validate InvocationIntent binding
+    if envelope.invocation_intent_id != invocation_id.0 {
+        bail!(
+            "INVOCATION_MISMATCH: envelope has '{}', kernel has '{}'",
+            envelope.invocation_intent_id,
+            invocation_id.0
+        );
+    }
+
+    // 6d. Validate issuer
+    if envelope.issuer != "coding-harness" {
+        bail!(
+            "ISSUER_MISMATCH: expected 'coding-harness', got '{}'",
+            envelope.issuer
+        );
+    }
+
+    // 6e. Validate outcome is a known enum (serde already validated this)
+    //     Validate evidence_digest format
+    if !envelope.evidence_digest.starts_with("sha256:") {
+        bail!("EVIDENCE_DIGEST_FORMAT: invalid evidence_digest");
+    }
+
+    // 6f. Validate subject_digest matches the candidate_digest from the
+    //     validated response (the response's candidate_digest IS the subject_digest)
+    //     This is validated implicitly below when we parse the detailed response.
+
+    // ── 7. Parse detailed response fields for persistence ────────────────
+    //
+    // The envelope's opaque_payload binds the internal evidence. The Kernel
+    // also extracts structural fields (gate_results, candidate_id, etc.)
+    // from the same response for its own persistence — these are NOT the
+    // opaque payload content, they are the receipt's structured metadata.
+
+    // Re-use existing response validation for identity field matching
+    // and gate structure. NOTE: identity fields are now validated through
+    // the invocation_intent_id binding above, but we keep the existing
+    // field-level check for defense-in-depth.
     let ctx = RequestContext {
         hcr_id: hcr_id.to_string(),
         claim_id: outcome.claim_id.0.clone(),
@@ -151,10 +214,9 @@ pub fn handle(
         Err(e) => bail!("RESPONSE_VALIDATION_FAILED: {e}"),
     };
 
-    // ── 7. Persist five gate attempts + evidence (PR2 hotfix) ─────────────
+    // ── 8. Persist five gate attempts + evidence (PR2 hotfix) ─────────────
     // Maps each harness gate result to an HcrGateAttempt + InvocationProposed
-    // + ReceiptReceived + HcrGateEvidence chain, satisfying settle_hcr_in_tx()'s
-    // requirement of exactly 5 attempts + 5 evidence.
+    // + ReceiptReceived + HcrGateEvidence chain.
     let harness_result = harness_response.get("result").unwrap_or(&harness_response);
     gate_evidence::persist_gates(
         journal,
@@ -165,10 +227,10 @@ pub fn handle(
         &gate_harness_id,
     )?;
 
-    // 8. Determine receipt status
-    let receipt_status = match validated.overall_outcome.as_str() {
-        "CandidatePassed" => ReceiptStatus::Succeeded,
-        _ => ReceiptStatus::Failed,
+    // 9. Determine receipt status from envelope
+    let receipt_status = match envelope.outcome {
+        external_receipt_envelope::ExternalOutcome::Passed => ReceiptStatus::Succeeded,
+        external_receipt_envelope::ExternalOutcome::Failed => ReceiptStatus::Failed,
     };
 
     let output = json!({
@@ -183,7 +245,11 @@ pub fn handle(
         "gate_count": validated.gate_count,
     });
 
-    // 8. Atomic receipt append-or-compare (H3/H6)
+    // 10. Atomic receipt append-or-compare (H3/H6)
+    //
+    // The receipt_digest from the envelope serves as the payload_digest
+    // for identity comparison. This replaces the old compute_payload_digest
+    // which was computing a different digest over identity fields.
     let identity_fields = receipt::ReceiptIdentityFields {
         harness_execution_id: validated.harness_execution_id.clone(),
         overall_outcome: validated.overall_outcome.clone(),
@@ -192,31 +258,10 @@ pub fn handle(
         candidate_digest: validated.candidate_digest.clone(),
         artifact_ref: validated.artifact_ref.clone(),
         artifact_digest: validated.artifact_digest.clone(),
-        evidence_digest: validated.evidence_digest.clone(),
+        evidence_digest: envelope.evidence_digest.clone(),
+        receipt_digest: envelope.receipt_digest.clone(),
+        opaque_payload_digest: envelope.opaque_payload_digest.clone(),
     };
-    let payload_digest = receipt::compute_payload_digest(
-        hcr_id,
-        &outcome.claim_id.0,
-        &outcome.run_id.0,
-        &principal.principal_id.0,
-        &session.id.0,
-        &snapshot_id,
-        "external.coding_hcr_accept",
-        &idempotency_key,
-        &validated.harness_execution_id,
-        &validated.overall_outcome,
-        &validated.candidate_digest,
-        validated.artifact_ref.as_deref(),
-        validated.artifact_digest.as_deref(),
-        &validated.evidence_digest,
-        &[
-            ("scaffold", true),
-            ("build", true),
-            ("trusted_test", true),
-            ("trusted_smoke", true),
-            ("artifact", true),
-        ],
-    );
     match receipt::append_or_compare_receipt(
         journal,
         &outcome.run_id,
@@ -227,7 +272,7 @@ pub fn handle(
         &idempotency_key,
         receipt_status,
         &output,
-        &payload_digest,
+        &envelope.receipt_digest,
         &identity_fields,
     )? {
         AppendReceiptResult::Appended => {}
@@ -242,7 +287,7 @@ pub fn handle(
         }
     }
 
-    // 9. R3A settlement
+    // 11. R3A settlement
     let settlement = settle_hcr(journal, hcr_id, &outcome.claim_id.0, &outcome.run_id.0)?;
     let settlement_id = match &settlement {
         SettlementResult::Succeeded(id) | SettlementResult::CandidateFailed(id) => id.clone(),
@@ -270,7 +315,7 @@ pub fn handle(
 
 fn call_harness_accept(
     _config: &KernelConfig,
-    _approved: &ApprovedInvocation,
+    approved: &ApprovedInvocation,
     candidate_ref: &str,
     idempotency_key: &str,
     hcr_id: &str,
@@ -280,6 +325,8 @@ fn call_harness_accept(
     gateway_session_id: &str,
     registry_snapshot_id: &str,
 ) -> Result<Value> {
+    let invocation_intent_id = approved.intent().invocation_id.0.clone();
+
     let body = json!({
         "protocol_version": "external-harness-v1",
         "operation": "external.coding_hcr_accept",
@@ -293,6 +340,7 @@ fn call_harness_accept(
             "registry_snapshot_id": registry_snapshot_id,
             "operation": "external.coding_hcr_accept",
             "idempotency_key": idempotency_key,
+            "invocation_intent_id": invocation_intent_id,
         },
     });
 
