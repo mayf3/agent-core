@@ -5,6 +5,7 @@
 //! breakdown, by_model, by_profile, run-1, model-a).
 
 use super::constraint_diagnostic;
+use super::shared_verifier_engine::validate_events_applied;
 use agent_core_kernel::domain::DevelopmentRequest;
 use serde_json::{json, Value};
 
@@ -127,16 +128,19 @@ pub fn public_spec() -> Value {
 pub fn verify(
     _request: &DevelopmentRequest,
     _source: &str,
+    input: &str,
     stdout: &str,
 ) -> Result<(), String> {
-    // Profile contract check (reuses same logic as token dashboard)
+    // Events-applied check (shared logic — count comes from actual input)
+    validate_events_applied(input, stdout)?;
+
+    // Profile contract check (fields other than events_applied)
     let output: Value = serde_json::from_str(stdout.trim())
         .map_err(|_| "PROFILE_CONTRACT_OUTPUT_INVALID".to_string())?;
     let mut missing = Vec::new();
     for (field, expected) in [
         ("ok", json!(true)),
         ("schema_version", json!("hook-consumer-service-contract-v0")),
-        ("events_applied", json!(3)),
         ("html_nonempty", json!(true)),
         ("html_safe", json!(true)),
         ("html_runtime_metadata", json!(true)),
@@ -154,14 +158,14 @@ pub fn verify(
     }
 
     // Render contract: failure event fields + generic runtime metadata
-    let rendered = output
-        .get("rendered")
-        .ok_or_else(|| constraint_diagnostic(
+    let rendered = output.get("rendered").ok_or_else(|| {
+        constraint_diagnostic(
             "json.rendered.required",
             "$.rendered",
             "required object",
             "missing",
-        ))?;
+        )
+    })?;
     let rendered_text = serde_json::to_string(rendered)
         .map_err(|_| "RENDER_CONTRACT_OUTPUT_INVALID".to_string())?
         .to_lowercase();
@@ -184,12 +188,23 @@ pub fn verify(
     // Failure event specific: check that the rendered output contains
     // failure-related terms (not token-specific terms).
     let failure_terms = ["failure", "fail_count", "error", "error_category"];
-    if !failure_terms.iter().any(|term| rendered_text.contains(term)) {
+    if !failure_terms
+        .iter()
+        .any(|term| rendered_text.contains(term))
+    {
         render_missing.push("failure-or-error".into());
     }
 
     // Must NOT contain token dashboard contamination terms
-    let token_terms = ["rolling_windows", "by_model", "by_profile", "input_tokens", "cached_tokens", "output_tokens", "reasoning_tokens"];
+    let token_terms = [
+        "rolling_windows",
+        "by_model",
+        "by_profile",
+        "input_tokens",
+        "cached_tokens",
+        "output_tokens",
+        "reasoning_tokens",
+    ];
     for term in &token_terms {
         if rendered_text.contains(term) {
             return Err(format!(
@@ -234,16 +249,33 @@ mod tests {
     #[test]
     fn failure_viewer_spec_contains_no_token_terms() {
         let spec = public_spec();
-        let schema = serde_json::to_string(&spec["output_json_schema"]).unwrap().to_lowercase();
-        let html = serde_json::to_string(&spec["html_contract"]).unwrap().to_lowercase();
-        for forbidden in &["rolling_windows", "by_model", "by_profile", "run-1", "model-a"] {
-            assert!(!schema.contains(forbidden), "schema must not contain '{forbidden}'");
-            assert!(!html.contains(forbidden), "html must not contain '{forbidden}'");
+        let schema = serde_json::to_string(&spec["output_json_schema"])
+            .unwrap()
+            .to_lowercase();
+        let html = serde_json::to_string(&spec["html_contract"])
+            .unwrap()
+            .to_lowercase();
+        for forbidden in &[
+            "rolling_windows",
+            "by_model",
+            "by_profile",
+            "run-1",
+            "model-a",
+        ] {
+            assert!(
+                !schema.contains(forbidden),
+                "schema must not contain '{forbidden}'"
+            );
+            assert!(
+                !html.contains(forbidden),
+                "html must not contain '{forbidden}'"
+            );
         }
     }
 
     #[test]
     fn verify_passes_valid_failure_output() {
+        let input = r#"{"events":[{"id":1},{"id":2},{"id":3}]}"#;
         let output = json!({
             "ok": true,
             "schema_version": "hook-consumer-service-contract-v0",
@@ -263,11 +295,12 @@ mod tests {
                 "health": "ready"
             }
         });
-        assert!(verify(&dummy_request(), "", &output.to_string()).is_ok());
+        assert!(verify(&dummy_request(), "", input, &output.to_string()).is_ok());
     }
 
     #[test]
     fn verify_rejects_token_contamination() {
+        let input = r#"{"events":[{"id":1},{"id":2},{"id":3}]}"#;
         let output = json!({
             "ok": true,
             "schema_version": "hook-consumer-service-contract-v0",
@@ -285,18 +318,16 @@ mod tests {
                 "health": "ready"
             }
         });
-        let result = verify(&dummy_request(), "", &output.to_string());
+        let result = verify(&dummy_request(), "", input, &output.to_string());
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("CROSS_KIT_CONTAMINATION"));
     }
 
     fn dummy_request() -> DevelopmentRequest {
-        use agent_core_kernel::domain::{DevelopmentRequestDraft, TargetKind};
         use agent_core_kernel::contract_catalog::CONTRACT_CATALOG_VERSION;
-        let mut draft = DevelopmentRequestDraft::new(
-            TargetKind::HookConsumerService,
-            "failure-viewer".into(),
-        );
+        use agent_core_kernel::domain::{DevelopmentRequestDraft, TargetKind};
+        let mut draft =
+            DevelopmentRequestDraft::new(TargetKind::HookConsumerService, "failure-viewer".into());
         draft.requirements = vec!["display failure events".into()];
         draft.required_contracts = vec!["event.observe.v0".into()];
         draft.requested_permissions = vec!["journal.observe".into()];

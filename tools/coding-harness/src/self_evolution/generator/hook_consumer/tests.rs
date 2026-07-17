@@ -5,10 +5,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn request(name: &str) -> DevelopmentRequest {
-    let mut draft = DevelopmentRequestDraft::new(
-        TargetKind::HookConsumerService,
-        name.into(),
-    );
+    let mut draft = DevelopmentRequestDraft::new(TargetKind::HookConsumerService, name.into());
     draft.requirements = vec!["display observed facts".into()];
     draft.required_contracts = vec!["event.observe.v0".into()];
     draft.requested_permissions = vec!["journal.observe".into()];
@@ -67,7 +64,15 @@ fn materialized_candidate_is_request_bound_and_replay_stable() {
             "mutable_surface": ["src/component.rs"]
         }
     });
-    let first = materialize(&root, "candidate-test", &request, source(), "model-test", &manifest).unwrap();
+    let first = materialize(
+        &root,
+        "candidate-test",
+        &request,
+        source(),
+        "model-test",
+        &manifest,
+    )
+    .unwrap();
     let second = load_existing(
         &request,
         "candidate-test",
@@ -131,7 +136,15 @@ fn cached_candidate_rejects_fixed_runtime_and_manifest_tampering() {
                 "mutable_surface": ["src/component.rs"]
             }
         });
-        materialize(&root, "candidate-test", &request, source(), "model-test", &manifest).unwrap();
+        materialize(
+            &root,
+            "candidate-test",
+            &request,
+            source(),
+            "model-test",
+            &manifest,
+        )
+        .unwrap();
         let candidate = root.join("candidate-test/candidate");
         if tamper == "runtime" {
             std::fs::write(candidate.join("src/support.rs"), "pub fn bypass() {}").unwrap();
@@ -142,7 +155,13 @@ fn cached_candidate_rejects_fixed_runtime_and_manifest_tampering() {
             manifest["requested_permissions"] = json!(["journal.observe", "host.execute"]);
             std::fs::write(path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
         }
-        assert!(load_existing(&request, "candidate-test", &candidate, &acceptance_selector::AcceptanceSelection::new("", "")).is_err());
+        assert!(load_existing(
+            &request,
+            "candidate-test",
+            &candidate,
+            &acceptance_selector::AcceptanceSelection::new("", "")
+        )
+        .is_err());
         let _ = std::fs::remove_dir_all(root);
     }
 }
@@ -178,8 +197,15 @@ impl ReadText for PathBuf {
 #[test]
 fn generic_prompt_contains_no_product_terms() {
     let forbidden = [
-        "rolling_windows", "by_model", "by_profile", "run-1", "model-a",
-        "input_tokens", "cached_tokens", "reasoning_tokens", "Token Dashboard",
+        "rolling_windows",
+        "by_model",
+        "by_profile",
+        "run-1",
+        "model-a",
+        "input_tokens",
+        "cached_tokens",
+        "reasoning_tokens",
+        "Token Dashboard",
     ];
     for term in &forbidden {
         assert!(
@@ -247,13 +273,15 @@ fn token_and_non_token_kits_dont_cross_pollute() {
     let viewer_kit = crate::self_evolution::acceptance_kit::AcceptanceKitId::FailureEventViewerV0;
 
     // Token spec contains telemetry fields
-    let token_spec = serde_json::to_string(&token_kit.public_spec()).unwrap().to_lowercase();
+    let token_spec = serde_json::to_string(&token_kit.public_spec())
+        .unwrap()
+        .to_lowercase();
     assert!(token_spec.contains("rolling_windows") || token_spec.contains("input_tokens"));
 
     // Failure viewer spec schema must NOT contain telemetry fields
-    let viewer_schema = serde_json::to_string(
-        &viewer_kit.public_spec()["output_json_schema"]
-    ).unwrap().to_lowercase();
+    let viewer_schema = serde_json::to_string(&viewer_kit.public_spec()["output_json_schema"])
+        .unwrap()
+        .to_lowercase();
     assert!(!viewer_schema.contains("rolling_windows"));
     assert!(!viewer_schema.contains("input_tokens"));
     assert!(!viewer_schema.contains("by_profile"));
@@ -261,8 +289,11 @@ fn token_and_non_token_kits_dont_cross_pollute() {
     // Verifying a token-contaminated output against non-token kit must fail.
     let contaminated = r#"{"ok":true,"schema_version":"hook-consumer-service-contract-v0","events_applied":3,"html_nonempty":true,"html_safe":true,"html_runtime_metadata":true,"rendered":{"rolling_windows":{"1_day":{"calls":2}},"telemetry_unavailable":false,"last_observed_cursor":3,"projection_lag":"caught_up","component_version":"0.1.0","health":"ready"}}"#;
     let viewer_req = request("failure-viewer");
+    let probe_input = r#"{"events":[{"id":1},{"id":2},{"id":3}]}"#;
     assert!(
-        viewer_kit.verify(&viewer_req, "", contaminated).is_err(),
+        viewer_kit
+            .verify(&viewer_req, "", probe_input, contaminated)
+            .is_err(),
         "FailureEventViewer must reject output with token fields"
     );
 }
@@ -277,10 +308,7 @@ fn substring_token_does_not_select_token_kit() {
         result.is_err(),
         "substring 'token' in name must not select any kit"
     );
-    assert_eq!(
-        result.unwrap_err(),
-        "ACCEPTANCE_KIT_SELECTION_REQUIRED"
-    );
+    assert_eq!(result.unwrap_err(), "ACCEPTANCE_KIT_SELECTION_REQUIRED");
 
     // Even explicit resolve of a kit-like string must fail exact match
     assert_eq!(
@@ -316,7 +344,8 @@ fn acceptance_diagnostics_only_expose_public_constraints() {
 
     // Empty output should produce diagnostics with constraint info only
     let empty_output = r#"{"ok":false,"rendered":{}}"#;
-    let result = token_kit.verify(&req, "", empty_output);
+    let probe_input = r#"{"events":[{"id":1}]}"#;
+    let result = token_kit.verify(&req, "", probe_input, empty_output);
     assert!(result.is_err());
     let diagnostics = result.unwrap_err();
     // Diagnostics must not contain host paths, secrets, or private data
@@ -326,21 +355,25 @@ fn acceptance_diagnostics_only_expose_public_constraints() {
     assert!(!diagnostics.contains("api_key"));
     assert!(!diagnostics.contains("password"));
     // Should contain constraint information
-    assert!(diagnostics.contains("ACCEPTANCE") || diagnostics.contains("CONTRACT") || diagnostics.contains("missing"));
+    assert!(
+        diagnostics.contains("ACCEPTANCE")
+            || diagnostics.contains("CONTRACT")
+            || diagnostics.contains("missing")
+    );
 }
 
 /// Validate contracts: an unknown bundle_ref returns ACCEPTANCE_KIT_SELECTION_REQUIRED.
 #[test]
 fn validate_contracts_with_unknown_bundle_ref_fails_selection_required() {
     let req = request("generic-observer");
+    let probe_input = r#"{"events":[{"id":1},{"id":2},{"id":3}]}"#;
     let valid_output = r#"{"ok":true,"schema_version":"hook-consumer-service-contract-v0","events_applied":3,"html_nonempty":true,"html_safe":true,"html_runtime_metadata":true,"rendered":{"telemetry_unavailable":false,"last_observed_cursor":3,"projection_lag":"caught_up","component_version":"0.1.0","health":"ready"}}"#;
-    let result = contract::validate_contracts("unknown-bundle-v0", &req, valid_output);
+    let result = contract::validate_contracts("unknown-bundle-v0", &req, probe_input, valid_output);
+    assert!(result.is_err(), "must fail with unknown bundle_ref");
     assert!(
-        result.is_err(),
-        "must fail with unknown bundle_ref"
-    );
-    assert!(
-        result.unwrap_err().contains("ACCEPTANCE_KIT_SELECTION_REQUIRED"),
+        result
+            .unwrap_err()
+            .contains("ACCEPTANCE_KIT_SELECTION_REQUIRED"),
         "must return ACCEPTANCE_KIT_SELECTION_REQUIRED"
     );
 }
@@ -350,9 +383,9 @@ fn validate_contracts_with_unknown_bundle_ref_fails_selection_required() {
 fn validate_source_with_unknown_bundle_ref_fails() {
     let result = contract::validate_source("unknown-bundle-v0", source());
     assert!(result.is_err());
-    assert!(
-        result.unwrap_err().contains("ACCEPTANCE_KIT_SELECTION_REQUIRED")
-    );
+    assert!(result
+        .unwrap_err()
+        .contains("ACCEPTANCE_KIT_SELECTION_REQUIRED"));
 }
 
 /// Profile contract reports failures correctly when using token kit.
@@ -374,7 +407,10 @@ fn profile_contract_reports_failures_with_token_kit() {
             "health": "ready"
         }
     });
-    let error = contract::validate_contracts("token-dashboard-v0", &req, &output.to_string()).unwrap_err();
+    let probe_input = r#"{"events":[{"id":1},{"id":2},{"id":3}]}"#;
+    let error =
+        contract::validate_contracts("token-dashboard-v0", &req, probe_input, &output.to_string())
+            .unwrap_err();
     // Profile contract failure: html_runtime_metadata is false
     assert!(error.contains("html_runtime_metadata"));
     assert!(error.contains("PROFILE_CONTRACT_TEST_FAILED"));

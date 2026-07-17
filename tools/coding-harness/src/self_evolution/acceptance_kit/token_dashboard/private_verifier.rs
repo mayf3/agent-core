@@ -7,7 +7,7 @@
 //! 4. Follows source-level policies (no within_days in apply_event, no today_utc)
 
 use super::super::constraint_diagnostic;
-use super::super::shared_verifier_engine::truncate_diagnostics;
+use super::super::shared_verifier_engine::{truncate_diagnostics, validate_events_applied};
 use agent_core_kernel::domain::DevelopmentRequest;
 use serde_json::{json, Value};
 
@@ -15,11 +15,17 @@ use serde_json::{json, Value};
 pub fn verify(
     _request: &DevelopmentRequest,
     source: &str,
+    input: &str,
     stdout: &str,
 ) -> Result<(), String> {
     let mut failures = Vec::new();
 
-    // Profile contract check
+    // Events-applied check (shared logic — count comes from actual input)
+    if let Err(error) = validate_events_applied(input, stdout) {
+        failures.push(error);
+    }
+
+    // Profile contract check (fields other than events_applied)
     if let Err(error) = verify_profile_contract(stdout) {
         failures.push(error);
     }
@@ -45,6 +51,8 @@ pub fn verify(
 }
 
 /// Validate the profile contract output (applies to every hook consumer).
+/// Does NOT check events_applied — that is handled by validate_events_applied
+/// using the actual input event count.
 fn verify_profile_contract(stdout: &str) -> Result<(), String> {
     let output: Value = serde_json::from_str(stdout.trim())
         .map_err(|_| "PROFILE_CONTRACT_OUTPUT_INVALID".to_string())?;
@@ -52,7 +60,6 @@ fn verify_profile_contract(stdout: &str) -> Result<(), String> {
     for (field, expected) in [
         ("ok", json!(true)),
         ("schema_version", json!("hook-consumer-service-contract-v0")),
-        ("events_applied", json!(3)),
         ("html_nonempty", json!(true)),
         ("html_safe", json!(true)),
         ("html_runtime_metadata", json!(true)),
@@ -75,20 +82,15 @@ fn verify_profile_contract(stdout: &str) -> Result<(), String> {
 /// Validate the rendered output for telemetry-specific contract fields.
 fn verify_request_contract(stdout: &str) -> Result<(), String> {
     let output: Value = serde_json::from_str(stdout.trim())
-        .map_err(|_| constraint_diagnostic(
-            "json.parse",
-            "$",
-            "valid JSON",
-            "parse failure",
-        ))?;
-    let rendered = output
-        .get("rendered")
-        .ok_or_else(|| constraint_diagnostic(
+        .map_err(|_| constraint_diagnostic("json.parse", "$", "valid JSON", "parse failure"))?;
+    let rendered = output.get("rendered").ok_or_else(|| {
+        constraint_diagnostic(
             "json.rendered.required",
             "$.rendered",
             "required object",
             "missing",
-        ))?;
+        )
+    })?;
     let rendered_text = serde_json::to_string(rendered)
         .map_err(|_| "REQUEST_CONTRACT_RENDERED_INVALID".to_string())?
         .to_lowercase();
@@ -148,7 +150,11 @@ fn verify_request_contract(stdout: &str) -> Result<(), String> {
             missing.push(format!("overall-{days}-day-call-count=2"));
         }
         if !requested_overall_window_satisfies(rendered, days, |window| {
-            counter_equals(window, &["avg_latency", "average_latency", "latency_avg"], 25.0)
+            counter_equals(
+                window,
+                &["avg_latency", "average_latency", "latency_avg"],
+                25.0,
+            )
         }) {
             missing.push(format!("overall-{days}-day-average-latency=25"));
         }
@@ -164,7 +170,11 @@ fn verify_request_contract(stdout: &str) -> Result<(), String> {
         }
     }
 
-    if output.get("html_telemetry_metrics").and_then(Value::as_bool) != Some(true) {
+    if output
+        .get("html_telemetry_metrics")
+        .and_then(Value::as_bool)
+        != Some(true)
+    {
         missing.push("html-telemetry-metrics".into());
     }
     if output.get("html_average_latency").and_then(Value::as_bool) != Some(true) {
@@ -183,8 +193,8 @@ fn verify_request_contract(stdout: &str) -> Result<(), String> {
 
 /// Validate that the generated Rust source follows the Token Dashboard policy.
 fn verify_source_policy(source: &str) -> Result<(), String> {
-    let syntax = syn::parse_file(source)
-        .map_err(|_| "REQUEST_SOURCE_CONTRACT_INVALID_RUST".to_string())?;
+    let syntax =
+        syn::parse_file(source).map_err(|_| "REQUEST_SOURCE_CONTRACT_INVALID_RUST".to_string())?;
     let apply = syntax.items.iter().find_map(|item| match item {
         syn::Item::Fn(function) if function.sig.ident == "apply_event" => {
             Some(syn::Item::Fn(function.clone()))
@@ -391,10 +401,7 @@ pub fn apply_event(state: &mut Value, event: &Value) {
 pub fn render_json(state: &Value, runtime: &Value) -> Value { json!({}) }
 pub fn render_html(state: &Value, runtime: &Value) -> String { String::new() }";
         let result = verify_source_policy(frozen);
-        assert!(
-            result.is_err(),
-            "expected error but got Ok: {result:?}"
-        );
+        assert!(result.is_err(), "expected error but got Ok: {result:?}");
         let error = result.unwrap_err();
         assert!(
             error.contains("within_days") || error.contains("rolling windows"),

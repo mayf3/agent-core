@@ -68,13 +68,19 @@ pub(super) fn generate(
     let result = if candidate.is_dir() {
         // For cache validation we create a selection from the manifest's stored values
         let manifest_bytes = std::fs::read(candidate.join("manifest.json")).ok();
-        let stored_selection = manifest_bytes.as_ref().and_then(|bytes| {
-            serde_json::from_slice::<Value>(bytes).ok().and_then(|v| {
-                let bundle_ref = v.get("acceptance_bundle_ref")?.as_str()?.to_string();
-                let bundle_digest = v.get("acceptance_bundle_digest")?.as_str()?.to_string();
-                Some(acceptance_selector::AcceptanceSelection::new(&bundle_ref, &bundle_digest))
+        let stored_selection = manifest_bytes
+            .as_ref()
+            .and_then(|bytes| {
+                serde_json::from_slice::<Value>(bytes).ok().and_then(|v| {
+                    let bundle_ref = v.get("acceptance_bundle_ref")?.as_str()?.to_string();
+                    let bundle_digest = v.get("acceptance_bundle_digest")?.as_str()?.to_string();
+                    Some(acceptance_selector::AcceptanceSelection::new(
+                        &bundle_ref,
+                        &bundle_digest,
+                    ))
+                })
             })
-        }).unwrap_or(acceptance_selector::AcceptanceSelection::new("", ""));
+            .unwrap_or(acceptance_selector::AcceptanceSelection::new("", ""));
         load_existing(request, &candidate_id, &candidate, &stored_selection)
     } else {
         let config = ModelConfig::from_env()?;
@@ -86,14 +92,11 @@ pub(super) fn generate(
         let compile_stdout = loop {
             match compile_probe(&base, &candidate_id, request, &source) {
                 Ok(stdout) => break stdout,
-                Err(CompileProbeError::Candidate(diagnostics))
-                    if model_calls < 6 =>
-                {
+                Err(CompileProbeError::Candidate(diagnostics)) if model_calls < 6 => {
                     #[cfg(debug_assertions)]
                     eprintln!(
                         "generator compile probe failed before repair {}:\n{}",
-                        model_calls,
-                        diagnostics
+                        model_calls, diagnostics
                     );
                     let diagnostics =
                         sanitize_model_diagnostics(&diagnostics, &base, &candidate_id);
@@ -122,17 +125,28 @@ pub(super) fn generate(
 
         // 3. Freeze candidate bytes and compute future digest
         let source_digest = format!("sha256:{}", hex::encode(Sha256::digest(source.as_bytes())));
-        let component_manifest = cache::component_manifest(request, &source_digest, config.model(), &selection);
+        let component_manifest =
+            cache::component_manifest(request, &source_digest, config.model(), &selection);
 
         // 4. Kit-specific acceptance verification
-        if let Err(diagnostics) = kit.verify(request, &source, &compile_stdout) {
+        if let Err(diagnostics) = kit.verify(request, &source, COMPILE_PROBE_INPUT, &compile_stdout)
+        {
             #[cfg(debug_assertions)]
             eprintln!("generator acceptance verify failed:\n{diagnostics}");
-            return Err(GenerationError::new("GENERATOR_ACCEPTANCE_REPAIR_EXHAUSTED"));
+            return Err(GenerationError::new(
+                "GENERATOR_ACCEPTANCE_REPAIR_EXHAUSTED",
+            ));
         }
 
         // 5. All checks passed — materialize exact frozen bytes
-        materialize(&base, &candidate_id, request, &source, config.model(), &component_manifest)
+        materialize(
+            &base,
+            &candidate_id,
+            request,
+            &source,
+            config.model(),
+            &component_manifest,
+        )
     };
     if let Ok(value) = &result {
         writeln!(lock, "{}", value["candidate_digest"].as_str().unwrap_or(""))?;
@@ -167,10 +181,13 @@ fn compile_probe(
     source: &str,
 ) -> Result<String, CompileProbeError> {
     model::validate_generated_source(source).map_err(|_| CompileProbeError::Infrastructure)?;
-    contract::validate_source(&crate::self_evolution::acceptance_selector::select(request)
-        .map_err(|_| CompileProbeError::Candidate("ACCEPTANCE_KIT_SELECTION_REQUIRED".into()))?
-        .bundle_ref, source)
-        .map_err(CompileProbeError::Candidate)?;
+    contract::validate_source(
+        &crate::self_evolution::acceptance_selector::select(request)
+            .map_err(|_| CompileProbeError::Candidate("ACCEPTANCE_KIT_SELECTION_REQUIRED".into()))?
+            .bundle_ref,
+        source,
+    )
+    .map_err(CompileProbeError::Candidate)?;
     let probe = base.join(format!(
         ".{candidate_id}.compile-probe.{}.{}",
         std::process::id(),
@@ -213,9 +230,7 @@ fn compile_probe(
                     &String::from_utf8_lossy(&output.stderr),
                 )));
             }
-            return host_contract_probe(
-                &probe.join("target/debug/generated-hook-consumer"),
-            );
+            return host_contract_probe(&probe.join("target/debug/generated-hook-consumer"));
         }
 
         let cargo_home = std::env::var("CARGO_HOME").unwrap_or_else(|_| {
@@ -271,7 +286,8 @@ fn compile_probe(
             )));
         }
         // Only profile contract check here — no kit-specific verify
-        validate_profile_contract(&contract.stdout).map_err(CompileProbeError::Candidate)?;
+        validate_profile_contract(COMPILE_PROBE_INPUT, &contract.stdout)
+            .map_err(CompileProbeError::Candidate)?;
         Ok(contract.stdout)
     })();
     #[cfg(debug_assertions)]
@@ -287,9 +303,7 @@ fn compile_probe(
 }
 
 #[cfg(all(target_os = "macos", debug_assertions))]
-fn host_contract_probe(
-    binary: &Path,
-) -> Result<String, CompileProbeError> {
+fn host_contract_probe(binary: &Path) -> Result<String, CompileProbeError> {
     use std::os::unix::process::CommandExt;
     use std::process::Stdio;
 
@@ -335,7 +349,8 @@ fn host_contract_probe(
             truncate_diagnostics(&String::from_utf8_lossy(&output.stderr)),
         )));
     }
-    validate_profile_contract(&stdout).map_err(CompileProbeError::Candidate)?;
+    validate_profile_contract(COMPILE_PROBE_INPUT, &stdout)
+        .map_err(CompileProbeError::Candidate)?;
     Ok(stdout.to_string())
 }
 
@@ -399,10 +414,12 @@ fn materialize(
         candidate_id,
         &base.join(candidate_id).join("candidate"),
         &acceptance_selector::AcceptanceSelection::new(
-            component_manifest.get("acceptance_bundle_ref")
+            component_manifest
+                .get("acceptance_bundle_ref")
                 .and_then(Value::as_str)
                 .unwrap_or(""),
-            component_manifest.get("acceptance_bundle_digest")
+            component_manifest
+                .get("acceptance_bundle_digest")
                 .and_then(Value::as_str)
                 .unwrap_or(""),
         ),
