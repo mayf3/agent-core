@@ -11,19 +11,25 @@
 use agent_core_kernel::domain::DevelopmentRequest;
 use serde_json::{json, Value};
 
-/// Validate the profile contract output.
+/// Validate the profile contract output (shared check for all kits).
 ///
-/// This is a shared check for all hook consumer service kits:
-/// the generated binary's `--profile-contract-test` output must
-/// contain standard profile fields.
-pub(super) fn validate_profile_contract(stdout: &str) -> Result<(), String> {
+/// `input` is the probe input JSON string whose `events` array is used
+/// to determine the expected `events_applied` count. This ensures the
+/// check works with any event count rather than a hardcoded magic number.
+///
+/// The remaining profile fields (ok, schema_version, html_*) are checked
+/// with fixed expected values.
+pub(super) fn validate_profile_contract(input: &str, stdout: &str) -> Result<(), String> {
+    // Events-applied validation (count comes from actual input)
+    crate::self_evolution::acceptance_kit::validate_events_applied(input, stdout)?;
+
+    // Remaining profile fields (fixed expected values)
     let output: Value = serde_json::from_str(stdout.trim())
         .map_err(|_| "PROFILE_CONTRACT_OUTPUT_INVALID".to_string())?;
     let mut missing = Vec::new();
     for (field, expected) in [
         ("ok", json!(true)),
         ("schema_version", json!("hook-consumer-service-contract-v0")),
-        ("events_applied", json!(2)),
         ("html_nonempty", json!(true)),
         ("html_safe", json!(true)),
         ("html_runtime_metadata", json!(true)),
@@ -51,18 +57,19 @@ pub(super) fn validate_profile_contract(stdout: &str) -> Result<(), String> {
 pub(super) fn validate_contracts(
     bundle_ref: &str,
     request: &DevelopmentRequest,
+    input: &str,
     stdout: &str,
 ) -> Result<(), String> {
     let kit = crate::self_evolution::acceptance_kit::AcceptanceKitId::resolve(bundle_ref)
         .map_err(|_| format!("ACCEPTANCE_KIT_SELECTION_REQUIRED: bundle_ref '{bundle_ref}' is unknown. The external AcceptanceSelector must set a valid bundle_ref."))?;
 
     // Profile contract is shared across all hook consumer kits.
-    validate_profile_contract(stdout)?;
+    validate_profile_contract(input, stdout)?;
 
     // Kit-specific verification does NOT have access to the source here
     // (source policy check runs earlier in compile_probe). The verify
     // method handles request contract validation only.
-    kit.verify(request, "", stdout)
+    kit.verify(request, "", input, stdout)
 }
 
 /// Validate the generated source against kit-specific source policies.
@@ -88,8 +95,8 @@ pub(super) fn validate_source(bundle_ref: &str, source: &str) -> Result<(), Stri
 
 /// Token Dashboard source policy: no within_days in apply_event, no today_utc().
 fn validate_token_source(source: &str) -> Result<(), String> {
-    let syntax = syn::parse_file(source)
-        .map_err(|_| "REQUEST_SOURCE_CONTRACT_INVALID_RUST".to_string())?;
+    let syntax =
+        syn::parse_file(source).map_err(|_| "REQUEST_SOURCE_CONTRACT_INVALID_RUST".to_string())?;
     let apply = syntax.items.iter().find_map(|item| match item {
         syn::Item::Fn(function) if function.sig.ident == "apply_event" => {
             Some(syn::Item::Fn(function.clone()))

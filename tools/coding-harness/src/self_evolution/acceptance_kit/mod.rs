@@ -8,15 +8,16 @@
 //! Kit selection is done by the external AcceptanceSelector, which provides
 //! a bundle_ref string. The Kernel never sets acceptance_kit_ref.
 
-mod token_dashboard;
 mod failure_event_viewer;
 mod shared_verifier_engine;
+mod token_dashboard;
 
 use agent_core_kernel::domain::DevelopmentRequest;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 pub use shared_verifier_engine::constraint_diagnostic;
+pub use shared_verifier_engine::validate_events_applied;
 
 /// Known Acceptance Kit identifiers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,8 +60,8 @@ impl AcceptanceKitId {
 
     /// Digest of the public specification (sha256 of canonical JSON).
     pub fn public_spec_digest(self) -> String {
-        let canonical = serde_json::to_vec(&self.public_spec())
-            .expect("public spec is always valid JSON");
+        let canonical =
+            serde_json::to_vec(&self.public_spec()).expect("public spec is always valid JSON");
         format!("sha256:{}", hex::encode(Sha256::digest(&canonical)))
     }
 
@@ -105,6 +106,8 @@ impl AcceptanceKitId {
 
     /// Run the private verifier for this kit against generated output.
     ///
+    /// `input` is the probe input JSON string from which the event count is
+    /// derived. `stdout` is the candidate's profile contract output.
     /// Returns `Ok(())` on pass, or `Err(diagnostics)` on failure.
     /// The diagnostics string contains structured constraint information
     /// for the model to consume during repair.
@@ -112,14 +115,13 @@ impl AcceptanceKitId {
         self,
         request: &DevelopmentRequest,
         source: &str,
+        input: &str,
         stdout: &str,
     ) -> Result<(), String> {
         match self {
-            Self::TokenDashboardV0 => {
-                token_dashboard::verify(request, source, stdout)
-            }
+            Self::TokenDashboardV0 => token_dashboard::verify(request, source, input, stdout),
             Self::FailureEventViewerV0 => {
-                failure_event_viewer::verify(request, source, stdout)
+                failure_event_viewer::verify(request, source, input, stdout)
             }
         }
     }
@@ -221,9 +223,19 @@ mod tests {
         let spec = AcceptanceKitId::FailureEventViewerV0.public_spec();
         let _text = serde_json::to_string(&spec).unwrap().to_lowercase();
         // Check output_json_schema and html_contract don't contain token fields
-        let schema = serde_json::to_string(&spec["output_json_schema"]).unwrap().to_lowercase();
-        let html = serde_json::to_string(&spec["html_contract"]).unwrap().to_lowercase();
-        for forbidden in &["rolling_windows", "by_model", "by_profile", "run-1", "model-a"] {
+        let schema = serde_json::to_string(&spec["output_json_schema"])
+            .unwrap()
+            .to_lowercase();
+        let html = serde_json::to_string(&spec["html_contract"])
+            .unwrap()
+            .to_lowercase();
+        for forbidden in &[
+            "rolling_windows",
+            "by_model",
+            "by_profile",
+            "run-1",
+            "model-a",
+        ] {
             assert!(
                 !schema.contains(forbidden),
                 "failure viewer schema must not contain '{forbidden}'"
