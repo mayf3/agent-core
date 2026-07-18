@@ -349,6 +349,28 @@ fn contract_test_mode() {
     let Some(events) = page.get("events").and_then(Value::as_array) else {
         std::process::exit(1);
     };
+
+    // Read the evaluation time from the environment.
+    // This is set by the Coding Harness runner so that the candidate
+    // binary and the reference oracle use the same frozen date,
+    // making rolling-window results deterministic and date-independent.
+    let evaluation_time = std::env::var("AGENT_CORE_CONTRACT_EVALUATION_TIME_UTC")
+        .unwrap_or_default();
+    if evaluation_time.is_empty() {
+        eprintln!("CONTRACT_TEST_MISSING_EVALUATION_TIME");
+        std::process::exit(1);
+    }
+    // Extract date portion: "2026-07-18T00:00:00Z" -> "2026-07-18"
+    let today_utc = if evaluation_time.len() >= 10
+        && evaluation_time.as_bytes()[4] == b'-'
+        && evaluation_time.as_bytes()[7] == b'-'
+    {
+        &evaluation_time[..10]
+    } else {
+        eprintln!("CONTRACT_TEST_INVALID_EVALUATION_TIME: {evaluation_time}");
+        std::process::exit(1);
+    };
+
     let mut state = component::initial_state();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         for event in events {
@@ -361,8 +383,8 @@ fn contract_test_mode() {
             "telemetry_unavailable":false,
             "last_observed_cursor":events.len(),
             "projection_lag":"caught_up",
-            "last_observed_at":"2026-07-15T12:00:00Z",
-            "today_utc":"2026-07-15"
+            "last_observed_at": format!("{today_utc}T12:00:00Z"),
+            "today_utc": today_utc
         });
         let rendered = component::render_json(&state, &runtime);
         let html = component::render_html(&state, &runtime);

@@ -1,6 +1,6 @@
 mod calculator;
 #[cfg(feature = "test-fixtures")]
-mod hook_consumer;
+pub mod hook_consumer;
 
 use agent_core_kernel::domain::DevelopmentRequest;
 use serde_json::Value;

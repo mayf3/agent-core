@@ -72,6 +72,18 @@ pub fn event_date(event: &Value) -> Option<String> {
 }
 
 pub fn today_utc() -> String {
+    // When AGENT_CORE_CONTRACT_EVALUATION_TIME_UTC is set, use it instead of
+    // the system clock. This ensures deterministic, date-independent results
+    // during contract testing — the candidate binary and the reference oracle
+    // use the same frozen evaluation time.
+    if let Ok(value) = std::env::var("AGENT_CORE_CONTRACT_EVALUATION_TIME_UTC") {
+        if value.len() >= 10
+            && value.as_bytes()[4] == b'-'
+            && value.as_bytes()[7] == b'-'
+        {
+            return value[..10].to_string();
+        }
+    }
     let days = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
