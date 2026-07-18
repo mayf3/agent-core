@@ -35,7 +35,10 @@ fn main() {
 
     // --- Per-kit bundle digest computation ---
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
-    let src_dir = Path::new(&manifest_dir).join("src").join("self_evolution").join("acceptance_kit");
+    let src_dir = Path::new(&manifest_dir)
+        .join("src")
+        .join("self_evolution")
+        .join("acceptance_kit");
     let crate_version = std::env::var("CARGO_PKG_VERSION").unwrap_or_default();
 
     // Token Dashboard bundle
@@ -51,27 +54,39 @@ fn main() {
         &crate_version,
     ) {
         println!("cargo:rustc-env=TOKEN_DASHBOARD_BUNDLE_DIGEST={}", digest);
-        println!("cargo:warning=TOKEN_DASHBOARD_BUNDLE_DIGEST={}", &digest[..24]);
+        println!(
+            "cargo:warning=TOKEN_DASHBOARD_BUNDLE_DIGEST={}",
+            &digest[..24]
+        );
     }
 
     // Failure Event Viewer bundle
     if let Some(digest) = compute_bundle_digest(
         "failure-event-viewer-v0",
         &src_dir,
-        &[
-            "failure_event_viewer.rs",
-            "shared_verifier_engine.rs",
-        ],
+        &["failure_event_viewer.rs", "shared_verifier_engine.rs"],
         &crate_version,
     ) {
         println!("cargo:rustc-env=FAILURE_VIEWER_BUNDLE_DIGEST={}", digest);
-        println!("cargo:warning=FAILURE_VIEWER_BUNDLE_DIGEST={}", &digest[..24]);
+        println!(
+            "cargo:warning=FAILURE_VIEWER_BUNDLE_DIGEST={}",
+            &digest[..24]
+        );
     }
 
     // Trigger rebuild when any acceptance_kit file changes
-    println!("cargo:rerun-if-changed={}", src_dir.join("shared_verifier_engine.rs").display());
-    println!("cargo:rerun-if-changed={}", src_dir.join("token_dashboard").display());
-    println!("cargo:rerun-if-changed={}", src_dir.join("failure_event_viewer.rs").display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        src_dir.join("shared_verifier_engine.rs").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        src_dir.join("token_dashboard").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        src_dir.join("failure_event_viewer.rs").display()
+    );
 }
 
 /// Compute a bundle digest for a kit by building a canonical manifest

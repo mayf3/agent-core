@@ -114,9 +114,9 @@ fn compute_expected_from_input(input: &Value) -> ExpectedMetrics {
                     "reasoning_tokens",
                     "total_tokens",
                 ];
-                let has_null_token = token_fields.iter().any(|field| {
-                    payload.get(*field).map_or(true, |v| v.is_null())
-                });
+                let has_null_token = token_fields
+                    .iter()
+                    .any(|field| payload.get(*field).map_or(true, |v| v.is_null()));
                 if has_null_token {
                     unavailable_count += 1;
                 }
@@ -310,17 +310,20 @@ fn verify_request_contract(stdout: &str, expected: &ExpectedMetrics) -> Result<(
 
     // Unavailable dimension
     let unavailable_markers = ["unavailable"];
-    if !unavailable_markers.iter().any(|m| rendered_lower.contains(m)) {
+    if !unavailable_markers
+        .iter()
+        .any(|m| rendered_lower.contains(m))
+    {
         missing.push("dim-unavailable".into());
     }
 
     // Positive counters
-    if expected.failed_count > 0 && !has_positive_counter(rendered, &["failure", "fail_count", "failures"]) {
+    if expected.failed_count > 0
+        && !has_positive_counter(rendered, &["failure", "fail_count", "failures"])
+    {
         missing.push("counter-failure".into());
     }
-    if expected.unavailable_count > 0
-        && !has_positive_counter(rendered, &["unavailable"])
-    {
+    if expected.unavailable_count > 0 && !has_positive_counter(rendered, &["unavailable"]) {
         missing.push("counter-unavailable".into());
     }
 
@@ -548,7 +551,9 @@ mod tests {
     fn verify_rejects_invalid_json_output() {
         let result = verify_profile_contract("not-json");
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("PROFILE_CONTRACT_OUTPUT_INVALID"));
+        assert!(result
+            .unwrap_err()
+            .contains("PROFILE_CONTRACT_OUTPUT_INVALID"));
     }
 
     #[test]
