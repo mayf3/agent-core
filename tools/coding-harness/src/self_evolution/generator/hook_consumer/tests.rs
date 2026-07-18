@@ -181,7 +181,9 @@ fn total_model_calls_never_exceed_budget() {
     // Test that valid initial+repair combinations fit in budget
     for initial in 1..=3 {
         // With initial=3, we have budget-3=3 remaining for repair
-        assert!(initial + (super::TOTAL_MODEL_CALL_BUDGET - initial) <= super::TOTAL_MODEL_CALL_BUDGET);
+        assert!(
+            initial + (super::TOTAL_MODEL_CALL_BUDGET - initial) <= super::TOTAL_MODEL_CALL_BUDGET
+        );
     }
 }
 
@@ -489,13 +491,7 @@ fn known_good_token_candidate_passes_full_production_verification() {
     let kit = crate::self_evolution::acceptance_kit::AcceptanceKitId::TokenDashboardV0;
     let source = crate::fixtures::hook_consumer::COMPONENT_RS;
 
-    let result = super::verify_frozen_candidate(
-        &root,
-        "known_good_e2e",
-        &request,
-        source,
-        kit,
-    );
+    let result = super::verify_frozen_candidate(&root, "known_good_e2e", &request, source, kit);
     assert!(
         result.is_ok(),
         "known-good token candidate must pass full verification: {:?}",

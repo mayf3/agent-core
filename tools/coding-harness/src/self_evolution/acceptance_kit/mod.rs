@@ -294,24 +294,51 @@ mod tests {
     #[test]
     fn token_dashboard_has_two_private_cases() {
         let cases = AcceptanceKitId::TokenDashboardV0.private_verification_cases();
-        assert!(cases.len() >= 2, "Token Dashboard must have at least 2 private cases, got {}", cases.len());
+        assert!(
+            cases.len() >= 2,
+            "Token Dashboard must have at least 2 private cases, got {}",
+            cases.len()
+        );
         for (i, case) in cases.iter().enumerate() {
             assert!(!case.case_id.is_empty(), "case {} has empty case_id", i);
-            assert!(!case.input.is_empty(), "case {} '{}' has empty input", i, case.case_id);
-            assert!(!case.evaluation_time_utc.is_empty(), "case {} '{}' has empty evaluation_time_utc", i, case.case_id);
+            assert!(
+                !case.input.is_empty(),
+                "case {} '{}' has empty input",
+                i,
+                case.case_id
+            );
+            assert!(
+                !case.evaluation_time_utc.is_empty(),
+                "case {} '{}' has empty evaluation_time_utc",
+                i,
+                case.case_id
+            );
             // Verify input is valid JSON
             let parsed: Result<Value, _> = serde_json::from_str(case.input);
-            assert!(parsed.is_ok(), "case {} '{}' input is not valid JSON: {:?}", i, case.case_id, parsed.err());
+            assert!(
+                parsed.is_ok(),
+                "case {} '{}' input is not valid JSON: {:?}",
+                i,
+                case.case_id,
+                parsed.err()
+            );
         }
     }
 
     #[test]
     fn failure_viewer_has_at_least_one_private_case() {
         let cases = AcceptanceKitId::FailureEventViewerV0.private_verification_cases();
-        assert!(!cases.is_empty(), "Failure Event Viewer must have at least 1 private case");
+        assert!(
+            !cases.is_empty(),
+            "Failure Event Viewer must have at least 1 private case"
+        );
         for (i, case) in cases.iter().enumerate() {
             assert!(!case.case_id.is_empty(), "case {} has empty case_id", i);
-            assert!(!case.evaluation_time_utc.is_empty(), "case {} has empty evaluation_time_utc", i);
+            assert!(
+                !case.evaluation_time_utc.is_empty(),
+                "case {} has empty evaluation_time_utc",
+                i
+            );
             let parsed: Result<Value, _> = serde_json::from_str(case.input);
             assert!(parsed.is_ok(), "case {} input is not valid JSON", i);
         }
@@ -319,11 +346,19 @@ mod tests {
 
     #[test]
     fn each_kit_has_unique_case_ids() {
-        for kit in &[AcceptanceKitId::TokenDashboardV0, AcceptanceKitId::FailureEventViewerV0] {
+        for kit in &[
+            AcceptanceKitId::TokenDashboardV0,
+            AcceptanceKitId::FailureEventViewerV0,
+        ] {
             let cases = kit.private_verification_cases();
             let mut seen = std::collections::HashSet::new();
             for case in cases {
-                assert!(seen.insert(case.case_id), "duplicate case_id '{}' in {:?}", case.case_id, kit);
+                assert!(
+                    seen.insert(case.case_id),
+                    "duplicate case_id '{}' in {:?}",
+                    case.case_id,
+                    kit
+                );
             }
         }
     }
@@ -336,21 +371,37 @@ mod tests {
         for case in token_cases {
             let parsed: Value = serde_json::from_str(case.input).unwrap();
             let events = parsed.get("events").and_then(Value::as_array);
-            assert!(events.is_some(), "token case '{}' has no events array", case.case_id);
+            assert!(
+                events.is_some(),
+                "token case '{}' has no events array",
+                case.case_id
+            );
             let has_token_events = events.unwrap().iter().any(|e| {
-                e["event_kind"].as_str().map_or(false, |k| k == "model.invocation.completed.v0")
+                e["event_kind"]
+                    .as_str()
+                    .map_or(false, |k| k == "model.invocation.completed.v0")
             });
-            assert!(has_token_events, "token case '{}' must have at least one completed invocation event", case.case_id);
+            assert!(
+                has_token_events,
+                "token case '{}' must have at least one completed invocation event",
+                case.case_id
+            );
         }
         // FEV cases must NOT contain token business events
         for case in fev_cases {
             let parsed: Value = serde_json::from_str(case.input).unwrap();
             let empty = vec![];
-            let events = parsed.get("events").and_then(Value::as_array).unwrap_or(&empty);
+            let events = parsed
+                .get("events")
+                .and_then(Value::as_array)
+                .unwrap_or(&empty);
             for event in events {
                 let kind = event["event_kind"].as_str().unwrap_or("");
-                assert_eq!(kind, "model.invocation.failed.v0",
-                    "FEV case '{}' has non-failure event kind '{}'", case.case_id, kind);
+                assert_eq!(
+                    kind, "model.invocation.failed.v0",
+                    "FEV case '{}' has non-failure event kind '{}'",
+                    case.case_id, kind
+                );
             }
         }
     }

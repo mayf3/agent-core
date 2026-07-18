@@ -59,9 +59,7 @@ fn run_binary_with_input(binary: &Path, input: &str) -> Result<String, String> {
     if result.exit_code != 0 {
         return Err(format!(
             "PRIVATE_CASE_EXIT_CODE={}\nstdout:\n{}\nstderr:\n{}",
-            result.exit_code,
-            result.stdout,
-            result.stderr,
+            result.exit_code, result.stdout, result.stderr,
         ));
     }
     Ok(result.stdout)
@@ -96,18 +94,15 @@ pub(super) fn verify_frozen_candidate(
             .map_err(|_| CompileProbeError::Infrastructure)?;
 
         // Pre-validate source
-        model::validate_generated_source(source)
-            .map_err(|_| CompileProbeError::Infrastructure)?;
+        model::validate_generated_source(source).map_err(|_| CompileProbeError::Infrastructure)?;
 
         // Check source policy
-        contract::validate_source(kit.kit_id(), source)
-            .map_err(CompileProbeError::Candidate)?;
+        contract::validate_source(kit.kit_id(), source).map_err(CompileProbeError::Candidate)?;
 
         // Write probe files
         let runtime = MAIN_RS.replace(
             "__COMPONENT_PRELUDE__",
-            &model::component_prelude(source)
-                .map_err(|_| CompileProbeError::Infrastructure)?,
+            &model::component_prelude(source).map_err(|_| CompileProbeError::Infrastructure)?,
         );
         for (path, bytes) in [
             (probe.join("Cargo.toml"), CARGO_TOML.as_bytes()),
@@ -116,8 +111,7 @@ pub(super) fn verify_frozen_candidate(
             (probe.join("src/support.rs"), SUPPORT_RS.as_bytes()),
             (probe.join("src/component.rs"), source.as_bytes()),
         ] {
-            std::fs::write(path, bytes)
-                .map_err(|_| CompileProbeError::Infrastructure)?;
+            std::fs::write(path, bytes).map_err(|_| CompileProbeError::Infrastructure)?;
         }
 
         // 2. Compile once (sandboxed)
@@ -267,13 +261,16 @@ pub(super) fn generate(
         loop {
             match verify_frozen_candidate(&base, &candidate_id, request, &source, kit) {
                 Ok(_compile_stdout) => break,
-                Err(CompileProbeError::Candidate(diagnostics)) if model_calls < TOTAL_MODEL_CALL_BUDGET => {
+                Err(CompileProbeError::Candidate(diagnostics))
+                    if model_calls < TOTAL_MODEL_CALL_BUDGET =>
+                {
                     #[cfg(debug_assertions)]
                     eprintln!(
                         "generator candidate verification failed before repair {}:\n{}",
                         model_calls, diagnostics
                     );
-                    let diagnostics = sanitize_model_diagnostics(&diagnostics, &base, &candidate_id);
+                    let diagnostics =
+                        sanitize_model_diagnostics(&diagnostics, &base, &candidate_id);
                     let (repaired, attempts) = model::repair_module_with_retry(
                         &config,
                         request,
