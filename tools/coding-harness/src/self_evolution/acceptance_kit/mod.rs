@@ -3,7 +3,9 @@
 //! Each kit defines:
 //! - A `public_spec` (JSON) injected into the model's per-request context.
 //! - A `private_verifier` (Rust code, never exposed to the model).
-//! - Digests that bind both: changing either invalidates existing candidates.
+//! - `PrivateVerificationCase`s: hidden inputs with frozen time, each with
+//!   business events from which expected results are computed.
+//! - Digests that bind all of the above: changing any invalidates caches.
 //!
 //! Kit selection is done by the external AcceptanceSelector, which provides
 //! a bundle_ref string. The Kernel never sets acceptance_kit_ref.
@@ -18,6 +20,27 @@ use sha2::{Digest, Sha256};
 
 pub use shared_verifier_engine::constraint_diagnostic;
 pub use shared_verifier_engine::validate_events_applied;
+
+/// A private verification case for an Acceptance Kit.
+///
+/// Each case contains a hidden input with real business events, a frozen
+/// evaluation time (so the result is date-independent), and a case_id
+/// stable across SHA changes. The private verifier derives all expected
+/// values from the input events according to the kit's public spec,
+/// ensuring no hardcoded assertions.
+///
+/// None of these fields are ever exposed to the model, the prompt, the
+/// public spec, the Kernel Journal, or user-facing diagnostics.
+#[derive(Debug, Clone)]
+pub struct PrivateVerificationCase {
+    /// Stable identifier (safe in diagnostics — no hidden data).
+    pub case_id: &'static str,
+    /// Input JSON with real business events (never exposed to the model).
+    pub input: &'static str,
+    /// Frozen evaluation time so that rolling-window calculations are
+    /// deterministic and date-independent. RFC 3339 in UTC.
+    pub evaluation_time_utc: &'static str,
+}
 
 /// Known Acceptance Kit identifiers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,9 +94,9 @@ impl AcceptanceKitId {
     fn private_verifier_digest(self) -> &'static str {
         match self {
             // Bump this tag when token_dashboard verification logic changes.
-            Self::TokenDashboardV0 => "pv_token_dashboard_v0_001",
+            Self::TokenDashboardV0 => "pv_token_dashboard_v0_002",
             // Bump this tag when failure_event_viewer verification logic changes.
-            Self::FailureEventViewerV0 => "pv_failure_viewer_v0_001",
+            Self::FailureEventViewerV0 => "pv_failure_viewer_v0_002",
         }
     }
 
@@ -101,6 +124,19 @@ impl AcceptanceKitId {
             "token-dashboard-v0" => Ok(Self::TokenDashboardV0),
             "failure-event-viewer-v0" => Ok(Self::FailureEventViewerV0),
             _ => Err("ACCEPTANCE_KIT_SELECTION_REQUIRED"),
+        }
+    }
+
+    /// Return the private verification cases for this kit.
+    ///
+    /// Every kit must return at least one case. These are the hidden inputs
+    /// used to verify generated output against computed expectations.
+    /// The returned slice is a static reference; each case contains a frozen
+    /// evaluation time so results are date-independent.
+    pub fn private_verification_cases(self) -> &'static [PrivateVerificationCase] {
+        match self {
+            Self::TokenDashboardV0 => token_dashboard::private_verification_cases(),
+            Self::FailureEventViewerV0 => failure_event_viewer::private_verification_cases(),
         }
     }
 
@@ -253,5 +289,69 @@ mod tests {
         let viewer = AcceptanceKitId::FailureEventViewerV0;
         // Different kit IDs → different combined digest
         assert_ne!(token.combined_kit_digest(), viewer.combined_kit_digest());
+    }
+
+    #[test]
+    fn token_dashboard_has_two_private_cases() {
+        let cases = AcceptanceKitId::TokenDashboardV0.private_verification_cases();
+        assert!(cases.len() >= 2, "Token Dashboard must have at least 2 private cases, got {}", cases.len());
+        for (i, case) in cases.iter().enumerate() {
+            assert!(!case.case_id.is_empty(), "case {} has empty case_id", i);
+            assert!(!case.input.is_empty(), "case {} '{}' has empty input", i, case.case_id);
+            assert!(!case.evaluation_time_utc.is_empty(), "case {} '{}' has empty evaluation_time_utc", i, case.case_id);
+            // Verify input is valid JSON
+            let parsed: Result<Value, _> = serde_json::from_str(case.input);
+            assert!(parsed.is_ok(), "case {} '{}' input is not valid JSON: {:?}", i, case.case_id, parsed.err());
+        }
+    }
+
+    #[test]
+    fn failure_viewer_has_at_least_one_private_case() {
+        let cases = AcceptanceKitId::FailureEventViewerV0.private_verification_cases();
+        assert!(!cases.is_empty(), "Failure Event Viewer must have at least 1 private case");
+        for (i, case) in cases.iter().enumerate() {
+            assert!(!case.case_id.is_empty(), "case {} has empty case_id", i);
+            assert!(!case.evaluation_time_utc.is_empty(), "case {} has empty evaluation_time_utc", i);
+            let parsed: Result<Value, _> = serde_json::from_str(case.input);
+            assert!(parsed.is_ok(), "case {} input is not valid JSON", i);
+        }
+    }
+
+    #[test]
+    fn each_kit_has_unique_case_ids() {
+        for kit in &[AcceptanceKitId::TokenDashboardV0, AcceptanceKitId::FailureEventViewerV0] {
+            let cases = kit.private_verification_cases();
+            let mut seen = std::collections::HashSet::new();
+            for case in cases {
+                assert!(seen.insert(case.case_id), "duplicate case_id '{}' in {:?}", case.case_id, kit);
+            }
+        }
+    }
+
+    #[test]
+    fn private_cases_have_distinct_inputs_across_kits() {
+        let token_cases = AcceptanceKitId::TokenDashboardV0.private_verification_cases();
+        let fev_cases = AcceptanceKitId::FailureEventViewerV0.private_verification_cases();
+        // Token cases must contain completed invocation events with tokens
+        for case in token_cases {
+            let parsed: Value = serde_json::from_str(case.input).unwrap();
+            let events = parsed.get("events").and_then(Value::as_array);
+            assert!(events.is_some(), "token case '{}' has no events array", case.case_id);
+            let has_token_events = events.unwrap().iter().any(|e| {
+                e["event_kind"].as_str().map_or(false, |k| k == "model.invocation.completed.v0")
+            });
+            assert!(has_token_events, "token case '{}' must have at least one completed invocation event", case.case_id);
+        }
+        // FEV cases must NOT contain token business events
+        for case in fev_cases {
+            let parsed: Value = serde_json::from_str(case.input).unwrap();
+            let empty = vec![];
+            let events = parsed.get("events").and_then(Value::as_array).unwrap_or(&empty);
+            for event in events {
+                let kind = event["event_kind"].as_str().unwrap_or("");
+                assert_eq!(kind, "model.invocation.failed.v0",
+                    "FEV case '{}' has non-failure event kind '{}'", case.case_id, kind);
+            }
+        }
     }
 }

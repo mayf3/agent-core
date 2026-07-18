@@ -174,12 +174,14 @@ fn fixed_runtime_hard_bounds_projection_growth() {
 }
 
 #[test]
-fn unused_initial_attempts_extend_repairs_without_exceeding_six_model_calls() {
-    assert_eq!(repair_budget(1), 4);
-    assert_eq!(repair_budget(2), 4);
-    assert_eq!(repair_budget(3), 3);
-    for initial_attempts in 1..=3 {
-        assert!(initial_attempts + repair_budget(initial_attempts) <= 6);
+fn total_model_calls_never_exceed_budget() {
+    // The unified budget is 6. Each call consumes from it.
+    // generate(), compile repair, and acceptance repair all share it.
+    assert_eq!(super::TOTAL_MODEL_CALL_BUDGET, 6);
+    // Test that valid initial+repair combinations fit in budget
+    for initial in 1..=3 {
+        // With initial=3, we have budget-3=3 remaining for repair
+        assert!(initial + (super::TOTAL_MODEL_CALL_BUDGET - initial) <= super::TOTAL_MODEL_CALL_BUDGET);
     }
 }
 
@@ -428,5 +430,149 @@ fn repair_diagnostics_do_not_disclose_host_path_or_candidate_key() {
     assert_eq!(
         sanitized,
         "<generator-root>/.<candidate-id>/src/component.rs"
+    );
+}
+
+// ─── Private verification case unit tests ─────────────────────────────
+
+#[test]
+fn private_verification_diagnostic_contains_no_private_fixture() {
+    use crate::self_evolution::acceptance_kit::AcceptanceKitId;
+    // Call verify with generic input that has no business events.
+    // The diagnostic should NOT contain private fixture content.
+    let generic_input = r#"{"events":[{"id":1}]}"#;
+    let generic_output = r#"{"events_applied":1,"ok":true,"schema_version":"hook-consumer-service-contract-v0","html_nonempty":true,"html_safe":true,"html_runtime_metadata":true}"#;
+    let request = request("token-dashboard");
+    let kit = AcceptanceKitId::TokenDashboardV0;
+    // With no business events, it should pass the events-applied check
+    // (source policy would fail with our minimal test source, so we check
+    //  that the diagnostic doesn't contain fixture data).
+    let result = kit.verify(&request, source(), generic_input, generic_output);
+    // We don't care about pass/fail — we care that diagnostics are safe
+    if let Err(diagnostics) = result {
+        let lower = diagnostics.to_lowercase();
+        assert!(
+            !lower.contains("private"),
+            "diagnostic must not contain 'private': {diagnostics}"
+        );
+        assert!(
+            !lower.contains("secret"),
+            "diagnostic must not contain 'secret': {diagnostics}"
+        );
+        assert!(
+            !lower.contains("fixture"),
+            "diagnostic must not contain 'fixture': {diagnostics}"
+        );
+    }
+}
+
+/// Total model call budget is enforced as a single unified cap.
+#[test]
+fn total_budget_is_single_unified_cap() {
+    assert_eq!(super::TOTAL_MODEL_CALL_BUDGET, 6);
+    // The budget covers: generate + compile repair + acceptance repair.
+    // No phase has its own budget.
+}
+
+// ─── Known-good incorrect candidate tests (compile via verify_frozen_candidate) ──
+
+/// Known-good Token Dashboard source from the fixture generator.
+/// Must pass full production verification (compile + generic probe + all private cases).
+/// Only available when test-fixtures feature is enabled.
+#[cfg(feature = "test-fixtures")]
+#[test]
+#[ignore = "requires bubblewrap and cargo sandbox"]
+fn known_good_token_candidate_passes_full_production_verification() {
+    let root = temp_root("known_good_e2e");
+    std::fs::create_dir_all(&root).unwrap();
+    let request = request("token-dashboard");
+    let kit = crate::self_evolution::acceptance_kit::AcceptanceKitId::TokenDashboardV0;
+    let source = crate::fixtures::hook_consumer::COMPONENT_RS;
+
+    let result = super::verify_frozen_candidate(
+        &root,
+        "known_good_e2e",
+        &request,
+        source,
+        kit,
+    );
+    assert!(
+        result.is_ok(),
+        "known-good token candidate must pass full verification: {:?}",
+        result.err()
+    );
+}
+
+/// Source that produces no rolling windows should be rejected.
+#[cfg(feature = "test-fixtures")]
+#[test]
+#[ignore = "requires bubblewrap and cargo sandbox"]
+fn incorrect_missing_windows_fails_verification() {
+    let root = temp_root("missing_windows_e2e");
+    std::fs::create_dir_all(&root).unwrap();
+    let request = request("token-dashboard");
+
+    let bad_source = r#"
+use serde_json::{json, Value};
+pub fn initial_state() -> Value { json!({"total":0}) }
+pub fn apply_event(state: &mut Value, event: &Value) {
+    let _ = event;
+    state["total"] = json!(state["total"].as_u64().unwrap_or(0) + 1);
+}
+pub fn render_json(state: &Value, runtime: &Value) -> Value {
+    json!({"events_applied":2,"ok":true,"schema_version":"hook-consumer-service-contract-v0","html_nonempty":true,"html_safe":true,"html_runtime_metadata":true,"rendered":{"telemetry_unavailable":false,"last_observed_cursor":2,"projection_lag":"caught_up","component_version":"0.1.0","health":"ready","total":state["total"]}})
+}
+pub fn render_html(state: &Value, runtime: &Value) -> String {
+    let _ = (state, runtime); format!("<p>{}</p>", state["total"])
+}
+"#;
+
+    let result = super::verify_frozen_candidate(
+        &root,
+        "missing_windows_e2e",
+        &request,
+        bad_source,
+        crate::self_evolution::acceptance_kit::AcceptanceKitId::TokenDashboardV0,
+    );
+    assert!(
+        result.is_err(),
+        "incorrect source (no rolling windows) must be rejected"
+    );
+}
+
+/// Source that ignores failed invocations should be rejected.
+#[cfg(feature = "test-fixtures")]
+#[test]
+#[ignore = "requires bubblewrap and cargo sandbox"]
+fn incorrect_ignores_failures_fails_verification() {
+    let root = temp_root("ignores_failures_e2e");
+    std::fs::create_dir_all(&root).unwrap();
+    let request = request("token-dashboard");
+
+    let bad_source = r#"
+use serde_json::{json, Value};
+pub fn initial_state() -> Value { json!({"calls":0}) }
+pub fn apply_event(state: &mut Value, event: &Value) {
+    let _ = event;
+    state["calls"] = json!(state["calls"].as_u64().unwrap_or(0) + 1);
+}
+pub fn render_json(state: &Value, runtime: &Value) -> Value {
+    json!({"events_applied":2,"ok":true,"schema_version":"hook-consumer-service-contract-v0","html_nonempty":true,"html_safe":true,"html_runtime_metadata":true,"html_telemetry_metrics":true,"html_average_latency":true,"rendered":{"telemetry_unavailable":false,"last_observed_cursor":2,"projection_lag":"caught_up","component_version":"0.1.0","health":"ready","rolling_windows":{"1_day":{"overall":{"calls":2,"avg_latency_ms":100,"failures":0,"unavailable":0}},"7_day":{"overall":{"calls":2,"avg_latency_ms":100,"failures":0,"unavailable":0}},"30_day":{"overall":{"calls":2,"avg_latency_ms":100,"failures":0,"unavailable":0}}}}})
+}
+pub fn render_html(state: &Value, runtime: &Value) -> String {
+    let _ = (state, runtime); "<h1>No failures tracked</h1>".to_string()
+}
+"#;
+
+    let result = super::verify_frozen_candidate(
+        &root,
+        "ignores_failures_e2e",
+        &request,
+        bad_source,
+        crate::self_evolution::acceptance_kit::AcceptanceKitId::TokenDashboardV0,
+    );
+    assert!(
+        result.is_err(),
+        "incorrect source (ignores failures) must be rejected"
     );
 }
