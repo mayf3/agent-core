@@ -25,13 +25,18 @@ pub(crate) fn check(candidate: &CandidateSnapshot, ctx: &GateContext) -> GateRes
             format!("candidate binary not found: {}", ctx.built_binary.display()),
         );
     }
+    let extra_env: &[(&str, &str)] = if let Some(time) = smoke.evaluation_time_utc {
+        &[("AGENT_CORE_CONTRACT_EVALUATION_TIME_UTC", time)]
+    } else {
+        &[]
+    };
     let result = super::run_command_sandboxed(
         &ctx.built_binary,
         smoke.args,
         &ctx.work_base,
         Duration::from_secs(30),
         &[smoke.input],
-        &[],
+        extra_env,
     );
     let sandbox = match result {
         Ok(result) => result,
@@ -115,5 +120,33 @@ mod tests {
             &smoke,
             r#"{"ok":true,"result":41}"#
         ));
+        // Calculator smoke has no evaluation time (no contract-test mode)
+        assert!(smoke.evaluation_time_utc.is_none());
+    }
+
+    #[test]
+    fn hook_consumer_smoke_receives_evaluation_time() {
+        let smoke = crate::fixtures::smoke_case("hook-consumer-service-contract-v0").unwrap();
+        assert!(
+            smoke.evaluation_time_utc.is_some(),
+            "hook consumer smoke must carry a frozen evaluation time"
+        );
+        let time = smoke.evaluation_time_utc.unwrap();
+        assert!(
+            time.len() >= 10 && time.as_bytes()[4] == b'-' && time.as_bytes()[7] == b'-',
+            "evaluation_time_utc must be ISO8601 date: {time}"
+        );
+    }
+
+    #[test]
+    fn hook_consumer_smoke_events_applied_dynamic() {
+        // The expected value no longer requires literal "ok":true, only
+        // the structural fields that the generic contract test validates.
+        let smoke = crate::fixtures::smoke_case("hook-consumer-service-contract-v0").unwrap();
+        assert!(
+            smoke.expected.get("ok").is_none(),
+            "expected must not require literal \"ok\":true"
+        );
+        assert!(smoke.expected.get("schema_version").is_some());
     }
 }
