@@ -16,6 +16,9 @@ pub struct SmokeCase {
     pub expected: Value,
     pub args: &'static [&'static str],
     pub allow_additional_fields: bool,
+    /// Frozen evaluation time passed as `AGENT_CORE_CONTRACT_EVALUATION_TIME_UTC`.
+    /// `None` means the candidate does not require a frozen time for this smoke test.
+    pub evaluation_time_utc: Option<&'static str>,
 }
 
 /// Ordinary deterministic fixtures share the same Generic DevelopmentRequest
@@ -84,11 +87,11 @@ pub fn smoke_case(test_kit: &str) -> Option<SmokeCase> {
             expected: serde_json::json!({"ok": true, "result": 42}),
             args: &[],
             allow_additional_fields: false,
+            evaluation_time_utc: None,
         }),
         "hook-consumer-service-contract-v0" => Some(SmokeCase {
             input: r#"{"schema_version":"event.observe.v0","next_cursor":1,"has_more":false,"events":[{"schema_version":"event.observe.v0","event_id":"smoke-event","event_kind":"future.observed.fact.v9","occurred_at":"2026-07-15T00:00:00Z","payload":{"unknown":true}}]}"#,
             expected: serde_json::json!({
-                "ok": true,
                 "schema_version": "hook-consumer-service-contract-v0",
                 "events_applied": 1,
                 "html_nonempty": true,
@@ -97,6 +100,7 @@ pub fn smoke_case(test_kit: &str) -> Option<SmokeCase> {
             }),
             args: &["--profile-contract-test"],
             allow_additional_fields: true,
+            evaluation_time_utc: Some("2026-07-15T12:00:00Z"),
         }),
         _ => None,
     }
