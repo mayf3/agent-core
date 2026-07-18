@@ -441,6 +441,27 @@ pub(super) fn component_prelude(source: &str) -> Result<String, GenerationError>
     Ok("    use serde_json::{json, Map, Value};\n    use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};\n    use crate::support::{ensure_object_path, event_date, html_escape, increment_u64, value_display, value_string, value_u64, within_days};\n".into())
 }
 
+/// The four required public functions every hook-consumer module must expose.
+const REQUIRED_FUNCTIONS: [&str; 4] =
+    ["initial_state", "apply_event", "render_json", "render_html"];
+
+/// Promote the four required functions from private to public visibility.
+///
+/// The model occasionally omits the `pub` keyword on otherwise correct
+/// function definitions. This step fixes that single syntactic omission
+/// so the strict interface validation in `validate_generated_source`
+/// can pass. It never creates, renames, duplicates, or alters signatures
+/// or bodies.
+fn promote_required_functions(syntax: &mut syn::File) {
+    for item in &mut syntax.items {
+        if let syn::Item::Fn(function) = item {
+            if REQUIRED_FUNCTIONS.contains(&function.sig.ident.to_string().as_str()) {
+                function.vis = syn::Visibility::Public(syn::token::Pub::default());
+            }
+        }
+    }
+}
+
 fn normalize_generated_source(source: &str) -> Result<String, GenerationError> {
     let mut syntax = syn::parse_file(source)
         .map_err(|_| GenerationError::new("GENERATOR_MODEL_OUTPUT_INVALID_RUST"))?;
@@ -454,6 +475,7 @@ fn normalize_generated_source(source: &str) -> Result<String, GenerationError> {
     syntax
         .items
         .retain(|item| !matches!(item, syn::Item::Use(_)));
+    promote_required_functions(&mut syntax);
     let normalized = prettyplease::unparse(&syntax);
     validate_generated_source(&normalized)?;
     Ok(normalized)

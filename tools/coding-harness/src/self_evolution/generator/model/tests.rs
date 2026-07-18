@@ -168,6 +168,147 @@ fn initial_generation_accepts_a_safe_third_response() {
     );
 }
 
+fn private_required_source() -> &'static str {
+    r#"fn initial_state() -> Value { json!({}) }
+fn apply_event(state: &mut Value, event: &Value) { state["last"] = event.clone(); }
+fn render_json(state: &Value, runtime: &Value) -> Value { json!({"state":state,"runtime":runtime}) }
+fn render_html(state: &Value, runtime: &Value) -> String { let _ = (state, runtime); "<h1>observer</h1>".to_string() }"#
+}
+
+#[test]
+fn normalizer_promotes_required_functions_to_public() {
+    let normalized = normalize_generated_source(private_required_source()).unwrap();
+    // Must contain `pub fn` for all four required functions
+    assert!(normalized.contains("pub fn initial_state"));
+    assert!(normalized.contains("pub fn apply_event"));
+    assert!(normalized.contains("pub fn render_json"));
+    assert!(normalized.contains("pub fn render_html"));
+    // Must pass the strict interface validation
+    validate_generated_source(&normalized).unwrap();
+}
+
+#[test]
+fn normalizer_does_not_promote_helper_functions() {
+    let src = format!(
+        r#"{}
+fn helper() -> u32 {{ 42 }}"#,
+        private_required_source()
+    );
+    let normalized = normalize_generated_source(&src).unwrap();
+    // Helper stays private
+    assert!(!normalized.contains("pub fn helper"));
+    // Required functions are promoted
+    assert!(normalized.contains("pub fn initial_state"));
+    validate_generated_source(&normalized).unwrap();
+}
+
+#[test]
+fn normalizer_does_not_create_missing_required_function() {
+    let src = r#"pub fn initial_state() -> Value { json!({}) }
+pub fn apply_event(state: &mut Value, event: &Value) { state["last"] = event.clone(); }
+pub fn render_json(state: &Value, runtime: &Value) -> Value { json!({"state":state,"runtime":runtime}) }"#;
+    // Missing render_html — should fail even after normalization
+    assert_eq!(
+        normalize_generated_source(src).unwrap_err().code(),
+        "GENERATOR_MODEL_OUTPUT_INTERFACE_MISMATCH"
+    );
+}
+
+#[test]
+fn normalizer_does_not_hide_wrong_function_name() {
+    let src = r#"pub fn initial_state() -> Value { json!({}) }
+pub fn apply_event(state: &mut Value, event: &Value) { state["last"] = event.clone(); }
+pub fn render_json(state: &Value, runtime: &Value) -> Value { json!({"state":state,"runtime":runtime}) }
+pub fn render_watcher(state: &Value, runtime: &Value) -> String { "<h1>observer</h1>".to_string() }"#;
+    // render_watcher is not render_html — name mismatch, strict validation fails
+    assert_eq!(
+        normalize_generated_source(src).unwrap_err().code(),
+        "GENERATOR_MODEL_OUTPUT_INTERFACE_MISMATCH"
+    );
+}
+
+#[test]
+fn normalizer_rejects_extra_public_function() {
+    let src = r#"pub fn initial_state() -> Value { json!({}) }
+pub fn apply_event(state: &mut Value, event: &Value) { state["last"] = event.clone(); }
+pub fn render_json(state: &Value, runtime: &Value) -> Value { json!({"state":state,"runtime":runtime}) }
+pub fn render_html(state: &Value, runtime: &Value) -> String { "<h1>observer</h1>".to_string() }
+pub fn extra() -> String { "extra".to_string() }"#;
+    // Extra public function should fail strict validation
+    assert_eq!(
+        normalize_generated_source(src).unwrap_err().code(),
+        "GENERATOR_MODEL_OUTPUT_INTERFACE_MISMATCH"
+    );
+}
+
+#[test]
+fn normalizer_preserves_function_bodies() {
+    let normalized = normalize_generated_source(private_required_source()).unwrap();
+    // Body content preserved after normalization
+    assert!(normalized.contains("json!({})"));
+    assert!(normalized.contains("state[\"last\"] = event.clone()"));
+    assert!(normalized.contains("<h1>observer</h1>"));
+}
+
+#[test]
+fn normalized_realistic_model_output_passes_interface_validation() {
+    // This is structurally equivalent to the real deepseek-v4-flash model output
+    // from the canary run — all four required functions exist but lack `pub`.
+    let realistic_output = r#"fn initial_state() -> Value {
+    json!({"failures": {"list": []}})
+}
+
+fn apply_event(state: &mut Value, event: &Value) {
+    let kind = match value_string(event, &["event_kind"]) {
+        Some(k) => k,
+        None => return,
+    };
+    if !kind.contains("failure") && kind != "failure" {
+        return;
+    }
+    let timestamp = value_display(event, &["payload", "timestamp"])
+        .unwrap_or_else(|| "unknown".to_string());
+    let error_msg = value_display(event, &["payload", "error"])
+        .unwrap_or_else(|| "no error".to_string());
+    let failures_map = ensure_object_path(state, &["failures"]);
+    let list_val = failures_map.entry("list").or_insert(Value::Array(Vec::new()));
+    if let Value::Array(ref mut list) = list_val {
+        const MAX: usize = 100;
+        while list.len() >= MAX { list.remove(0); }
+        list.push(json!({"time": timestamp, "type": kind, "error": error_msg}));
+    }
+}
+
+fn render_json(state: &Value, _runtime: &Value) -> Value {
+    match state.get("failures").and_then(|v| v.get("list")) {
+        Some(list) => list.clone(),
+        None => json!([]),
+    }
+}
+
+fn render_html(state: &Value, _runtime: &Value) -> String {
+    let failures = state.get("failures").and_then(|v| v.get("list"))
+        .and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    if failures.is_empty() {
+        return "<div class=\"failures\"><p>No recent failures.</p></div>".to_string();
+    }
+    let rows: String = failures.iter().map(|f| {
+        let time = f.get("time").and_then(|v| v.as_str()).unwrap_or("unknown");
+        let kind = f.get("type").and_then(|v| v.as_str()).unwrap_or("unknown");
+        let error = f.get("error").and_then(|v| v.as_str()).unwrap_or("no error");
+        format!("<tr><td>{}</td><td>{}</td><td>{}</td></tr>",
+            html_escape(time), html_escape(kind), html_escape(error))
+    }).collect();
+    format!("<table class=\"failures\"><thead><tr><th>Time</th><th>Type</th><th>Error</th></tr></thead><tbody>{}</tbody></table>", rows)
+}"#;
+    let normalized = normalize_generated_source(realistic_output).unwrap();
+    assert!(normalized.contains("pub fn initial_state"));
+    assert!(normalized.contains("pub fn apply_event"));
+    assert!(normalized.contains("pub fn render_json"));
+    assert!(normalized.contains("pub fn render_html"));
+    validate_generated_source(&normalized).unwrap();
+}
+
 #[test]
 fn model_response_is_bounded_to_the_single_module() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();

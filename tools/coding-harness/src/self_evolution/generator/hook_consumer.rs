@@ -195,11 +195,11 @@ pub(super) fn verify_frozen_candidate(
         for case in kit.private_verification_cases() {
             let case_stdout = run_binary_with_input(&binary, case.input, case.evaluation_time_utc)
                 .map_err(|e| {
-                CompileProbeError::Candidate(format!(
-                    "PRIVATE_CASE_FAILURE case={}\n{}",
-                    case.case_id, e
-                ))
-            })?;
+                    CompileProbeError::Candidate(format!(
+                        "PRIVATE_CASE_FAILURE case={}\n{}",
+                        case.case_id, e
+                    ))
+                })?;
             kit.verify(request, source, case.input, &case_stdout)
                 .map_err(|diagnostics| {
                     CompileProbeError::Candidate(format!(

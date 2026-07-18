@@ -570,7 +570,13 @@ fn known_good_token_candidate_passes_full_production_verification() {
     let request = request("token-dashboard");
     let kit = crate::self_evolution::acceptance_kit::AcceptanceKitId::TokenDashboardV0;
 
-    let result = super::verify_frozen_candidate(&root, "known_good_e2e", &request, KNOWN_GOOD_TOKEN_SOURCE, kit);
+    let result = super::verify_frozen_candidate(
+        &root,
+        "known_good_e2e",
+        &request,
+        KNOWN_GOOD_TOKEN_SOURCE,
+        kit,
+    );
     assert!(
         result.is_ok(),
         "known-good token candidate must pass full verification: {:?}",
@@ -620,8 +626,14 @@ pub fn render_html(state: &Value, runtime: &Value) -> String {
 /// The evaluation time env var key is defined consistently.
 #[test]
 fn evaluation_time_env_key_is_defined() {
-    assert_eq!(super::EVALUATION_TIME_ENV_KEY, "AGENT_CORE_CONTRACT_EVALUATION_TIME_UTC");
-    assert_eq!(super::GENERIC_PROBE_EVALUATION_TIME_UTC, "2026-07-15T12:00:00Z");
+    assert_eq!(
+        super::EVALUATION_TIME_ENV_KEY,
+        "AGENT_CORE_CONTRACT_EVALUATION_TIME_UTC"
+    );
+    assert_eq!(
+        super::GENERIC_PROBE_EVALUATION_TIME_UTC,
+        "2026-07-15T12:00:00Z"
+    );
 }
 
 /// Generic probe uses an explicit frozen evaluation time, not system clock.
@@ -630,24 +642,56 @@ fn generic_probe_uses_explicit_frozen_time() {
     let time = super::GENERIC_PROBE_EVALUATION_TIME_UTC;
     assert!(!time.is_empty(), "generic probe time must not be empty");
     // Must be valid RFC 3339 format
-    assert!(time.len() >= 10, "generic probe time must be at least YYYY-MM-DD: {time}");
-    assert_eq!(&time.as_bytes()[4..5], b"-", "expected - at position 4: {time}");
-    assert_eq!(&time.as_bytes()[7..8], b"-", "expected - at position 7: {time}");
+    assert!(
+        time.len() >= 10,
+        "generic probe time must be at least YYYY-MM-DD: {time}"
+    );
+    assert_eq!(
+        &time.as_bytes()[4..5],
+        b"-",
+        "expected - at position 4: {time}"
+    );
+    assert_eq!(
+        &time.as_bytes()[7..8],
+        b"-",
+        "expected - at position 7: {time}"
+    );
 }
 
 /// Private verification cases each have an explicit frozen evaluation time.
 #[test]
 fn private_cases_have_explicit_evaluation_time() {
     use crate::self_evolution::acceptance_kit::AcceptanceKitId;
-    for kit in &[AcceptanceKitId::TokenDashboardV0, AcceptanceKitId::FailureEventViewerV0] {
+    for kit in &[
+        AcceptanceKitId::TokenDashboardV0,
+        AcceptanceKitId::FailureEventViewerV0,
+    ] {
         for case in kit.private_verification_cases() {
-            assert!(!case.evaluation_time_utc.is_empty(),
-                "case '{}' in {:?} has empty evaluation_time_utc", case.case_id, kit);
+            assert!(
+                !case.evaluation_time_utc.is_empty(),
+                "case '{}' in {:?} has empty evaluation_time_utc",
+                case.case_id,
+                kit
+            );
             // Must be valid RFC 3339 format
             let time = case.evaluation_time_utc;
-            assert!(time.len() >= 10, "case '{}' time too short: {time}", case.case_id);
-            assert_eq!(&time.as_bytes()[4..5], b"-", "case '{}' invalid time format: {time}", case.case_id);
-            assert_eq!(&time.as_bytes()[7..8], b"-", "case '{}' invalid time format: {time}", case.case_id);
+            assert!(
+                time.len() >= 10,
+                "case '{}' time too short: {time}",
+                case.case_id
+            );
+            assert_eq!(
+                &time.as_bytes()[4..5],
+                b"-",
+                "case '{}' invalid time format: {time}",
+                case.case_id
+            );
+            assert_eq!(
+                &time.as_bytes()[7..8],
+                b"-",
+                "case '{}' invalid time format: {time}",
+                case.case_id
+            );
         }
     }
 }
@@ -685,8 +729,17 @@ fn changing_evaluation_time_changes_rolling_window_result() {
     let kit = crate::self_evolution::acceptance_kit::AcceptanceKitId::TokenDashboardV0;
 
     // Build once and run with all private cases (each with their own time)
-    assert!(super::verify_frozen_candidate(&root.join("build"), "canary", &request, KNOWN_GOOD_TOKEN_SOURCE, kit).is_ok(),
-        "known-good source must compile and pass with multi-time verification");
+    assert!(
+        super::verify_frozen_candidate(
+            &root.join("build"),
+            "canary",
+            &request,
+            KNOWN_GOOD_TOKEN_SOURCE,
+            kit
+        )
+        .is_ok(),
+        "known-good source must compile and pass with multi-time verification"
+    );
 }
 
 /// Candidate binary and reference oracle use the same evaluation time.
@@ -695,14 +748,21 @@ fn changing_evaluation_time_changes_rolling_window_result() {
 #[test]
 fn candidate_and_reference_oracle_use_same_evaluation_time() {
     use crate::self_evolution::acceptance_kit::AcceptanceKitId;
-    for kit in &[AcceptanceKitId::TokenDashboardV0, AcceptanceKitId::FailureEventViewerV0] {
+    for kit in &[
+        AcceptanceKitId::TokenDashboardV0,
+        AcceptanceKitId::FailureEventViewerV0,
+    ] {
         for case in kit.private_verification_cases() {
             // The oracle (compute_expected_from_input) doesn't need the
             // evaluation time for current metrics, but the candidate
             // binary receives it via run_binary_with_input.
             // Verify the flow: case time → run_binary_with_input → binary
             let time = case.evaluation_time_utc;
-            assert!(!time.is_empty(), "time must not be empty for {}", case.case_id);
+            assert!(
+                !time.is_empty(),
+                "time must not be empty for {}",
+                case.case_id
+            );
 
             // Verify it flows through the constant
             let _env_value = super::EVALUATION_TIME_ENV_KEY;
@@ -722,7 +782,10 @@ fn same_binary_multiple_times_contract_preserved() {
     // This is a structural test that the API supports different times.
     use crate::self_evolution::acceptance_kit::AcceptanceKitId;
     let cases = AcceptanceKitId::TokenDashboardV0.private_verification_cases();
-    assert!(cases.len() >= 2, "need at least 2 cases for multi-time test");
+    assert!(
+        cases.len() >= 2,
+        "need at least 2 cases for multi-time test"
+    );
     // Each case has its own evaluation_time_utc
     for case in cases {
         let _ = case.evaluation_time_utc; // consumed by run_binary_with_input
