@@ -224,6 +224,7 @@ fn config() -> crate::config::KernelConfig {
         feishu_coding_owner_id: None,
         tool_loop_timeout_ms: 300_000,
         context_prepare_hook: crate::hook::HookConfig::default(),
+        external_orchestration: None,
     }
 }
 

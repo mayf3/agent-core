@@ -96,6 +96,17 @@ pub struct KernelConfig {
     pub tool_loop_timeout_ms: u64,
     /// context.prepare.v0 hook config. Default disabled. Env: AGENT_CORE_CONTEXT_PREPARE_HOOK_*.
     pub context_prepare_hook: HookConfig,
+    /// External Orchestration Seam V0 binding. When `Some`, the Kernel can
+    /// delegate a raw input to an external Development Controller over a
+    /// loopback HTTP binding and record the returned receipt. This is a
+    /// generic governance binding — the Kernel does NOT interpret the input
+    /// or the result, does not know any product name, and the recorded
+    /// `ReceiptReceived` is a call receipt only (no Proposal / Deployment /
+    /// Registry effect). Default `None` (seam disabled). Configured via
+    /// `AGENT_CORE_EXTERNAL_ORCHESTRATION_URL` /
+    /// `AGENT_CORE_EXTERNAL_ORCHESTRATION_TOKEN`. See
+    /// docs/decisions/external-orchestration-seam-v0.md.
+    pub external_orchestration: Option<crate::orchestration::OrchestrationBinding>,
 }
 
 impl KernelConfig {
@@ -192,6 +203,7 @@ impl KernelConfig {
                 timeout_ms: env_u64("AGENT_CORE_CONTEXT_PREPARE_HOOK_TIMEOUT_MS", 5_000),
                 ..Default::default()
             },
+            external_orchestration: crate::orchestration::OrchestrationBinding::from_env(),
         }
     }
 }

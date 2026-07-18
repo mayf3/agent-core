@@ -11,6 +11,7 @@ pub mod hcr;
 pub mod hook;
 pub mod journal;
 pub mod llm;
+pub mod orchestration;
 pub mod registry;
 pub mod runtime;
 pub mod server;

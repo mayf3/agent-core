@@ -3,6 +3,20 @@ name = "agent-core-kernel"
 version = "0.1.0"
 edition = "2021"
 
+[workspace]
+# Minimal workspace hosting the External Orchestration Seam V0.
+# The root kernel package stays in place (src/ is NOT moved). Only the
+# protocol crate and the development controller are workspace members;
+# the standalone tools under tools/ remain built independently so this
+# change forces no workspace-wide cleanup. See
+# docs/decisions/external-orchestration-seam-v0.md.
+members = [
+    ".",
+    "crates/agent-core-protocol",
+    "tools/development-controller",
+]
+resolver = "2"
+
 [features]
 # Exposes the `_for_test` helpers on `JournalStore`. Production builds must
 # never enable this; it is pulled in automatically by `cargo test` via the
@@ -11,6 +25,7 @@ default = []
 test-helpers = []
 
 [dependencies]
+agent-core-protocol = { path = "crates/agent-core-protocol" }
 anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
 ctrlc = { version = "3.5.2", features = ["termination"] }
