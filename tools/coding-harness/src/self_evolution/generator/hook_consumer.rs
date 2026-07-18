@@ -38,19 +38,34 @@ const COMPILE_PROBE_INPUT: &str = r#"{"schema_version":"event.observe.v0","next_
 /// acceptance repair). This is a single unified budget.
 const TOTAL_MODEL_CALL_BUDGET: usize = 6;
 
-/// Run the compiled binary with the given input and return its stdout.
+/// Frozen evaluation time for the generic profile probe.
+/// This matches the date of events in COMPILE_PROBE_INPUT.
+const GENERIC_PROBE_EVALUATION_TIME_UTC: &str = "2026-07-15T12:00:00Z";
+
+/// The environment variable key for passing the evaluation time
+/// to the candidate binary during contract test mode.
+const EVALUATION_TIME_ENV_KEY: &str = "AGENT_CORE_CONTRACT_EVALUATION_TIME_UTC";
+
+/// Run the compiled binary with the given input and evaluation time,
+/// and return its stdout.
 ///
-/// Reuses the sandbox execution infrastructure from compile_probe.
-/// The binary must be a previously compiled `generated-hook-consumer`
-/// binary built with `cargo build --locked`.
-fn run_binary_with_input(binary: &Path, input: &str) -> Result<String, String> {
+/// The `evaluation_time_utc` is passed as an environment variable so the
+/// candidate binary's contract test mode uses it for `today_utc` and
+/// `last_observed_at` instead of the system clock or a hardcoded date.
+/// This ensures the candidate binary and the reference oracle use the
+/// same frozen evaluation time.
+fn run_binary_with_input(
+    binary: &Path,
+    input: &str,
+    evaluation_time_utc: &str,
+) -> Result<String, String> {
     let result = crate::hcr::gates::run_command_sandboxed(
         binary,
         &["--profile-contract-test"],
         binary.parent().unwrap_or(Path::new("/tmp")),
         std::time::Duration::from_secs(15),
         &[input],
-        &[],
+        &[(EVALUATION_TIME_ENV_KEY, evaluation_time_utc)],
     )
     .map_err(|_| "PRIVATE_CASE_INFRASTRUCTURE_FAILURE".to_string())?;
     if result.child_cleanup.as_str() != "confirmed" {
@@ -148,14 +163,16 @@ pub(super) fn verify_frozen_candidate(
             )));
         }
 
-        // 3. Run generic profile contract probe
+        // 3. Run generic profile contract probe with frozen evaluation time.
+        //    The time is passed as an env var so the binary's contract_test_mode
+        //    uses it deterministically (not the system clock).
         let generic = crate::hcr::gates::run_command_sandboxed(
             &binary,
             &["--profile-contract-test"],
             &probe,
             std::time::Duration::from_secs(15),
             &[COMPILE_PROBE_INPUT],
-            &[],
+            &[(EVALUATION_TIME_ENV_KEY, GENERIC_PROBE_EVALUATION_TIME_UTC)],
         )
         .map_err(|_| CompileProbeError::Infrastructure)?;
         if generic.child_cleanup.as_str() != "confirmed" {
@@ -171,9 +188,13 @@ pub(super) fn verify_frozen_candidate(
         validate_profile_contract(COMPILE_PROBE_INPUT, &generic.stdout)
             .map_err(CompileProbeError::Candidate)?;
 
-        // 4. Run each kit private verification case on the SAME binary
+        // 4. Run each kit private verification case on the SAME binary.
+        //    Each case provides its own frozen evaluation time so that
+        //    rolling-window results are deterministic and date-independent.
+        //    The candidate binary and the reference oracle share the same time.
         for case in kit.private_verification_cases() {
-            let case_stdout = run_binary_with_input(&binary, case.input).map_err(|e| {
+            let case_stdout = run_binary_with_input(&binary, case.input, case.evaluation_time_utc)
+                .map_err(|e| {
                 CompileProbeError::Candidate(format!(
                     "PRIVATE_CASE_FAILURE case={}\n{}",
                     case.case_id, e
@@ -317,6 +338,7 @@ pub(super) fn generate(
     result
 }
 
+#[derive(Debug)]
 enum CompileProbeError {
     Candidate(String),
     Infrastructure,
