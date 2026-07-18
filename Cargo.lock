@@ -13,6 +13,7 @@ name = "agent-core-kernel"
 version = "0.1.0"
 dependencies = [
  "agent-core-kernel",
+ "agent-core-protocol",
  "anyhow",
  "chrono",
  "ctrlc",
@@ -25,6 +26,16 @@ dependencies = [
  "thiserror",
  "ureq",
  "uuid",
+]
+
+[[package]]
+name = "agent-core-protocol"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]
@@ -219,6 +230,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c"
 dependencies = [
  "powerfmt",
+]
+
+[[package]]
+name = "development-controller"
+version = "0.1.0"
+dependencies = [
+ "agent-core-protocol",
+ "anyhow",
+ "ctrlc",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

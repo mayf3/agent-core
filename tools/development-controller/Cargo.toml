@@ -1,0 +1,37 @@
+[package]
+name = "development-controller"
+version = "0.1.0"
+edition = "2021"
+
+description = """
+External Development Controller for the Agent Core External Orchestration Seam V0.
+
+Depends ONLY on `agent-core-protocol` — never on `agent-core-kernel`. This
+establishes a real process and dependency boundary: the Kernel cannot reach
+into the Controller's internals and vice versa.
+
+Seam V0 scope: a single controlled endpoint, POST /v1/orchestrations, that
+accepts an ExternalOrchestrationIntent and returns a confirmation
+ExternalOrchestrationResult. No Chinese NL parsing, no failure-viewer, no
+event.observe.v0, no Coding Harness call, no Acceptance, no Repair, no
+Manifest, no Proposal.
+"""
+
+[dependencies]
+agent-core-protocol = { path = "../../crates/agent-core-protocol" }
+anyhow = "1"
+ctrlc = { version = "3.5.2", features = ["termination"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[lib]
+name = "development_controller"
+path = "src/lib.rs"
+
+[[bin]]
+name = "development-controller"
+path = "src/main.rs"
+
+[dev-dependencies]
+# NOTE: deliberately NO agent-core-kernel dependency, even for tests. The
+# independence guard (scripts/check-controller-no-kernel.sh) enforces this.
