@@ -9,17 +9,13 @@ use sha2::{Digest, Sha256};
 use std::io::Write;
 use std::path::Path;
 
-const CARGO_TOML: &str =
-    include_str!("../../templates/hook-consumer-service/Cargo.toml.template");
-const CARGO_LOCK: &str =
-    include_str!("../../templates/hook-consumer-service/Cargo.lock.template");
-const MAIN_RS: &str =
-    include_str!("../../templates/hook-consumer-service/main.rs.template");
-const SUPPORT_RS: &str =
-    include_str!("../../templates/hook-consumer-service/support.rs.template");
+const CARGO_TOML: &str = include_str!("../../templates/hook-consumer-service/Cargo.toml.template");
+const CARGO_LOCK: &str = include_str!("../../templates/hook-consumer-service/Cargo.lock.template");
+const MAIN_RS: &str = include_str!("../../templates/hook-consumer-service/main.rs.template");
+const SUPPORT_RS: &str = include_str!("../../templates/hook-consumer-service/support.rs.template");
 
 /// A known-good component module that satisfies the profile-contract test.
-const COMPONENT_RS: &str = r#"use serde_json::{json, Value};
+pub(crate) const COMPONENT_RS: &str = r#"use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
 pub fn initial_state() -> Value {
@@ -276,7 +272,12 @@ pub fn generate(
     if !supports(request) {
         return Err(std::io::Error::other("hook_consumer fixture mismatch"));
     }
-    generate_locked(artifact_root, &request.idempotency_key, &request.request_id, &request.name)
+    generate_locked(
+        artifact_root,
+        &request.idempotency_key,
+        &request.request_id,
+        &request.name,
+    )
 }
 
 pub(super) fn supports(request: &DevelopmentRequest) -> bool {
@@ -326,10 +327,7 @@ fn materialize(
     request_id: &str,
     component_name: &str,
 ) -> Result<Value, std::io::Error> {
-    let temp = base.join(format!(
-        ".{candidate_id}.{}.tmp",
-        std::process::id()
-    ));
+    let temp = base.join(format!(".{candidate_id}.{}.tmp", std::process::id()));
     let candidate = temp.join("candidate");
     let _ = std::fs::remove_dir_all(&temp);
     std::fs::create_dir_all(candidate.join("src"))?;
@@ -346,10 +344,14 @@ fn materialize(
     std::fs::write(candidate.join("src/component.rs"), COMPONENT_RS)?;
 
     // Write manifest
-    let module_digest = format!("sha256:{}", hex::encode(Sha256::digest(COMPONENT_RS.as_bytes())));
+    let module_digest = format!(
+        "sha256:{}",
+        hex::encode(Sha256::digest(COMPONENT_RS.as_bytes()))
+    );
     // Placeholder artifact digest — the real digest is computed during
     // the Artifact gate after the binary is built.
-    let placeholder_digest = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+    let placeholder_digest =
+        "sha256:0000000000000000000000000000000000000000000000000000000000000000";
     let manifest = serde_json::json!({
         "schema_version": "component-artifact-v1",
         "component_id": component_name,
@@ -387,8 +389,14 @@ fn materialize(
         "name": component_name,
         "requested_permissions": ["journal.observe"]
     });
-    std::fs::write(candidate.join("manifest.json"), serde_json::to_vec_pretty(&manifest)?)?;
-    std::fs::write(candidate.join("specification.json"), serde_json::to_vec_pretty(&specification)?)?;
+    std::fs::write(
+        candidate.join("manifest.json"),
+        serde_json::to_vec_pretty(&manifest)?,
+    )?;
+    std::fs::write(
+        candidate.join("specification.json"),
+        serde_json::to_vec_pretty(&specification)?,
+    )?;
 
     // Sync and rename
     sync_dir(&candidate.join("src"))?;
@@ -397,7 +405,11 @@ fn materialize(
     std::fs::rename(&temp, base.join(candidate_id))?;
     sync_dir(base)?;
 
-    load_existing(request_id, component_name, &base.join(candidate_id).join("candidate"))
+    load_existing(
+        request_id,
+        component_name,
+        &base.join(candidate_id).join("candidate"),
+    )
 }
 
 fn load_existing(
@@ -411,12 +423,16 @@ fn load_existing(
         .pointer("/generation/development_request_id")
         .and_then(Value::as_str)
         != Some(request_id)
-        || component_manifest.get("component_id").and_then(Value::as_str) != Some(component_name)
+        || component_manifest
+            .get("component_id")
+            .and_then(Value::as_str)
+            != Some(component_name)
     {
         return Err(std::io::Error::other("CANDIDATE_CACHE_IDENTITY_MISMATCH"));
     }
     let source = std::fs::read_to_string(candidate.join("src/component.rs"))?;
-    let expected_source_digest = format!("sha256:{}", hex::encode(Sha256::digest(source.as_bytes())));
+    let expected_source_digest =
+        format!("sha256:{}", hex::encode(Sha256::digest(source.as_bytes())));
     if component_manifest
         .pointer("/generation/module_digest")
         .and_then(Value::as_str)
@@ -424,8 +440,7 @@ fn load_existing(
     {
         return Err(std::io::Error::other("CANDIDATE_CACHE_INVALID"));
     }
-    let digest = crate::hcr::candidate::compute_digest(candidate)
-        .map_err(std::io::Error::other)?;
+    let digest = crate::hcr::candidate::compute_digest(candidate).map_err(std::io::Error::other)?;
     // The candidate directory is .../<candidate_id>/candidate/. Derive the
     // candidate_id from the parent directory name.
     let candidate_dir = candidate.parent().unwrap_or(candidate);
@@ -453,10 +468,8 @@ mod tests {
     use agent_core_kernel::domain::DevelopmentRequestDraft;
 
     fn hook_consumer_request() -> DevelopmentRequest {
-        let mut draft = DevelopmentRequestDraft::new(
-            TargetKind::HookConsumerService,
-            "token-dashboard".into(),
-        );
+        let mut draft =
+            DevelopmentRequestDraft::new(TargetKind::HookConsumerService, "token-dashboard".into());
         draft.requirements = vec!["token usage dashboard via event.observe.v0".into()];
         draft.required_contracts = vec!["event.observe.v0".into()];
         draft.requested_permissions = vec!["journal.observe".into()];
@@ -478,7 +491,9 @@ mod tests {
             label,
             std::process::id(),
             std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ))
     }
 
@@ -491,7 +506,13 @@ mod tests {
         assert_eq!(m["test_kit"], "hook-consumer-service-contract-v0");
         assert_eq!(m["kind"], "hook_consumer_service");
         let p = root.join(result["candidate_ref"].as_str().unwrap());
-        for f in &["Cargo.toml", "src/main.rs", "src/support.rs", "src/component.rs", "manifest.json"] {
+        for f in &[
+            "Cargo.toml",
+            "src/main.rs",
+            "src/support.rs",
+            "src/component.rs",
+            "manifest.json",
+        ] {
             assert!(p.join(f).exists(), "missing {f}");
         }
         let _ = std::fs::remove_dir_all(root);
@@ -527,7 +548,6 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(root);
     }
-
 
     /// Different development_message_id → different request_id →
     /// different specification.json content → different digest.

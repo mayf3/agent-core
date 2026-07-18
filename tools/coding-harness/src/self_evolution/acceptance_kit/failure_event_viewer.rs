@@ -6,8 +6,27 @@
 
 use super::constraint_diagnostic;
 use super::shared_verifier_engine::validate_events_applied;
+use crate::self_evolution::acceptance_kit::PrivateVerificationCase;
 use agent_core_kernel::domain::DevelopmentRequest;
 use serde_json::{json, Value};
+
+/// Private verification cases for Failure Event Viewer.
+///
+/// Each case contains only `model.invocation.failed.v0` events (no token
+/// business fields). Evaluation time is frozen for deterministic results.
+pub(super) fn private_verification_cases() -> &'static [PrivateVerificationCase] {
+    &[
+        PrivateVerificationCase {
+            case_id: "fev-case-A",
+            evaluation_time_utc: "2026-07-18T00:00:00Z",
+            input: r#"{"schema_version":"event.observe.v0","next_cursor":3,"has_more":false,"events":[
+                {"event_id":"fail-1","event_kind":"model.invocation.failed.v0","occurred_at":"2026-07-15T10:00:00Z","run_id":"batch-run","payload":{"model":"gpt-4","provider":"openai","profile":"default","error_category":"rate_limited","latency_ms":5000}},
+                {"event_id":"fail-2","event_kind":"model.invocation.failed.v0","occurred_at":"2026-07-16T14:30:00Z","run_id":"batch-run","payload":{"model":"claude-3","provider":"anthropic","profile":"production","error_category":"timeout","latency_ms":120000}},
+                {"event_id":"fail-3","event_kind":"model.invocation.failed.v0","occurred_at":"2026-07-17T09:00:00Z","run_id":"ad-hoc","payload":{"model":"llama-3","provider":"meta","profile":"eval","error_category":"dependency_unavailable","latency_ms":30000}}
+            ]}"#,
+        },
+    ]
+}
 
 /// Public specification for the Failure Event Viewer kit.
 ///

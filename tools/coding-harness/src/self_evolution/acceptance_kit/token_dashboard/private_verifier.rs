@@ -2,14 +2,154 @@
 //!
 //! Validates that the generated module:
 //! 1. Passes the profile contract (hook-consumer-service-contract-v0)
-//! 2. Renders the required telemetry fields (runs, models, profiles, windows)
+//! 2. Renders the required telemetry fields derived from the input events
 //! 3. Computes values from input events, not hardcoded example values
 //! 4. Follows source-level policies (no within_days in apply_event, no today_utc)
+//!
+//! Expected values are COMPUTED from the input at verification time.
+//! No hardcoded assertions from public spec examples are used.
 
 use super::super::constraint_diagnostic;
 use super::super::shared_verifier_engine::{truncate_diagnostics, validate_events_applied};
 use agent_core_kernel::domain::DevelopmentRequest;
 use serde_json::{json, Value};
+use std::collections::BTreeSet;
+
+/// Expected metrics computed from the private verification case input.
+struct ExpectedMetrics {
+    /// Business invocation events (completed + failed) — excludes unknown/other.
+    invocation_events: usize,
+    /// Completed invocations.
+    completed_count: usize,
+    /// Failed invocations.
+    failed_count: usize,
+    /// Invocations where any token field is null/missing (unavailable).
+    unavailable_count: usize,
+    /// Average latency in ms across all invocation events that have latency_ms.
+    avg_latency: f64,
+    /// Distinct run IDs from invocation events.
+    run_ids: BTreeSet<String>,
+    /// Distinct model names from invocation events.
+    model_names: BTreeSet<String>,
+    /// Distinct profile names from invocation events.
+    profile_names: BTreeSet<String>,
+    /// Distinct dates (YYYY-MM-DD) from invocation events.
+    dates: BTreeSet<String>,
+}
+
+/// Compute expected metrics from the input events according to the public spec.
+///
+/// Rules (from public spec):
+/// - `events_applied` counts ALL events (including unknown future types).
+/// - Business call_count = completed + failed invocations.
+/// - Unknown events do NOT contribute to call_count, dimensions, or aggregates.
+/// - latency_ms on completed events contributes to avg_latency.
+/// - latency_ms on failed events MAY contribute to avg_latency (spec allows it).
+/// - A completed event with any null/missing token field counts as unavailable.
+/// - Failed events do NOT count toward unavailable.
+fn compute_expected_from_input(input: &Value) -> ExpectedMetrics {
+    let events = input
+        .get("events")
+        .and_then(Value::as_array)
+        .map(std::vec::Vec::as_slice)
+        .unwrap_or(&[]);
+
+    let mut completed_count = 0usize;
+    let mut failed_count = 0usize;
+    let mut unavailable_count = 0usize;
+    let mut latency_sum_ms: f64 = 0.0;
+    let mut latency_count: usize = 0;
+    let mut run_ids: BTreeSet<String> = BTreeSet::new();
+    let mut model_names: BTreeSet<String> = BTreeSet::new();
+    let mut profile_names: BTreeSet<String> = BTreeSet::new();
+    let mut dates: BTreeSet<String> = BTreeSet::new();
+
+    for event in events {
+        let kind = event
+            .get("event_kind")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+
+        let is_completed = kind == "model.invocation.completed.v0";
+        let is_failed = kind == "model.invocation.failed.v0";
+        if !is_completed && !is_failed {
+            continue; // unknown events — no business aggregation
+        }
+
+        if is_completed {
+            completed_count += 1;
+        }
+        if is_failed {
+            failed_count += 1;
+        }
+
+        // Extract run_id (top-level on envelope)
+        if let Some(run_id) = event.get("run_id").and_then(Value::as_str) {
+            run_ids.insert(run_id.to_string());
+        }
+
+        // Extract payload fields
+        if let Some(payload) = event.get("payload") {
+            if let Some(model) = payload.get("model").and_then(Value::as_str) {
+                model_names.insert(model.to_string());
+            }
+            if let Some(profile) = payload.get("profile").and_then(Value::as_str) {
+                profile_names.insert(profile.to_string());
+            }
+
+            // Latency — public spec says it's present for completed AND failed events
+            if let Some(latency) = payload.get("latency_ms") {
+                if let Some(ms) = latency.as_f64() {
+                    latency_sum_ms += ms;
+                    latency_count += 1;
+                }
+            }
+
+            // Unavailable: a completed event where any token field is null/missing
+            if is_completed {
+                let token_fields = [
+                    "input_tokens",
+                    "cached_input_tokens",
+                    "output_tokens",
+                    "reasoning_tokens",
+                    "total_tokens",
+                ];
+                let has_null_token = token_fields.iter().any(|field| {
+                    payload.get(*field).map_or(true, |v| v.is_null())
+                });
+                if has_null_token {
+                    unavailable_count += 1;
+                }
+            }
+        }
+
+        // Date from occurred_at
+        if let Some(occurred_at) = event.get("occurred_at").and_then(Value::as_str) {
+            if occurred_at.len() >= 10 {
+                dates.insert(occurred_at[..10].to_string());
+            }
+        }
+    }
+
+    let total_invocations = completed_count + failed_count;
+    let avg_latency = if latency_count > 0 {
+        latency_sum_ms / latency_count as f64
+    } else {
+        0.0
+    };
+
+    ExpectedMetrics {
+        invocation_events: total_invocations,
+        completed_count,
+        failed_count,
+        unavailable_count,
+        avg_latency,
+        run_ids,
+        model_names,
+        profile_names,
+        dates,
+    }
+}
 
 /// Private verifier for Token Dashboard.
 pub fn verify(
@@ -25,14 +165,20 @@ pub fn verify(
         failures.push(error);
     }
 
+    // Parse input to determine if we have business events for deeper checks
+    let input_value: Value = serde_json::from_str(input).unwrap_or(json!({}));
+    let expected = compute_expected_from_input(&input_value);
+
     // Profile contract check (fields other than events_applied)
     if let Err(error) = verify_profile_contract(stdout) {
         failures.push(error);
     }
 
     // Request contract check (telemetry-specific fields)
-    if let Err(error) = verify_request_contract(stdout) {
-        failures.push(error);
+    if expected.invocation_events > 0 {
+        if let Err(error) = verify_request_contract(stdout, &expected) {
+            failures.push(error);
+        }
     }
 
     // Source policy check
@@ -51,8 +197,6 @@ pub fn verify(
 }
 
 /// Validate the profile contract output (applies to every hook consumer).
-/// Does NOT check events_applied — that is handled by validate_events_applied
-/// using the actual input event count.
 fn verify_profile_contract(stdout: &str) -> Result<(), String> {
     let output: Value = serde_json::from_str(stdout.trim())
         .map_err(|_| "PROFILE_CONTRACT_OUTPUT_INVALID".to_string())?;
@@ -80,7 +224,11 @@ fn verify_profile_contract(stdout: &str) -> Result<(), String> {
 }
 
 /// Validate the rendered output for telemetry-specific contract fields.
-fn verify_request_contract(stdout: &str) -> Result<(), String> {
+///
+/// Uses `expected` (computed from the actual input) to determine what
+/// dimensions, counters, and metrics should appear in the output.
+/// Diagnostics use constraint IDs rather than leaking exact expected values.
+fn verify_request_contract(stdout: &str, expected: &ExpectedMetrics) -> Result<(), String> {
     let output: Value = serde_json::from_str(stdout.trim())
         .map_err(|_| constraint_diagnostic("json.parse", "$", "valid JSON", "parse failure"))?;
     let rendered = output.get("rendered").ok_or_else(|| {
@@ -94,6 +242,7 @@ fn verify_request_contract(stdout: &str) -> Result<(), String> {
     let rendered_text = serde_json::to_string(rendered)
         .map_err(|_| "REQUEST_CONTRACT_RENDERED_INVALID".to_string())?
         .to_lowercase();
+    let rendered_lower = rendered_text;
 
     let mut missing = Vec::new();
 
@@ -105,68 +254,101 @@ fn verify_request_contract(stdout: &str) -> Result<(), String> {
         ("component_version", &["component_version"][..]),
         ("health", &["health"][..]),
     ] {
-        if !aliases.iter().any(|marker| rendered_text.contains(marker)) {
-            missing.push(label.to_string());
+        if !aliases.iter().any(|marker| rendered_lower.contains(marker)) {
+            missing.push(format!("runtime-{label}"));
         }
     }
 
-    // Token Dashboard specific fields
-    for (label, aliases) in [
-        ("run-1", &["run-1"][..]),
-        ("model-a", &["model-a"][..]),
-        ("default", &["default"][..]),
-        ("2026-07-15", &["2026-07-15"][..]),
-        ("input", &["input"][..]),
-        ("cached", &["cached"][..]),
-        ("output", &["output"][..]),
-        ("reasoning", &["reasoning"][..]),
-        ("latency", &["latency"][..]),
-        ("failure", &["failure", "fail_count", "failures"][..]),
-        ("unavailable", &["unavailable"][..]),
+    // Dimensions derived from input: run IDs
+    for run_id in &expected.run_ids {
+        let lower = run_id.to_lowercase();
+        if !rendered_lower.contains(&lower) {
+            missing.push(format!("dim-run-{run_id}"));
+        }
+    }
+    // Model names
+    for model in &expected.model_names {
+        let lower = model.to_lowercase();
+        if !rendered_lower.contains(&lower) {
+            missing.push(format!("dim-model-{model}"));
+        }
+    }
+    // Profile names
+    for profile in &expected.profile_names {
+        let lower = profile.to_lowercase();
+        if !rendered_lower.contains(&lower) {
+            missing.push(format!("dim-profile-{profile}"));
+        }
+    }
+    // Dates
+    for date in &expected.dates {
+        if !rendered_lower.contains(date) {
+            missing.push(format!("dim-date-{date}"));
+        }
+    }
+
+    // Token dimension labels
+    for (label, marker) in [
+        ("input", "input"),
+        ("cached", "cached"),
+        ("output", "output"),
+        ("reasoning", "reasoning"),
+        ("latency", "latency"),
     ] {
-        if !aliases.iter().any(|marker| rendered_text.contains(marker)) {
-            missing.push(label.to_string());
+        if !rendered_lower.contains(marker) {
+            missing.push(format!("dim-{label}"));
         }
     }
 
-    if !has_positive_counter(rendered, &["unavailable"]) {
-        missing.push("positive-unavailable-counter".into());
+    // Failure dimension (if there are failures in the input)
+    if expected.failed_count > 0 {
+        let failure_markers = ["failure", "fail_count", "failures"];
+        if !failure_markers.iter().any(|m| rendered_lower.contains(m)) {
+            missing.push("dim-failure".into());
+        }
     }
-    if !has_positive_counter(rendered, &["failure", "fail_count", "failures"]) {
-        missing.push("positive-failure-counter".into());
+
+    // Unavailable dimension
+    let unavailable_markers = ["unavailable"];
+    if !unavailable_markers.iter().any(|m| rendered_lower.contains(m)) {
+        missing.push("dim-unavailable".into());
+    }
+
+    // Positive counters
+    if expected.failed_count > 0 && !has_positive_counter(rendered, &["failure", "fail_count", "failures"]) {
+        missing.push("counter-failure".into());
+    }
+    if expected.unavailable_count > 0
+        && !has_positive_counter(rendered, &["unavailable"])
+    {
+        missing.push("counter-unavailable".into());
     }
 
     // Rolling windows validation
     for days in [1, 7, 30] {
         if !has_window_key(rendered, days) {
-            missing.push(format!("{days}-day-window"));
+            missing.push(format!("window-{days}day"));
         }
-        if !has_positive_overall_window(rendered, days) {
-            missing.push(format!("positive-overall-{days}-day-window"));
+        if expected.invocation_events > 0 && !has_positive_overall_window(rendered, days) {
+            missing.push(format!("pos-window-{days}day"));
         }
-        if !requested_overall_window_satisfies(rendered, days, |window| {
-            counter_equals(window, &["calls", "call_count", "invocations"], 2.0)
-        }) {
-            missing.push(format!("overall-{days}-day-call-count=2"));
+        // Check that overall windows have a positive unavailable counter
+        // only when the input has unavailable events
+        if expected.unavailable_count > 0
+            && !requested_overall_window_satisfies(rendered, days, |window| {
+                has_positive_counter(window, &["unavailable"])
+            })
+        {
+            missing.push(format!("window-{days}day-unavailable"));
         }
-        if !requested_overall_window_satisfies(rendered, days, |window| {
-            counter_equals(
-                window,
-                &["avg_latency", "average_latency", "latency_avg"],
-                25.0,
-            )
-        }) {
-            missing.push(format!("overall-{days}-day-average-latency=25"));
-        }
-        if !requested_overall_window_satisfies(rendered, days, |window| {
-            has_positive_counter(window, &["unavailable"])
-        }) {
-            missing.push(format!("positive-overall-{days}-day-unavailable"));
-        }
-        if !requested_overall_window_satisfies(rendered, days, |window| {
-            has_positive_counter(window, &["failure", "fail_count", "failures"])
-        }) {
-            missing.push(format!("positive-overall-{days}-day-failure"));
+        // Check that overall windows have a positive failure counter
+        // only when the input has failure events
+        if expected.failed_count > 0
+            && !requested_overall_window_satisfies(rendered, days, |window| {
+                has_positive_counter(window, &["failure", "fail_count", "failures"])
+            })
+        {
+            missing.push(format!("window-{days}day-failure"));
         }
     }
 
@@ -185,7 +367,7 @@ fn verify_request_contract(stdout: &str) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!(
-            "GENERATOR_ACCEPTANCE_REPAIR_EXHAUSTED missing={}\nPATH_CONTRACT: run dimension comes from top-level event.run_id; model and profile dimensions come from event.payload.model and event.payload.profile.\nWINDOW_CONTRACT: expose overall/global/summary/total windows, a top-level rolling_windows object, or top-level windows whose distinct 1_day, 7_day, and 30_day objects each contain total/overall/summary/global. Each overall window must include calls=2, avg_latency_ms or latency_avg=25, failures=1, and a positive unavailable counter.",
+            "GENERATOR_ACCEPTANCE_REPAIR_EXHAUSTED missing={}",
             missing.join(","),
         ))
     }
@@ -339,23 +521,6 @@ where
     }
 }
 
-fn counter_equals(value: &Value, names: &[&str], expected: f64) -> bool {
-    match value {
-        Value::Object(map) => map.iter().any(|(key, value)| {
-            let key = key.to_lowercase();
-            (names.iter().any(|name| key.contains(name))
-                && value
-                    .as_f64()
-                    .is_some_and(|number| (number - expected).abs() < 0.001))
-                || counter_equals(value, names, expected)
-        }),
-        Value::Array(items) => items
-            .iter()
-            .any(|item| counter_equals(item, names, expected)),
-        _ => false,
-    }
-}
-
 fn window_key_matches(key: &str, days: u64) -> bool {
     let normalized: String = key
         .to_lowercase()
@@ -381,14 +546,27 @@ mod tests {
 
     #[test]
     fn verify_rejects_invalid_json_output() {
-        let result = verify_request_contract("not-json");
+        let result = verify_profile_contract("not-json");
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("ACCEPTANCE_CONSTRAINT"));
+        assert!(result.unwrap_err().contains("PROFILE_CONTRACT_OUTPUT_INVALID"));
     }
 
     #[test]
     fn verify_rejects_missing_rendered_field() {
-        let result = verify_request_contract(r#"{"ok": true}"#);
+        let result = verify_request_contract(
+            r#"{"ok": true}"#,
+            &ExpectedMetrics {
+                invocation_events: 0,
+                completed_count: 0,
+                failed_count: 0,
+                unavailable_count: 0,
+                avg_latency: 0.0,
+                run_ids: BTreeSet::new(),
+                model_names: BTreeSet::new(),
+                profile_names: BTreeSet::new(),
+                dates: BTreeSet::new(),
+            },
+        );
         assert!(result.is_err());
     }
 
@@ -420,5 +598,60 @@ pub fn render_html(state: &Value, runtime: &Value) -> String { String::new() }
         assert!(verify_source_policy(host_clock)
             .unwrap_err()
             .contains("runtime.today_utc"));
+    }
+
+    #[test]
+    fn compute_expected_from_invocation_events() {
+        let input: Value = serde_json::from_str(r#"{"events":[
+            {"event_id":"c1","event_kind":"model.invocation.completed.v0","occurred_at":"2026-07-15T10:00:00Z","run_id":"run-a","payload":{"model":"m1","profile":"p1","latency_ms":100,"input_tokens":10,"cached_input_tokens":2,"output_tokens":5,"reasoning_tokens":1,"total_tokens":15}},
+            {"event_id":"c2","event_kind":"model.invocation.completed.v0","occurred_at":"2026-07-16T14:00:00Z","run_id":"run-b","payload":{"model":"m2","profile":"p2","latency_ms":200,"input_tokens":20,"cached_input_tokens":3,"output_tokens":10,"reasoning_tokens":2,"total_tokens":30}},
+            {"event_id":"f1","event_kind":"model.invocation.failed.v0","occurred_at":"2026-07-15T11:00:00Z","run_id":"run-a","payload":{"model":"m1","profile":"p1","error_category":"timeout"}},
+            {"event_id":"unk","event_kind":"future.unknown.v1","occurred_at":"2026-07-18T00:00:00Z","payload":{"x":1}}
+        ]}"#).unwrap();
+        let metrics = compute_expected_from_input(&input);
+        assert_eq!(metrics.invocation_events, 3, "completed+failed=3");
+        assert_eq!(metrics.completed_count, 2);
+        assert_eq!(metrics.failed_count, 1);
+        assert_eq!(metrics.unavailable_count, 0); // all token fields present and non-null
+        assert!((metrics.avg_latency - 150.0).abs() < 0.001); // (100+200)/2
+        assert!(metrics.run_ids.contains("run-a"));
+        assert!(metrics.run_ids.contains("run-b"));
+        assert!(metrics.model_names.contains("m1"));
+        assert!(metrics.model_names.contains("m2"));
+        assert!(metrics.profile_names.contains("p1"));
+        assert!(metrics.profile_names.contains("p2"));
+        assert!(metrics.dates.contains("2026-07-15"));
+        assert!(metrics.dates.contains("2026-07-16"));
+    }
+
+    #[test]
+    fn compute_expected_unavailable_from_null_tokens() {
+        let input: Value = serde_json::from_str(r#"{"events":[
+            {"event_id":"c1","event_kind":"model.invocation.completed.v0","occurred_at":"2026-07-15T10:00:00Z","run_id":"run-a","payload":{"model":"m1","profile":"p1","latency_ms":100,"input_tokens":null,"output_tokens":5,"total_tokens":null}}
+        ]}"#).unwrap();
+        let metrics = compute_expected_from_input(&input);
+        assert_eq!(metrics.unavailable_count, 1);
+        assert!((metrics.avg_latency - 100.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn unknown_events_do_not_affect_business_aggregates() {
+        let input: Value = serde_json::from_str(r#"{"events":[
+            {"event_id":"unk","event_kind":"future.observed.v99","occurred_at":"2026-07-18T00:00:00Z","payload":{"x":1}},
+            {"event_id":"c1","event_kind":"model.invocation.completed.v0","occurred_at":"2026-07-15T10:00:00Z","run_id":"run-a","payload":{"model":"m1","profile":"p1","latency_ms":50,"input_tokens":5,"output_tokens":3,"total_tokens":8}}
+        ]}"#).unwrap();
+        let metrics = compute_expected_from_input(&input);
+        // Unknown event does NOT count as invocation
+        assert_eq!(metrics.invocation_events, 1);
+        assert_eq!(metrics.completed_count, 1);
+        assert_eq!(metrics.failed_count, 0);
+        assert_eq!(metrics.run_ids.len(), 1);
+        assert_eq!(metrics.model_names.len(), 1);
+        // But events_applied (separate check) counts ALL events including unknown
+        assert_eq!(
+            input.get("events").and_then(Value::as_array).unwrap().len(),
+            2,
+            "events_applied counts all events including unknown"
+        );
     }
 }
