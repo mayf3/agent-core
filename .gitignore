@@ -29,3 +29,5 @@ logs/
 tmp/
 temp/
 artifacts/
+runtime.env
+.env
