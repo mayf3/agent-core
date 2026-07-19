@@ -141,7 +141,19 @@ async function waitForCardCapture(
     const bindingsFile = path.join(EVIDENCE_DIR, `card-bindings-${proposalId}.json`);
     if (fs.existsSync(bindingsFile)) {
       const payload = JSON.parse(fs.readFileSync(bindingsFile, "utf-8"));
-      return payload as any;
+      // Bindings file has flat {proposal_id, approval_id, decision_nonce, message_id}
+      // Wrap in CapturedCardPayload shape for the caller
+      return {
+        message_id: payload.message_id || "",
+        msg_type: "interactive",
+        content: payload,
+        captured_at: new Date().toISOString(),
+        bindings: {
+          proposal_id: payload.proposal_id,
+          approval_id: payload.approval_id,
+          decision_nonce: payload.decision_nonce,
+        },
+      } as CapturedCardPayload;
     }
     // Check all card files
     const files = fs.readdirSync(EVIDENCE_DIR).filter((f) => f.startsWith("card-") && f.endsWith(".json"));
