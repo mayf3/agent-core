@@ -222,6 +222,29 @@ async function waitForComponent(
   throw new Error(`TIMEOUT: component ${componentId} not Healthy within ${timeoutMs}ms`);
 }
 
+/** Poll Kernel journal to find the registered component_id */
+async function waitForAnyComponent(
+  timeoutMs: number = 180_000,
+): Promise<{ component_id: string; version: string; status: string }> {
+  const startTime = Date.now();
+  while (Date.now() - startTime < timeoutMs) {
+    const resp = await kernelRequest("GET", "/v1/events?limit=100", null, EVENT_OBSERVE_TOKEN).catch(() => null);
+    if (resp?.ok && resp.data?.events) {
+      for (const ev of resp.data.events) {
+        if (ev.event_kind === "ComponentRegistered" && ev.payload?.component_id) {
+          return {
+            component_id: ev.payload.component_id,
+            version: ev.payload.version || "unknown",
+            status: ev.payload.status || "Healthy",
+          };
+        }
+      }
+    }
+    await sleep(3_000);
+  }
+  throw new Error(`TIMEOUT: no ComponentRegistered event within ${timeoutMs}ms`);
+}
+
 /** Disable a component via formal API */
 async function disableComponent(componentId: string): Promise<any> {
   const body = {
@@ -371,15 +394,24 @@ async function runFreshShadow(): Promise<void> {
 
   // ---- Step 5: Wait for deployment ----
   console.log("\n[5] Waiting for deployment...");
-  // Derive component_id from proposal data
-  // operation_name is the component short name (e.g. "failure-viewer")
-  // manifest_id is the content-addressed manifest hash — NOT the component_id
-  const componentId = proposalData.operation_name || "failure-viewer";
+  
+  // First, wait for ComponentRegistered event in journal
+  let componentEvent: any;
+  try {
+    componentEvent = await waitForAnyComponent(180_000);
+  } catch (err: any) {
+    return evidence.fail("DEPLOYMENT", `no ComponentRegistered event: ${err.message}`);
+  }
+  
+  const componentId = componentEvent.component_id;
+  console.log(`  Component registered: ${componentId} v${componentEvent.version}`);
+  
+  // Then verify via /v1/components API
   let componentData: any;
   try {
-    componentData = await waitForComponent(componentId, 180_000);
+    componentData = await waitForComponent(componentId, 60_000);
   } catch (err: any) {
-    return evidence.fail("DEPLOYMENT", `component ${componentId} not deployed: ${err.message}`);
+    return evidence.fail("DEPLOYMENT", `component ${componentId} not Healthy via API: ${err.message}`);
   }
 
   // Verify deployment receipt and registry
