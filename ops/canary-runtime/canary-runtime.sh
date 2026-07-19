@@ -924,7 +924,7 @@ shadow_cleanup() {
 
     # ---- Phase 2: Verify ports released ----
     echo "--- Verifying port release ---"
-    for svc in kernel connector coding-harness capability-host deployment-harness; do
+    for svc in kernel coding-harness capability-host deployment-harness; do
         local port
         port="$(get_port "$svc")"
         if curl -sf --max-time 1 "http://127.0.0.1:${port}/health" >/dev/null 2>&1; then
@@ -1173,17 +1173,9 @@ cmd_shadow_e2e() {
     " 2>&1 || echo "  ⚠️  Kernel start may have failed (check logs)"
     sleep 2
     
-    # Shadow Connector (no WSClient)
-    echo "Starting Shadow Connector (port ${AGENT_CORE_CONNECTOR_PORT:-4131})..."
-    vm_exec "
-        export \$(grep -v '^\s*#' '${shadow_env}' | grep -v '^\s*$' | xargs 2>/dev/null)
-        SHADOW_EVIDENCE_DIR='${shadow_root}/evidence' \
-        SHADOW_STATE_DIR='${shadow_root}/state' \
-        SHADOW_RUN_ID='${run_id}' \
-        nohup npx tsx '${PROJECT_DIR}/tools/shadow-canary/connector-shadow.ts' \
-            > '${shadow_root}/logs/connector.log' 2>&1 &
-        echo \$! > '${shadow_root}/pids/connector.pid'
-    " 2>&1 || echo "  ⚠️  Shadow Connector start may have failed"
+    # NOTE: Shadow Connector is NOT started here — inject.ts starts it
+    # on the host via the CapturedFeishuTransport when it imports
+    # connector-shadow.ts. This avoids a duplicate port 4131 bind.
     
     # Coding Harness
     echo "Starting Coding Harness (port 7200)..."
@@ -1222,7 +1214,7 @@ cmd_shadow_e2e() {
     echo "--- Shadow doctor ---"
     # Quick port check
     local shadow_ok=0
-    for svc in kernel connector coding-harness capability-host deployment-harness; do
+    for svc in kernel coding-harness capability-host deployment-harness; do
         local port
         port="$(get_port "$svc")"
         if check_port "$port" "$svc" 2>/dev/null; then
@@ -1231,20 +1223,20 @@ cmd_shadow_e2e() {
             echo "  ⚠️  $svc not responding on port $port"
         fi
     done
-    echo "Shadow services: ${shadow_ok}/5 healthy"
+    echo "Shadow VM services: ${shadow_ok}/4 healthy"
     
-    # 9. Run the specific flow
+    # 9. Run inject.ts (full automated flow)
     echo ""
-    if [ "${variant}" = "dirty" ]; then
-        echo "=== Dirty Upgrade Shadow ==="
-        echo "Variant not yet implemented — running fresh as fallback"
-        echo "Dirty flow requires:"
-        echo "  1. SHADOW_FAILURE_COUNT=1 to trigger failed deployment"
-        echo "  2. Two sequential deployments to exercise version monotonicity"
-        run_fresh_shadow_flow "${shadow_root}" "${run_id}"
-    else
-        echo "=== Fresh Shadow ==="
-        run_fresh_shadow_flow "${shadow_root}" "${run_id}"
+    echo "--- Running inject.ts (${variant}) ---"
+    
+    local inject_exit_code=0
+    SHADOW_EVIDENCE_DIR="${shadow_root}/evidence"     SHADOW_STATE_DIR="${shadow_root}/state"     SHADOW_RUN_ID="${run_id}"     SHADOW_VARIANT="${variant}"     npx tsx "${PROJECT_DIR}/tools/shadow-canary/inject.ts" "${variant}"         2>&1 || inject_exit_code=$?
+    
+    if [ "$inject_exit_code" -ne 0 ]; then
+        echo ""
+        echo "❌ inject.ts failed (exit ${inject_exit_code})"
+        echo "FIRST_FAILED_STEP: $(grep -o '"first_failed_step":"[^"]*"' "${shadow_root}/evidence/shadow-summary.json" 2>/dev/null | head -1 || echo 'unknown')"
+        exit "$inject_exit_code"
     fi
     
     # 10. Collect evidence
@@ -1257,66 +1249,6 @@ cmd_shadow_e2e() {
     echo "Variant: ${variant}"
     echo "Evidence: ${shadow_root}/evidence"
     echo "Run ID: ${run_id}"
-}
-
-run_fresh_shadow_flow() {
-    local shadow_root="$1"
-    local run_id="$2"
-    local evidence_dir="${shadow_root}/evidence"
-    
-    echo ""
-    echo "--- Fresh Shadow Flow ---"
-    
-    # Verify shadow.env config digest
-    local config_digest
-    config_digest=$(sha256sum "${shadow_root}/shadow.env" 2>/dev/null | cut -c1-16 || echo "unknown")
-    echo "shadow.env digest: ${config_digest}"
-    
-    # Verify Connector execute endpoint is reachable
-    local connector_port="${AGENT_CORE_CONNECTOR_PORT:-4131}"
-    local connector_status
-    connector_status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 3 \
-        -X POST "http://127.0.0.1:${connector_port}/v1/execute" \
-        -H "Content-Type: application/json" \
-        -d '{}' 2>/dev/null || echo "000")
-    echo "Connector execute endpoint: HTTP ${connector_status}"
-    
-    echo ""
-    echo "=== Shadow Flow Summary ==="
-    echo "The complete automated flow requires a Node.js process that:"
-    echo ""
-    echo "1. Imports connector-shadow.ts"
-    echo "2. Calls simulateFeishuMessage(\"开发一个 failure-viewer...\")"
-    echo "3. Waits for proposal creation (polls evidence/card-bindings-*.json)"
-    echo "4. Gets bindings from captured card payload"
-    echo "5. Calls simulateCardApproval(proposalId, approvalId, decisionNonce)"
-    echo "6. Verifies deployment_pending response"
-    echo "7. Polls for component registration"
-    echo "8. Verifies Registry state"
-    echo ""
-    echo "See tools/shadow-canary/inject.mjs for the injection template."
-    
-    # Write flow documentation
-    cat > "${evidence_dir}/shadow-flow-instructions.md" << EOF
-# Shadow Canary Flow
-
-## Manual verification steps:
-
-1. Check kernel health:
-   curl -s http://127.0.0.1:${AGENT_CORE_KERNEL_PORT:-4130}/health
-
-2. Check kernel events:
-   curl -s -H "Authorization: Bearer ${AGENT_CORE_EVENT_OBSERVE_TOKEN}" \\
-     "http://127.0.0.1:${AGENT_CORE_KERNEL_PORT:-4130}/v1/events?limit=10"
-
-3. List proposals (requires proposal_id from simulation):
-   curl -s -H "Authorization: Bearer ${AGENT_CORE_CAPABILITY_DECISION_TOKEN}" \\
-     "http://127.0.0.1:${AGENT_CORE_KERNEL_PORT:-4130}/v1/capability-change-proposals/<proposal_id>"
-EOF
-    
-    echo "Flow instructions written to ${evidence_dir}/shadow-flow-instructions.md"
-    echo ""
-    echo "FRESH_SHADOW_CANARY_TEMPLATE_READY"
 }
 
 # =============================================================================

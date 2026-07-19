@@ -141,18 +141,40 @@ export async function simulateFeishuMessage(
   };
 
   try {
-    // Step 1: Normalize the event (production code)
+    // Step 1: Normalize the event (PRODUCTION code)
     const normalized = normalizeMessageEvent(fakeFeishuEvent);
     console.log(`[shadow] normalized message: type=${normalized.payload.message_type} chat=${normalized.payload.chat_type}`);
 
-    // Step 2: Post ingress (production code — calls Kernel /v1/ingress)
-    const response = await postIngress(config, fakeFeishuEvent);
-    console.log(`[shadow] ingress response: HTTP ${response?.status || "unknown"}`);
+    // Step 2: POST to Kernel /v1/ingress via fetch (same endpoint as postIngress,
+    // but captures the HTTP response which postIngress discards)
+    const ingressBody = {
+      protocol_version: "v1",
+      source: "Feishu",
+      external_event_id: normalized.external_event_id,
+      received_at: new Date().toISOString(),
+      payload: normalized.payload,
+      routing_hint: {},
+      auth_context: { authenticated: true },
+    };
+
+    const response = await fetch(config.kernelUrl, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${config.ipcToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(ingressBody),
+    });
+
+    let data: any = {};
+    try { data = await response.json(); } catch { /* ignore parse errors */ }
+
+    console.log(`[shadow] ingress response: HTTP ${response.status} status=${data.status || "unknown"}`);
 
     return {
-      ok: response?.ok !== false,
-      status: response?.status,
-      kernelEventId: response?.data?.kernel_event_id,
+      ok: response.ok,
+      status: response.status,
+      kernelEventId: data.kernel_event_id || data.run_id || "",
     };
   } catch (error: any) {
     console.error(`[shadow] simulateFeishuMessage error: ${error.message}`);
