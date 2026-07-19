@@ -996,9 +996,6 @@ generate_shadow_env() {
     done < "$src" > "$dst"
     
     # Add shadow-specific variables
-    echo "SHADOW_RUN_ID=${run_id}" >> "$dst"
-    echo "SHADOW_EVIDENCE_DIR=${shadow_root}/evidence" >> "$dst"
-    echo "SHADOW_STATE_DIR=${shadow_root}/state" >> "$dst"
     
     echo "shadow.env generated at ${dst}"
 }
@@ -1225,20 +1222,44 @@ cmd_shadow_e2e() {
     done
     echo "Shadow VM services: ${shadow_ok}/4 healthy"
     
-    # 9. Run inject.ts (full automated flow)
     echo ""
-    echo "--- Running inject.ts (${variant}) ---"
-    
+    echo "--- Deploying shadow tools to shared mount ---"
+    local shadow_tools_dir="/Users/yanfenma/.agent-core/hcr-linux/shadow-tools"
+    rm -rf "${shadow_tools_dir}"
+    # Preserve project directory structure so relative imports work
+    mkdir -p "${shadow_tools_dir}/tools/shadow-canary" "${shadow_tools_dir}/connectors/feishu/src"
+    cp -r "${PROJECT_DIR}/tools/shadow-canary/"* "${shadow_tools_dir}/tools/shadow-canary/"
+    cp -r "${PROJECT_DIR}/connectors/feishu/src/"* "${shadow_tools_dir}/connectors/feishu/src/"
+    echo "  Shadow tools deployed to ${shadow_tools_dir}"
+
+    echo "--- Running inject.ts (${variant}) inside VM ---"
     local inject_exit_code=0
-    SHADOW_EVIDENCE_DIR="${shadow_root}/evidence"     SHADOW_STATE_DIR="${shadow_root}/state"     SHADOW_RUN_ID="${run_id}"     SHADOW_VARIANT="${variant}"     npx tsx "${PROJECT_DIR}/tools/shadow-canary/inject.ts" "${variant}"         2>&1 || inject_exit_code=$?
-    
+    vm_exec "
+        # Force-kill any listener on port 4131 (lingering Connector)
+        fuser -k 4131/tcp 2>/dev/null || true
+        sleep 1
+        # Also kill any remaining tsx processes from previous runs
+        pkill -f 'tsx.*connector-shadow' 2>/dev/null || true
+        pkill -f 'tsx.*feishu' 2>/dev/null || true
+        sleep 1
+        set -a
+        source '${shadow_root}/shadow.env'
+        set +a
+        SHADOW_EVIDENCE_DIR='${shadow_root}/evidence' \
+        SHADOW_STATE_DIR='${shadow_root}/state' \
+        SHADOW_RUN_ID='${run_id}' \
+        SHADOW_VARIANT='${variant}' \
+        cd '${shadow_tools_dir}/tools/shadow-canary' && \
+        npx tsx inject.ts '${variant}'
+    " 2>&1 || inject_exit_code=$?
+
     if [ "$inject_exit_code" -ne 0 ]; then
         echo ""
         echo "❌ inject.ts failed (exit ${inject_exit_code})"
         echo "FIRST_FAILED_STEP: $(grep -o '"first_failed_step":"[^"]*"' "${shadow_root}/evidence/shadow-summary.json" 2>/dev/null | head -1 || echo 'unknown')"
         exit "$inject_exit_code"
     fi
-    
+
     # 10. Collect evidence
     echo ""
     echo "--- Collecting evidence ---"
