@@ -1,0 +1,25 @@
+[package]
+name = "shadow-failure-proxy"
+version = "0.1.0"
+edition = "2021"
+
+# This binary is ONLY built with --features shadow-fixtures.
+# It intercepts deployment calls and injects controlled failures
+# for Shadow Canary dirty-flow testing.
+#
+# Build:
+#   cargo build --release -p shadow-failure-proxy --features shadow-fixtures
+#
+# Production deployment-harness never includes this code.
+
+[dependencies]
+agent-core-kernel = { path = "../..", optional = true }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+hex = "0.4"
+
+[features]
+default = []
+shadow-fixtures = ["agent-core-kernel"]
