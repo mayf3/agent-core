@@ -24,7 +24,18 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve script location (handles symlinks like root-level canary-runtime)
+resolve_script_dir() {
+    local source="${BASH_SOURCE[0]}"
+    while [ -h "$source" ]; do
+        local dir
+        dir="$(cd -P "$(dirname "$source")" && pwd)"
+        source="$(readlink "$source")"
+        [[ "$source" != /* ]] && source="$dir/$source"
+    done
+    cd -P "$(dirname "$source")" && pwd
+}
+SCRIPT_DIR="$(resolve_script_dir)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 RUNTIME_ENV="$PROJECT_DIR/runtime.env"
 VM_NAME="${HCR_VM_NAME:-agent-core-hcr}"
@@ -949,37 +960,39 @@ shadow_cleanup() {
 }
 
 # Generate shadow.env from runtime.env with explicit allowlist
+# (bash 3.2 compatible — no associative arrays)
+SHADOW_MOUNT_PREFIX="/Users/yanfenma/.agent-core/hcr-linux/shadow"
 generate_shadow_env() {
     local shadow_root="$1"
     local src="$PROJECT_DIR/runtime.env"
     local dst="${shadow_root}/shadow.env"
     
-    # Explicit allowlist of variables to override
-    # All others are copied verbatim from runtime.env
-    declare -A OVERRIDES
-    OVERRIDES["AGENT_CORE_KERNEL_PORT"]="${AGENT_CORE_KERNEL_PORT:-4130}"
-    OVERRIDES["AGENT_CORE_CONNECTOR_PORT"]="${AGENT_CORE_CONNECTOR_PORT:-4131}"
-    OVERRIDES["AGENT_CORE_DATA_DIR"]="${shadow_root}/journal"
-    OVERRIDES["AGENT_CORE_HARNESS_ARTIFACT_ROOT"]="${shadow_root}/artifacts"
-    OVERRIDES["HARNESS_ARTIFACT_ROOT"]="${shadow_root}/artifacts"
-    OVERRIDES["DEPLOYMENT_HARNESS_ARTIFACT_ROOT"]="${shadow_root}/artifacts"
-    OVERRIDES["DEPLOYMENT_HARNESS_STATE_ROOT"]="${shadow_root}/state/deployment"
-    OVERRIDES["CAPABILITY_HOST_ARTIFACT_ROOT"]="${shadow_root}/artifacts"
-    OVERRIDES["AGENT_CORE_CONTEXT_DIR"]="${shadow_root}/context"
-    OVERRIDES["CODING_WORKSPACE_ROOT"]="${shadow_root}/workspaces"
-    
-    # Copy runtime.env, applying overrides
+    # Copy runtime.env, applying overrides for known keys
     while IFS='=' read -r key value; do
         # Skip comments and blank lines
         case "$key" in
             ''|\#*) continue ;;
         esac
         key=$(echo "$key" | xargs)
-        if [ -n "${OVERRIDES[$key]:-}" ]; then
-            echo "${key}=${OVERRIDES[$key]}"
-        else
-            echo "${key}=${value}"
-        fi
+        # Override known shadow keys; pass through everything else
+        case "$key" in
+            AGENT_CORE_KERNEL_PORT)
+                echo "${key}=${AGENT_CORE_KERNEL_PORT:-4130}" ;;
+            AGENT_CORE_CONNECTOR_PORT)
+                echo "${key}=${AGENT_CORE_CONNECTOR_PORT:-4131}" ;;
+            AGENT_CORE_DATA_DIR)
+                echo "${key}=${shadow_root}/journal" ;;
+            AGENT_CORE_HARNESS_ARTIFACT_ROOT|HARNESS_ARTIFACT_ROOT|DEPLOYMENT_HARNESS_ARTIFACT_ROOT|CAPABILITY_HOST_ARTIFACT_ROOT)
+                echo "${key}=${shadow_root}/artifacts" ;;
+            DEPLOYMENT_HARNESS_STATE_ROOT)
+                echo "${key}=${shadow_root}/state/deployment" ;;
+            AGENT_CORE_CONTEXT_DIR)
+                echo "${key}=${shadow_root}/context" ;;
+            CODING_WORKSPACE_ROOT)
+                echo "${key}=${shadow_root}/workspaces" ;;
+            *)
+                echo "${key}=${value}" ;;
+        esac
     done < "$src" > "$dst"
     
     # Add shadow-specific variables
@@ -995,6 +1008,10 @@ check_shadow_path_fence() {
     local shadow_root="$1"
     local errors=0
     
+    # Normalize shadow_root (macOS /tmp → /private/tmp)
+    local normalized_root
+    normalized_root=$(cd -P "$shadow_root" && pwd 2>/dev/null || echo "$shadow_root")
+    
     for path in \
         "${shadow_root}/journal" \
         "${shadow_root}/artifacts" \
@@ -1008,11 +1025,11 @@ check_shadow_path_fence() {
         "${shadow_root}/evidence"; do
         mkdir -p "$path"
         local resolved
-        resolved=$(cd "$path" && pwd -P 2>/dev/null || echo "")
+        resolved=$(cd -P "$path" 2>/dev/null && pwd || echo "")
         if [ -z "$resolved" ]; then
             echo "FAIL: Cannot resolve path $path"
             errors=$((errors + 1))
-        elif [[ "$resolved" != "${shadow_root}"* ]]; then
+        elif [[ "$resolved" != "${normalized_root}"* ]]; then
             echo "FAIL: Path $path resolves outside shadow root: $resolved"
             errors=$((errors + 1))
         else
@@ -1025,8 +1042,8 @@ check_shadow_path_fence() {
         local path="${shadow_root}/state/${f}"
         touch "$path" 2>/dev/null || true
         local resolved
-        resolved=$(cd "$(dirname "$path")" && pwd -P 2>/dev/null || echo "")
-        if [[ "$resolved" != "${shadow_root}"* ]]; then
+        resolved=$(cd -P "$(dirname "$path")" 2>/dev/null && pwd || echo "")
+        if [[ "$resolved" != "${normalized_root}"* ]]; then
             echo "FAIL: Connector state $f escapes shadow root: $resolved"
             errors=$((errors + 1))
         else
@@ -1078,7 +1095,7 @@ collect_shadow_evidence() {
 cmd_shadow_e2e() {
     local variant="${1:-fresh}"
     local run_id="shadow_$(date +%s)"
-    local shadow_root="/tmp/agent-core-shadow-${run_id}"
+    local shadow_root="/Users/yanfenma/.agent-core/hcr-linux/shadow/shadow_${run_id}"
     
     echo "=== canary-runtime: shadow-e2e (${variant}) ==="
     echo "Run ID: ${run_id}"
@@ -1143,25 +1160,27 @@ cmd_shadow_e2e() {
     echo "--- Starting shadow services ---"
     
     local kernel_db="${shadow_root}/journal/journal.db"
+    local shadow_env="${shadow_root}/shadow.env"
     
     # Kernel
     echo "Starting Kernel (port ${AGENT_CORE_KERNEL_PORT:-4130})..."
     vm_exec "
+        export \$(grep -v '^\s*#' '${shadow_env}' | grep -v '^\s*$' | xargs 2>/dev/null)
         mkdir -p '${shadow_root}/journal' '${shadow_root}/logs' '${shadow_root}/pids'
         nohup ${KERNEL_BIN} serve --db '${kernel_db}' \
             > '${shadow_root}/logs/kernel.log' 2>&1 &
         echo \$! > '${shadow_root}/pids/kernel.pid'
-        echo 'Kernel PID: \$!' >> '${shadow_root}/logs/startup.log'
     " 2>&1 || echo "  ⚠️  Kernel start may have failed (check logs)"
+    sleep 2
     
     # Shadow Connector (no WSClient)
     echo "Starting Shadow Connector (port ${AGENT_CORE_CONNECTOR_PORT:-4131})..."
     vm_exec "
-        cd '${PROJECT_DIR}'
+        export \$(grep -v '^\s*#' '${shadow_env}' | grep -v '^\s*$' | xargs 2>/dev/null)
         SHADOW_EVIDENCE_DIR='${shadow_root}/evidence' \
         SHADOW_STATE_DIR='${shadow_root}/state' \
         SHADOW_RUN_ID='${run_id}' \
-        nohup npx tsx tools/shadow-canary/connector-shadow.ts \
+        nohup npx tsx '${PROJECT_DIR}/tools/shadow-canary/connector-shadow.ts' \
             > '${shadow_root}/logs/connector.log' 2>&1 &
         echo \$! > '${shadow_root}/pids/connector.pid'
     " 2>&1 || echo "  ⚠️  Shadow Connector start may have failed"
@@ -1169,6 +1188,7 @@ cmd_shadow_e2e() {
     # Coding Harness
     echo "Starting Coding Harness (port 7200)..."
     vm_exec "
+        export \$(grep -v '^\s*#' '${shadow_env}' | grep -v '^\s*$' | xargs 2>/dev/null)
         nohup ${CODING_HARNESS_BIN} --listen 127.0.0.1:7200 \
             > '${shadow_root}/logs/coding-harness.log' 2>&1 &
         echo \$! > '${shadow_root}/pids/coding-harness.pid'
@@ -1177,6 +1197,7 @@ cmd_shadow_e2e() {
     # Capability Host
     echo "Starting Capability Host (port 7300)..."
     vm_exec "
+        export \$(grep -v '^\s*#' '${shadow_env}' | grep -v '^\s*$' | xargs 2>/dev/null)
         nohup ${CAPABILITY_HOST_BIN} \
             > '${shadow_root}/logs/capability-host.log' 2>&1 &
         echo \$! > '${shadow_root}/pids/capability-host.pid'
@@ -1185,6 +1206,7 @@ cmd_shadow_e2e() {
     # Deployment Harness (on standard port)
     echo "Starting Deployment Harness (port 7400)..."
     vm_exec "
+        export \$(grep -v '^\s*#' '${shadow_env}' | grep -v '^\s*$' | xargs 2>/dev/null)
         nohup ${DEPLOYMENT_HARNESS_BIN} \
             > '${shadow_root}/logs/deployment-harness.log' 2>&1 &
         echo \$! > '${shadow_root}/pids/deployment-harness.pid'
