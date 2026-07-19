@@ -1,4 +1,10 @@
 //! Trusted human decision path for externally managed service components.
+//!
+//! The deployment harness call is dispatched to a background thread so the
+//! kernel accept loop remains available for concurrent event-observe requests
+//! during the deployment harness health-check window (10+ seconds). The caller
+//! receives a `deployment_pending` response immediately; the background thread
+//! records the final deployment result atomically.
 
 use super::capability_decision::{
     decision_identity, map_trusted_error, parse_input, response, retryable_host_error,
@@ -16,24 +22,42 @@ use crate::domain::{
 use crate::journal::trusted_capability_activation::{
     TrustedDecisionIdentity, TrustedDecisionResult,
 };
+use crate::journal::trusted_service_activation::intent_exists_without_receipt;
 use crate::journal::JournalStore;
 use anyhow::Result;
 use serde_json::{json, Value};
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::thread;
 
 const DEPLOYMENT_FAILURE: &str = "SERVICE_DEPLOYMENT_FAILED";
 
+/// Database path set by the first caller; reused by background deployment threads
+/// so the HTTP handler chain does not need to carry the path as a parameter.
+static DB_PATH: OnceLock<PathBuf> = OnceLock::new();
+
 pub(crate) fn handle(
     journal: &JournalStore,
     store: &ContentStore,
-    db_path: Option<&PathBuf>,
     proposal_id: &str,
     body: &Value,
     expected_agent: &AgentId,
 ) -> Result<Value> {
     let input = parse_input(body)?;
     let identity = decision_identity(proposal_id, &input)?;
+
+    // Seed the database path for background deployment threads the first time
+    // a managed-service proposal is decided. The path is read from the kernel
+    // env at startup and stored once here.
+    let _ = DB_PATH.set(
+        std::env::var("OVERRIDE_DB_PATH")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+                let data_dir = std::env::var("AGENT_CORE_DATA_DIR")
+                    .unwrap_or_else(|_| format!("{}/.agent-core", std::env::var("HOME").unwrap_or_default()));
+                PathBuf::from(data_dir).join("kernel.sqlite")
+            }),
+    );
     let approval = journal
         .load_capability_approval_by_proposal(proposal_id)
         .map_err(internal)?
@@ -70,6 +94,19 @@ pub(crate) fn handle(
         return Ok(response(proposal_id, &input.approval_id, result));
     }
 
+    // ── First-time approval ──────────────────────────────────────────
+    let proposal = journal
+        .load_proposal(proposal_id)
+        .map_err(internal)?
+        .ok_or_else(|| CapabilityRouteError::NotFound("proposal_not_found".into()))?;
+
+    // Check for an in-flight deployment: if the deployment intent was already
+    // recorded but the receipt hasn't been received, the previous background
+    // thread is still running → return pending without spawning a duplicate.
+	    if intent_exists_without_receipt(journal, proposal_id, &identity.manifest_digest)? {
+        return Ok(pending_response(proposal_id, &input.approval_id, &identity));
+    }
+
     let manifest = verify_service_candidate(journal, store, proposal_id, &identity)?;
     let mut intent = DeploymentIntent {
         protocol_version: DEPLOYMENT_PROTOCOL.into(),
@@ -90,53 +127,53 @@ pub(crate) fn handle(
         .record_trusted_service_deployment_intent(&identity, &intent, &manifest, expected_agent)
         .map_err(map_trusted_error)?;
 
-    // Spawn deployment in a background thread so the kernel accept loop
-    // remains available for concurrent event-observe requests during the
-    // deployment harness health-check window (10+ seconds).
+    // Spawn deployment in background so the kernel accept loop remains
+    // available for concurrent event-observe requests.
     let bg_proposal_id = proposal_id.to_string();
     let bg_approval_id = input.approval_id.clone();
     let bg_identity = identity.clone();
     let bg_intent = intent.clone();
     let bg_manifest = manifest.clone();
     let bg_agent = expected_agent.clone();
-    let bg_db_path = db_path.cloned();
     thread::spawn(move || {
-        let bg_journal = match bg_db_path.as_ref().and_then(|p| JournalStore::open(p).ok()) {
-            Some(j) => j,
-            None => return,
-        };
-        let client = match HttpDeploymentHarnessClient::from_env() {
-            Ok(c) => c,
-            Err(_) => {
-                let _ = bg_journal.fail_trusted_activation_atomic(
-                    &bg_identity, DEPLOYMENT_FAILURE, &bg_agent,
-                );
-                return;
-            }
+        let Some(j) = DB_PATH.get().and_then(|p| JournalStore::open(p).ok()) else { return };
+        let Ok(client) = HttpDeploymentHarnessClient::from_env() else {
+            let _ = j.fail_trusted_activation_atomic(&bg_identity, DEPLOYMENT_FAILURE, &bg_agent);
+            return;
         };
         let _ = bg_deploy_and_record(
-            &bg_journal, &bg_proposal_id, &bg_approval_id, &bg_identity,
+            &j, &bg_proposal_id, &bg_approval_id, &bg_identity,
             &bg_intent, &bg_manifest, &bg_agent, &client,
         );
     });
 
-    // Return immediate ACK — the caller (Feishu connector callback) does not
-    // wait for deployment. The result is recorded atomically in the background.
-    Ok(response(proposal_id, &input.approval_id, TrustedDecisionResult {
-        decision_id: identity.decision_id.clone(),
-        status: CapabilityApprovalStatus::Approved,
-        activated_snapshot_id: None,
-        host_deployment_id: None,
-        activation_error: None,
-        replayed: false,
-    }))
+    Ok(pending_response(proposal_id, &input.approval_id, &identity))
+}
+
+/// Build a `deployment_pending` response for the immediate ACK sent before
+/// the background deployment completes.
+fn pending_response(
+    proposal_id: &str,
+    approval_id: &str,
+    identity: &TrustedDecisionIdentity,
+) -> Value {
+    json!({
+        "proposal_id": proposal_id,
+        "approval_id": approval_id,
+        "decision_id": identity.decision_id,
+        "status": "deployment_pending",
+        "activated_snapshot_id": null,
+        "host_deployment_id": null,
+        "activation_error": null,
+        "replayed": false,
+    })
 }
 
 /// Run deployment in a background thread and atomically record the outcome.
 fn bg_deploy_and_record(
     journal: &JournalStore,
-    proposal_id: &str,
-    approval_id: &str,
+    _proposal_id: &str,
+    _approval_id: &str,
     identity: &TrustedDecisionIdentity,
     intent: &DeploymentIntent,
     manifest: &ServiceManifest,

@@ -258,9 +258,10 @@ export async function executeProposalDecision(
 
   // 2. Terminal states must still reach Kernel so an identical callback can
   // replay its durable result and a conflicting callback can be rejected.
-  const replayableProposalStatuses = new Set([
-    "PendingApproval", "Approved", "Rejected", "Activated", "ActivationFailed",
-  ]);
+	  const replayableProposalStatuses = new Set([
+	    "PendingApproval", "Approved", "Rejected", "Activated", "ActivationFailed",
+	    "deployment_pending",
+	  ]);
   if (!replayableProposalStatuses.has(proposal.status)) {
     return {
       ok: false,
@@ -313,31 +314,45 @@ export async function executeProposalDecision(
   }
   const { ok, data } = response;
 
-  if (ok) {
-    if (
-      decisionInput.kind === "approve" &&
-      data.approval_id === proposal.approval.approval_id &&
-      typeof data.decision_id === "string" &&
-      data.decision_id &&
-      data.status === "ActivationFailed"
-    ) {
-      return {
-        ok: false,
-        replyText: `批准已记录，但能力激活失败: ${renderError(String(data.activation_error || "activation_failed"))}`,
-        proposalInfo: proposal,
-        decisionId: data.decision_id,
-      };
-    }
-    const expectedStatus = decisionInput.kind === "approve" ? "Activated" : "Rejected";
-    const invalidIdentity =
-      data.approval_id !== proposal.approval.approval_id ||
-      typeof data.decision_id !== "string" ||
-      !data.decision_id ||
-      data.status !== expectedStatus;
-    const invalidActivation = decisionInput.kind === "approve" && (
-      typeof data.activated_snapshot_id !== "string" || !data.activated_snapshot_id ||
-      typeof data.host_deployment_id !== "string" || !data.host_deployment_id
-    );
+	  if (ok) {
+	    if (
+	      decisionInput.kind === "approve" &&
+	      data.approval_id === proposal.approval.approval_id &&
+	      typeof data.decision_id === "string" &&
+	      data.decision_id &&
+	      data.status === "ActivationFailed"
+	    ) {
+	      return {
+	        ok: false,
+	        replyText: `批准已记录，但能力激活失败: ${renderError(String(data.activation_error || "activation_failed"))}`,
+	        proposalInfo: proposal,
+	        decisionId: data.decision_id,
+	      };
+	    }
+	    // Async approval: the kernel accepted the approval and started
+	    // deployment in the background. Return an immediate ACK; the
+	    // final result arrives via the existing notification mechanism.
+	    if (
+	      decisionInput.kind === "approve" &&
+	      data.status === "deployment_pending"
+	    ) {
+	      return {
+	        ok: true,
+	        replyText: "批准已受理，能力正在激活",
+	        proposalInfo: proposal,
+	        decisionId: data.decision_id,
+	      };
+	    }
+	    const expectedStatus = decisionInput.kind === "approve" ? "Activated" : "Rejected";
+	    const invalidIdentity =
+	      data.approval_id !== proposal.approval.approval_id ||
+	      typeof data.decision_id !== "string" ||
+	      !data.decision_id ||
+	      data.status !== expectedStatus;
+	    const invalidActivation = decisionInput.kind === "approve" && (
+	      typeof data.activated_snapshot_id !== "string" || !data.activated_snapshot_id ||
+	      typeof data.host_deployment_id !== "string" || !data.host_deployment_id
+	    );
     if (invalidIdentity || invalidActivation) {
       return { ok: false, replyText: "审批服务返回格式异常", proposalInfo: proposal };
     }
