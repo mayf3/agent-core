@@ -999,7 +999,6 @@ generate_shadow_env() {
     echo "SHADOW_RUN_ID=${run_id}" >> "$dst"
     echo "SHADOW_EVIDENCE_DIR=${shadow_root}/evidence" >> "$dst"
     echo "SHADOW_STATE_DIR=${shadow_root}/state" >> "$dst"
-    echo "OVERRIDE_DB_PATH=${shadow_root}/journal/journal.db" >> "$dst"
     
     echo "shadow.env generated at ${dst}"
 }
@@ -1178,6 +1177,12 @@ cmd_shadow_e2e() {
             fi
         done
         sleep 2
+    " 2>/dev/null || true
+
+    # Kernel binary update from VM build
+    echo "--- Updating kernel binary ---"
+    vm_exec "
+        cp /home/yanfenma.guest/agent-core-build/target/release/agent-core-kernel ${KERNEL_BIN} 2>/dev/null && echo '  ✅ Kernel binary updated' || echo '  ⚠️  Build not available, using existing binary'
     " 2>/dev/null || true
 
     # 8. Deploy shadow tools to shared VM mount
