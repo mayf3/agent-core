@@ -1,8 +1,4 @@
-//! Shadow Canary — Known-Failure Regression Tests
-//!
-//! These tests exercise specific failure modes identified during Milestone 1
-//! convergence. Each test uses in-memory Journal + CaptureServer + direct
-//! function calls — no real HTTP servers or Lima VM required.
+//! SHADOW_SUPPORT_SMOKE_TESTS — Known-failure regression battery.
 //!
 //! Run: cargo test --test shadow_canary
 
