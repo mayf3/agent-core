@@ -19,12 +19,15 @@ use crate::journal::trusted_capability_activation::{
 use crate::journal::JournalStore;
 use anyhow::Result;
 use serde_json::{json, Value};
+use std::path::PathBuf;
+use std::thread;
 
 const DEPLOYMENT_FAILURE: &str = "SERVICE_DEPLOYMENT_FAILED";
 
 pub(crate) fn handle(
     journal: &JournalStore,
     store: &ContentStore,
+    db_path: Option<&PathBuf>,
     proposal_id: &str,
     body: &Value,
     expected_agent: &AgentId,
@@ -86,50 +89,79 @@ pub(crate) fn handle(
     journal
         .record_trusted_service_deployment_intent(&identity, &intent, &manifest, expected_agent)
         .map_err(map_trusted_error)?;
-    let client = HttpDeploymentHarnessClient::from_env().map_err(|_| retryable_host_error())?;
-    handle_deployment(
-        journal,
-        proposal_id,
-        &input,
-        &identity,
-        &intent,
-        &manifest,
-        expected_agent,
-        &client,
-    )
+
+    // Spawn deployment in a background thread so the kernel accept loop
+    // remains available for concurrent event-observe requests during the
+    // deployment harness health-check window (10+ seconds).
+    let bg_proposal_id = proposal_id.to_string();
+    let bg_approval_id = input.approval_id.clone();
+    let bg_identity = identity.clone();
+    let bg_intent = intent.clone();
+    let bg_manifest = manifest.clone();
+    let bg_agent = expected_agent.clone();
+    let bg_db_path = db_path.cloned();
+    thread::spawn(move || {
+        let bg_journal = match bg_db_path.as_ref().and_then(|p| JournalStore::open(p).ok()) {
+            Some(j) => j,
+            None => return,
+        };
+        let client = match HttpDeploymentHarnessClient::from_env() {
+            Ok(c) => c,
+            Err(_) => {
+                let _ = bg_journal.fail_trusted_activation_atomic(
+                    &bg_identity, DEPLOYMENT_FAILURE, &bg_agent,
+                );
+                return;
+            }
+        };
+        let _ = bg_deploy_and_record(
+            &bg_journal, &bg_proposal_id, &bg_approval_id, &bg_identity,
+            &bg_intent, &bg_manifest, &bg_agent, &client,
+        );
+    });
+
+    // Return immediate ACK — the caller (Feishu connector callback) does not
+    // wait for deployment. The result is recorded atomically in the background.
+    Ok(response(proposal_id, &input.approval_id, TrustedDecisionResult {
+        decision_id: identity.decision_id.clone(),
+        status: CapabilityApprovalStatus::Approved,
+        activated_snapshot_id: None,
+        host_deployment_id: None,
+        activation_error: None,
+        replayed: false,
+    }))
 }
 
-#[allow(clippy::too_many_arguments)]
-fn handle_deployment(
+/// Run deployment in a background thread and atomically record the outcome.
+fn bg_deploy_and_record(
     journal: &JournalStore,
     proposal_id: &str,
-    input: &TrustedDecisionBody,
+    approval_id: &str,
     identity: &TrustedDecisionIdentity,
     intent: &DeploymentIntent,
     manifest: &ServiceManifest,
     expected_agent: &AgentId,
     deployer: &dyn DeploymentHarnessDeployer,
-) -> Result<Value> {
+) -> Result<()> {
     let receipt = match deployer.deploy(intent) {
         Ok(receipt) if receipt.validate_for(intent, &manifest.component_id).is_ok() => receipt,
         Err(error) if is_definitive_rejection(&error) => {
-            let result = journal
+            journal
                 .fail_trusted_activation_atomic(identity, DEPLOYMENT_FAILURE, expected_agent)
                 .map_err(map_trusted_error)?;
-            return Ok(response(proposal_id, &input.approval_id, result));
+            return Ok(());
         }
-        Ok(_) | Err(_) => return Err(retryable_host_error()),
+        Ok(_) | Err(_) => {
+            journal
+                .fail_trusted_activation_atomic(identity, DEPLOYMENT_FAILURE, expected_agent)
+                .map_err(map_trusted_error)?;
+            return Ok(());
+        }
     };
-    let result = journal
+    journal
         .activate_trusted_service_atomic(identity, intent, manifest, &receipt, expected_agent)
-        .map_err(map_trusted_error)?;
-    Ok(service_response(
-        proposal_id,
-        &input.approval_id,
-        result,
-        manifest,
-        &receipt,
-    ))
+        .ok();
+    Ok(())
 }
 
 fn verify_service_candidate(
