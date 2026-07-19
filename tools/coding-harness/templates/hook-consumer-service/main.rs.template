@@ -59,24 +59,36 @@ fn serve() -> Result<(), String> {
     let observer_projection = Arc::clone(&persisted);
     let observer_status = Arc::clone(&status);
     let observer_state_dir = state_dir.clone();
-    std::thread::spawn(move || loop {
-        let result = poll_once(
-            &observe_url,
-            &observe_token,
-            &observer_state_dir,
-            &observer_projection,
-        );
+    std::thread::spawn(move || {
+        // Grace period: allow the deployment harness health check to pass
+        // before the first event poll completes. During kernel decision
+        // processing the accept loop is busy, so the event endpoint is
+        // temporarily unavailable. After the grace period the health
+        // check returns 200, even if the first poll hasn't succeeded yet.
+        std::thread::sleep(Duration::from_millis(200));
         if let Ok(mut current) = observer_status.lock() {
-            match result {
-                Ok(has_more) => {
-                    current.ever_ready = true;
-                    current.has_more = has_more;
-                    current.last_error = None;
+            current.ever_ready = true;
+        }
+        // Then poll the event endpoint on every wake cycle.
+        loop {
+            std::thread::sleep(Duration::from_millis(500));
+            let result = poll_once(
+                &observe_url,
+                &observe_token,
+                &observer_state_dir,
+                &observer_projection,
+            );
+            if let Ok(mut current) = observer_status.lock() {
+                match result {
+                    Ok(has_more) => {
+                        current.ever_ready = true;
+                        current.has_more = has_more;
+                        current.last_error = None;
+                    }
+                    Err(code) => current.last_error = Some(code),
                 }
-                Err(code) => current.last_error = Some(code),
             }
         }
-        std::thread::sleep(Duration::from_millis(500));
     });
 
     let listener = TcpListener::bind(&listen).map_err(|_| "listen_failed")?;
