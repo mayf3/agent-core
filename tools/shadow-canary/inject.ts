@@ -231,7 +231,7 @@ async function waitForAnyComponent(
     const resp = await kernelRequest("GET", "/v1/events?limit=100", null, EVENT_OBSERVE_TOKEN).catch(() => null);
     if (resp?.ok && resp.data?.events) {
       for (const ev of resp.data.events) {
-        if (ev.event_kind === "ComponentRegistered" && ev.payload?.component_id) {
+        if (ev.event_kind === "component.registered.v0" && ev.payload?.component_id) {
           return {
             component_id: ev.payload.component_id,
             version: ev.payload.version || "unknown",
