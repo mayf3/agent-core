@@ -196,13 +196,13 @@ fn http_get_json(url: &str, token: &str) -> Result<Value, String> {
         return Err("observer_token_invalid".into());
     }
     let (address, path) = parse_loopback_url(url)?;
-    let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(2))
+    let mut stream = TcpStream::connect_timeout(&address, Duration::from_millis(200))
         .map_err(|_| "observer_connect_failed")?;
     stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
+        .set_read_timeout(Some(Duration::from_millis(500)))
         .map_err(|_| "observer_timeout_setup_failed")?;
     stream
-        .set_write_timeout(Some(Duration::from_secs(2)))
+        .set_write_timeout(Some(Duration::from_millis(200)))
         .map_err(|_| "observer_timeout_setup_failed")?;
     let request = format!(
         "GET {path} HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n"
