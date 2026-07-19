@@ -213,9 +213,8 @@ start_service "kernel" "${PID_DIR}/kernel.pid" \
     "${KERNEL_BIN}" serve --db "${SHADOW_ROOT}/journal/journal.db"
 sleep 2
 
-# 1b. Shadow Connector (no WSClient)
-start_service "connector" "${PID_DIR}/connector.pid" \
-    npx tsx "${CONNECTOR_SCRIPT}"
+# 1b. NO connector here — inject.ts imports connector-shadow.ts which starts
+#     its own execute server on port 4131. Starting it twice causes EADDRINUSE.
 
 # 1c. Coding Harness
 start_service "coding-harness" "${PID_DIR}/coding-harness.pid" \
@@ -246,10 +245,9 @@ echo ""
 echo "[supervisor] Waiting for services to be ready..."
 FAILED=false
 
-for svc in kernel connector coding-harness capability-host deployment-harness; do
+for svc in kernel coding-harness capability-host deployment-harness; do
     case "$svc" in
         kernel) port=4130; timeout=30 ;;
-        connector) port=4131; timeout=15 ;;
         coding-harness) port=7200; timeout=15 ;;
         capability-host) port=7300; timeout=15 ;;
         deployment-harness) port=7400; timeout=15 ;;
@@ -268,7 +266,7 @@ fi
 echo ""
 echo "[supervisor] Verifying process persistence..."
 ALL_ALIVE=true
-for svc in kernel connector coding-harness capability-host deployment-harness; do
+for svc in kernel coding-harness capability-host deployment-harness; do
     if ! check_process_alive "$svc"; then
         ALL_ALIVE=false
     fi
