@@ -8,7 +8,6 @@ use crate::journal::JournalStore;
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::path::PathBuf;
 
 pub const CAPABILITY_CHANGE_PROPOSE_GRANT: &str = "capability_change.propose";
 pub const CAPABILITY_CHANGE_DECIDE_GRANT: &str = "capability_change.decide";
@@ -203,7 +202,6 @@ pub fn handle_decision(
     journal: &JournalStore,
     _gateway: &Gateway,
     store: &ContentStore,
-    db_path: Option<&PathBuf>,
     proposal_id: &str,
     body: &Value,
     principal: &str,
@@ -225,7 +223,7 @@ pub fn handle_decision(
         );
     }
     if journal.load_proposal_hcr_link(proposal_id)?.is_some() {
-        return super::service_decision::handle(journal, store, db_path, proposal_id, body, config_agent_id);
+        return super::service_decision::handle(journal, store, proposal_id, body, config_agent_id);
     }
     let input: DecisionBody = serde_json::from_value(body.clone())
         .map_err(|e| CapabilityRouteError::InvalidRequest(format!("{e}")))?;
