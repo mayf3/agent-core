@@ -178,19 +178,16 @@ PORT_CONFLICT=false
 for port_spec in 4130:kernel 4131:connector 7200:coding-harness 7300:capability-host 7400:deployment-harness; do
     port="${port_spec%%:*}"
     name="${port_spec##*:}"
-    if ss -tlnp "sport = :${port}" 2>/dev/null | grep -q LISTEN; then
-        local occupier
-        occupier=$(ss -tlnp "sport = :${port}" 2>/dev/null | grep -oP 'pid=\K[0-9]+' | head -1)
-        if [ -n "$occupier" ]; then
-            local occupier_exe
-            occupier_exe=$(readlink -f /proc/${occupier}/exe 2>/dev/null || echo "unknown")
-            echo "  ⚠️  Port ${port} (${name}) occupied by PID ${occupier}: ${occupier_exe}"
-            PORT_CONFLICT=true
-        fi
+    # Use /proc/net/tcp to check for listening ports (works on all Linux)
+    # Port in /proc/net/tcp is in hex, little-endian
+    port_hex=$(printf "%04X" ${port})
+    if grep -q "0${port_hex:2:2}${port_hex:0:2}" /proc/net/tcp 2>/dev/null; then
+        echo "  ⚠️  Port ${port} (${name}) is already in use"
+        PORT_CONFLICT=true
     fi
 done
 if [ "$PORT_CONFLICT" = "true" ]; then
-    echo "[supervisor] ❌ SHADOW_PORT_CONFLICT — aborting"
+    echo "[supervisor] ❌ SHADOW_PORT_CONFLICT"
     exit 1
 fi
 echo "[supervisor] All ports free ✓"
