@@ -81,14 +81,16 @@ impl super::JournalStore {
             tx.commit()?;
             return Ok(());
         }
-        let in_flight: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM component_deployment_intents i
-             LEFT JOIN component_deployment_receipts r
-               ON r.proposal_id = i.proposal_id AND r.component_id = i.component_id
-             WHERE i.component_id=?1 AND r.receipt_id IS NULL AND i.intent_id != ?2",
-            params![manifest.component_id, intent.intent_id],
-            |row| row.get(0),
-        )?;
+	        let in_flight: i64 = tx.query_row(
+	            "SELECT COUNT(*) FROM component_deployment_intents i
+	             LEFT JOIN component_deployment_receipts r
+	               ON r.proposal_id = i.proposal_id AND r.component_id = i.component_id
+	             JOIN capability_change_proposals p ON p.proposal_id = i.proposal_id
+	             WHERE i.component_id=?1 AND r.receipt_id IS NULL AND i.intent_id != ?2
+	               AND p.status = 'Approved'",
+	            params![manifest.component_id, intent.intent_id],
+	            |row| row.get(0),
+	        )?;
         let pending_control: i64 = tx.query_row(
             "SELECT COUNT(*) FROM component_control_intents
              WHERE component_id=?1 AND status='pending'",
@@ -392,7 +394,7 @@ pub fn intent_exists_without_receipt(
     let count: i64 = journal.conn.lock().unwrap().query_row(
         "SELECT COUNT(*) FROM component_deployment_intents i
          LEFT JOIN component_deployment_receipts r
-           ON r.intent_id = i.intent_id AND r.proposal_id = i.proposal_id
+           ON r.proposal_id = i.proposal_id AND r.component_id = i.component_id
          WHERE i.proposal_id=?1 AND i.manifest_digest=?2 AND r.receipt_id IS NULL",
         params![proposal_id, manifest_digest],
         |row| row.get::<_, i64>(0),
