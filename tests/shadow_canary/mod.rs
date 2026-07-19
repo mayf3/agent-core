@@ -1,18 +1,12 @@
-//! Shadow Canary — Known-Failure Regression Tests
+//! SHADOW_SUPPORT_SMOKE_TESTS — 8 key failure regression tests.
 //!
-//! Test modules:
-//! - preflight:   Owner validation, outbox retry
-//! - versioning:  Version monotonicity, allocation, idempotency
-//! - readiness:   Event page readiness, token validation, kernel availability
-//! - approval:    Approval atomicity, connector deployment_pending acceptance
-//! - deployment:  deployment_pending response, callback ACK, in-flight tracking
-//! - recovery:    ActivationFailed isolation, origin validation, schema
+//! Tests marked [INTEGRATION] require full service_decision flow and
+//! are verified by the Shadow Canary, not in-memory journal alone.
 
-mod helpers;
-
-mod preflight;
-mod versioning;
-mod readiness;
-mod approval;
-mod deployment;
-mod recovery;
+mod auth;      // missing_owner_open_id_fails_preflight
+mod outbox;    // outbox_unknown_idempotent_retry
+mod version;   // existing_version_allocates_next_patch, equal_version_is_rejected
+mod approval;  // approval_event_and_intent_are_atomic
+mod decision;  // same_decision_does_not_spawn_second_deployment
+mod callback;  // connector_accepts_deployment_pending, callback_ack_before_deployment_finishes
+mod smoke;     // support smoke: coding_router, journal queries, hash chain
