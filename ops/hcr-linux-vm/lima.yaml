@@ -21,10 +21,22 @@ mounts:
   - location: "~/.agent-core/hcr-linux"
     writable: true
 
-# Port forwarding: only Mac loopback.
+# Port forwarding: Mac loopback only — all five Agent Core services.
 portForwards:
+  - guestPort: 4130
+    hostPort: 4130
+    hostIP: "127.0.0.1"
+  - guestPort: 4131
+    hostPort: 4131
+    hostIP: "127.0.0.1"
   - guestPort: 7200
     hostPort: 7200
+    hostIP: "127.0.0.1"
+  - guestPort: 7300
+    hostPort: 7300
+    hostIP: "127.0.0.1"
+  - guestPort: 7400
+    hostPort: 7400
     hostIP: "127.0.0.1"
 
 # No SSH agent forwarding
