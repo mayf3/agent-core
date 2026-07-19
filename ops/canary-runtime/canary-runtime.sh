@@ -1152,7 +1152,16 @@ cmd_shadow_e2e() {
         exit 1
     }
     
-    # 7. Start shadow services
+    # 7. Kill any lingering processes on the ports shadow services will use
+    echo ""
+    echo "--- Freeing shadow service ports ---"
+    for port in "${AGENT_CORE_KERNEL_PORT:-4130}" "${AGENT_CORE_CONNECTOR_PORT:-4131}" 7200 7300 7400; do
+        echo "  Freeing port ${port}..."
+        vm_exec "fuser -k ${port}/tcp 2>/dev/null; fuser -k ${port}/udp 2>/dev/null; true" 2>/dev/null || true
+    done
+    sleep 2
+
+    # 8. Start shadow services
     echo ""
     echo "--- Starting shadow services ---"
     
