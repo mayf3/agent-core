@@ -122,23 +122,35 @@ wait_for_port() {
                 return 1
             fi
         fi
-        # Check port
-        if curl -sf --max-time 2 "http://127.0.0.1:${port}/health" >/dev/null 2>&1; then
-            echo "[supervisor] ✅ $name ready (port $port)"
-            return 0
-        fi
-        # Special case for connector (execute endpoint returns 401 without auth)
-        if [ "$name" = "connector" ]; then
-            local status
-            status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 2 \
-                -X POST "http://127.0.0.1:${port}/v1/execute" \
-                -H "Content-Type: application/json" \
-                -d '{}' 2>/dev/null || echo "000")
-            if [ "$status" != "000" ]; then
-                echo "[supervisor] ✅ connector ready (port $port, HTTP $status)"
-                return 0
-            fi
-        fi
+        
+        # Check port — different services use different endpoints
+        case "$name" in
+            coding-harness)
+                if curl -sf --max-time 3 -X POST "http://127.0.0.1:${port}/execute" \
+                    -H "Content-Type: application/json" \
+                    -d '{"protocol_version":"external-harness-v1","operation":"external.coding_workspace_list","arguments":{"workspace_id":"scratch"}}' >/dev/null 2>&1; then
+                    echo "[supervisor] ✅ $name ready (port $port)"
+                    return 0
+                fi
+                ;;
+            connector)
+                local status
+                status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 2 \
+                    -X POST "http://127.0.0.1:${port}/v1/execute" \
+                    -H "Content-Type: application/json" \
+                    -d '{}' 2>/dev/null || echo "000")
+                if [ "$status" != "000" ]; then
+                    echo "[supervisor] ✅ $name ready (port $port, HTTP $status)"
+                    return 0
+                fi
+                ;;
+            *)
+                if curl -sf --max-time 2 "http://127.0.0.1:${port}/health" >/dev/null 2>&1; then
+                    echo "[supervisor] ✅ $name ready (port $port)"
+                    return 0
+                fi
+                ;;
+        esac
         sleep 1
         waited=$((waited + 1))
     done
