@@ -87,6 +87,7 @@ pub(crate) fn try_handle_capability_request(
             journal,
             gateway,
             &store,
+            Some(&config.db_path),
             pid,
             &body,
             principal,
