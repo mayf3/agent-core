@@ -1244,13 +1244,6 @@ cmd_shadow_e2e() {
     echo "--- Running inject.ts (${variant}) inside VM ---"
     local inject_exit_code=0
     vm_exec "
-        # Force-kill any listener on port 4131 (lingering Connector)
-        fuser -k 4131/tcp 2>/dev/null || true
-        sleep 1
-        # Also kill any remaining tsx processes from previous runs
-        pkill -f 'tsx.*connector-shadow' 2>/dev/null || true
-        pkill -f 'tsx.*feishu' 2>/dev/null || true
-        sleep 1
         set -a
         source '${shadow_root}/shadow.env'
         set +a
