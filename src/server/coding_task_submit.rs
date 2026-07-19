@@ -1,4 +1,16 @@
 //! Trusted orchestration for catalogued Generic DevelopmentRequests.
+//!
+//! # LEGACY: Managed-Service Version Allocation
+//!
+//! The version-resolution logic in this module (`resolve_next_deployment_version`,
+//! `query_deployment_harness_version`) is a temporary bridge for the Milestone 1
+//! canary path. It queries the Deployment Harness read-only status endpoint to
+//! derive the next patch version for a managed service component.
+//!
+//! In the target architecture (External Controller / Harness), version selection
+//! is the responsibility of the external development pipeline, NOT the Kernel.
+//! This code MUST be removed when the external orchestration seam takes over
+//! manifest construction.
 
 use crate::capabilities::store::{ContentStore, Sha256Digest};
 use crate::config::KernelConfig;
@@ -12,6 +24,8 @@ use crate::server::{coding_harness_client, hcr_acceptance};
 use anyhow::{bail, Result};
 use chrono::Utc;
 use serde_json::{json, Value};
+use std::io::{Read, Write};
+use std::net::TcpStream;
 use std::time::Duration;
 
 #[derive(Debug, Clone)]
@@ -180,13 +194,21 @@ pub fn handle_coding_task_submit(
     let component_manifest_key = Sha256Digest::parse(&component_manifest_digest)?;
     store.load(&artifact_key)?;
     store.load(&evidence_key)?;
-    let component_manifest: Value = serde_json::from_slice(&store.load(&component_manifest_key)?)?;
+    let mut component_manifest: Value = serde_json::from_slice(&store.load(&component_manifest_key)?)?;
     let (manifest_ref, manifest_bytes) = match request.target_kind {
         TargetKind::InvocableCapability => {
             let manifest = invocable_manifest(request, &component_manifest, &artifact_digest)?;
             (manifest.manifest_id.clone(), serde_json::to_vec(&manifest)?)
         }
         TargetKind::HookConsumerService => {
+            // LEGACY: Resolve next deployment version from the Deployment
+            // Harness. This ensures monotonically increasing patch versions.
+            // See module-level doc comment for removal plan.
+            let component_id = request.name.clone();
+            let override_version = resolve_next_deployment_version(&component_id)?;
+            if let (Some(ver), Some(service)) = (&override_version, component_manifest.get_mut("service").and_then(|v| v.as_object_mut())) {
+                service.insert("version".into(), json!(ver));
+            }
             let manifest = service_manifest(request, &component_manifest, &artifact_digest)?;
             (manifest.manifest_id.clone(), serde_json::to_vec(&manifest)?)
         }
@@ -587,6 +609,199 @@ fn load_existing_result(
         settlement_id: link.settlement_id,
         proposal_id: link.proposal_id,
     }))
+}
+
+// ---------------------------------------------------------------------------
+// LEGACY: Managed-Service Version Allocation
+//
+// Queries the Deployment Harness read-only status endpoint for the current
+// highest deployed version of a component, then increments the patch number.
+//
+// This is a temporary bridge for Milestone 1. See module-level doc comment
+// for the removal plan.
+// ---------------------------------------------------------------------------
+
+/// Resolve the next deployment version for a managed-service component.
+///
+/// Queries the Deployment Harness for the current version of `component_id`.
+/// If the component exists and has a parsable semver, returns the next patch
+/// version. If the component does not exist or the version cannot be parsed,
+/// returns `None` (caller falls back to the initial version from the manifest).
+fn resolve_next_deployment_version(component_id: &str) -> Result<Option<String>> {
+    let response = query_deployment_harness_version(component_id)?;
+    match response {
+        Some(current) => {
+            let next = increment_patch(&current)
+                .ok_or_else(|| anyhow::anyhow!("INVALID_EXISTING_VERSION: {current}"))?;
+            Ok(Some(next))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Query the Deployment Harness `GET /v1/components/{component_id}` and
+/// return the current deployed `version` string, if the component exists.
+///
+/// Returns `Ok(None)` when the component is not found (404 or `ok: false`).
+/// Returns `Err` on transport errors or malformed responses.
+fn query_deployment_harness_version(component_id: &str) -> Result<Option<String>> {
+    let endpoint = std::env::var("AGENT_CORE_DEPLOYMENT_HARNESS_CONTROL_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:7400".into());
+    let token = std::env::var("AGENT_CORE_DEPLOYMENT_HARNESS_CONTROL_TOKEN")
+        .map_err(|_| anyhow::anyhow!("DEPLOYMENT_HARNESS_CONTROL_NOT_CONFIGURED"))?;
+    if token.len() < 32 {
+        bail!("DEPLOYMENT_HARNESS_CONTROL_TOKEN_INVALID");
+    }
+
+    let authority = endpoint
+        .strip_prefix("http://")
+        .ok_or_else(|| anyhow::anyhow!("DEPLOYMENT_HARNESS_ENDPOINT_INVALID"))?
+        .trim_end_matches('/');
+    let path = format!("/v1/components/{component_id}");
+    let addr = authority
+        .parse::<std::net::SocketAddr>()
+        .map_err(|_| anyhow::anyhow!("DEPLOYMENT_HARNESS_ENDPOINT_INVALID"))?;
+    if !addr.ip().is_loopback() {
+        bail!("DEPLOYMENT_HARNESS_ENDPOINT_NOT_LOOPBACK");
+    }
+
+    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5))
+        .map_err(|_| anyhow::anyhow!("DEPLOYMENT_HARNESS_CONNECT_FAILED"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .ok();
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .ok();
+
+    let request = format!(
+        "GET {path} HTTP/1.1\r\nHost: {authority}\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n"
+    );
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|_| anyhow::anyhow!("DEPLOYMENT_HARNESS_WRITE_FAILED"))?;
+
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .map_err(|_| anyhow::anyhow!("DEPLOYMENT_HARNESS_READ_FAILED"))?;
+
+    let status = response
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(0);
+    let payload = response
+        .split_once("\r\n\r\n")
+        .map(|(_, p)| p)
+        .unwrap_or("");
+
+    // 200 → component exists; parse version.
+    if status == 200 {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(payload) {
+            if val.get("ok").and_then(|v| v.as_bool()) == Some(true) {
+                let version = val
+                    .get("version")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                return Ok(version);
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Increment the patch component of a semver string "X.Y.Z".
+///
+/// Returns `None` if `current` is not a valid three-part semver or if any
+/// component is not a non-negative integer. Overflow wraps u64.
+fn increment_patch(current: &str) -> Option<String> {
+    let parts: Vec<&str> = current.split('.').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let major: u64 = parts[0].parse().ok()?;
+    let minor: u64 = parts[1].parse().ok()?;
+    let patch: u64 = parts[2].parse().ok()?;
+    Some(format!("{major}.{minor}.{}", patch.wrapping_add(1)))
+}
+
+#[cfg(test)]
+mod version_resolution_tests {
+    use super::*;
+    use crate::contract_catalog::CONTRACT_CATALOG_VERSION;
+
+    #[test]
+    fn existing_0_1_0_increments_to_0_1_1() {
+        assert_eq!(increment_patch("0.1.0"), Some("0.1.1".into()));
+    }
+
+    #[test]
+    fn existing_0_1_9_increments_to_0_1_10() {
+        assert_eq!(increment_patch("0.1.9"), Some("0.1.10".into()));
+    }
+
+    #[test]
+    fn existing_1_0_0_increments_to_1_0_1() {
+        assert_eq!(increment_patch("1.0.0"), Some("1.0.1".into()));
+    }
+
+    #[test]
+    fn invalid_version_returns_none() {
+        assert_eq!(increment_patch("0.1"), None);
+        assert_eq!(increment_patch("0.a.0"), None);
+        assert_eq!(increment_patch(""), None);
+        assert_eq!(increment_patch("0.1.0.0"), None);
+    }
+
+    #[test]
+    fn equal_version_is_not_reused() {
+        let next = increment_patch("0.1.0").unwrap();
+        assert_ne!(next, "0.1.0");
+    }
+
+    #[test]
+    fn version_is_bound_into_manifest_digest() {
+        let mut base = json!({
+            "schema_version":"component-artifact-v1",
+            "component_id":"token-dashboard",
+            "kind":"hook_consumer_service",
+            "profile_id":"hook-consumer-service-v0",
+            "contract_catalog_version": CONTRACT_CATALOG_VERSION,
+            "required_contracts":["event.observe.v0"],
+            "requested_permissions":["journal.observe"],
+            "deployment_profile":"managed-service-v0",
+            "service":{"version":"0.1.0","healthcheck_path":"/health"}
+        });
+        let mut draft = DevelopmentRequestDraft::new(
+            TargetKind::HookConsumerService,
+            "token-dashboard".into(),
+        );
+        draft.build_profile = "hook-consumer-service-v0".into();
+        draft.deployment_profile = "managed-service-v0".into();
+        draft.required_contracts = vec!["event.observe.v0".into()];
+        draft.requested_permissions = vec!["journal.observe".into()];
+        draft.requirements = vec!["test requirement".into()];
+        draft.acceptance_criteria = vec!["test acceptance".into()];
+        let request = DevelopmentRequest::from_draft(
+            draft,
+            "principal:test".into(),
+            "session:test".into(),
+            "message:service".into(),
+            "development:message:service".into(),
+            CONTRACT_CATALOG_VERSION.into(),
+        )
+        .unwrap();
+
+        let digest = format!("sha256:{}", "a".repeat(64));
+        base["service"]["version"] = json!("0.1.0");
+        let m1 = service_manifest(&request, &base, &digest).unwrap();
+        base["service"]["version"] = json!("0.1.1");
+        let m2 = service_manifest(&request, &base, &digest).unwrap();
+        assert_ne!(m1.manifest_id, m2.manifest_id,
+            "different versions must produce different manifest_ids");
+    }
 }
 
 #[cfg(test)]

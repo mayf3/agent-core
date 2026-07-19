@@ -86,6 +86,10 @@ export function startExecuteServer(
       return json(res, 200, { ok: true, receipt });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      console.error(`execute error: ${message.slice(0, 500)}`);
+      if (error instanceof Error && error.stack) {
+        console.error(`execute error stack: ${error.stack.slice(0, 500)}`);
+      }
       return json(res, 500, { ok: false, error: message.slice(0, 200) });
     }
   });
