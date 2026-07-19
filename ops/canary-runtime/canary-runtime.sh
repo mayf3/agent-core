@@ -1155,117 +1155,66 @@ cmd_shadow_e2e() {
         exit 1
     }
     
-    # 7. Kill any lingering processes on the ports shadow services will use
+    # 7. Ensure shadow service ports are free by terminating lingering
+    #    processes that use the exact shadow service binary paths.
+    #    This is NOT a broad kill — it checks /proc/pid/exe against
+    #    the known binary paths.
     echo ""
-    echo "--- Freeing shadow service ports ---"
-    for port in "${AGENT_CORE_KERNEL_PORT:-4130}" "${AGENT_CORE_CONNECTOR_PORT:-4131}" 7200 7300 7400; do
-        echo "  Freeing port ${port}..."
-        vm_exec "fuser -k ${port}/tcp 2>/dev/null; fuser -k ${port}/udp 2>/dev/null; true" 2>/dev/null || true
-    done
-    sleep 2
+    echo "--- Ensuring shadow ports are free ---"
+    local shadow_bins=("${KERNEL_BIN}" "${CODING_HARNESS_BIN}" "${CAPABILITY_HOST_BIN}" "${DEPLOYMENT_HARNESS_BIN}")
+    vm_exec "
+        for bin in ${shadow_bins[*]}; do
+            if [ -f \"\$bin\" ]; then
+                for pid in \$(pgrep -f \"\$bin\" 2>/dev/null || true); do
+                    if [ -n \"\$pid\" ] && [ \"\$pid\" -ne \"\$\$\" ]; then
+                        exe=\$(readlink -f /proc/\${pid}/exe 2>/dev/null || echo '')
+                        if [ \"\$exe\" = \"\$bin\" ]; then
+                            echo \"  Terminating lingering \$bin (PID \$pid)\"
+                            kill \$pid 2>/dev/null || true
+                        fi
+                    fi
+                done
+            fi
+        done
+        sleep 2
+    " 2>/dev/null || true
 
-    # 8. Start shadow services
-    echo ""
-    echo "--- Starting shadow services ---"
-    
-    local kernel_db="${shadow_root}/journal/journal.db"
-    local shadow_env="${shadow_root}/shadow.env"
-    
-    # Kernel
-    echo "Starting Kernel (port ${AGENT_CORE_KERNEL_PORT:-4130})..."
-    vm_exec "
-        export \$(grep -v '^\s*#' '${shadow_env}' | grep -v '^\s*$' | xargs 2>/dev/null)
-        mkdir -p '${shadow_root}/journal' '${shadow_root}/logs' '${shadow_root}/pids'
-        nohup ${KERNEL_BIN} serve --db '${kernel_db}' \
-            > '${shadow_root}/logs/kernel.log' 2>&1 &
-        echo \$! > '${shadow_root}/pids/kernel.pid'
-    " 2>&1 || echo "  ⚠️  Kernel start may have failed (check logs)"
-    sleep 2
-    
-    # NOTE: Shadow Connector is NOT started here — inject.ts starts it
-    # on the host via the CapturedFeishuTransport when it imports
-    # connector-shadow.ts. This avoids a duplicate port 4131 bind.
-    
-    # Coding Harness
-    echo "Starting Coding Harness (port 7200)..."
-    vm_exec "
-        export \$(grep -v '^\s*#' '${shadow_env}' | grep -v '^\s*$' | xargs 2>/dev/null)
-        nohup ${CODING_HARNESS_BIN} --listen 127.0.0.1:7200 \
-            > '${shadow_root}/logs/coding-harness.log' 2>&1 &
-        echo \$! > '${shadow_root}/pids/coding-harness.pid'
-    " 2>&1 || echo "  ⚠️  Coding Harness start may have failed"
-    
-    # Capability Host
-    echo "Starting Capability Host (port 7300)..."
-    vm_exec "
-        export \$(grep -v '^\s*#' '${shadow_env}' | grep -v '^\s*$' | xargs 2>/dev/null)
-        nohup ${CAPABILITY_HOST_BIN} \
-            > '${shadow_root}/logs/capability-host.log' 2>&1 &
-        echo \$! > '${shadow_root}/pids/capability-host.pid'
-    " 2>&1 || echo "  ⚠️  Capability Host start may have failed"
-    
-    # Deployment Harness (on standard port)
-    echo "Starting Deployment Harness (port 7400)..."
-    vm_exec "
-        export \$(grep -v '^\s*#' '${shadow_env}' | grep -v '^\s*$' | xargs 2>/dev/null)
-        nohup ${DEPLOYMENT_HARNESS_BIN} \
-            > '${shadow_root}/logs/deployment-harness.log' 2>&1 &
-        echo \$! > '${shadow_root}/pids/deployment-harness.pid'
-    " 2>&1 || echo "  ⚠️  Deployment Harness start may have failed"
-    
-    # Wait for services
-    echo ""
-    echo "--- Waiting for shadow services ---"
-    sleep 5
-    
-    # 8. Shadow doctor
-    echo ""
-    echo "--- Shadow doctor ---"
-    # Quick port check
-    local shadow_ok=0
-    for svc in kernel coding-harness capability-host deployment-harness; do
-        local port
-        port="$(get_port "$svc")"
-        if check_port "$port" "$svc" 2>/dev/null; then
-            shadow_ok=$((shadow_ok + 1))
-        else
-            echo "  ⚠️  $svc not responding on port $port"
-        fi
-    done
-    echo "Shadow VM services: ${shadow_ok}/4 healthy"
-    
-    echo ""
-    echo "--- Deploying shadow tools to shared mount ---"
+    # 8. Deploy shadow tools to shared VM mount
     local shadow_tools_dir="/Users/yanfenma/.agent-core/hcr-linux/shadow-tools"
     rm -rf "${shadow_tools_dir}"
-    # Preserve project directory structure so relative imports work
     mkdir -p "${shadow_tools_dir}/tools/shadow-canary" "${shadow_tools_dir}/connectors/feishu/src"
     cp -r "${PROJECT_DIR}/tools/shadow-canary/"* "${shadow_tools_dir}/tools/shadow-canary/"
     cp -r "${PROJECT_DIR}/connectors/feishu/src/"* "${shadow_tools_dir}/connectors/feishu/src/"
     echo "  Shadow tools deployed to ${shadow_tools_dir}"
 
-    echo "--- Running inject.ts (${variant}) inside VM ---"
-    local inject_exit_code=0
-    vm_exec "
-        set -a
-        source '${shadow_root}/shadow.env'
-        set +a
-        SHADOW_EVIDENCE_DIR='${shadow_root}/evidence' \
-        SHADOW_STATE_DIR='${shadow_root}/state' \
-        SHADOW_RUN_ID='${run_id}' \
-        SHADOW_VARIANT='${variant}' \
-        cd '${shadow_tools_dir}/tools/shadow-canary' && \
-        npx tsx inject.ts '${variant}'
-    " 2>&1 || inject_exit_code=$?
-
-    if [ "$inject_exit_code" -ne 0 ]; then
+    # 8. Run Shadow Supervisor (single persistent session)
+    echo ""
+    echo "--- Running Shadow Supervisor (${variant}) ---"
+    local supervisor_script="${shadow_tools_dir}/tools/shadow-canary/shadow-supervisor.sh"
+    local shadow_env="${shadow_root}/shadow.env"
+    
+    local supervisor_exit_code=0
+    "$LIMACTL" shell "$VM_NAME" -- \
+        bash "${supervisor_script}" \
+            "${variant}" \
+            "${shadow_env}" \
+            "${shadow_root}" \
+            "${run_id}" \
+        2>&1 || supervisor_exit_code=$?
+    
+    if [ "$supervisor_exit_code" -ne 0 ]; then
         echo ""
-        echo "❌ inject.ts failed (exit ${inject_exit_code})"
-        echo "FIRST_FAILED_STEP: $(grep -o '"first_failed_step":"[^"]*"' "${shadow_root}/evidence/shadow-summary.json" 2>/dev/null | head -1 || echo 'unknown')"
-        exit "$inject_exit_code"
+        echo "❌ Shadow Supervisor failed (exit ${supervisor_exit_code})"
+        if [ -f "${shadow_root}/evidence/shadow-summary.json" ]; then
+            echo "FIRST_FAILED_STEP: $(grep -o '"first_failed_step":"[^"]*"' "${shadow_root}/evidence/shadow-summary.json" 2>/dev/null | head -1 || echo 'unknown')"
+        else
+            echo "FIRST_FAILED_STEP: SUPERVISOR_STARTUP"
+        fi
+        # Trap handles cleanup and production restore
+        exit "$supervisor_exit_code"
     fi
 
-    # 10. Collect evidence
+    # 9. Collect evidence
     echo ""
     echo "--- Collecting evidence ---"
     collect_shadow_evidence "${shadow_root}"
