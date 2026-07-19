@@ -371,8 +371,10 @@ async function runFreshShadow(): Promise<void> {
 
   // ---- Step 5: Wait for deployment ----
   console.log("\n[5] Waiting for deployment...");
-  // Derive component_id from proposal data (manifest_id or operation name)
-  const componentId = proposalData.manifest_id || `failure-viewer`;
+  // Derive component_id from proposal data
+  // operation_name is the component short name (e.g. "failure-viewer")
+  // manifest_id is the content-addressed manifest hash — NOT the component_id
+  const componentId = proposalData.operation_name || "failure-viewer";
   let componentData: any;
   try {
     componentData = await waitForComponent(componentId, 180_000);
