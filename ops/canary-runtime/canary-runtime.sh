@@ -999,6 +999,7 @@ generate_shadow_env() {
     echo "SHADOW_RUN_ID=${run_id}" >> "$dst"
     echo "SHADOW_EVIDENCE_DIR=${shadow_root}/evidence" >> "$dst"
     echo "SHADOW_STATE_DIR=${shadow_root}/state" >> "$dst"
+    echo "OVERRIDE_DB_PATH=${shadow_root}/journal/journal.db" >> "$dst"
     
     echo "shadow.env generated at ${dst}"
 }
