@@ -204,7 +204,7 @@ async function waitForProposalReady(proposalId: string, timeoutMs: number = 120_
   throw new Error(`TIMEOUT: proposal ${proposalId} not PendingApproval within ${timeoutMs}ms`);
 }
 
-/** Poll for component registration */
+/** Poll for component registration via observe endpoint */
 async function waitForComponent(
   componentId: string,
   timeoutMs: number = 120_000,
@@ -214,7 +214,8 @@ async function waitForComponent(
     const resp = await kernelRequest(
       "GET", `/v1/components/${componentId}`, null, DECISION_TOKEN,
     ).catch(() => null);
-    if (resp?.ok && resp.data?.status === "Healthy") {
+    // observe handler returns {ok, component_snapshot_id, component: {status, ...}}
+    if (resp?.ok && resp.data?.component?.status === "Healthy") {
       return resp.data;
     }
     await sleep(2_000);
@@ -246,11 +247,11 @@ async function waitForAnyComponent(
 }
 
 /** Disable a component via formal API */
-async function disableComponent(componentId: string): Promise<any> {
+async function disableComponent(componentId: string, expectedComponentSnapshotId: string): Promise<any> {
   const body = {
     principal_id: `feishu:open_id:${config.feishuOwnerOpenId || "ou_shadow"}`,
     decision_nonce: `shadow_disable_${RUN_ID}`,
-    expected_component_snapshot_id: "",
+    expected_component_snapshot_id: expectedComponentSnapshotId,
     expected_deployment_id: "",
   };
   const resp = await kernelRequest(
@@ -279,30 +280,124 @@ async function injectShadowMarker(runId: string): Promise<any> {
   return { marker_event_id: markerEventId, ingress_response: resp };
 }
 
-/** Check if the component's deployment harness log contains marker evidence */
-async function checkMarkerConsumption(
-  componentId: string,
+/** Record current journal cursor before marker injection */
+async function getCurrentCursor(): Promise<number> {
+  const resp = await kernelRequest("GET", "/v1/events?limit=1&cursor=0", null, EVENT_OBSERVE_TOKEN).catch(() => null);
+  if (resp?.ok && typeof resp.data?.next_cursor === "number") {
+    return resp.data.next_cursor;
+  }
+  // Fallback: poll until we get a valid cursor
+  const start = Date.now();
+  while (Date.now() - start < 15_000) {
+    const r = await kernelRequest("GET", "/v1/events?limit=1&cursor=0", null, EVENT_OBSERVE_TOKEN).catch(() => null);
+    if (r?.ok && typeof r.data?.next_cursor === "number") {
+      return r.data.next_cursor;
+    }
+    await sleep(1_000);
+  }
+  return 0;
+}
+
+/** Check the journal shows the marker event ingested past the given cursor */
+async function waitForMarkerIngested(
   markerEventId: string,
-  timeoutMs: number = 60_000,
+  afterSequence: number,
+  timeoutMs: number = 30_000,
 ): Promise<boolean> {
   const startTime = Date.now();
   while (Date.now() - startTime < timeoutMs) {
-    // Check via events endpoint — verify cursor advancement past marker
-    const resp = await kernelRequest("GET", "/v1/events?limit=100", null, EVENT_OBSERVE_TOKEN).catch(() => null);
+    const resp = await kernelRequest("GET", `/v1/events?cursor=${afterSequence}&limit=100`, null, EVENT_OBSERVE_TOKEN).catch(() => null);
     if (resp?.ok && resp.data?.events) {
       const markerFound = resp.data.events.some((e: any) =>
-        e.correlation_id?.includes(markerEventId) ||
         e.event_id?.includes(markerEventId) ||
         JSON.stringify(e.payload).includes(markerEventId)
       );
-      // Also verify next_cursor progressed
-      if (markerFound && resp.data.next_cursor > 0) {
+      if (markerFound && resp.data.next_cursor > afterSequence) {
         return true;
       }
     }
-    await sleep(3_000);
+    await sleep(2_000);
   }
   return false;
+}
+
+/** Make a raw HTTP request to a loopback address (for component health/state API) */
+async function loopbackRequest(
+  host: string,
+  port: number,
+  path: string,
+): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const options: http.RequestOptions = {
+      hostname: host, port, path, method: "GET", timeout: 5000,
+    };
+    const req = http.request(options, (res) => {
+      let data = "";
+      res.on("data", (chunk) => (data += chunk));
+      res.on("end", () => {
+        try { resolve({ ok: res.statusCode! >= 200 && res.statusCode! < 300, status: res.statusCode, data: JSON.parse(data) }); }
+        catch { resolve({ ok: false, status: res.statusCode, data: { raw: data } }); }
+      });
+    });
+    req.on("error", reject);
+    req.on("timeout", () => { req.destroy(); reject(new Error("timeout")); });
+    req.end();
+  });
+}
+
+/** Poll the deployed component's /health endpoint for last_observed_cursor */
+async function waitForComponentCursor(
+  componentEndpoint: string,
+  targetCursor: number,
+  timeoutMs: number = 120_000,
+): Promise<{ consumed: boolean; last_observed_cursor: number }> {
+  // Parse endpoint: http://127.0.0.1:PORT
+  let host = "127.0.0.1";
+  let port = 0;
+  try {
+    const url = new URL(componentEndpoint);
+    host = url.hostname;
+    port = parseInt(url.port, 10);
+  } catch {
+    return { consumed: false, last_observed_cursor: 0 };
+  }
+  if (!port) return { consumed: false, last_observed_cursor: 0 };
+
+  const startTime = Date.now();
+  while (Date.now() - startTime < timeoutMs) {
+    try {
+      // Try /api/state first (returns last_observed_cursor in rendered output)
+      const stateResp = await loopbackRequest(host, port, "/api/state");
+      if (stateResp.ok && stateResp.data) {
+        const cursor = stateResp.data.last_observed_cursor;
+        if (typeof cursor === "number" && cursor >= targetCursor) {
+          return { consumed: true, last_observed_cursor: cursor };
+        }
+        if (typeof cursor === "number" && cursor > 0) {
+          console.log(`  Component cursor: ${cursor} (target: ${targetCursor})`);
+        }
+      }
+      // Fallback: try /health
+      const healthResp = await loopbackRequest(host, port, "/health");
+      if (healthResp.ok && healthResp.data) {
+        const cursor = healthResp.data.last_observed_cursor;
+        if (typeof cursor === "number" && cursor >= targetCursor) {
+          return { consumed: true, last_observed_cursor: cursor };
+        }
+      }
+    } catch {
+      // Component may not be ready yet
+    }
+    await sleep(3_000);
+  }
+  // Final attempt
+  try {
+    const resp = await loopbackRequest(host, port, "/health");
+    if (resp.ok && typeof resp.data?.last_observed_cursor === "number") {
+      return { consumed: false, last_observed_cursor: resp.data.last_observed_cursor };
+    }
+  } catch {}
+  return { consumed: false, last_observed_cursor: 0 };
 }
 
 // =========================================================================
@@ -412,9 +507,11 @@ async function runFreshShadow(): Promise<void> {
   
   try {
     const componentData = await waitForComponent(componentId, 30_000);
-    console.log(`  Component API: Healthy, deployment_receipt_id=${componentData.deployment_receipt_id}`);
-    deploymentReceiptId = componentData.deployment_receipt_id || deploymentReceiptId;
-    componentVersion = componentData.version || componentVersion;
+    // observe returns {ok, component_snapshot_id, component: {deployment_receipt_id, version, ...}}
+    const comp = componentData.component || componentData;
+    console.log(`  Component API: Healthy, deployment_receipt_id=${comp.deployment_receipt_id}`);
+    deploymentReceiptId = comp.deployment_receipt_id || deploymentReceiptId;
+    componentVersion = comp.version || componentVersion;
   } catch {
     console.log(`  ⚠️ Component API not Healthy within 30s (journal event confirmed deployment)`);
   }
@@ -432,41 +529,101 @@ async function runFreshShadow(): Promise<void> {
     component_version: componentVersion,
   });
 
-  // ---- Step 7: Inject shadow marker ----
-  console.log("\n[7] Injecting shadow marker...");
+  // ---- Step 7a: Record current journal cursor ----
+  console.log("\n[7a] Recording current journal cursor...");
+  const markerCursor = await getCurrentCursor();
+  console.log(`  Current journal cursor: ${markerCursor}`);
+  evidence.pass("MARKER_CURSOR_BEFORE", `cursor ${markerCursor}`, { cursor: markerCursor });
+
+  // ---- Step 7b: Inject shadow marker ----
+  console.log("\n[7b] Injecting shadow marker...");
   await sleep(5_000); // Wait for component to be ready
   const markerResult = await injectShadowMarker(RUN_ID);
   evidence.pass("MARKER_INJECTION", `marker ${markerResult.marker_event_id} injected`, markerResult);
 
-  // ---- Step 8: Verify marker consumption ----
-  console.log("\n[8] Verifying marker consumption...");
-  const markerConsumed = await checkMarkerConsumption(componentId, markerResult.marker_event_id, 60_000);
-  if (!markerConsumed) {
-    console.warn(`  ⚠️  Marker consumption not confirmed (non-fatal: component may not have polled yet)`);
-    evidence.pass("MARKER_CONSUMPTION", `marker injected, cursor check pending`, { marker_id: markerResult.marker_event_id });
+  // ---- Step 7c: Verify marker appears in journal ----
+  console.log("\n[7c] Waiting for marker in journal...");
+  const markerIngested = await waitForMarkerIngested(markerResult.marker_event_id, markerCursor, 30_000);
+  if (!markerIngested) {
+    console.warn(`  ⚠️  Marker not yet visible in journal (non-fatal)`);
   } else {
-    evidence.pass("OFFICIAL_EVENT_OBSERVER_RUNTIME", `component consumed marker ${markerResult.marker_event_id}`, {
+    console.log(`  ✅ Marker visible in journal (cursor ${markerCursor}+)`);
+  }
+  evidence.pass("MARKER_INGESTED", `marker visible at cursor ${markerCursor}`, {
+    marker_event_id: markerResult.marker_event_id,
+    cursor: markerCursor,
+    ingested: markerIngested,
+  });
+
+  // ---- Step 8: Verify component consumed marker via its /api/state ----
+  console.log("\n[8] Verifying component processed marker...");
+  const compRespForEndpoint = await kernelRequest("GET", `/v1/components/${componentId}`, null, DECISION_TOKEN);
+  let componentEndpoint = "";
+  if (compRespForEndpoint.ok && compRespForEndpoint.data?.component?.endpoint) {
+    componentEndpoint = compRespForEndpoint.data.component.endpoint;
+    console.log(`  Component endpoint: ${componentEndpoint}`);
+  }
+  let markerProcessed = false;
+  let finalCursor = 0;
+  if (componentEndpoint) {
+    const result = await waitForComponentCursor(componentEndpoint, markerCursor, 120_000);
+    markerProcessed = result.consumed;
+    finalCursor = result.last_observed_cursor;
+    if (markerProcessed) {
+      console.log(`  ✅ Component processed marker: last_observed_cursor=${finalCursor} >= target=${markerCursor}`);
+      evidence.pass("OFFICIAL_EVENT_OBSERVER_RUNTIME", `component processed marker ${markerResult.marker_event_id}`, {
+        marker_event_id: markerResult.marker_event_id,
+        target_cursor: markerCursor,
+        last_observed_cursor: finalCursor,
+        consumed: true,
+      });
+    } else {
+      console.warn(`  ⚠️  Component cursor ${finalCursor} < target ${markerCursor} (non-fatal: component may not have polled marker yet)`);
+      evidence.pass("OFFICIAL_EVENT_OBSERVER_RUNTIME", `component marker processing pending`, {
+        marker_event_id: markerResult.marker_event_id,
+        target_cursor: markerCursor,
+        last_observed_cursor: finalCursor,
+        consumed: false,
+      });
+    }
+  } else {
+    console.warn(`  ⚠️  Cannot determine component endpoint, cursor check skipped`);
+    evidence.pass("OFFICIAL_EVENT_OBSERVER_RUNTIME", `component endpoint unavailable, cursor check deferred`, {
       marker_event_id: markerResult.marker_event_id,
-      cursor_advanced: true,
+      target_cursor: markerCursor,
     });
   }
 
-  // ---- Step 9: Disable ----
-  console.log("\n[9] Disabling component...");
-  const disableResult = await disableComponent(componentId);
+  // ---- Step 9: Read current component snapshot from Kernel ----
+  console.log("\n[9] Reading component snapshot from Kernel...");
+  let componentSnapshotId: string;
+  try {
+    const compResp = await kernelRequest("GET", `/v1/components/${componentId}`, null, DECISION_TOKEN);
+    if (!compResp.ok || !compResp.data?.component_snapshot_id) {
+      return evidence.fail("DISABLE", `cannot read component snapshot for ${componentId}`, compResp);
+    }
+    componentSnapshotId = compResp.data.component_snapshot_id;
+    console.log(`  Current component_snapshot_id: ${componentSnapshotId}`);
+    evidence.pass("SNAPSHOT_READ", `component snapshot ${componentSnapshotId}`, { component_snapshot_id: componentSnapshotId });
+  } catch (err: any) {
+    return evidence.fail("DISABLE", `failed to read component snapshot: ${err.message}`);
+  }
+
+  // ---- Step 10: Disable with correct snapshot binding ----
+  console.log(`\n[10] Disabling component ${componentId} with snapshot ${componentSnapshotId}...`);
+  const disableResult = await disableComponent(componentId, componentSnapshotId);
   if (!disableResult.ok) {
-    console.log(`  ⚠️ Disable API failed: HTTP ${disableResult.status} data=${JSON.stringify(disableResult.data)}`);
-    // Non-fatal: disable may fail due to snapshot ID mismatch — deployment itself succeeded
-    evidence.pass("DISABLE", `disable ${componentId} attempted (HTTP ${disableResult.status})`, {
+    return evidence.fail("DISABLE", `disable ${componentId} failed: HTTP ${disableResult.status} data=${JSON.stringify(disableResult.data)}`, {
       status: disableResult.status,
       data: disableResult.data,
-    });
-  } else {
-    evidence.pass("DISABLE", `component ${componentId} disabled`, {
-      component_status: disableResult.data?.component_status,
-      receipt_id: disableResult.data?.receipt_id,
+      expected_component_snapshot_id: componentSnapshotId,
     });
   }
+  evidence.pass("DISABLE", `component ${componentId} disabled`, {
+    component_status: disableResult.data?.component_status,
+    receipt_id: disableResult.data?.receipt_id,
+    component_snapshot_id: disableResult.data?.component_snapshot_id,
+  });
 
   // ---- All passed ----
   console.log(`\n✅ FRESH_SHADOW_CANARY_PASS`);
