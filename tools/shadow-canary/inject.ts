@@ -102,6 +102,14 @@ function kernelRequest(method: string, path: string, body?: any, token?: string)
     const headers: Record<string, string> = { "Content-Type": "application/json" };
     if (token) headers["Authorization"] = `Bearer ${token}`;
 
+    // Set Content-Length explicitly — the Agent Core HTTP server reads body
+    // bytes based on Content-Length and does NOT support Transfer-Encoding: chunked.
+    let bodyStr: string | undefined;
+    if (body !== undefined) {
+      bodyStr = JSON.stringify(body);
+      headers["Content-Length"] = String(Buffer.byteLength(bodyStr));
+    }
+
     const options: http.RequestOptions = {
       hostname: url.hostname, port: url.port, path: url.pathname + url.search,
       method, headers, timeout: 30000,
@@ -117,7 +125,7 @@ function kernelRequest(method: string, path: string, body?: any, token?: string)
     });
     req.on("error", reject);
     req.on("timeout", () => { req.destroy(); reject(new Error("timeout")); });
-    if (body) req.write(JSON.stringify(body));
+    if (bodyStr) req.write(bodyStr);
     req.end();
   });
 }
@@ -539,6 +547,9 @@ async function runFreshShadow(): Promise<void> {
   console.log("\n[7b] Injecting shadow marker...");
   await sleep(5_000); // Wait for component to be ready
   const markerResult = await injectShadowMarker(RUN_ID);
+  if (!markerResult.ingress_response.ok) {
+    return evidence.fail("MARKER_INJECTION", `marker injection failed: HTTP ${markerResult.ingress_response.status}`, markerResult.ingress_response);
+  }
   evidence.pass("MARKER_INJECTION", `marker ${markerResult.marker_event_id} injected`, markerResult);
 
   // ---- Step 7c: Verify marker appears in journal ----
