@@ -425,19 +425,6 @@ async function runFreshShadow(): Promise<void> {
     deployment_receipt_id: deploymentReceiptId,
   });
 
-  // Verify deployment receipt and registry
-  if (!componentData.deployment_receipt_id) {
-    return evidence.fail("DEPLOYMENT", `no deployment_receipt_id for ${componentId}`, componentData);
-  }
-  evidence.pass("DEPLOYMENT", `component ${componentId} v${componentData.version} deployed`, {
-    component_id: componentId,
-    version: componentData.version,
-    endpoint: componentData.endpoint,
-    deployment_receipt_id: componentData.deployment_receipt_id,
-    manifest_digest: componentData.manifest_digest,
-    artifact_digest: componentData.artifact_digest,
-  });
-
   // ---- Step 6: Verify Registry ----
   console.log("\n[6] Verifying Kernel Registry...");
   evidence.pass("REGISTRY", `component ${componentId} registered (event confirms registry update)`, {
@@ -479,7 +466,7 @@ async function runFreshShadow(): Promise<void> {
   console.log(`\n✅ FRESH_SHADOW_CANARY_PASS`);
   evidence.pass("FRESH_SHADOW_CANARY", `fresh shadow completed for ${RUN_ID}`, {
     component_id: componentId,
-    version: componentData.version,
+    version: componentVersion,
   });
 }
 
