@@ -96,13 +96,14 @@ trap cleanup EXIT INT TERM HUP
 start_service() {
     local name="$1"
     local pid_file="$2"
+    local log_file="${LOG_DIR}/${name}.log"
     shift 2
-    # Run the command in background
-    "$@" &
+    # Run the command, redirecting output to log file
+    "$@" > "$log_file" 2>&1 &
     local pid=$!
     echo "$pid" > "$pid_file"
     SPAWNED_PIDS+=("$pid")
-    echo "[supervisor] started $name (PID $pid)"
+    echo "[supervisor] started $name (PID $pid) log=$log_file"
 }
 
 wait_for_port() {
