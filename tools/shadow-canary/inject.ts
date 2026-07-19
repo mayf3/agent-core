@@ -255,12 +255,12 @@ async function waitForAnyComponent(
 }
 
 /** Disable a component via formal API */
-async function disableComponent(componentId: string, expectedComponentSnapshotId: string): Promise<any> {
+async function disableComponent(componentId: string, expectedComponentSnapshotId: string, expectedDeploymentId: string): Promise<any> {
   const body = {
     principal_id: `feishu:open_id:${config.feishuOwnerOpenId || "ou_shadow"}`,
     decision_nonce: `shadow_disable_${RUN_ID}`,
     expected_component_snapshot_id: expectedComponentSnapshotId,
-    expected_deployment_id: "",
+    expected_deployment_id: expectedDeploymentId,
   };
   const resp = await kernelRequest(
     "POST", `/v1/components/${componentId}/disable`, body, DECISION_TOKEN,
@@ -605,29 +605,36 @@ async function runFreshShadow(): Promise<void> {
     });
   }
 
-  // ---- Step 9: Read current component snapshot from Kernel ----
-  console.log("\n[9] Reading component snapshot from Kernel...");
+  // ---- Step 9: Read component snapshot and deployment_id from Kernel ----
+  console.log("\n[9] Reading component state from Kernel...");
   let componentSnapshotId: string;
+  let deploymentId: string;
   try {
     const compResp = await kernelRequest("GET", `/v1/components/${componentId}`, null, DECISION_TOKEN);
     if (!compResp.ok || !compResp.data?.component_snapshot_id) {
       return evidence.fail("DISABLE", `cannot read component snapshot for ${componentId}`, compResp);
     }
     componentSnapshotId = compResp.data.component_snapshot_id;
+    deploymentId = compResp.data.component?.deployment_id || "";
     console.log(`  Current component_snapshot_id: ${componentSnapshotId}`);
-    evidence.pass("SNAPSHOT_READ", `component snapshot ${componentSnapshotId}`, { component_snapshot_id: componentSnapshotId });
+    console.log(`  Current deployment_id: ${deploymentId}`);
+    evidence.pass("SNAPSHOT_READ", `component snapshot ${componentSnapshotId}`, {
+      component_snapshot_id: componentSnapshotId,
+      deployment_id: deploymentId,
+    });
   } catch (err: any) {
-    return evidence.fail("DISABLE", `failed to read component snapshot: ${err.message}`);
+    return evidence.fail("DISABLE", `failed to read component state: ${err.message}`);
   }
 
   // ---- Step 10: Disable with correct snapshot binding ----
   console.log(`\n[10] Disabling component ${componentId} with snapshot ${componentSnapshotId}...`);
-  const disableResult = await disableComponent(componentId, componentSnapshotId);
+  const disableResult = await disableComponent(componentId, componentSnapshotId, deploymentId);
   if (!disableResult.ok) {
     return evidence.fail("DISABLE", `disable ${componentId} failed: HTTP ${disableResult.status} data=${JSON.stringify(disableResult.data)}`, {
       status: disableResult.status,
       data: disableResult.data,
       expected_component_snapshot_id: componentSnapshotId,
+      expected_deployment_id: deploymentId,
     });
   }
   evidence.pass("DISABLE", `component ${componentId} disabled`, {
