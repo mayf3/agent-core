@@ -849,6 +849,455 @@ cmd_status() {
 }
 
 # =============================================================================
+# COMMAND: shadow-e2e
+# =============================================================================
+
+SHADOW_ROOT=""
+SHADOW_PRE_EXISTING=false
+
+# Trap: precise stop + production recovery
+shadow_cleanup() {
+    local exit_code=$?
+    local shadow_root="${SHADOW_ROOT}"
+    echo ""
+    echo "=== shadow-e2e cleanup ==="
+
+    # ---- Phase 1: Stop shadow processes by PID (NO pkill) ----
+    if [ -n "$shadow_root" ] && [ -d "${shadow_root}/pids" ]; then
+        echo "--- Stopping shadow processes ---"
+        for pid_file in "${shadow_root}/pids"/*.pid; do
+            [ -f "$pid_file" ] || continue
+            local svc_name
+            svc_name=$(basename "$pid_file" .pid)
+            local pid
+            pid=$(cat "$pid_file" 2>/dev/null || echo "")
+            if [ -z "$pid" ]; then
+                rm -f "$pid_file"
+                continue
+            fi
+
+            # Verify process belongs to this shadow (check /proc/PID/cmdline)
+            if [ -f "/proc/${pid}/cmdline" ] 2>/dev/null; then
+                local cmdline
+                cmdline=$(tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null || echo "")
+                if ! echo "$cmdline" | grep -q "shadow"; then
+                    if ! echo "$cmdline" | grep -q "${shadow_root}"; then
+                        echo "  ⚠️  PID ${pid} (${svc_name}) does not match shadow root — skipping"
+                        continue
+                    fi
+                fi
+            fi
+
+            # SIGTERM first
+            kill "$pid" 2>/dev/null && echo "  Stopped ${svc_name} (PID ${pid})" || {
+                echo "  ${svc_name} (PID ${pid}) already exited"
+                rm -f "$pid_file"
+                continue
+            }
+
+            # Wait up to 5s for graceful exit
+            local waited=0
+            while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 5 ]; do
+                sleep 1
+                waited=$((waited + 1))
+            done
+
+            # SIGKILL if still alive
+            if kill -0 "$pid" 2>/dev/null; then
+                kill -9 "$pid" 2>/dev/null || true
+                echo "  Force killed ${svc_name} (PID ${pid})"
+            fi
+            rm -f "$pid_file"
+        done
+    fi
+
+    # ---- Phase 2: Verify ports released ----
+    echo "--- Verifying port release ---"
+    for svc in kernel connector coding-harness capability-host deployment-harness; do
+        local port
+        port="$(get_port "$svc")"
+        if curl -sf --max-time 1 "http://127.0.0.1:${port}/health" >/dev/null 2>&1; then
+            echo "  ⚠️  Port ${port} (${svc}) still in use"
+        else
+            echo "  ✅ Port ${port} (${svc}) released"
+        fi
+    done
+
+    # ---- Phase 3: Restore production runtime (if it was running before) ----
+    if [ "$SHADOW_PRE_EXISTING" = "true" ]; then
+        echo "--- Restoring production runtime ---"
+        if cmd_start 2>/dev/null; then
+            echo "  ✅ Production runtime started"
+            if cmd_doctor 2>/dev/null; then
+                echo "  ✅ Production doctor: CANARY_PREFLIGHT_PASS"
+                echo "CANARY_RUNTIME_RESTORED_PASS" >> "${shadow_root}/evidence/shadow-verdict.txt" 2>/dev/null
+            else
+                echo "  ❌ Production doctor: FAILED"
+                echo "CANARY_RUNTIME_RESTORED_FAIL" >> "${shadow_root}/evidence/shadow-verdict.txt" 2>/dev/null
+                # Do NOT override clean exit — restoration failure is a real failure
+                exit_code=1
+            fi
+        else
+            echo "  ❌ Production runtime start failed"
+            echo "CANARY_RUNTIME_RESTORED_FAIL" >> "${shadow_root}/evidence/shadow-verdict.txt" 2>/dev/null
+            exit_code=1
+        fi
+    fi
+
+    echo "=== cleanup exit code: ${exit_code} ==="
+    exit "$exit_code"
+}
+
+# Generate shadow.env from runtime.env with explicit allowlist
+generate_shadow_env() {
+    local shadow_root="$1"
+    local src="$PROJECT_DIR/runtime.env"
+    local dst="${shadow_root}/shadow.env"
+    
+    # Explicit allowlist of variables to override
+    # All others are copied verbatim from runtime.env
+    declare -A OVERRIDES
+    OVERRIDES["AGENT_CORE_KERNEL_PORT"]="${AGENT_CORE_KERNEL_PORT:-4130}"
+    OVERRIDES["AGENT_CORE_CONNECTOR_PORT"]="${AGENT_CORE_CONNECTOR_PORT:-4131}"
+    OVERRIDES["AGENT_CORE_DATA_DIR"]="${shadow_root}/journal"
+    OVERRIDES["AGENT_CORE_HARNESS_ARTIFACT_ROOT"]="${shadow_root}/artifacts"
+    OVERRIDES["HARNESS_ARTIFACT_ROOT"]="${shadow_root}/artifacts"
+    OVERRIDES["DEPLOYMENT_HARNESS_ARTIFACT_ROOT"]="${shadow_root}/artifacts"
+    OVERRIDES["DEPLOYMENT_HARNESS_STATE_ROOT"]="${shadow_root}/state/deployment"
+    OVERRIDES["CAPABILITY_HOST_ARTIFACT_ROOT"]="${shadow_root}/artifacts"
+    OVERRIDES["AGENT_CORE_CONTEXT_DIR"]="${shadow_root}/context"
+    OVERRIDES["CODING_WORKSPACE_ROOT"]="${shadow_root}/workspaces"
+    
+    # Copy runtime.env, applying overrides
+    while IFS='=' read -r key value; do
+        # Skip comments and blank lines
+        case "$key" in
+            ''|\#*) continue ;;
+        esac
+        key=$(echo "$key" | xargs)
+        if [ -n "${OVERRIDES[$key]:-}" ]; then
+            echo "${key}=${OVERRIDES[$key]}"
+        else
+            echo "${key}=${value}"
+        fi
+    done < "$src" > "$dst"
+    
+    # Add shadow-specific variables
+    echo "SHADOW_RUN_ID=${run_id}" >> "$dst"
+    echo "SHADOW_EVIDENCE_DIR=${shadow_root}/evidence" >> "$dst"
+    echo "SHADOW_STATE_DIR=${shadow_root}/state" >> "$dst"
+    
+    echo "shadow.env generated at ${dst}"
+}
+
+# Realpath fence verification — 11 state paths must all be inside shadow root
+check_shadow_path_fence() {
+    local shadow_root="$1"
+    local errors=0
+    
+    for path in \
+        "${shadow_root}/journal" \
+        "${shadow_root}/artifacts" \
+        "${shadow_root}/state" \
+        "${shadow_root}/state/deployment" \
+        "${shadow_root}/context" \
+        "${shadow_root}/workspaces" \
+        "${shadow_root}/workspaces/scratch" \
+        "${shadow_root}/logs" \
+        "${shadow_root}/pids" \
+        "${shadow_root}/evidence"; do
+        mkdir -p "$path"
+        local resolved
+        resolved=$(cd "$path" && pwd -P 2>/dev/null || echo "")
+        if [ -z "$resolved" ]; then
+            echo "FAIL: Cannot resolve path $path"
+            errors=$((errors + 1))
+        elif [[ "$resolved" != "${shadow_root}"* ]]; then
+            echo "FAIL: Path $path resolves outside shadow root: $resolved"
+            errors=$((errors + 1))
+        else
+            echo "  ✅ $path"
+        fi
+    done
+    
+    # Also verify Connector state files
+    for f in feishu-executes-shadow.jsonl feishu-reactions-shadow.jsonl; do
+        local path="${shadow_root}/state/${f}"
+        touch "$path" 2>/dev/null || true
+        local resolved
+        resolved=$(cd "$(dirname "$path")" && pwd -P 2>/dev/null || echo "")
+        if [[ "$resolved" != "${shadow_root}"* ]]; then
+            echo "FAIL: Connector state $f escapes shadow root: $resolved"
+            errors=$((errors + 1))
+        else
+            echo "  ✅ ${f}"
+        fi
+    done
+    
+    if [ "$errors" -gt 0 ]; then
+        echo "SHADOW_PATH_FENCE_FAILED: $errors path(s) outside shadow root"
+        return 1
+    fi
+    echo "SHADOW_PATH_FENCE_PASS"
+    return 0
+}
+
+# Collect evidence summary (sanitized config digest)
+collect_shadow_evidence() {
+    local shadow_root="$1"
+    local evidence_dir="${shadow_root}/evidence"
+    mkdir -p "$evidence_dir"
+    
+    # Sanitized config digest — variable names + PRESENT/ABSENT only
+    {
+        echo "=== Shadow Config Summary ==="
+        echo "Run ID: ${run_id}"
+        echo "Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        echo ""
+        echo "=== Variables (sanitized) ==="
+        while IFS='=' read -r key value; do
+            case "$key" in
+                ''|\#*) continue ;;
+            esac
+            key=$(echo "$key" | xargs)
+            # Only emit variable name and PRESENT/ABSENT flag
+            if echo "$key" | grep -qiE "token|secret|key|password" 2>/dev/null; then
+                echo "${key}=PRESENT"
+            else
+                echo "${key}=PRESENT"
+            fi
+        done < "${shadow_root}/shadow.env" > "${evidence_dir}/config-summary.txt"
+        
+        echo "" >> "${evidence_dir}/config-summary.txt"
+        echo "CONFIG_FINGERPRINT=$(sha256sum "${shadow_root}/shadow.env" 2>/dev/null | cut -c1-16 || echo 'unavailable')" >> "${evidence_dir}/config-summary.txt"
+    }
+    
+    echo "Evidence collected in ${evidence_dir}"
+}
+
+cmd_shadow_e2e() {
+    local variant="${1:-fresh}"
+    local run_id="shadow_$(date +%s)"
+    local shadow_root="/tmp/agent-core-shadow-${run_id}"
+    
+    echo "=== canary-runtime: shadow-e2e (${variant}) ==="
+    echo "Run ID: ${run_id}"
+    echo "Shadow root: ${shadow_root}"
+    
+    # Set global for trap
+    SHADOW_ROOT="${shadow_root}"
+    
+    # Set trap for cleanup
+    trap shadow_cleanup EXIT INT TERM
+    
+    # Record pre-existing runtime state
+    SHADOW_PRE_EXISTING=false
+    if vm_is_running 2>/dev/null; then
+        SHADOW_PRE_EXISTING=true
+        echo "Pre-existing runtime detected — will be restored after shadow"
+    fi
+    mkdir -p "${shadow_root}/evidence"
+    echo "pre_existing_runtime=${SHADOW_PRE_EXISTING}" > "${shadow_root}/evidence/pre-existing-runtime-state.txt"
+    
+    # 1. Stop all existing services
+    echo ""
+    echo "--- Stopping existing services ---"
+    cmd_stop 2>/dev/null || true
+    sleep 2
+    
+    # 2. Create shadow state directories
+    echo ""
+    echo "--- Creating shadow directories ---"
+    mkdir -p "${shadow_root}"/{journal,artifacts,state,state/deployment,context,workspaces,logs,pids,evidence}
+    mkdir -p "${shadow_root}"/workspaces/scratch
+    
+    # 3. Generate shadow.env
+    echo ""
+    echo "--- Generating shadow.env ---"
+    generate_shadow_env "${shadow_root}"
+    
+    # 4. Path fence verification
+    echo ""
+    echo "--- Shadow path fence ---"
+    check_shadow_path_fence "${shadow_root}" || {
+        echo "SHADOW_PATH_FENCE_FAILED — aborting"
+        exit 1
+    }
+    
+    # 5. Load shadow.env
+    set -a
+    # shellcheck source=/dev/null
+    source "${shadow_root}/shadow.env"
+    set +a
+    
+    # 6. Verify token consistency (on shadow.env)
+    echo ""
+    echo "--- Token consistency (shadow) ---"
+    verify_tokens || {
+        echo "Shadow token verification failed — aborting"
+        exit 1
+    }
+    
+    # 7. Start shadow services
+    echo ""
+    echo "--- Starting shadow services ---"
+    
+    local kernel_db="${shadow_root}/journal/journal.db"
+    
+    # Kernel
+    echo "Starting Kernel (port ${AGENT_CORE_KERNEL_PORT:-4130})..."
+    vm_exec "
+        mkdir -p '${shadow_root}/journal' '${shadow_root}/logs' '${shadow_root}/pids'
+        nohup ${KERNEL_BIN} serve --db '${kernel_db}' \
+            > '${shadow_root}/logs/kernel.log' 2>&1 &
+        echo \$! > '${shadow_root}/pids/kernel.pid'
+        echo 'Kernel PID: \$!' >> '${shadow_root}/logs/startup.log'
+    " 2>&1 || echo "  ⚠️  Kernel start may have failed (check logs)"
+    
+    # Shadow Connector (no WSClient)
+    echo "Starting Shadow Connector (port ${AGENT_CORE_CONNECTOR_PORT:-4131})..."
+    vm_exec "
+        cd '${PROJECT_DIR}'
+        SHADOW_EVIDENCE_DIR='${shadow_root}/evidence' \
+        SHADOW_STATE_DIR='${shadow_root}/state' \
+        SHADOW_RUN_ID='${run_id}' \
+        nohup npx tsx tools/shadow-canary/connector-shadow.ts \
+            > '${shadow_root}/logs/connector.log' 2>&1 &
+        echo \$! > '${shadow_root}/pids/connector.pid'
+    " 2>&1 || echo "  ⚠️  Shadow Connector start may have failed"
+    
+    # Coding Harness
+    echo "Starting Coding Harness (port 7200)..."
+    vm_exec "
+        nohup ${CODING_HARNESS_BIN} --listen 127.0.0.1:7200 \
+            > '${shadow_root}/logs/coding-harness.log' 2>&1 &
+        echo \$! > '${shadow_root}/pids/coding-harness.pid'
+    " 2>&1 || echo "  ⚠️  Coding Harness start may have failed"
+    
+    # Capability Host
+    echo "Starting Capability Host (port 7300)..."
+    vm_exec "
+        nohup ${CAPABILITY_HOST_BIN} \
+            > '${shadow_root}/logs/capability-host.log' 2>&1 &
+        echo \$! > '${shadow_root}/pids/capability-host.pid'
+    " 2>&1 || echo "  ⚠️  Capability Host start may have failed"
+    
+    # Deployment Harness (on standard port)
+    echo "Starting Deployment Harness (port 7400)..."
+    vm_exec "
+        nohup ${DEPLOYMENT_HARNESS_BIN} \
+            > '${shadow_root}/logs/deployment-harness.log' 2>&1 &
+        echo \$! > '${shadow_root}/pids/deployment-harness.pid'
+    " 2>&1 || echo "  ⚠️  Deployment Harness start may have failed"
+    
+    # Wait for services
+    echo ""
+    echo "--- Waiting for shadow services ---"
+    sleep 5
+    
+    # 8. Shadow doctor
+    echo ""
+    echo "--- Shadow doctor ---"
+    # Quick port check
+    local shadow_ok=0
+    for svc in kernel connector coding-harness capability-host deployment-harness; do
+        local port
+        port="$(get_port "$svc")"
+        if check_port "$port" "$svc" 2>/dev/null; then
+            shadow_ok=$((shadow_ok + 1))
+        else
+            echo "  ⚠️  $svc not responding on port $port"
+        fi
+    done
+    echo "Shadow services: ${shadow_ok}/5 healthy"
+    
+    # 9. Run the specific flow
+    echo ""
+    if [ "${variant}" = "dirty" ]; then
+        echo "=== Dirty Upgrade Shadow ==="
+        echo "Variant not yet implemented — running fresh as fallback"
+        echo "Dirty flow requires:"
+        echo "  1. SHADOW_FAILURE_COUNT=1 to trigger failed deployment"
+        echo "  2. Two sequential deployments to exercise version monotonicity"
+        run_fresh_shadow_flow "${shadow_root}" "${run_id}"
+    else
+        echo "=== Fresh Shadow ==="
+        run_fresh_shadow_flow "${shadow_root}" "${run_id}"
+    fi
+    
+    # 10. Collect evidence
+    echo ""
+    echo "--- Collecting evidence ---"
+    collect_shadow_evidence "${shadow_root}"
+    
+    echo ""
+    echo "=== Shadow Canary Complete ==="
+    echo "Variant: ${variant}"
+    echo "Evidence: ${shadow_root}/evidence"
+    echo "Run ID: ${run_id}"
+}
+
+run_fresh_shadow_flow() {
+    local shadow_root="$1"
+    local run_id="$2"
+    local evidence_dir="${shadow_root}/evidence"
+    
+    echo ""
+    echo "--- Fresh Shadow Flow ---"
+    
+    # Verify shadow.env config digest
+    local config_digest
+    config_digest=$(sha256sum "${shadow_root}/shadow.env" 2>/dev/null | cut -c1-16 || echo "unknown")
+    echo "shadow.env digest: ${config_digest}"
+    
+    # Verify Connector execute endpoint is reachable
+    local connector_port="${AGENT_CORE_CONNECTOR_PORT:-4131}"
+    local connector_status
+    connector_status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 3 \
+        -X POST "http://127.0.0.1:${connector_port}/v1/execute" \
+        -H "Content-Type: application/json" \
+        -d '{}' 2>/dev/null || echo "000")
+    echo "Connector execute endpoint: HTTP ${connector_status}"
+    
+    echo ""
+    echo "=== Shadow Flow Summary ==="
+    echo "The complete automated flow requires a Node.js process that:"
+    echo ""
+    echo "1. Imports connector-shadow.ts"
+    echo "2. Calls simulateFeishuMessage(\"开发一个 failure-viewer...\")"
+    echo "3. Waits for proposal creation (polls evidence/card-bindings-*.json)"
+    echo "4. Gets bindings from captured card payload"
+    echo "5. Calls simulateCardApproval(proposalId, approvalId, decisionNonce)"
+    echo "6. Verifies deployment_pending response"
+    echo "7. Polls for component registration"
+    echo "8. Verifies Registry state"
+    echo ""
+    echo "See tools/shadow-canary/inject.mjs for the injection template."
+    
+    # Write flow documentation
+    cat > "${evidence_dir}/shadow-flow-instructions.md" << EOF
+# Shadow Canary Flow
+
+## Manual verification steps:
+
+1. Check kernel health:
+   curl -s http://127.0.0.1:${AGENT_CORE_KERNEL_PORT:-4130}/health
+
+2. Check kernel events:
+   curl -s -H "Authorization: Bearer ${AGENT_CORE_EVENT_OBSERVE_TOKEN}" \\
+     "http://127.0.0.1:${AGENT_CORE_KERNEL_PORT:-4130}/v1/events?limit=10"
+
+3. List proposals (requires proposal_id from simulation):
+   curl -s -H "Authorization: Bearer ${AGENT_CORE_CAPABILITY_DECISION_TOKEN}" \\
+     "http://127.0.0.1:${AGENT_CORE_KERNEL_PORT:-4130}/v1/capability-change-proposals/<proposal_id>"
+EOF
+    
+    echo "Flow instructions written to ${evidence_dir}/shadow-flow-instructions.md"
+    echo ""
+    echo "FRESH_SHADOW_CANARY_TEMPLATE_READY"
+}
+
+# =============================================================================
 # MAIN
 # =============================================================================
 case "${1:-help}" in
@@ -868,14 +1317,19 @@ case "${1:-help}" in
     status)
         cmd_status
         ;;
+    shadow-e2e)
+        shift
+        cmd_shadow_e2e "${1:-fresh}"
+        ;;
     help|--help|-h)
-        echo "Usage: $0 {start|build|doctor|stop|status}"
+        echo "Usage: $0 {start|build|doctor|stop|status|shadow-e2e}"
         echo ""
         echo "  start [--build]   Start all services (optionally rebuild first)"
         echo "  build             Build all services inside the Lima VM"
         echo "  doctor            Run comprehensive preflight checks"
         echo "  stop              Stop all services"
         echo "  status            Show current runtime status"
+        echo "  shadow-e2e [fresh|dirty]  Run Shadow Canary (isolated environment)"
         exit 0
         ;;
     *)

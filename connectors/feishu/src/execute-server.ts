@@ -1,5 +1,6 @@
 import http from "node:http";
 import type { ConnectorConfig } from "./config.js";
+import type { FeishuTransport } from "./transport.js";
 import type { ReactionTracker } from "./reactions.js";
 import type { ExecuteStore } from "./execute-store.js";
 import type { ApprovalConfig } from "./approval.js";
@@ -10,7 +11,7 @@ import {
 
 export function startExecuteServer(
   config: ConnectorConfig,
-  client: any,
+  transport: FeishuTransport,
   reactions?: ReactionTracker,
   executeStore?: ExecuteStore,
   approvalConfig?: ApprovalConfig,
@@ -52,7 +53,7 @@ export function startExecuteServer(
       }
 
       console.log(`execute approved operation=${body.operation} invocation=${shortId(body.invocation_id)} msg=${shortId(body.arguments.message_id)}`);
-      const promise = sendReply(client, body.arguments, approvalConfig)
+      const promise = sendReply(transport, body.arguments, approvalConfig)
         .then((receipt) => {
           void reactions?.markSucceeded(body.arguments.message_id);
           // Persist SUCCESS only — a failure must not be recorded as sent.
@@ -120,24 +121,13 @@ export function validateExecute(body: any) {
   }
 }
 
-async function sendReply(client: any, args: any, approvalConfig?: ApprovalConfig) {
+async function sendReply(transport: FeishuTransport, args: any, approvalConfig?: ApprovalConfig) {
   const presentation = parsePendingProposalPresentation(args.presentation);
   if (presentation) {
     if (!approvalConfig) throw new Error("approval_not_configured");
-    return sendPendingProposalCardReply(client, args.message_id, presentation, approvalConfig);
+    return sendPendingProposalCardReply(transport, args.message_id, presentation, approvalConfig);
   }
-  const response = await client.request({
-    method: "POST",
-    url: `/open-apis/im/v1/messages/${encodeURIComponent(args.message_id)}/reply`,
-    data: {
-      msg_type: "text",
-      content: JSON.stringify({ text: args.text }),
-    },
-  });
-  return {
-    message_id: response?.data?.message_id || response?.data?.message?.message_id || null,
-    status: "sent",
-  };
+  return transport.replyToMessage(args.message_id, "text", { text: args.text });
 }
 
 async function readJson(req: http.IncomingMessage) {

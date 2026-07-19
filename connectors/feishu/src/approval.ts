@@ -17,6 +17,7 @@ import {
   renderError,
   renderProposalPendingCard,
 } from "./renderer.js";
+import type { FeishuTransport } from "./transport.js";
 
 export interface ApprovalConfig {
   /** Kernel base URL, e.g. http://127.0.0.1:4130 */
@@ -415,7 +416,7 @@ export function parsePendingProposalPresentation(value: unknown): PendingProposa
 }
 
 export async function sendPendingProposalCardReply(
-  client: any,
+  transport: FeishuTransport,
   messageId: string,
   presentation: PendingProposalPresentation,
   config: ApprovalConfig,
@@ -431,15 +432,7 @@ export async function sendPendingProposalCardReply(
     approval_id: proposal.approval.approval_id,
     decision_nonce: proposal.approval.decision_nonce,
   });
-  const response = await client.request({
-    method: "POST",
-    url: `/open-apis/im/v1/messages/${encodeURIComponent(messageId)}/reply`,
-    data: { msg_type: "interactive", content: JSON.stringify(card) },
-  });
-  return {
-    message_id: response?.data?.message_id || response?.data?.message?.message_id || null,
-    status: "sent",
-  };
+  return transport.replyToMessage(messageId, "interactive", card);
 }
 
 export function parseProposalCardAction(raw: any) {
