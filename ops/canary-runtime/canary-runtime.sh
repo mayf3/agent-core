@@ -1299,17 +1299,19 @@ case "${1:-help}" in
         ;;
     shadow-e2e)
         shift
-        cmd_shadow_e2e "${1:-fresh}"
+        cmd_shadow_e2e "${1:-hook-fresh}"
         ;;
     help|--help|-h)
         echo "Usage: $0 {start|build|doctor|stop|status|shadow-e2e}"
         echo ""
-        echo "  start [--build]   Start all services (optionally rebuild first)"
-        echo "  build             Build all services inside the Lima VM"
-        echo "  doctor            Run comprehensive preflight checks"
-        echo "  stop              Stop all services"
-        echo "  status            Show current runtime status"
-        echo "  shadow-e2e [fresh|dirty]  Run Shadow Canary (isolated environment)"
+        echo "  start [--build]               Start all services (optionally rebuild first)"
+        echo "  build                         Build all services inside the Lima VM"
+        echo "  doctor                        Run comprehensive preflight checks"
+        echo "  stop                          Stop all services"
+        echo "  status                        Show current runtime status"
+        echo "  shadow-e2e [scenario]         Run Shadow Canary (isolated environment)"
+        echo "    Scenarios: hook-fresh | hook-dirty | invocable-fresh | invocable-dirty"
+        echo "    (Legacy: fresh → hook-fresh, dirty → hook-dirty)"
         exit 0
         ;;
     *)
