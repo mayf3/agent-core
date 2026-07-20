@@ -1,11 +1,11 @@
 mod cache;
 mod contract;
 
-#[cfg(test)]
-use self::contract::validate_request_contract;
-use self::contract::{validate_contracts, validate_request_source};
+use self::contract::validate_profile_contract;
 use super::model::{self, ModelConfig};
 use super::GenerationError;
+use crate::self_evolution::acceptance_kit::AcceptanceKitId;
+use crate::self_evolution::acceptance_selector;
 use agent_core_kernel::domain::{DevelopmentRequest, TargetKind};
 use fs2::FileExt;
 use serde_json::{json, Value};
@@ -22,7 +22,208 @@ const SUPPORT_RS: &str =
     include_str!("../../../templates/hook-consumer-service/support.rs.template");
 const TEST_KIT: &str = "hook-consumer-service-contract-v0";
 const ENTRY: &str = "target/release/generated-hook-consumer";
-const COMPILE_PROBE_INPUT: &str = r#"{"schema_version":"event.observe.v0","next_cursor":3,"has_more":false,"events":[{"event_id":"completed-1","event_kind":"model.invocation.completed.v0","occurred_at":"2026-07-15T10:00:00Z","run_id":"run-1","payload":{"profile":"default","provider":"test","model":"model-a<img src=x onerror=alert(1)>","latency_ms":20,"input_tokens":10,"cached_input_tokens":2,"output_tokens":5,"reasoning_tokens":1,"total_tokens":16}},{"event_id":"failed-1","event_kind":"model.invocation.failed.v0","occurred_at":"2026-07-15T11:00:00Z","run_id":"run-2","payload":{"profile":"analysis","provider":"test","model":"model-b","latency_ms":30,"error_category":"dependency_unavailable"}},{"event_id":"future-1","event_kind":"future.observed.fact.v9","occurred_at":"2026-07-15T12:00:00Z","payload":{"unknown":{"nested":true}}}]}"#;
+
+/// Generic compile probe input for runtime profile contract testing.
+///
+/// Contains only event.observe.v0 envelope fields and generic event types.
+/// No model invocation business fields (tokens, latency, model names, etc.).
+/// This ensures the generic probe tests only:
+/// - Event envelope parsing
+/// - Cursor handling
+/// - Unknown field tolerance
+/// - Stable JSON/HTML output without crashing
+const COMPILE_PROBE_INPUT: &str = r#"{"schema_version":"event.observe.v0","next_cursor":2,"has_more":false,"events":[{"event_id":"evt-1","event_kind":"example.event.v0","occurred_at":"2026-07-15T10:00:00Z","run_id":"run-1","payload":{"value":1,"label":"example"}},{"event_id":"future-1","event_kind":"future.observed.fact.v9","occurred_at":"2026-07-15T12:00:00Z","payload":{"unknown":{"nested":true}}}]}"#;
+
+/// Maximum total model calls across all phases (generate, compile repair,
+/// acceptance repair). This is a single unified budget.
+const TOTAL_MODEL_CALL_BUDGET: usize = 6;
+
+/// Frozen evaluation time for the generic profile probe.
+/// This matches the date of events in COMPILE_PROBE_INPUT.
+const GENERIC_PROBE_EVALUATION_TIME_UTC: &str = "2026-07-15T12:00:00Z";
+
+/// The environment variable key for passing the evaluation time
+/// to the candidate binary during contract test mode.
+const EVALUATION_TIME_ENV_KEY: &str = "AGENT_CORE_CONTRACT_EVALUATION_TIME_UTC";
+
+/// Run the compiled binary with the given input and evaluation time,
+/// and return its stdout.
+///
+/// The `evaluation_time_utc` is passed as an environment variable so the
+/// candidate binary's contract test mode uses it for `today_utc` and
+/// `last_observed_at` instead of the system clock or a hardcoded date.
+/// This ensures the candidate binary and the reference oracle use the
+/// same frozen evaluation time.
+fn run_binary_with_input(
+    binary: &Path,
+    input: &str,
+    evaluation_time_utc: &str,
+) -> Result<String, String> {
+    let result = crate::hcr::gates::run_command_sandboxed(
+        binary,
+        &["--profile-contract-test"],
+        binary.parent().unwrap_or(Path::new("/tmp")),
+        std::time::Duration::from_secs(15),
+        &[input],
+        &[(EVALUATION_TIME_ENV_KEY, evaluation_time_utc)],
+    )
+    .map_err(|_| "PRIVATE_CASE_INFRASTRUCTURE_FAILURE".to_string())?;
+    if result.child_cleanup.as_str() != "confirmed" {
+        return Err("PRIVATE_CASE_SANDBOX_FAILURE".to_string());
+    }
+    if result.exit_code != 0 {
+        return Err(format!(
+            "PRIVATE_CASE_EXIT_CODE={}\nstdout:\n{}\nstderr:\n{}",
+            result.exit_code, result.stdout, result.stderr,
+        ));
+    }
+    Ok(result.stdout)
+}
+
+/// Production-equivalent verification entry point.
+///
+/// Given frozen source bytes and an acceptance kit:
+/// 1. Compile the source into a temporary probe binary (once).
+/// 2. Run the generic profile probe on the binary.
+/// 3. Run each kit private verification case on the same binary.
+///
+/// This is the same function called by generate() and by
+/// known-good/incorrect candidate tests. It returns `Ok(probe_stdout)`
+/// when all checks pass, or `Err(diagnostics)` on the first failure.
+pub(super) fn verify_frozen_candidate(
+    base: &Path,
+    candidate_id: &str,
+    request: &DevelopmentRequest,
+    source: &str,
+    kit: AcceptanceKitId,
+) -> Result<String, CompileProbeError> {
+    // 1. Write a compile probe, build it, and get the binary
+    let probe = base.join(format!(
+        ".{candidate_id}.compile-probe.{}.{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let binary = probe.join("target/debug/generated-hook-consumer");
+    let result = (|| {
+        std::fs::create_dir_all(probe.join("src"))
+            .map_err(|_| CompileProbeError::Infrastructure)?;
+
+        // Pre-validate source
+        model::validate_generated_source(source).map_err(|_| CompileProbeError::Infrastructure)?;
+
+        // Check source policy
+        contract::validate_source(kit.kit_id(), source).map_err(CompileProbeError::Candidate)?;
+
+        // Write probe files
+        let runtime = MAIN_RS.replace(
+            "__COMPONENT_PRELUDE__",
+            &model::component_prelude(source).map_err(|_| CompileProbeError::Infrastructure)?,
+        );
+        for (path, bytes) in [
+            (probe.join("Cargo.toml"), CARGO_TOML.as_bytes()),
+            (probe.join("Cargo.lock"), CARGO_LOCK.as_bytes()),
+            (probe.join("src/main.rs"), runtime.as_bytes()),
+            (probe.join("src/support.rs"), SUPPORT_RS.as_bytes()),
+            (probe.join("src/component.rs"), source.as_bytes()),
+        ] {
+            std::fs::write(path, bytes).map_err(|_| CompileProbeError::Infrastructure)?;
+        }
+
+        // 2. Compile once (sandboxed)
+        let cargo_home = std::env::var("CARGO_HOME").unwrap_or_else(|_| {
+            std::env::var("HOME")
+                .map(|home| format!("{home}/.cargo"))
+                .unwrap_or_default()
+        });
+        let rustup_home = std::env::var("RUSTUP_HOME").unwrap_or_else(|_| {
+            std::env::var("HOME")
+                .map(|home| format!("{home}/.rustup"))
+                .unwrap_or_default()
+        });
+        let target_dir = probe.join("target").to_string_lossy().to_string();
+        let build = crate::hcr::gates::run_command_sandboxed(
+            Path::new("/usr/bin/env"),
+            &["cargo", "build", "--locked"],
+            &probe,
+            std::time::Duration::from_secs(60),
+            &[],
+            &[
+                ("CARGO_TARGET_DIR", target_dir.as_str()),
+                ("CARGO_HOME", &cargo_home),
+                ("RUSTUP_HOME", &rustup_home),
+            ],
+        )
+        .map_err(|_| CompileProbeError::Infrastructure)?;
+        if build.timed_out || build.child_cleanup.as_str() != "confirmed" {
+            return Err(CompileProbeError::Infrastructure);
+        }
+        if build.exit_code != 0 {
+            return Err(CompileProbeError::Candidate(truncate_diagnostics(
+                &build.stderr,
+            )));
+        }
+
+        // 3. Run generic profile contract probe with frozen evaluation time.
+        //    The time is passed as an env var so the binary's contract_test_mode
+        //    uses it deterministically (not the system clock).
+        let generic = crate::hcr::gates::run_command_sandboxed(
+            &binary,
+            &["--profile-contract-test"],
+            &probe,
+            std::time::Duration::from_secs(15),
+            &[COMPILE_PROBE_INPUT],
+            &[(EVALUATION_TIME_ENV_KEY, GENERIC_PROBE_EVALUATION_TIME_UTC)],
+        )
+        .map_err(|_| CompileProbeError::Infrastructure)?;
+        if generic.child_cleanup.as_str() != "confirmed" {
+            return Err(CompileProbeError::Infrastructure);
+        }
+        if generic.exit_code != 0 || generic.timed_out {
+            return Err(CompileProbeError::Candidate(format!(
+                "PROFILE_CONTRACT_TEST_FAILED\nstdout:\n{}\nstderr:\n{}",
+                truncate_diagnostics(&generic.stdout),
+                truncate_diagnostics(&generic.stderr),
+            )));
+        }
+        validate_profile_contract(COMPILE_PROBE_INPUT, &generic.stdout)
+            .map_err(CompileProbeError::Candidate)?;
+
+        // 4. Run each kit private verification case on the SAME binary.
+        //    Each case provides its own frozen evaluation time so that
+        //    rolling-window results are deterministic and date-independent.
+        //    The candidate binary and the reference oracle share the same time.
+        for case in kit.private_verification_cases() {
+            let case_stdout = run_binary_with_input(&binary, case.input, case.evaluation_time_utc)
+                .map_err(|e| {
+                    CompileProbeError::Candidate(format!(
+                        "PRIVATE_CASE_FAILURE case={}\n{}",
+                        case.case_id, e
+                    ))
+                })?;
+            kit.verify(request, source, case.input, &case_stdout)
+                .map_err(|diagnostics| {
+                    CompileProbeError::Candidate(format!(
+                        "PRIVATE_CASE_FAILURE case={}\n{}",
+                        case.case_id, diagnostics
+                    ))
+                })?;
+        }
+
+        // All checks passed
+        Ok(generic.stdout)
+    })();
+
+    // Clean up probe directory
+    #[cfg(debug_assertions)]
+    let keep_probe = std::env::var("CODING_GENERATOR_TEST_KEEP_PROBES").as_deref() == Ok("1");
+    #[cfg(not(debug_assertions))]
+    let keep_probe = false;
+    if !keep_probe {
+        let _ = std::fs::remove_dir_all(&probe);
+    }
+
+    result
+}
 
 pub(super) fn generate(
     artifact_root: &Path,
@@ -34,6 +235,13 @@ pub(super) fn generate(
     {
         return Err(GenerationError::new("GENERATOR_NOT_CONFIGURED_FOR_PROFILE"));
     }
+
+    // 1. Resolve acceptance bundle via external selector
+    let selection = acceptance_selector::select(request)
+        .map_err(|_| GenerationError::new("ACCEPTANCE_KIT_SELECTION_REQUIRED"))?;
+    let kit = AcceptanceKitId::resolve(&selection.bundle_ref)
+        .map_err(|_| GenerationError::new("ACCEPTANCE_KIT_SELECTION_REQUIRED"))?;
+
     let base = artifact_root.join("generated");
     std::fs::create_dir_all(&base)?;
     let key_hash = hex::encode(Sha256::digest(request.idempotency_key.as_bytes()));
@@ -49,23 +257,38 @@ pub(super) fn generate(
     let candidate_root = base.join(&candidate_id);
     let candidate = candidate_root.join("candidate");
     let result = if candidate.is_dir() {
-        load_existing(request, &candidate_id, &candidate)
+        // For cache validation we create a selection from the manifest's stored values
+        let manifest_bytes = std::fs::read(candidate.join("manifest.json")).ok();
+        let stored_selection = manifest_bytes
+            .as_ref()
+            .and_then(|bytes| {
+                serde_json::from_slice::<Value>(bytes).ok().and_then(|v| {
+                    let bundle_ref = v.get("acceptance_bundle_ref")?.as_str()?.to_string();
+                    let bundle_digest = v.get("acceptance_bundle_digest")?.as_str()?.to_string();
+                    Some(acceptance_selector::AcceptanceSelection::new(
+                        &bundle_ref,
+                        &bundle_digest,
+                    ))
+                })
+            })
+            .unwrap_or(acceptance_selector::AcceptanceSelection::new("", ""));
+        load_existing(request, &candidate_id, &candidate, &stored_selection)
     } else {
         let config = ModelConfig::from_env()?;
         let (mut source, initial_attempts) = model::generate_module_with_retry(&config, request)?;
         let mut model_calls = initial_attempts;
-        let max_repairs = repair_budget(initial_attempts);
-        for repair_round in 0..=max_repairs {
-            match compile_probe(&base, &candidate_id, request, &source) {
-                Ok(()) => break,
+
+        // 2. Unified freeze-verify loop: compile + generic probe + private cases
+        loop {
+            match verify_frozen_candidate(&base, &candidate_id, request, &source, kit) {
+                Ok(_compile_stdout) => break,
                 Err(CompileProbeError::Candidate(diagnostics))
-                    if repair_round < max_repairs && model_calls < 6 =>
+                    if model_calls < TOTAL_MODEL_CALL_BUDGET =>
                 {
                     #[cfg(debug_assertions)]
                     eprintln!(
-                        "generator compile probe failed before repair {}:\n{}",
-                        repair_round + 1,
-                        diagnostics
+                        "generator candidate verification failed before repair {}:\n{}",
+                        model_calls, diagnostics
                     );
                     let diagnostics =
                         sanitize_model_diagnostics(&diagnostics, &base, &candidate_id);
@@ -74,14 +297,14 @@ pub(super) fn generate(
                         request,
                         &source,
                         &diagnostics,
-                        6 - model_calls,
+                        TOTAL_MODEL_CALL_BUDGET - model_calls,
                     )?;
                     model_calls += attempts;
                     source = repaired;
                 }
-                Err(CompileProbeError::Candidate(_diagnostics)) => {
+                Err(CompileProbeError::Candidate(diagnostics)) => {
                     #[cfg(debug_assertions)]
-                    eprintln!("generator compile repair exhausted:\n{_diagnostics}");
+                    eprintln!("generator candidate verification exhausted:\n{diagnostics}");
                     return Err(GenerationError::new("GENERATOR_COMPILE_REPAIR_EXHAUSTED"));
                 }
                 Err(CompileProbeError::Infrastructure) => {
@@ -91,7 +314,21 @@ pub(super) fn generate(
                 }
             }
         }
-        materialize(&base, &candidate_id, request, &source, config.model())
+
+        // 3. Freeze candidate bytes and compute future digest
+        let source_digest = format!("sha256:{}", hex::encode(Sha256::digest(source.as_bytes())));
+        let component_manifest =
+            cache::component_manifest(request, &source_digest, config.model(), &selection);
+
+        // 4. All checks passed — materialize exact frozen bytes
+        materialize(
+            &base,
+            &candidate_id,
+            request,
+            &source,
+            config.model(),
+            &component_manifest,
+        )
     };
     if let Ok(value) = &result {
         writeln!(lock, "{}", value["candidate_digest"].as_str().unwrap_or(""))?;
@@ -101,192 +338,10 @@ pub(super) fn generate(
     result
 }
 
-fn repair_budget(initial_attempts: usize) -> usize {
-    if initial_attempts < 3 {
-        4
-    } else {
-        3
-    }
-}
-
+#[derive(Debug)]
 enum CompileProbeError {
     Candidate(String),
     Infrastructure,
-}
-
-fn compile_probe(
-    base: &Path,
-    candidate_id: &str,
-    request: &DevelopmentRequest,
-    source: &str,
-) -> Result<(), CompileProbeError> {
-    model::validate_generated_source(source).map_err(|_| CompileProbeError::Infrastructure)?;
-    validate_request_source(request, source).map_err(CompileProbeError::Candidate)?;
-    let probe = base.join(format!(
-        ".{candidate_id}.compile-probe.{}.{}",
-        std::process::id(),
-        unique_suffix()
-    ));
-    let result = (|| {
-        std::fs::create_dir_all(probe.join("src"))
-            .map_err(|_| CompileProbeError::Infrastructure)?;
-        let runtime = MAIN_RS.replace(
-            "__COMPONENT_PRELUDE__",
-            &model::component_prelude(source).map_err(|_| CompileProbeError::Infrastructure)?,
-        );
-        for (path, bytes) in [
-            (probe.join("Cargo.toml"), CARGO_TOML.as_bytes()),
-            (probe.join("Cargo.lock"), CARGO_LOCK.as_bytes()),
-            (probe.join("src/main.rs"), runtime.as_bytes()),
-            (probe.join("src/support.rs"), SUPPORT_RS.as_bytes()),
-            (probe.join("src/component.rs"), source.as_bytes()),
-        ] {
-            std::fs::write(path, bytes).map_err(|_| CompileProbeError::Infrastructure)?;
-        }
-
-        #[cfg(all(target_os = "macos", debug_assertions))]
-        if std::env::var("CODING_GENERATOR_TEST_ALLOW_HOST_COMPILE").as_deref() == Ok("1") {
-            let mut command = std::process::Command::new("cargo");
-            command
-                .args(["build", "--locked"])
-                .current_dir(&probe)
-                .env_clear();
-            for name in ["PATH", "HOME", "TMPDIR", "CARGO_HOME", "RUSTUP_HOME"] {
-                if let Some(value) = std::env::var_os(name) {
-                    command.env(name, value);
-                }
-            }
-            let output = command
-                .output()
-                .map_err(|_| CompileProbeError::Infrastructure)?;
-            if !output.status.success() {
-                return Err(CompileProbeError::Candidate(truncate_diagnostics(
-                    &String::from_utf8_lossy(&output.stderr),
-                )));
-            }
-            return host_contract_probe(
-                &probe.join("target/debug/generated-hook-consumer"),
-                request,
-            );
-        }
-
-        let cargo_home = std::env::var("CARGO_HOME").unwrap_or_else(|_| {
-            std::env::var("HOME")
-                .map(|home| format!("{home}/.cargo"))
-                .unwrap_or_default()
-        });
-        let rustup_home = std::env::var("RUSTUP_HOME").unwrap_or_else(|_| {
-            std::env::var("HOME")
-                .map(|home| format!("{home}/.rustup"))
-                .unwrap_or_default()
-        });
-        let target_dir = probe.join("target").to_string_lossy().to_string();
-        let result = crate::hcr::gates::run_command_sandboxed(
-            Path::new("/usr/bin/env"),
-            &["cargo", "build", "--locked"],
-            &probe,
-            std::time::Duration::from_secs(60),
-            &[],
-            &[
-                ("CARGO_TARGET_DIR", target_dir.as_str()),
-                ("CARGO_HOME", &cargo_home),
-                ("RUSTUP_HOME", &rustup_home),
-            ],
-        )
-        .map_err(|_| CompileProbeError::Infrastructure)?;
-        if result.timed_out || result.child_cleanup.as_str() != "confirmed" {
-            return Err(CompileProbeError::Infrastructure);
-        }
-        if result.exit_code != 0 {
-            return Err(CompileProbeError::Candidate(truncate_diagnostics(
-                &result.stderr,
-            )));
-        }
-        let binary = probe.join("target/debug/generated-hook-consumer");
-        let contract = crate::hcr::gates::run_command_sandboxed(
-            &binary,
-            &["--profile-contract-test"],
-            &probe,
-            std::time::Duration::from_secs(15),
-            &[COMPILE_PROBE_INPUT],
-            &[],
-        )
-        .map_err(|_| CompileProbeError::Infrastructure)?;
-        if contract.child_cleanup.as_str() != "confirmed" {
-            return Err(CompileProbeError::Infrastructure);
-        }
-        if contract.exit_code != 0 || contract.timed_out {
-            return Err(CompileProbeError::Candidate(format!(
-                "PROFILE_CONTRACT_TEST_FAILED\nstdout:\n{}\nstderr:\n{}",
-                truncate_diagnostics(&contract.stdout),
-                truncate_diagnostics(&contract.stderr),
-            )));
-        }
-        validate_contracts(request, &contract.stdout).map_err(CompileProbeError::Candidate)
-    })();
-    #[cfg(debug_assertions)]
-    let keep_probe = std::env::var("CODING_GENERATOR_TEST_KEEP_PROBES").as_deref() == Ok("1");
-    #[cfg(not(debug_assertions))]
-    let keep_probe = false;
-    if keep_probe {
-        eprintln!("generator debug probe retained at {}", probe.display());
-    } else {
-        let _ = std::fs::remove_dir_all(&probe);
-    }
-    result
-}
-
-#[cfg(all(target_os = "macos", debug_assertions))]
-fn host_contract_probe(
-    binary: &Path,
-    request: &DevelopmentRequest,
-) -> Result<(), CompileProbeError> {
-    use std::os::unix::process::CommandExt;
-    use std::process::Stdio;
-
-    let mut command = std::process::Command::new(binary);
-    command
-        .arg("--profile-contract-test")
-        .env_clear()
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0);
-    let mut child = command
-        .spawn()
-        .map_err(|_| CompileProbeError::Infrastructure)?;
-    let pid = child.id();
-    child
-        .stdin
-        .take()
-        .ok_or(CompileProbeError::Infrastructure)?
-        .write_all(COMPILE_PROBE_INPUT.as_bytes())
-        .map_err(|_| CompileProbeError::Infrastructure)?;
-    let (sender, receiver) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = sender.send(child.wait_with_output());
-    });
-    let output = match receiver.recv_timeout(std::time::Duration::from_secs(15)) {
-        Ok(Ok(output)) => output,
-        Ok(Err(_)) => return Err(CompileProbeError::Infrastructure),
-        Err(_) => {
-            unsafe {
-                libc::killpg(pid as libc::pid_t, libc::SIGKILL);
-            }
-            return Err(CompileProbeError::Candidate(
-                "PROFILE_CONTRACT_TEST_TIMEOUT".into(),
-            ));
-        }
-    };
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    if !output.status.success() {
-        return Err(CompileProbeError::Candidate(format!(
-            "PROFILE_CONTRACT_TEST_FAILED\nstdout:\n{}\nstderr:\n{}",
-            truncate_diagnostics(&stdout),
-            truncate_diagnostics(&String::from_utf8_lossy(&output.stderr)),
-        )));
-    }
-    validate_contracts(request, &stdout).map_err(CompileProbeError::Candidate)
 }
 
 fn truncate_diagnostics(value: &str) -> String {
@@ -309,11 +364,10 @@ fn materialize(
     candidate_id: &str,
     request: &DevelopmentRequest,
     source: &str,
-    model_name: &str,
+    _model_name: &str,
+    component_manifest: &Value,
 ) -> Result<Value, GenerationError> {
     model::validate_generated_source(source)?;
-    let source_digest = format!("sha256:{}", hex::encode(Sha256::digest(source.as_bytes())));
-    let component_manifest = cache::component_manifest(request, &source_digest, model_name);
     let specification = cache::specification(request);
 
     let temp = base.join(format!(
@@ -332,7 +386,7 @@ fn materialize(
     write_file(&candidate.join("src/component.rs"), source.as_bytes())?;
     write_file(
         &candidate.join("manifest.json"),
-        &serde_json::to_vec_pretty(&component_manifest)
+        &serde_json::to_vec_pretty(component_manifest)
             .map_err(|_| GenerationError::new("CANDIDATE_GENERATION_FAILED"))?,
     )?;
     write_file(
@@ -349,6 +403,16 @@ fn materialize(
         request,
         candidate_id,
         &base.join(candidate_id).join("candidate"),
+        &acceptance_selector::AcceptanceSelection::new(
+            component_manifest
+                .get("acceptance_bundle_ref")
+                .and_then(Value::as_str)
+                .unwrap_or(""),
+            component_manifest
+                .get("acceptance_bundle_digest")
+                .and_then(Value::as_str)
+                .unwrap_or(""),
+        ),
     )
 }
 
@@ -356,6 +420,7 @@ fn load_existing(
     request: &DevelopmentRequest,
     candidate_id: &str,
     candidate: &Path,
+    selection: &acceptance_selector::AcceptanceSelection,
 ) -> Result<Value, GenerationError> {
     let manifest_bytes = std::fs::read(candidate.join("manifest.json"))?;
     let component_manifest: Value = serde_json::from_slice(&manifest_bytes)
@@ -382,7 +447,7 @@ fn load_existing(
     {
         return Err(GenerationError::new("CANDIDATE_CACHE_INVALID"));
     }
-    cache::validate(candidate, request, &source, &component_manifest)?;
+    cache::validate(candidate, request, &source, &component_manifest, selection)?;
     let digest = crate::hcr::candidate::compute_digest(candidate)
         .map_err(|_| GenerationError::new("CANDIDATE_GENERATION_FAILED"))?;
     Ok(json!({

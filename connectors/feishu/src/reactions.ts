@@ -1,4 +1,5 @@
 import type { ConnectorConfig } from "./config.js";
+import type { FeishuTransport } from "./transport.js";
 import {
   createJsonlReactionStore,
   type ReactionStateStore,
@@ -21,7 +22,7 @@ type ReactionState = {
 
 export function createReactionTracker(
   config: ConnectorConfig,
-  client: any,
+  transport: FeishuTransport,
   store: ReactionStateStore = createJsonlReactionStore(config.reactionStatePath),
 ): ReactionTracker {
   const states = loadStates(store);
@@ -40,13 +41,17 @@ export function createReactionTracker(
       if (!processingEmoji || !messageId || states.has(messageId)) {
         return;
       }
+      if (!transport.addReaction) {
+        return;
+      }
       try {
-        const reactionId = await withRetry(
-          () => addReaction(client, messageId, processingEmoji),
+        const result = await withRetry(
+          () => transport.addReaction!(messageId, processingEmoji),
           retryAttempts,
           retryBaseDelayMs,
           `add processing msg=${shortId(messageId)}`,
         );
+        const reactionId = result?.reaction_id;
         if (!reactionId) {
           console.log(`reaction add skipped msg=${shortId(messageId)} reason=no_reaction_id`);
           return;
@@ -64,20 +69,24 @@ export function createReactionTracker(
       }
     },
     async markSucceeded(messageId: string) {
-      await removeTrackedReaction(client, states, store, messageId, "succeeded", retryAttempts, retryBaseDelayMs);
+      await removeTrackedReaction(transport, states, store, messageId, "succeeded", retryAttempts, retryBaseDelayMs);
     },
     async markFailed(messageId: string) {
       if (!messageId || !failedEmoji) {
         return;
       }
-      await removeTrackedReaction(client, states, store, messageId, "failed", retryAttempts, retryBaseDelayMs);
+      await removeTrackedReaction(transport, states, store, messageId, "failed", retryAttempts, retryBaseDelayMs);
+      if (!transport.addReaction) {
+        return;
+      }
       try {
-        const reactionId = await withRetry(
-          () => addReaction(client, messageId, failedEmoji),
+        const result = await withRetry(
+          () => transport.addReaction!(messageId, failedEmoji),
           retryAttempts,
           retryBaseDelayMs,
           `add failed msg=${shortId(messageId)}`,
         );
+        const reactionId = result?.reaction_id;
         if (!reactionId) {
           console.warn(`reaction failed marker skipped msg=${shortId(messageId)} reason=no_reaction_id`);
           return;
@@ -95,7 +104,7 @@ export function createReactionTracker(
       }
     },
     async clearProcessing(messageId: string) {
-      await removeTrackedReaction(client, states, store, messageId, "cleared", retryAttempts, retryBaseDelayMs);
+      await removeTrackedReaction(transport, states, store, messageId, "cleared", retryAttempts, retryBaseDelayMs);
     },
   };
 }
@@ -104,21 +113,8 @@ export function extractReactionId(response: any): string {
   return String(response?.data?.reaction_id || response?.data?.reaction?.reaction_id || "");
 }
 
-async function addReaction(client: any, messageId: string, emojiType: string): Promise<string> {
-  const response = await client.request({
-    method: "POST",
-    url: `/open-apis/im/v1/messages/${encodeURIComponent(messageId)}/reactions`,
-    data: {
-      reaction_type: {
-        emoji_type: emojiType,
-      },
-    },
-  });
-  return extractReactionId(response);
-}
-
 async function removeTrackedReaction(
-  client: any,
+  transport: FeishuTransport,
   states: Map<string, ReactionState>,
   store: ReactionStateStore,
   messageId: string,
@@ -128,18 +124,17 @@ async function removeTrackedReaction(
 ) {
   const state = states.get(messageId);
   if (!state || state.status === "remove_pending") {
-    // No tracked reaction, or a concurrent remove is already in-flight for
-    // this message — avoid duplicate DELETEs.
     return;
   }
   state.status = "remove_pending";
+  if (!transport.removeReaction) {
+    states.delete(messageId);
+    store.delete(messageId);
+    return;
+  }
   try {
     await withRetry(
-      () =>
-        client.request({
-          method: "DELETE",
-          url: `/open-apis/im/v1/messages/${encodeURIComponent(messageId)}/reactions/${encodeURIComponent(state.reactionId)}`,
-        }),
+      () => transport.removeReaction!(messageId, state.reactionId),
       retryAttempts,
       retryBaseDelayMs,
       `remove msg=${shortId(messageId)} reason=${reason}`,
@@ -148,10 +143,6 @@ async function removeTrackedReaction(
     store.delete(messageId);
     console.log(`reaction removed msg=${shortId(messageId)} reaction=${shortId(state.reactionId)} reason=${reason}`);
   } catch (error) {
-    // Restore the prior status so a restart can still drive the removal via
-    // markSucceeded/markFailed (the existing recovery path for processing
-    // state). The in-flight remove_pending guard above only protects against
-    // concurrent duplicate DELETEs within a single process.
     state.status = reason === "failed" ? "failed" : "processing";
     console.warn(`reaction remove failed msg=${shortId(messageId)} category=${errorLabel(error)} attempts=${retryAttempts}`);
   }

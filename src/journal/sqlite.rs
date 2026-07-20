@@ -5,7 +5,7 @@ use anyhow::{anyhow, bail, Result};
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 pub struct JournalStore {
@@ -16,12 +16,15 @@ pub struct JournalStore {
     /// run status update, fail_run, hash-chain verification) keeps working.
     #[cfg(any(test, feature = "test-helpers"))]
     pub(crate) recall_failure_for_test: std::sync::atomic::AtomicBool,
+    /// The database path used to open this store. None for in-memory databases.
+    /// Used by try_clone() for background deployment threads.
+    db_path: Mutex<Option<PathBuf>>,
 }
 
 /// The schema `PRAGMA user_version` this kernel writes and understands. Bumped
 /// only when `migrations/` gains a new applied migration. The startup
 /// `migrate()` refuses to run against a DB whose version is newer than this.
-const CURRENT_SCHEMA_VERSION: i64 = 13;
+const CURRENT_SCHEMA_VERSION: i64 = 14;
 
 impl JournalStore {
     pub fn open(path: &Path) -> Result<Self> {
@@ -31,6 +34,7 @@ impl JournalStore {
         let conn = Connection::open(path)?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         let store = Self::with_conn(conn);
+        store.set_db_path(Some(path.to_path_buf()));
         store.migrate()?;
         Ok(store)
     }
@@ -39,10 +43,27 @@ impl JournalStore {
         let conn = Connection::open_in_memory()?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         let store = Self::with_conn(conn);
+        store.set_db_path(None);
         store.migrate()?;
         // Auto-init registry for tests; production uses open() + explicit init.
         store.initialize_registry()?;
         Ok(store)
+    }
+
+    /// Open a fresh connection to the same database for use in background
+    /// threads. Returns an error if this is an in-memory store.
+    pub fn try_clone(&self) -> Result<Self> {
+        let guard = self.db_path.lock().map_err(|_| anyhow::anyhow!("mutex"))?;
+        let path = guard.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("cannot clone in-memory journal store")
+        })?;
+        Self::open(path)
+    }
+
+    pub(crate) fn set_db_path(&self, path: Option<PathBuf>) {
+        if let Ok(mut guard) = self.db_path.lock() {
+            *guard = path;
+        }
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
@@ -51,6 +72,7 @@ impl JournalStore {
             conn: Mutex::new(conn),
             current_snapshot_id: Mutex::new(None),
             recall_failure_for_test: std::sync::atomic::AtomicBool::new(false),
+            db_path: Mutex::new(None),
         }
     }
 
@@ -59,6 +81,7 @@ impl JournalStore {
         Self {
             conn: Mutex::new(conn),
             current_snapshot_id: Mutex::new(None),
+            db_path: Mutex::new(None),
         }
     }
     /// The applied schema version (`PRAGMA user_version`). Useful for
@@ -364,6 +387,9 @@ impl JournalStore {
                 "../../migrations/0012_capability_change_approvals.sql"
             ))?;
             conn.execute_batch(include_str!("../../migrations/0013_component_registry.sql"))?;
+            conn.execute_batch(include_str!(
+                "../../migrations/0014_external_receipt_envelope_digests.sql"
+            ))?;
             super::queue::migrate(&conn)?;
             backfill_feishu_message_dedup(&conn)?;
             conn.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
@@ -442,6 +468,12 @@ impl JournalStore {
                         "../../migrations/0013_component_registry.sql"
                     ))?;
                     conn.pragma_update(None, "user_version", 13)?;
+                }
+                13 => {
+                    conn.execute_batch(include_str!(
+                        "../../migrations/0014_external_receipt_envelope_digests.sql"
+                    ))?;
+                    conn.pragma_update(None, "user_version", 14)?;
                 }
                 _ => break,
             }

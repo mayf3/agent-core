@@ -8,6 +8,7 @@ use crate::journal::JournalStore;
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+
 pub const CAPABILITY_CHANGE_PROPOSE_GRANT: &str = "capability_change.propose";
 pub const CAPABILITY_CHANGE_DECIDE_GRANT: &str = "capability_change.decide";
 /// Typed error classification for capability route handlers. Each variant

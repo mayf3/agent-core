@@ -251,7 +251,7 @@ fn generate_id() -> String {
     format!("candidate_{pid}_{nanos}")
 }
 
-	#[cfg(test)]
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -350,10 +350,8 @@ mod tests {
     /// file content, not absolute locations.
     #[test]
     fn same_source_different_paths_same_digest() {
-        let dir_a = std::env::temp_dir()
-            .join(format!("hcr_stable_a_{}", std::process::id()));
-        let dir_b = std::env::temp_dir()
-            .join(format!("hcr_stable_b_{}", std::process::id()));
+        let dir_a = std::env::temp_dir().join(format!("hcr_stable_a_{}", std::process::id()));
+        let dir_b = std::env::temp_dir().join(format!("hcr_stable_b_{}", std::process::id()));
 
         create_standard_source(&dir_a);
         create_standard_source(&dir_b);
@@ -374,10 +372,8 @@ mod tests {
     /// different workspaces) must produce the same digest.
     #[test]
     fn same_source_different_temp_dirs_same_digest() {
-        let temp_a = std::env::temp_dir()
-            .join(format!("hcr_tmp_a_{}", std::process::id()));
-        let temp_b = std::env::temp_dir()
-            .join(format!("hcr_tmp_b_{}", std::process::id()));
+        let temp_a = std::env::temp_dir().join(format!("hcr_tmp_a_{}", std::process::id()));
+        let temp_b = std::env::temp_dir().join(format!("hcr_tmp_b_{}", std::process::id()));
 
         create_standard_source(&temp_a);
         create_standard_source(&temp_b);
@@ -398,8 +394,7 @@ mod tests {
     /// time of computation.
     #[test]
     fn digest_is_deterministic_over_time() {
-        let tmp = std::env::temp_dir()
-            .join(format!("hcr_time_test_{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("hcr_time_test_{}", std::process::id()));
         create_standard_source(&tmp);
 
         let digest_first = compute_digest(&tmp).unwrap();
@@ -421,8 +416,7 @@ mod tests {
     /// Changing a single byte in the source must produce a different digest.
     #[test]
     fn single_byte_change_alters_digest() {
-        let tmp = std::env::temp_dir()
-            .join(format!("hcr_byte_test_{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("hcr_byte_test_{}", std::process::id()));
         create_standard_source(&tmp);
 
         let digest_original = compute_digest(&tmp).unwrap();
@@ -448,16 +442,14 @@ mod tests {
     /// (same content → same digest regardless of container).
     #[test]
     fn same_content_same_digest_across_snapshot_boundary() {
-        let tmp = std::env::temp_dir()
-            .join(format!("hcr_boundary_test_{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("hcr_boundary_test_{}", std::process::id()));
         create_standard_source(&tmp);
 
         // Digest the source directly.
         let direct_digest = compute_digest(&tmp).unwrap();
 
         // Digest through a snapshot.
-        let base = std::env::temp_dir()
-            .join(format!("hcr_boundary_base_{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("hcr_boundary_base_{}", std::process::id()));
         let snapshot = snapshot_candidate(&tmp, &base).unwrap();
         let snapshot_digest = compute_digest(&snapshot.candidate_path).unwrap();
 

@@ -78,8 +78,7 @@ fn hook_consumer_passes_all_five_gates() {
     let root = temp_base("submit");
 
     // ── Step 1: Generate via deterministic fixture ────────────────
-    let response =
-        self_evolution::handle_submit(&root, &json!({"development_request": request}));
+    let response = self_evolution::handle_submit(&root, &json!({"development_request": request}));
     assert!(
         response["ok"].as_bool().unwrap_or(false),
         "fixture generation failed: {}",
@@ -106,12 +105,15 @@ fn hook_consumer_passes_all_five_gates() {
     eprintln!("{}", candidate_digest);
 
     eprintln!("\n=== COMPONENT MANIFEST ===");
-    eprintln!("{}", serde_json::to_string_pretty(component_manifest).unwrap());
+    eprintln!(
+        "{}",
+        serde_json::to_string_pretty(component_manifest).unwrap()
+    );
 
     // ── Step 2: Snapshot the generated candidate ─────────────────
     let snapshot_base = temp_base("snapshot");
-    let snapshot = snapshot_candidate(&candidate_path, &snapshot_base)
-        .expect("candidate snapshot failed");
+    let snapshot =
+        snapshot_candidate(&candidate_path, &snapshot_base).expect("candidate snapshot failed");
 
     // ── Step 3: Run the Five Gates ────────────────────────────────
     let results = run_all_gates(&snapshot);
@@ -133,7 +135,8 @@ fn hook_consumer_passes_all_five_gates() {
 
     for (i, (expected, gate_result)) in expected_gates.iter().zip(results.iter()).enumerate() {
         assert_eq!(
-            gate_result.gate_kind, *expected,
+            gate_result.gate_kind,
+            *expected,
             "gate {} expected {:?} got {:?}",
             i + 1,
             expected,

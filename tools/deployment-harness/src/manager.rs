@@ -261,6 +261,7 @@ fn record_is_healthy(record: &DeploymentRecord) -> bool {
         &record.manifest.version,
         &record.instance_id,
     )
+    .is_success()
 }
 
 fn stop_record(record: &DeploymentRecord) -> bool {

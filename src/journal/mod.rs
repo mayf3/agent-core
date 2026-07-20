@@ -29,7 +29,7 @@ mod sqlite_read;
 pub mod test_helpers;
 pub mod trusted_capability_activation;
 mod trusted_capability_validation;
-mod trusted_service_activation;
+pub(crate) mod trusted_service_activation;
 mod unknown;
 mod worker;
 

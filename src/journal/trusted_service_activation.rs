@@ -47,11 +47,18 @@ impl super::JournalStore {
         if binding.link_operation != manifest.component_id {
             bail!("SERVICE_COMPONENT_BINDING_MISMATCH");
         }
-        let active_component_snapshot: String = tx.query_row(
-            "SELECT active_snapshot_id FROM component_registry_state WHERE singleton_id=1",
-            [],
-            |row| row.get(0),
-        )?;
+        // Record the trusted decision journal event atomically with the
+        // deployment intent. The approval table row stays Pending until
+        // activation completes — the CHECK constraint requires snapshot
+        // and deployment IDs for the Approved state.  The journal event
+        // serves as the authoritative audit trail of the decision and
+        // is committed in the same SQLite transaction.
+        super::activation_core::append_approval_event(&tx, &binding, identity)?;
+	        let active_component_snapshot: String = tx.query_row(
+	            "SELECT active_snapshot_id FROM component_registry_state WHERE singleton_id=1",
+	            [],
+	            |row| row.get(0),
+	        )?;
         let components = super::component_registry::load_snapshot(&tx, &active_component_snapshot)?;
         if let Some(current) = components.lookup(&manifest.component_id) {
             if compare_version(&manifest.version, &current.version) != std::cmp::Ordering::Greater {
@@ -74,20 +81,23 @@ impl super::JournalStore {
             tx.commit()?;
             return Ok(());
         }
-        let pending_deployment: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM component_deployment_intents i
-             JOIN capability_change_approvals a ON a.proposal_id=i.proposal_id
-             WHERE i.component_id=?1 AND a.status='Pending'",
-            params![manifest.component_id],
-            |row| row.get(0),
-        )?;
+	        let in_flight: i64 = tx.query_row(
+	            "SELECT COUNT(*) FROM component_deployment_intents i
+	             LEFT JOIN component_deployment_receipts r
+	               ON r.proposal_id = i.proposal_id AND r.component_id = i.component_id
+	             JOIN capability_change_proposals p ON p.proposal_id = i.proposal_id
+	             WHERE i.component_id=?1 AND r.receipt_id IS NULL AND i.intent_id != ?2
+	               AND p.status = 'Approved'",
+	            params![manifest.component_id, intent.intent_id],
+	            |row| row.get(0),
+	        )?;
         let pending_control: i64 = tx.query_row(
             "SELECT COUNT(*) FROM component_control_intents
              WHERE component_id=?1 AND status='pending'",
             params![manifest.component_id],
             |row| row.get(0),
         )?;
-        if pending_deployment != 0 || pending_control != 0 {
+        if in_flight != 0 || pending_control != 0 {
             bail!("SERVICE_COMPONENT_EFFECT_IN_FLIGHT");
         }
         tx.execute(
@@ -373,6 +383,26 @@ fn append_activation_events(
     Ok(())
 }
 
+/// Check whether a deployment intent exists for the given proposal without
+/// a corresponding receipt — i.e., the background deployment is still in
+/// flight. Used by the async approval path to prevent duplicate threads.
+pub fn intent_exists_without_receipt(
+    journal: &super::JournalStore,
+    proposal_id: &str,
+    manifest_digest: &str,
+) -> Result<bool> {
+    let count: i64 = journal.conn.lock().unwrap().query_row(
+        "SELECT COUNT(*) FROM component_deployment_intents i
+         LEFT JOIN component_deployment_receipts r
+           ON r.proposal_id = i.proposal_id AND r.component_id = i.component_id
+         WHERE i.proposal_id=?1 AND i.manifest_digest=?2 AND r.receipt_id IS NULL",
+        params![proposal_id, manifest_digest],
+        |row| row.get::<_, i64>(0),
+    )?;
+    Ok(count > 0)
+}
+
 #[cfg(test)]
 #[path = "tests/trusted_service_activation.rs"]
 mod tests;
+
