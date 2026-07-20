@@ -28,6 +28,7 @@ pub fn compute_fingerprint(
     operation: &str,
     candidate_ref: &str,
     idempotency_key: &str,
+    requirement_digest: Option<&str>,
 ) -> RequestFingerprint {
     let canonical = serde_json::json!({
         "hcr_id": hcr_id,
@@ -39,6 +40,7 @@ pub fn compute_fingerprint(
         "operation": operation,
         "candidate_ref": candidate_ref,
         "idempotency_key": idempotency_key,
+        "requirement_digest": requirement_digest,
     });
     let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
     let hex = hex::encode(Sha256::digest(&bytes));

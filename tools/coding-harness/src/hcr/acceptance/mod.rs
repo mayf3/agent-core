@@ -53,6 +53,7 @@ pub fn handle_accept(artifact_root: &Path, args: &Value) -> Value {
         _ => return err_json("MISSING_CANDIDATE_REF"),
     };
     let invocation_intent_id = get_str(args, "invocation_intent_id").unwrap_or("");
+    let requirement_digest = get_str(args, "requirement_digest");
 
     if idempotency_key.is_empty() {
         return err_json("MISSING_IDEMPOTENCY_KEY");
@@ -71,6 +72,7 @@ pub fn handle_accept(artifact_root: &Path, args: &Value) -> Value {
         operation,
         candidate_ref,
         idempotency_key,
+        requirement_digest,
     );
 
     let store = ExecutionStore::new(artifact_root);
