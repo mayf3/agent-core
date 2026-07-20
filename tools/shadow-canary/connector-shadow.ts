@@ -88,12 +88,20 @@ shadowExecuteStore.load();
 // Start the execute server (production code path)
 // ---------------------------------------------------------------------------
 
-startExecuteServer(config, transport, undefined, shadowExecuteStore as any, approvalConfig);
+const _server = startExecuteServer(config, transport, undefined, shadowExecuteStore as any, approvalConfig);
 
 console.log(`[shadow-connector] listening on port ${config.connectorPort}`);
 console.log(`[shadow-connector] kernel URL: ${config.kernelUrl}`);
 console.log(`[shadow-connector] evidence dir: ${EVIDENCE_DIR}`);
 console.log(`[shadow-connector] WSClient NOT started (shadow mode)`);
+
+// Export a close function so inject.ts can cleanly stop the server
+// and release the port before exiting. Without this, the node process
+// stays alive (holding port 4131) after the test completes, blocking
+// subsequent shadow runs.
+export function closeServer(): void {
+  _server.close();
+}
 
 // ---------------------------------------------------------------------------
 // Export injection hooks for inject.mjs

@@ -34,6 +34,7 @@ import {
   transport,
   config,
   approvalConfig,
+  closeServer,
 } from "./connector-shadow.ts";
 import type { CapturedCardPayload } from "./capture-transport.ts";
 
@@ -1033,20 +1034,27 @@ async function main() {
     await runFreshShadow();
   }
 
-  // Write summary
-  evidence.summary();
+	  // Write summary
+	  evidence.summary();
 
-  if (evidence.failed) {
-    console.error(`\n❌ FAILED at step: ${evidence.firstFailedStep}`);
-    process.exit(1);
-  }
+	  // Close the shadow connector HTTP server so the port is released
+	  // before the process exits. Without this, the node event loop keeps
+	  // the server alive and port 4131 stays bound, blocking subsequent
+	  // shadow canary runs.
+	  closeServer();
 
-  console.log(`\n✅ ALL STEPS PASSED`);
-}
+	  if (evidence.failed) {
+	    console.error(`\n❌ FAILED at step: ${evidence.firstFailedStep}`);
+	    process.exit(1);
+	  }
 
-main().catch((err) => {
-  console.error(`\n❌ FATAL: ${err.message}`);
-  evidence.fail("FATAL", err.message, { stack: err.stack });
-  evidence.summary();
-  process.exit(1);
-});
+	  console.log(`\n✅ ALL STEPS PASSED`);
+	}
+
+	main().catch((err) => {
+	  console.error(`\n❌ FATAL: ${err.message}`);
+	  evidence.fail("FATAL", err.message, { stack: err.stack });
+	  evidence.summary();
+	  closeServer();
+	  process.exit(1);
+	});
