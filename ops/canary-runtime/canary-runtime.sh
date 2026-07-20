@@ -803,29 +803,55 @@ cmd_stop() {
         local pid_file="/home/yanfenma.guest/.agent-core/pids/${svc}.pid"
         vm_exec "
             target=''
-            # 1. Discover by port (ss gives the real listening PID)
-            case '$svc' in
-                kernel)    p=4130 ;; connector) p=4131 ;;
-                coding-harness) p=7200 ;; capability-host) p=7300 ;;
-                deployment-harness) p=7400 ;;
-            esac
-            target=\$(ss -tlnp 2>/dev/null | grep \":\$p \" | grep -oP 'pid=\K[0-9]+' | head -1)
-            # 2. Fall back to PID file if ss found nothing (non-listening services)
-            if [ -z \"\$target\" ] && [ -f '$pid_file' ]; then
+            if [ -f '$pid_file' ]; then
                 fp=\$(cat '$pid_file')
+                # Ownership verification: PID must exist and cmdline must match
                 if kill -0 \$fp 2>/dev/null; then
-                    target=\$fp
+                    exe=\$(readlink -f /proc/\${fp}/exe 2>/dev/null || echo '')
+                    case '$svc' in
+                        kernel)
+                            if echo \"\$exe\" | grep -q 'agent-core-kernel'; then
+                                target=\$fp
+                            else
+                                echo '  PID \$fp (file) exe=\$exe does not match kernel — skipping'
+                            fi ;;
+                        connector)
+                            if echo \"\$exe\" | grep -q 'node' && grep -q 'connectors/feishu' /proc/\${fp}/cmdline 2>/dev/null; then
+                                target=\$fp
+                            else
+                                echo '  PID \$fp (file) does not match connector — skipping'
+                            fi ;;
+                        coding-harness)
+                            if echo \"\$exe\" | grep -q 'coding-harness'; then
+                                target=\$fp
+                            else
+                                echo '  PID \$fp (file) does not match coding-harness — skipping'
+                            fi ;;
+                        capability-host)
+                            if echo \"\$exe\" | grep -q 'capability-host'; then
+                                target=\$fp
+                            else
+                                echo '  PID \$fp (file) does not match capability-host — skipping'
+                            fi ;;
+                        deployment-harness)
+                            if echo \"\$exe\" | grep -q 'deployment-harness'; then
+                                target=\$fp
+                            else
+                                echo '  PID \$fp (file) does not match deployment-harness — skipping'
+                            fi ;;
+                    esac
+                else
+                    echo '  PID file stale: \$fp not running'
                 fi
+            else
+                echo '  No PID file for $svc'
             fi
             if [ -n \"\$target\" ]; then
-                # SIGTERM, wait briefly, then SIGKILL if still alive
                 kill \$target 2>/dev/null || true
                 sleep 1
                 kill -0 \$target 2>/dev/null && kill -9 \$target 2>/dev/null || true
                 rm -f '$pid_file'
-                echo 'Stopped $svc'
-            else
-                echo '  $svc: already stopped'
+                echo 'Stopped $svc (PID \$target)'
             fi
         " 2>/dev/null || true
     done
