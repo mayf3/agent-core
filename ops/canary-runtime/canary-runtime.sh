@@ -1188,9 +1188,18 @@ cmd_shadow_e2e() {
     # 8. Deploy shadow tools to shared VM mount
     local shadow_tools_dir="/Users/yanfenma/.agent-core/hcr-linux/shadow-tools"
     rm -rf "${shadow_tools_dir}"
-    mkdir -p "${shadow_tools_dir}/tools/shadow-canary" "${shadow_tools_dir}/connectors/feishu/src"
+    mkdir -p "${shadow_tools_dir}/tools/shadow-canary" "${shadow_tools_dir}/connectors/feishu/src" "${shadow_tools_dir}/shadow-failure-proxy/target/release"
     cp -r "${PROJECT_DIR}/tools/shadow-canary/"* "${shadow_tools_dir}/tools/shadow-canary/"
     cp -r "${PROJECT_DIR}/connectors/feishu/src/"* "${shadow_tools_dir}/connectors/feishu/src/"
+    # Deploy failure proxy binary (if built)
+    if [ -f "${PROJECT_DIR}/tools/shadow-failure-proxy/target/release/shadow-failure-proxy" ]; then
+        cp "${PROJECT_DIR}/tools/shadow-failure-proxy/target/release/shadow-failure-proxy" \
+            "${shadow_tools_dir}/shadow-failure-proxy/target/release/shadow-failure-proxy"
+        chmod +x "${shadow_tools_dir}/shadow-failure-proxy/target/release/shadow-failure-proxy"
+        echo "  ✅ Failure proxy binary deployed"
+    else
+        echo "  ⚠️  Failure proxy binary not found (skip)"
+    fi
     echo "  Shadow tools deployed to ${shadow_tools_dir}"
 
     # 8. Run Shadow Supervisor (single persistent session)
