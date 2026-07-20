@@ -2,9 +2,9 @@
 
 #[cfg(test)]
 mod tests {
-    use super::super::version_query::{parse_status_code, query_deployed_version};
-    use super::super::version_allocation::{allocate_next_version, increment_patch};
-    use super::super::delivery_manifest::build_delivery_manifest;
+	use super::super::version_query::{parse_status_code, query_deployed_version};
+	    use super::super::version_allocation::{allocate_next_version, increment_patch};
+	    use super::super::service_manifest::build_service_manifest;
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::sync::atomic::{AtomicU16, Ordering};
@@ -70,46 +70,46 @@ mod tests {
         assert_ne!(orig, next);
     }
 
-    // ── build_delivery_manifest tests ──
-    #[test]
-    fn build_delivery_manifest_sets_correct_version() {
-        let component = serde_json::json!({
-            "schema_version": "component-artifact-v1",
-            "component_id": "test-component",
-            "target_kind": "HookConsumerService",
-            "profile_id": "hook-consumer-service-v0",
-            "contract_catalog_version": "1",
-            "required_contracts": ["event.observe.v0"],
-            "requested_permissions": ["journal.observe"],
-            "service": { "version": "0.1.5", "healthcheck_path": "/health" }
-        });
-        let manifest = build_delivery_manifest(&component,
-            "sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234").unwrap();
-        assert_eq!(manifest.version, "0.1.5");
-        assert_eq!(manifest.component_id, "test-component");
-        assert_eq!(manifest.entrypoint, "artifact");
-    }
-
-    #[test]
-    fn build_delivery_manifest_different_versions_different_ids() {
-        let base = serde_json::json!({
-            "schema_version": "component-artifact-v1",
-            "component_id": "token-dashboard",
-            "target_kind": "HookConsumerService",
-            "profile_id": "hook-consumer-service-v0",
-            "contract_catalog_version": "1",
-            "required_contracts": ["event.observe.v0"],
-            "requested_permissions": ["journal.observe"],
-            "service": { "version": "0.1.0", "healthcheck_path": "/health" }
-        });
-        let m1 = build_delivery_manifest(&base,
-            "sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234").unwrap();
-        let mut v2 = base.clone();
-        v2["service"]["version"] = serde_json::json!("0.1.1");
-        let m2 = build_delivery_manifest(&v2,
-            "sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234").unwrap();
-        assert_ne!(m1.manifest_id, m2.manifest_id);
-    }
+	    // ── build_service_manifest tests ──
+	    #[test]
+	    fn build_service_manifest_sets_correct_version() {
+	        let component = serde_json::json!({
+	            "schema_version": "component-artifact-v1",
+	            "component_id": "test-component",
+	            "target_kind": "HookConsumerService",
+	            "profile_id": "hook-consumer-service-v0",
+	            "contract_catalog_version": "1",
+	            "required_contracts": ["event.observe.v0"],
+	            "requested_permissions": ["journal.observe"],
+	            "service": { "version": "0.1.5", "healthcheck_path": "/health" }
+	        });
+	        let manifest = build_service_manifest(&component,
+	            "sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234").unwrap();
+	        assert_eq!(manifest.version, "0.1.5");
+	        assert_eq!(manifest.component_id, "test-component");
+	        assert_eq!(manifest.entrypoint, "artifact");
+	    }
+	
+	    #[test]
+	    fn build_service_manifest_different_versions_different_ids() {
+	        let base = serde_json::json!({
+	            "schema_version": "component-artifact-v1",
+	            "component_id": "token-dashboard",
+	            "target_kind": "HookConsumerService",
+	            "profile_id": "hook-consumer-service-v0",
+	            "contract_catalog_version": "1",
+	            "required_contracts": ["event.observe.v0"],
+	            "requested_permissions": ["journal.observe"],
+	            "service": { "version": "0.1.0", "healthcheck_path": "/health" }
+	        });
+	        let m1 = build_service_manifest(&base,
+	            "sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234").unwrap();
+	        let mut v2 = base.clone();
+	        v2["service"]["version"] = serde_json::json!("0.1.1");
+	        let m2 = build_service_manifest(&v2,
+	            "sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234").unwrap();
+	        assert_ne!(m1.manifest_id, m2.manifest_id);
+	    }
 
     // ── Mock server helpers ──
     fn start_mock(response: &'static [u8]) -> u16 {

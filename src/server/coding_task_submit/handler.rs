@@ -10,8 +10,6 @@ use anyhow::{bail, Result};
 use chrono::Utc;
 use serde_json::{json, Value};
 
-use super::invocable::invocable_manifest;
-
 #[derive(Debug, Clone)]
 pub struct CodingTaskSubmitResult {
     pub development_request_id: String,
@@ -162,48 +160,37 @@ pub fn handle_coding_task_submit(
     let candidate_id = required_str(&accepted, "candidate_id")?.to_string();
     let artifact_ref = required_str(&accepted, "artifact_ref")?.to_string();
     let artifact_digest = required_digest(&accepted, "artifact_digest")?;
-    let component_manifest_digest = required_digest(&accepted, "component_manifest_digest")?;
     let evidence_digest = required_digest(&accepted, "evidence_digest")?;
     let settlement_id = required_str(&accepted, "settlement_id")?.to_string();
     let claim_id = required_str(&accepted, "claim_id")?.to_string();
     let hcr_run_id = required_str(&accepted, "run_id")?.to_string();
     let harness_execution_id = required_str(&accepted, "harness_execution_id")?.to_string();
-    let acceptance_invocation_id =
-        required_str(&accepted, "acceptance_invocation_id")?.to_string();
+    let acceptance_invocation_id = required_str(&accepted, "acceptance_invocation_id")?.to_string();
 
     // 4. Artifact and evidence were stored by the Harness. Kernel re-loads
     // and hashes both, then builds (or loads) the activation manifest.
     let store = ContentStore::new(config.harness_artifact_root.clone());
     let artifact_key = Sha256Digest::parse(&artifact_digest)?;
     let evidence_key = Sha256Digest::parse(&evidence_digest)?;
-    let _component_manifest_key = Sha256Digest::parse(&component_manifest_digest)?;
     store.load(&artifact_key)?;
     store.load(&evidence_key)?;
-    let (manifest_ref, manifest_bytes) = match request.target_kind {
-        TargetKind::InvocableCapability => {
-            let component_manifest: Value =
-                serde_json::from_slice(&store.load(&_component_manifest_key)?)?;
-            let manifest =
-                invocable_manifest(request, &component_manifest, &artifact_digest)?;
-            (manifest.manifest_id.clone(), serde_json::to_vec(&manifest)?)
-        }
-        TargetKind::HookConsumerService => {
-            // Delivery manifest was constructed by the Coding Harness during
-            // acceptance, with correct version allocated externally. Kernel
-            // only verifies digest consistency — no manifest type parsing.
-            let delivery_ref =
-                required_str(&accepted, "delivery_manifest_ref")?.to_string();
-            let delivery_digest_str = required_digest(&accepted, "delivery_manifest_digest")?;
-            let delivery_digest_key = Sha256Digest::parse(&delivery_digest_str)?;
-            let bytes = store.load(&delivery_digest_key)?;
-            let computed = Sha256Digest::compute(&bytes);
-            if computed.as_str() != delivery_digest_str {
-                bail!("DELIVERY_MANIFEST_DIGEST_TAMPERED");
-            }
-            (delivery_ref, bytes.to_vec())
-        }
-        _ => bail!("DEPLOYMENT_PROFILE_NOT_IMPLEMENTED"),
-    };
+
+    // 4b. Unified delivery manifest path — Kernel never branches on
+    //     target_kind.  The Coding Harness constructs both service and
+    //     invocable delivery manifests during acceptance.  Kernel loads
+    //     the content‑addressed bytes, verifies the digest, and uses
+    //     the exact same ref/digest for the Proposal — without parsing
+    //     or understanding the manifest type.
+    let delivery_ref = required_str(&accepted, "delivery_manifest_ref")?.to_string();
+    let delivery_digest_str = required_digest(&accepted, "delivery_manifest_digest")?;
+    let delivery_digest_key = Sha256Digest::parse(&delivery_digest_str)?;
+    let bytes = store.load(&delivery_digest_key)?;
+    let computed = Sha256Digest::compute(&bytes);
+    if computed.as_str() != delivery_digest_str {
+        bail!("DELIVERY_MANIFEST_DIGEST_TAMPERED");
+    }
+    let manifest_ref = delivery_ref;
+    let manifest_bytes = bytes.to_vec();
     let manifest_digest = store.store(&manifest_bytes)?.as_str().to_string();
 
     let proposal_id = format!("proposal_{}", uuid::Uuid::new_v4().simple());
@@ -289,9 +276,6 @@ fn execute_new_submission(
     submit_key: &str,
     request: &DevelopmentRequest,
 ) -> Result<(Value, SubmittedCandidate)> {
-    use super::invocable::append_invocation_approved;
-    use super::invocable::append_invocation_proposed;
-
     let submit_intent = InvocationIntent {
         invocation_id: invocation_id.clone(),
         run_id: run.id.clone(),
@@ -303,9 +287,9 @@ fn execute_new_submission(
         }),
         idempotency_key: Some(submit_key.to_string()),
     };
-    append_invocation_proposed(journal, run, session, &submit_intent)?;
+    super::invocation_journal::append_invocation_proposed(journal, run, session, &submit_intent)?;
     let approved = gateway.approve_invocation(submit_intent, run, session, snapshot)?;
-    append_invocation_approved(journal, run, session, &approved)?;
+    super::invocation_journal::append_invocation_approved(journal, run, session, &approved)?;
     let result = coding_harness_client::execute(
         &approved,
         std::time::Duration::from_millis(config.harness_read_timeout_ms.max(900_000)),
