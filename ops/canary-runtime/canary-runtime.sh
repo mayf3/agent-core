@@ -904,69 +904,40 @@ SHADOW_PRE_EXISTING=false
 
 # Trap: precise stop + production recovery
 shadow_cleanup() {
+    # Capture the original exit code BEFORE resetting traps.
     local exit_code=$?
+    # Prevent recursive trap.  We call exit at the end of cleanup;
+    # resetting the trap avoids re-triggering on exit or on SIGTERM
+    # from an unrelated PGID kill inside the VM.
+    trap - EXIT INT TERM
     local shadow_root="${SHADOW_ROOT}"
     echo ""
     echo "=== shadow-e2e cleanup ==="
 
-    # ---- Phase 1: Stop shadow processes by PID (NO pkill) ----
+    # ---- Phase 1: Clean up PID files (PIDs are from inside the VM,
+    #      meaningless on the macOS host).  Keep PID files so that
+    #      stale entries don't confuse future runs — we just remove
+    #      them rather than attempting a cross-namespace kill.
     if [ -n "$shadow_root" ] && [ -d "${shadow_root}/pids" ]; then
-        echo "--- Stopping shadow processes ---"
-        for pid_file in "${shadow_root}/pids"/*.pid; do
+        echo "--- Cleaning shadow PID files ---"
+        for pid_file in "${shadow_root}/pids"/*.pid "${shadow_root}/pids"/*.txt; do
             [ -f "$pid_file" ] || continue
-            local svc_name
-            svc_name=$(basename "$pid_file" .pid)
-            local pid
-            pid=$(cat "$pid_file" 2>/dev/null || echo "")
-            if [ -z "$pid" ]; then
-                rm -f "$pid_file"
-                continue
-            fi
-
-            # Verify process belongs to this shadow (check /proc/PID/cmdline)
-            if [ -f "/proc/${pid}/cmdline" ] 2>/dev/null; then
-                local cmdline
-                cmdline=$(tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null || echo "")
-                if ! echo "$cmdline" | grep -q "shadow"; then
-                    if ! echo "$cmdline" | grep -q "${shadow_root}"; then
-                        echo "  ⚠️  PID ${pid} (${svc_name}) does not match shadow root — skipping"
-                        continue
-                    fi
-                fi
-            fi
-
-            # SIGTERM first
-            kill "$pid" 2>/dev/null && echo "  Stopped ${svc_name} (PID ${pid})" || {
-                echo "  ${svc_name} (PID ${pid}) already exited"
-                rm -f "$pid_file"
-                continue
-            }
-
-            # Wait up to 5s for graceful exit
-            local waited=0
-            while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 5 ]; do
-                sleep 1
-                waited=$((waited + 1))
-            done
-
-            # SIGKILL if still alive
-            if kill -0 "$pid" 2>/dev/null; then
-                kill -9 "$pid" 2>/dev/null || true
-                echo "  Force killed ${svc_name} (PID ${pid})"
-            fi
             rm -f "$pid_file"
+            echo "  Removed $(basename "$pid_file")"
         done
     fi
 
-    # ---- Phase 2: Verify ports released ----
+    # ---- Phase 2: Verify ports released (via Lima host forwarding) ----
     echo "--- Verifying port release ---"
-    for svc in kernel coding-harness capability-host deployment-harness; do
+    for svc in kernel connector coding-harness capability-host deployment-harness; do
         local port
         port="$(get_port "$svc")"
-        if curl -sf --max-time 1 "http://127.0.0.1:${port}/health" >/dev/null 2>&1; then
-            echo "  ⚠️  Port ${port} (${svc}) still in use"
-        else
-            echo "  ✅ Port ${port} (${svc}) released"
+        if [ -n "$port" ]; then
+            if curl -sf --max-time 1 "http://127.0.0.1:${port}/health" >/dev/null 2>&1; then
+                echo "  ⚠️  Port ${port} (${svc}) still in use"
+            else
+                echo "  ✅ Port ${port} (${svc}) released"
+            fi
         fi
     done
 
@@ -1210,6 +1181,18 @@ cmd_shadow_e2e() {
                         fi
                     fi
                 done
+            fi
+        done
+        # Also terminate lingering node processes running the Feishu Connector.
+        # cmd_stop kills the tracked connector PID, but the npx/tsx parent
+        # process survives and may restart the child (re-binding port 4131).
+        for pid in \$(pgrep -f 'node.*connectors/feishu' 2>/dev/null || true); do
+            if [ -n \"\$pid\" ] && [ \"\$pid\" -ne \"\$\$\" ]; then
+                exe=\$(readlink -f /proc/\${pid}/exe 2>/dev/null || echo '')
+                if echo \"\$exe\" | grep -q 'node'; then
+                    echo \"  Terminating lingering connector (PID \$pid)\"
+                    kill \$pid 2>/dev/null || true
+                fi
             fi
         done
         sleep 2

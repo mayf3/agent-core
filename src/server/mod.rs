@@ -188,8 +188,11 @@ fn handle_connection(
     // event.observe accepts either the full IPC token or its dedicated,
     // read-only observer token. The observer token is never accepted by any
     // mutation route.
+    // If the handler returns Ok(false), the path did not match /v1/events
+    // exactly — fall through to the IPC bearer check rather than returning
+    // without writing any HTTP response (which causes client "socket hang up").
     if path.starts_with("/v1/events") {
-        event_observe_http::try_handle_event_observe(
+        if event_observe_http::try_handle_event_observe(
             stream,
             path,
             &request.method,
@@ -197,8 +200,9 @@ fn handle_connection(
             &request.body,
             config,
             &journal,
-        )?;
-        return Ok(());
+        )? {
+            return Ok(());
+        }
     }
     // ---- All other /v1/ routes require the IPC bearer token ----
     if bearer != config.ipc_token.as_str() {
