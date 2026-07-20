@@ -297,16 +297,18 @@ async function injectShadowMarker(runId: string): Promise<any> {
   return { marker_event_id: markerEventId, ingress_response: resp };
 }
 
-/** Record current journal cursor before marker injection */
+/** Record current journal cursor (total event count) */
 async function getCurrentCursor(): Promise<number> {
-  const resp = await kernelRequest("GET", "/v1/events?limit=1&cursor=0", null, EVENT_OBSERVE_TOKEN).catch(() => null);
+  // Query from cursor=0 with a large limit to get the complete event list.
+  // next_cursor will be total_events + 1 which is the cursor for the next event.
+  const resp = await kernelRequest("GET", "/v1/events?limit=10000&cursor=0", null, EVENT_OBSERVE_TOKEN).catch(() => null);
   if (resp?.ok && typeof resp.data?.next_cursor === "number") {
     return resp.data.next_cursor;
   }
   // Fallback: poll until we get a valid cursor
   const start = Date.now();
   while (Date.now() - start < 15_000) {
-    const r = await kernelRequest("GET", "/v1/events?limit=1&cursor=0", null, EVENT_OBSERVE_TOKEN).catch(() => null);
+    const r = await kernelRequest("GET", "/v1/events?limit=10000&cursor=0", null, EVENT_OBSERVE_TOKEN).catch(() => null);
     if (r?.ok && typeof r.data?.next_cursor === "number") {
       return r.data.next_cursor;
     }
