@@ -277,9 +277,9 @@ async function disableComponent(componentId: string, expectedComponentSnapshotId
   return resp;
 }
 
-/** Inject a shadow marker event via ingress */
-async function injectShadowMarker(runId: string): Promise<any> {
-  const markerEventId = `shadow_marker_${RUN_ID}`;
+/** Inject a shadow marker event via ingress (with optional unique suffix) */
+async function injectShadowMarker(runId: string, suffix?: string): Promise<any> {
+  const markerEventId = suffix ? `shadow_marker_${RUN_ID}_${suffix}` : `shadow_marker_${RUN_ID}`;
   const ingressBody = {
     protocol_version: "v1",
     source: "Cli",
@@ -623,7 +623,7 @@ async function runDevelopmentCycle(
   console.log(`\n[${phase}-6] Injecting marker...`);
   const markerCursor = await getCurrentCursor();
   await sleep(3_000);
-  const markerResult = await injectShadowMarker(RUN_ID);
+  const markerResult = await injectShadowMarker(RUN_ID, phase);
   if (!markerResult.ingress_response.ok) {
     evidence.fail(`PHASE_${phase}_MARKER_INJECT`, `marker injection failed: HTTP ${markerResult.ingress_response.status}`, markerResult.ingress_response);
     return result;
