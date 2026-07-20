@@ -82,7 +82,6 @@ pub fn parse_coding_intent(text: &str) -> Result<CodingIntent> {
     draft.acceptance_criteria = draft.requirements.clone();
     draft.required_contracts = required_contracts;
     draft.requested_permissions = permissions_for(&catalog, &draft.required_contracts);
-
     Ok(CodingIntent {
         kind: CodingIntentKind::DevelopComponent,
         development_request: draft,

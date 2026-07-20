@@ -1,15 +1,35 @@
-use super::truncate_diagnostics;
+//! Acceptance Kit dispatch for hook consumer service generation.
+//!
+//! This module provides the shared profile contract checker used by
+//! all Acceptance Kits. Individual kit private verifiers live in
+//! `crate::self_evolution::acceptance_kit::*`.
+//!
+//! Kit selection is done externally via the AcceptanceSelector and
+//! the selected bundle_ref is passed in as a parameter. No substring
+//! matching on "token" is used anywhere in this module.
+
 use agent_core_kernel::domain::DevelopmentRequest;
 use serde_json::{json, Value};
 
-pub(super) fn validate_profile_contract(stdout: &str) -> Result<(), String> {
+/// Validate the profile contract output (shared check for all kits).
+///
+/// `input` is the probe input JSON string whose `events` array is used
+/// to determine the expected `events_applied` count. This ensures the
+/// check works with any event count rather than a hardcoded magic number.
+///
+/// The remaining profile fields (ok, schema_version, html_*) are checked
+/// with fixed expected values.
+pub(super) fn validate_profile_contract(input: &str, stdout: &str) -> Result<(), String> {
+    // Events-applied validation (count comes from actual input)
+    crate::self_evolution::acceptance_kit::validate_events_applied(input, stdout)?;
+
+    // Remaining profile fields (fixed expected values)
     let output: Value = serde_json::from_str(stdout.trim())
         .map_err(|_| "PROFILE_CONTRACT_OUTPUT_INVALID".to_string())?;
     let mut missing = Vec::new();
     for (field, expected) in [
         ("ok", json!(true)),
         ("schema_version", json!("hook-consumer-service-contract-v0")),
-        ("events_applied", json!(3)),
         ("html_nonempty", json!(true)),
         ("html_safe", json!(true)),
         ("html_runtime_metadata", json!(true)),
@@ -29,128 +49,52 @@ pub(super) fn validate_profile_contract(stdout: &str) -> Result<(), String> {
     }
 }
 
-pub(super) fn validate_contracts(request: &DevelopmentRequest, stdout: &str) -> Result<(), String> {
-    let mut failures = Vec::new();
-    if let Err(error) = validate_profile_contract(stdout) {
-        failures.push(error);
-    }
-    if let Err(error) = validate_request_contract(request, stdout) {
-        failures.push(error);
-    }
-    if failures.is_empty() {
-        Ok(())
-    } else {
-        Err(format!(
-            "COMBINED_CONTRACT_PROBE_FAILED\n{}",
-            failures.join("\n---\n")
-        ))
-    }
-}
-
-pub(super) fn validate_request_contract(
+/// Validate contracts against a specific Acceptance Kit.
+///
+/// Resolves the correct Acceptance Kit from the bundle_ref, runs the
+/// profile contract, then the kit's private verifier. If bundle_ref
+/// is unknown returns `ACCEPTANCE_KIT_SELECTION_REQUIRED`.
+pub(super) fn validate_contracts(
+    bundle_ref: &str,
     request: &DevelopmentRequest,
+    input: &str,
     stdout: &str,
 ) -> Result<(), String> {
-    if !request_requires_model_telemetry(request) {
-        return Ok(());
-    }
-    let output: Value = serde_json::from_str(stdout.trim())
-        .map_err(|_| "REQUEST_CONTRACT_OUTPUT_INVALID".to_string())?;
-    let rendered = output
-        .get("rendered")
-        .ok_or_else(|| "REQUEST_CONTRACT_RENDERED_MISSING".to_string())?;
-    let rendered_text = serde_json::to_string(rendered)
-        .map_err(|_| "REQUEST_CONTRACT_RENDERED_INVALID".to_string())?
-        .to_lowercase();
-    let mut missing = Vec::new();
-    for (label, aliases) in [
-        ("run-1", &["run-1"][..]),
-        ("model-a", &["model-a"][..]),
-        ("default", &["default"][..]),
-        ("2026-07-15", &["2026-07-15"][..]),
-        ("input", &["input"][..]),
-        ("cached", &["cached"][..]),
-        ("output", &["output"][..]),
-        ("reasoning", &["reasoning"][..]),
-        ("latency", &["latency"][..]),
-        ("failure", &["failure", "fail_count", "failures"][..]),
-        ("unavailable", &["unavailable"][..]),
-        ("telemetry_unavailable", &["telemetry_unavailable"][..]),
-        ("last_observed_cursor", &["last_observed_cursor"][..]),
-        ("projection_lag", &["projection_lag"][..]),
-        ("component_version", &["component_version"][..]),
-        ("health", &["health"][..]),
-    ] {
-        if !aliases.iter().any(|marker| rendered_text.contains(marker)) {
-            missing.push(label.to_string());
+    let kit = crate::self_evolution::acceptance_kit::AcceptanceKitId::resolve(bundle_ref)
+        .map_err(|_| format!("ACCEPTANCE_KIT_SELECTION_REQUIRED: bundle_ref '{bundle_ref}' is unknown. The external AcceptanceSelector must set a valid bundle_ref."))?;
+
+    // Profile contract is shared across all hook consumer kits.
+    validate_profile_contract(input, stdout)?;
+
+    // Kit-specific verification does NOT have access to the source here
+    // (source policy check runs earlier in compile_probe). The verify
+    // method handles request contract validation only.
+    kit.verify(request, "", input, stdout)
+}
+
+/// Validate the generated source against kit-specific source policies.
+///
+/// This is called separately in compile_probe before compiling, so it
+/// receives the source string directly.
+pub(super) fn validate_source(bundle_ref: &str, source: &str) -> Result<(), String> {
+    let kit = crate::self_evolution::acceptance_kit::AcceptanceKitId::resolve(bundle_ref)
+        .map_err(|_| "ACCEPTANCE_KIT_SELECTION_REQUIRED".to_string())?;
+
+    // The Token Dashboard kit has source-level policies (no within_days
+    // in apply_event, no today_utc). Other kits may opt out.
+    match kit {
+        crate::self_evolution::acceptance_kit::AcceptanceKitId::TokenDashboardV0 => {
+            validate_token_source(source)
         }
-    }
-    if !has_positive_counter(rendered, &["unavailable"]) {
-        missing.push("positive-unavailable-counter".into());
-    }
-    if !has_positive_counter(rendered, &["failure", "fail_count", "failures"]) {
-        missing.push("positive-failure-counter".into());
-    }
-    for days in [1, 7, 30] {
-        if !has_window_key(rendered, days) {
-            missing.push(format!("{days}-day-window"));
+        crate::self_evolution::acceptance_kit::AcceptanceKitId::FailureEventViewerV0 => {
+            // Failure Event Viewer has no additional source policies.
+            Ok(())
         }
-        if !has_positive_overall_window(rendered, days) {
-            missing.push(format!("positive-overall-{days}-day-window"));
-        }
-        if !requested_overall_window_satisfies(rendered, days, |window| {
-            counter_equals(window, &["calls", "call_count", "invocations"], 2.0)
-        }) {
-            missing.push(format!("overall-{days}-day-call-count=2"));
-        }
-        if !requested_overall_window_satisfies(rendered, days, |window| {
-            counter_equals(
-                window,
-                &["avg_latency", "average_latency", "latency_avg"],
-                25.0,
-            )
-        }) {
-            missing.push(format!("overall-{days}-day-average-latency=25"));
-        }
-        if !requested_overall_window_satisfies(rendered, days, |window| {
-            has_positive_counter(window, &["unavailable"])
-        }) {
-            missing.push(format!("positive-overall-{days}-day-unavailable"));
-        }
-        if !requested_overall_window_satisfies(rendered, days, |window| {
-            has_positive_counter(window, &["failure", "fail_count", "failures"])
-        }) {
-            missing.push(format!("positive-overall-{days}-day-failure"));
-        }
-    }
-    if output
-        .get("html_telemetry_metrics")
-        .and_then(Value::as_bool)
-        != Some(true)
-    {
-        missing.push("html-telemetry-metrics".into());
-    }
-    if output.get("html_average_latency").and_then(Value::as_bool) != Some(true) {
-        missing.push("html-average-latency".into());
-    }
-    if missing.is_empty() {
-        Ok(())
-    } else {
-        Err(format!(
-            "REQUEST_CONTRACT_FAILED missing={}\nPATH_CONTRACT: run dimension comes from top-level event.run_id; model and profile dimensions come from event.payload.model and event.payload.profile.\nWINDOW_CONTRACT: expose overall/global/summary/total windows, a top-level rolling_windows object, or top-level windows whose distinct 1_day, 7_day, and 30_day objects each contain total/overall/summary/global. Each overall window must include calls=2, avg_latency_ms or latency_avg=25, failures=1, and a positive unavailable counter.\nRENDERED_OUTPUT:\n{}",
-            missing.join(","),
-            truncate_diagnostics(&rendered_text),
-        ))
     }
 }
 
-pub(super) fn validate_request_source(
-    request: &DevelopmentRequest,
-    source: &str,
-) -> Result<(), String> {
-    if !request_requires_model_telemetry(request) {
-        return Ok(());
-    }
+/// Token Dashboard source policy: no within_days in apply_event, no today_utc().
+fn validate_token_source(source: &str) -> Result<(), String> {
     let syntax =
         syn::parse_file(source).map_err(|_| "REQUEST_SOURCE_CONTRACT_INVALID_RUST".to_string())?;
     let apply = syntax.items.iter().find_map(|item| match item {
@@ -182,159 +126,10 @@ pub(super) fn validate_request_source(
     Ok(())
 }
 
-fn request_requires_model_telemetry(request: &DevelopmentRequest) -> bool {
-    request
-        .requirements
-        .iter()
-        .chain(request.acceptance_criteria.iter())
-        .any(|value| value.to_lowercase().contains("token"))
-}
-
-fn has_positive_counter(value: &Value, names: &[&str]) -> bool {
-    match value {
-        Value::Object(map) => map.iter().any(|(key, value)| {
-            (names.iter().any(|name| key.to_lowercase().contains(name))
-                && contains_positive_number(value))
-                || has_positive_counter(value, names)
-        }),
-        Value::Array(items) => items.iter().any(|item| has_positive_counter(item, names)),
-        _ => false,
+pub(super) fn truncate_diagnostics(value: &str) -> String {
+    let mut end = value.len().min(16 * 1024);
+    while !value.is_char_boundary(end) {
+        end -= 1;
     }
-}
-
-fn contains_positive_number(value: &Value) -> bool {
-    match value {
-        Value::Number(number) => number.as_u64().is_some_and(|number| number > 0),
-        Value::Object(map) => map.values().any(contains_positive_number),
-        Value::Array(items) => items.iter().any(contains_positive_number),
-        _ => false,
-    }
-}
-
-fn has_window_key(value: &Value, days: u64) -> bool {
-    match value {
-        Value::Object(map) => map
-            .iter()
-            .any(|(key, value)| window_key_matches(key, days) || has_window_key(value, days)),
-        Value::Array(items) => items.iter().any(|item| has_window_key(item, days)),
-        _ => false,
-    }
-}
-
-fn has_positive_overall_window(value: &Value, days: u64) -> bool {
-    requested_overall_window_satisfies(value, days, contains_positive_number)
-}
-
-fn requested_overall_window_satisfies<F>(value: &Value, days: u64, check: F) -> bool
-where
-    F: Fn(&Value) -> bool + Copy,
-{
-    let direct_window_set = value.as_object().is_some_and(|map| {
-        [1, 7, 30].iter().all(|required_days| {
-            map.keys()
-                .any(|key| window_key_matches(key, *required_days))
-        }) && map
-            .iter()
-            .any(|(key, window)| window_key_matches(key, days) && check(window))
-    });
-    let top_level_windows = value.as_object().is_some_and(|map| {
-        map.iter()
-            .any(|(key, value)| match key.to_lowercase().as_str() {
-                "rolling_window" | "rolling_windows" => window_below_satisfies(value, days, check),
-                "windows" => window_with_named_overall_satisfies(value, days, check),
-                _ => false,
-            })
-    });
-    direct_window_set || top_level_windows || overall_window_satisfies(value, days, check)
-}
-
-fn window_with_named_overall_satisfies<F>(value: &Value, days: u64, check: F) -> bool
-where
-    F: Fn(&Value) -> bool + Copy,
-{
-    value.as_object().is_some_and(|windows| {
-        windows.iter().any(|(key, window)| {
-            window_key_matches(key, days)
-                && window.as_object().is_some_and(|fields| {
-                    fields.iter().any(|(key, value)| {
-                        matches!(
-                            key.to_lowercase().as_str(),
-                            "overall" | "global" | "summary" | "total"
-                        ) && check(value)
-                    })
-                })
-        })
-    })
-}
-
-fn overall_window_satisfies<F>(value: &Value, days: u64, check: F) -> bool
-where
-    F: Fn(&Value) -> bool + Copy,
-{
-    match value {
-        Value::Object(map) => map.iter().any(|(key, value)| {
-            let key = key.to_lowercase();
-            let overall = ["overall", "global", "summary", "total"]
-                .iter()
-                .any(|marker| key.contains(marker));
-            (overall && window_below_satisfies(value, days, check))
-                || overall_window_satisfies(value, days, check)
-        }),
-        Value::Array(items) => items
-            .iter()
-            .any(|item| overall_window_satisfies(item, days, check)),
-        _ => false,
-    }
-}
-
-fn window_below_satisfies<F>(value: &Value, days: u64, check: F) -> bool
-where
-    F: Fn(&Value) -> bool + Copy,
-{
-    match value {
-        Value::Object(map) => map.iter().any(|(key, value)| {
-            (window_key_matches(key, days) && check(value))
-                || window_below_satisfies(value, days, check)
-        }),
-        Value::Array(items) => items
-            .iter()
-            .any(|item| window_below_satisfies(item, days, check)),
-        _ => false,
-    }
-}
-
-fn counter_equals(value: &Value, names: &[&str], expected: f64) -> bool {
-    match value {
-        Value::Object(map) => map.iter().any(|(key, value)| {
-            let key = key.to_lowercase();
-            (names.iter().any(|name| key.contains(name))
-                && value
-                    .as_f64()
-                    .is_some_and(|number| (number - expected).abs() < 0.001))
-                || counter_equals(value, names, expected)
-        }),
-        Value::Array(items) => items
-            .iter()
-            .any(|item| counter_equals(item, names, expected)),
-        _ => false,
-    }
-}
-
-fn window_key_matches(key: &str, days: u64) -> bool {
-    let normalized: String = key
-        .to_lowercase()
-        .chars()
-        .filter(|ch| ch.is_alphanumeric() || *ch == '日' || *ch == '天')
-        .collect();
-    let patterns = match days {
-        1 => [
-            "1d", "1day", "day1", "daily1", "today", "今日", "1日", "1天",
-        ],
-        7 => ["7d", "7day", "day7", "daily7", "week", "近7", "7日", "7天"],
-        30 => [
-            "30d", "30day", "day30", "daily30", "month", "近30", "30日", "30天",
-        ],
-        _ => unreachable!(),
-    };
-    patterns.iter().any(|pattern| normalized.contains(pattern))
+    value[..end].to_string()
 }

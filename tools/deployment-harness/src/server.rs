@@ -183,8 +183,18 @@ fn safe_error(error: &anyhow::Error) -> (u16, &'static str) {
         || message.contains("NOT_MONOTONIC")
     {
         (409, "conflict")
-    } else if message.contains("HEALTHCHECK") || message.contains("EXITED_BEFORE_READY") {
-        (422, "healthcheck_failed")
+    } else if message.contains("EXITED_BEFORE_READY") {
+        (422, "service_exited_before_ready")
+    } else if message.contains("CONNECTION_REFUSED") {
+        (422, "service_healthcheck_connection_failed")
+    } else if message.contains("CONNECTION_TIMEOUT") {
+        (422, "service_healthcheck_connection_failed")
+    } else if message.contains("REJECTED") {
+        (422, "service_healthcheck_rejected")
+    } else if message.contains("IDENTITY_MISMATCH") {
+        (422, "service_healthcheck_identity_mismatch")
+    } else if message.contains("MALFORMED_RESPONSE") {
+        (422, "service_healthcheck_malformed_response")
     } else if message.contains("INVALID") || message.contains("MALFORMED") {
         (400, "invalid_request")
     } else {

@@ -248,7 +248,10 @@ fn harness_ok_false_through_runtime_records_failed() -> Result<()> {
         .collect();
     assert_eq!(r.len(), 1);
     assert_eq!(r[0].payload["status"], "Failed");
-    assert_eq!(r[0].payload["output"]["error_category"], "harness_failed");
+    assert_eq!(
+        r[0].payload["output"]["error_category"],
+        "external_infrastructure_failure"
+    );
     let caps = cap.lock().unwrap();
     assert_eq!(caps.len(), 2);
     assert_round2_failed(&caps);

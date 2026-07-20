@@ -2,6 +2,8 @@ import * as Lark from "@larksuiteoapi/node-sdk";
 import { loadConfig } from "./config.js";
 import { startExecuteServer } from "./execute-server.js";
 import { createJsonlExecuteStore } from "./execute-store.js";
+import { ProductionFeishuTransport } from "./production-transport.js";
+import type { FeishuTransport } from "./transport.js";
 import { normalizeMessageEvent, postIngress } from "./kernel.js";
 import { createReactionTracker } from "./reactions.js";
 import { safeLarkLogger } from "./safe-logger.js";
@@ -29,7 +31,8 @@ const baseConfig = {
 baseConfig["app" + "Secret"] = config.appSecret;
 
 const client = new Lark.Client(baseConfig);
-const reactions = createReactionTracker(config, client);
+const transport = new ProductionFeishuTransport(client);
+const reactions = createReactionTracker(config, transport);
 const executeStore = createJsonlExecuteStore(config.executeStatePath);
 executeStore.load(); // warm up the store from disk on startup
 
@@ -39,7 +42,7 @@ const approvalConfig: ApprovalConfig = {
   decisionToken: config.kernelDecisionToken,
   ownerOpenId: config.feishuOwnerOpenId,
 };
-startExecuteServer(config, client, reactions, executeStore, approvalConfig);
+startExecuteServer(config, transport, reactions, executeStore, approvalConfig);
 
 /**
  * Try to handle a message as an approval command BEFORE sending it to the LLM.
@@ -50,7 +53,7 @@ async function tryHandleApproval(
   chatType: string,
   senderOpenId: string,
   messageId: string,
-  client: any,
+  transport: FeishuTransport,
   reactions: any,
 ): Promise<boolean> {
   // Only handle text messages that look like approval commands.
@@ -66,7 +69,7 @@ async function tryHandleApproval(
   if (authError) {
     console.log(`approval rejected: ${authError}`);
     await reactions?.markFailed(messageId);
-    await sendTextReply(client, messageId, authError);
+    await sendTextReply(transport, messageId, authError);
     return true;
   }
 
@@ -81,7 +84,7 @@ async function tryHandleApproval(
   } else {
     await reactions?.markFailed(messageId);
   }
-  await sendTextReply(client, messageId, result.replyText);
+  await sendTextReply(transport, messageId, result.replyText);
   return true;
 }
 
@@ -95,13 +98,13 @@ async function tryHandleHarnessChangeRequest(
   senderOpenId: string,
   messageId: string,
   rawEvent: unknown,
-  client: any,
+  transport: FeishuTransport,
   reactions: any,
 ): Promise<boolean> {
   // First check for explicitly unsupported commands (修改/删除 etc).
   if (isUnsupportedCommand(text)) {
     await sendTextReply(
-      client,
+      transport,
       messageId,
       "不支持的 Harness 操作。v0 仅支持「创建 Harness <id>：<requirement>」。",
     );
@@ -124,7 +127,7 @@ async function tryHandleHarnessChangeRequest(
   );
   if (authError) {
     await reactions?.markFailed(messageId);
-    await sendTextReply(client, messageId, authError);
+    await sendTextReply(transport, messageId, authError);
     return true;
   }
 
@@ -143,20 +146,13 @@ async function tryHandleHarnessChangeRequest(
   } else {
     await reactions?.markFailed(messageId);
   }
-  await sendTextReply(client, messageId, result.replyText);
+  await sendTextReply(transport, messageId, result.replyText);
   return true;
 }
 
-async function sendTextReply(client: any, messageId: string, text: string) {
+async function sendTextReply(transport: FeishuTransport, messageId: string, text: string) {
   try {
-    await client.request({
-      method: "POST",
-      url: `/open-apis/im/v1/messages/${encodeURIComponent(messageId)}/reply`,
-      data: {
-        msg_type: "text",
-        content: JSON.stringify({ text }),
-      },
-    });
+    await transport.replyToMessage(messageId, "text", { text });
   } catch (error: any) {
     console.error(`send reply failed: ${(error?.message || String(error)).slice(0, 200)}`);
   }
@@ -181,7 +177,7 @@ const eventDispatcher = new Lark.EventDispatcher({}).register({
         payload.chat_type,
         payload.sender_open_id,
         payload.message_id,
-        client,
+        transport,
         reactions,
       ).catch((error) => {
         const message = error instanceof Error ? error.message : String(error);
@@ -201,7 +197,7 @@ const eventDispatcher = new Lark.EventDispatcher({}).register({
         payload.sender_open_id,
         payload.message_id,
         data,
-        client,
+        transport,
         reactions,
       ).catch((error) => {
         const message = error instanceof Error ? error.message : String(error);
