@@ -205,6 +205,7 @@ export async function simulateFeishuMessage(
     console.error(`[shadow] simulateFeishuMessage unexpected error: ${error.message}`);
     return { ok: false };
   }
+}
 
 /**
  * Simulate a card approval callback being received by the Connector.
