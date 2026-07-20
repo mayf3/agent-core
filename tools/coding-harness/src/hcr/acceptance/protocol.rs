@@ -64,6 +64,12 @@ pub struct AcceptanceResponse {
     pub artifact_ref: Option<String>,
     pub artifact_digest: Option<String>,
     pub component_manifest_digest: Option<String>,
+    /// Content‑addressable ref of the delivery manifest (e.g.
+    /// `"service_manifest_<sha256>"`).  Set only for `CandidatePassed`.
+    pub delivery_manifest_ref: Option<String>,
+    /// ContentStore digest of the delivery manifest bytes
+    /// (`"sha256:<hex>"`).  Set only for `CandidatePassed`.
+    pub delivery_manifest_digest: Option<String>,
     pub evidence_digest: String,
 }
 

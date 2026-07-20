@@ -1,5 +1,8 @@
-use super::*;
+use crate::domain::*;
+use crate::server::coding_delivery;
 use chrono::Utc;
+
+use super::super::handler::validate_private_owner_context;
 
 fn private_session() -> Session {
     Session {
@@ -79,15 +82,15 @@ fn owner_private_context_is_the_only_valid_coding_origin() {
 
 #[test]
 fn coding_delivery_routes_only_feishu_p2p_events() {
-    assert!(crate::server::coding_delivery::matches(&ingress(
+    assert!(coding_delivery::matches(&ingress(
         EventSource::Feishu,
         Some("p2p")
     )));
-    assert!(!crate::server::coding_delivery::matches(&ingress(
+    assert!(!coding_delivery::matches(&ingress(
         EventSource::Feishu,
         Some("group")
     )));
-    assert!(!crate::server::coding_delivery::matches(&ingress(
+    assert!(!coding_delivery::matches(&ingress(
         EventSource::Cli,
         None
     )));
