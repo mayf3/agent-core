@@ -38,7 +38,12 @@ fn handle(stream: &mut TcpStream, config: &DeploymentHarnessConfig) -> Result<()
     if request.method == "GET" && request.path == "/health" {
         return write_json(stream, 200, json!({"status":"ok"}));
     }
-    if request.bearer.as_deref() != Some(config.control_token.as_str()) {
+    if !is_authorized(
+        request.method.as_str(),
+        request.bearer.as_deref(),
+        &config.control_token,
+        config.read_token.as_deref(),
+    ) {
         return write_json(stream, 401, json!({"ok":false,"error_code":"unauthorized"}));
     }
     let result = route(config, &request);
@@ -174,6 +179,29 @@ fn read_request(stream: &mut TcpStream) -> Result<Request> {
     })
 }
 
+/// Authorise a request based on method and bearer token.
+///
+/// - GET requests are accepted with either `control_token` or
+///   `read_token` (if configured).
+/// - POST requests require the `control_token`.
+/// - A missing `read_token` means GET falls back to `control_token`
+///   only (backward compatible).
+pub(crate) fn is_authorized(
+    method: &str,
+    bearer: Option<&str>,
+    control_token: &str,
+    read_token: Option<&str>,
+) -> bool {
+    if method == "GET" {
+        // GET accepts either control_token or read_token
+        Some(control_token) == bearer
+            || read_token.is_some() && read_token == bearer
+    } else {
+        // POST requires control_token
+        Some(control_token) == bearer
+    }
+}
+
 fn safe_error(error: &anyhow::Error) -> (u16, &'static str) {
     let message = error.to_string();
     if message.contains("NOT_FOUND") {
@@ -225,10 +253,68 @@ fn write_json(stream: &mut TcpStream, status: u16, value: Value) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::safe_error;
+    use super::is_authorized;
 
     #[test]
     fn version_downgrade_is_a_definitive_conflict() {
         let error = anyhow::anyhow!("DEPLOYMENT_VERSION_NOT_MONOTONIC");
         assert_eq!(safe_error(&error), (409, "conflict"));
+    }
+
+    // ── is_authorized unit tests ──────────────────────────
+
+    #[test]
+    fn read_token_can_get() {
+        assert!(is_authorized("GET", Some("read"), "control", Some("read")));
+    }
+
+    #[test]
+    fn read_token_cannot_deploy() {
+        assert!(!is_authorized("POST", Some("read"), "control", Some("read")));
+    }
+
+    #[test]
+    fn read_token_cannot_disable() {
+        assert!(!is_authorized("POST", Some("read"), "control", Some("read")));
+    }
+
+    #[test]
+    fn read_token_cannot_rollback() {
+        assert!(!is_authorized("POST", Some("read"), "control", Some("read")));
+    }
+
+    #[test]
+    fn control_token_can_get() {
+        assert!(is_authorized("GET", Some("control"), "control", Some("read")));
+    }
+
+    #[test]
+    fn control_token_can_post() {
+        assert!(is_authorized("POST", Some("control"), "control", Some("read")));
+    }
+
+    #[test]
+    fn no_token_get_fails() {
+        assert!(!is_authorized("GET", None, "control", Some("read")));
+    }
+
+    #[test]
+    fn wrong_token_get_fails() {
+        assert!(!is_authorized("GET", Some("wrong"), "control", Some("read")));
+    }
+
+    #[test]
+    fn wrong_token_post_fails() {
+        assert!(!is_authorized("POST", Some("wrong"), "control", Some("read")));
+    }
+
+    #[test]
+    fn no_read_token_fallback_to_control_for_get() {
+        assert!(is_authorized("GET", Some("control"), "control", None));
+    }
+
+    #[test]
+    fn no_read_token_rejects_read_token_for_get() {
+        assert!(!is_authorized("GET", Some("read"), "control", None));
     }
 }

@@ -26,27 +26,51 @@ use std::time::Duration;
 //  Read-only version query (Deployment Harness)
 // ──────────────────────────────────────────────
 
-/// Environment variable for the DH control URL (read‑only usage).
-const ENV_DH_CONTROL_URL: &str = "AGENT_CORE_DEPLOYMENT_HARNESS_CONTROL_URL";
+/// Environment variable for the DH read‑only URL (falls back to
+/// `AGENT_CORE_DEPLOYMENT_HARNESS_CONTROL_URL` when not set).
+const ENV_DH_READ_URL: &str = "AGENT_CORE_DEPLOYMENT_HARNESS_READ_URL";
+const ENV_DH_CONTROL_URL_FALLBACK: &str = "AGENT_CORE_DEPLOYMENT_HARNESS_CONTROL_URL";
 const DEFAULT_DH_URL: &str = "http://127.0.0.1:7400";
 
-/// Environment variable for the DH control token.
-const ENV_DH_CONTROL_TOKEN: &str = "AGENT_CORE_DEPLOYMENT_HARNESS_CONTROL_TOKEN";
+/// Environment variable for the DH read‑only token.
+///
+/// This token MUST be scoped to only allow `GET /v1/components/{id}`.
+/// It must NOT permit deploy, disable, rollback, or any other write
+/// operation.  The Deployment Harness enforces this server-side.
+const ENV_DH_READ_TOKEN: &str = "AGENT_CORE_DEPLOYMENT_HARNESS_READ_TOKEN";
 
 /// Query the Deployment Harness for the current installed version of
-/// a component.  Returns `None` when the component does not exist
-/// (HTTP 404).  Returns an error on transport/parse failures.
+/// a component.
+///
+/// # Semantics (fail‑closed)
+///
+/// | HTTP status | JSON body | Result |
+/// |-------------|-----------|--------|
+/// | 404         | any       | `Ok(None)` — component does not exist |
+/// | 200         | `{"ok":true,"version":"X.Y.Z"}` | `Ok(Some("X.Y.Z"))` |
+/// | 200         | missing `version` or empty | `Err` |
+/// | 200         | `ok` is not `true` | `Err` |
+/// | 401, 403, 409, 429, 5xx | any | `Err` |
+/// | transport / timeout / JSON parse | — | `Err` |
+///
+/// Every error is fail‑closed: the caller MUST NOT interpret a non‑404
+/// error as "component does not exist" or silently fall back to a
+/// default version.
 ///
 /// # Read‑only guarantee
 ///
 /// This function only issues `GET /v1/components/{component_id}`.
 /// It never performs deploy, disable, rollback, or any write
-/// operation.
+/// operation.  The credential used is the dedicated read‑only token.
 pub fn query_deployed_version(component_id: &str) -> Result<Option<String>> {
-    let base_url = std::env::var(ENV_DH_CONTROL_URL)
+    let base_url = std::env::var(ENV_DH_READ_URL)
+        .or_else(|_| std::env::var(ENV_DH_CONTROL_URL_FALLBACK))
         .unwrap_or_else(|_| DEFAULT_DH_URL.to_string());
-    let token = std::env::var(ENV_DH_CONTROL_TOKEN)
-        .map_err(|_| anyhow!("MISSING_DH_CONTROL_TOKEN"))?;
+    let token = std::env::var(ENV_DH_READ_TOKEN)
+        .map_err(|_| anyhow!("MISSING_DH_READ_TOKEN"))?;
+    if token.len() < 32 {
+        return Err(anyhow!("DH_READ_TOKEN_TOO_SHORT"));
+    }
 
     // Parse the URL to extract host:port and path
     let url = url_parse(&base_url)?;
@@ -80,25 +104,59 @@ pub fn query_deployed_version(component_id: &str) -> Result<Option<String>> {
         .read_to_end(&mut raw)
         .map_err(|e| anyhow!("DH_READ: {e}"))?;
 
-    let body = extract_http_body(&raw);
-    let resp: Value =
-        serde_json::from_slice(body).map_err(|e| anyhow!("DH_JSON: {e}"))?;
+    // ── 1. Parse HTTP status line ──────────────────────────────────
+    let status_code = parse_status_code(&raw)?;
 
-    // 404 → component not yet deployed
-    if raw
-        .windows(12)
-        .any(|w| w == b"HTTP/1.1 404")
-    {
-        return Ok(None);
-    }
-    // 200 → extract version
-    if resp.get("ok").and_then(|v| v.as_bool()) == Some(true) {
-        if let Some(ver) = resp.get("version").and_then(|v| v.as_str()) {
-            return Ok(Some(ver.to_string()));
+    // ── 2. Fail‑closed dispatch by status ──────────────────────────
+    match status_code {
+        404 => {
+            // Component not yet deployed — not an error.
+            Ok(None)
+        }
+        200 => {
+            // Must have a valid JSON body with ok=true and version
+            let body = extract_http_body(&raw);
+            let resp: Value =
+                serde_json::from_slice(body).map_err(|e| anyhow!("DH_JSON: {e}"))?;
+
+            if resp.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+                return Err(anyhow!("DH_NOT_OK: component exists but ok!=true"));
+            }
+            let version = resp
+                .get("version")
+                .and_then(|v| v.as_str())
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| anyhow!("DH_MISSING_VERSION"))?;
+            Ok(Some(version.to_string()))
+        }
+        other => {
+            // 401, 403, 409, 429, 5xx, or any other unexpected status.
+            // Fail closed — do NOT treat these as "component not found".
+            Err(anyhow!("DH_UNEXPECTED_STATUS:{other}"))
         }
     }
-    // Any other status → component unknown or error
-    Ok(None)
+}
+
+/// Parse the HTTP status code from a raw HTTP/1.1 response.
+///
+/// Returns `Err` if the status line cannot be parsed (malformed
+/// response or connection error).
+fn parse_status_code(raw: &[u8]) -> Result<u16> {
+    // Find end of status line
+    let line_end = raw
+        .windows(2)
+        .position(|w| w == b"\r\n")
+        .ok_or_else(|| anyhow!("DH_NO_STATUS_LINE"))?;
+    let status_line = std::str::from_utf8(&raw[..line_end])
+        .map_err(|_| anyhow!("DH_STATUS_NOT_UTF8"))?;
+    // Expected format: "HTTP/1.1 XXX ..."
+    let code_str = status_line
+        .split_whitespace()
+        .nth(1)
+        .ok_or_else(|| anyhow!("DH_STATUS_MALFORMED:{status_line}"))?;
+    code_str
+        .parse::<u16>()
+        .map_err(|_| anyhow!("DH_STATUS_NOT_NUMERIC:{code_str}"))
 }
 
 /// Increment the patch component of a semver string.
@@ -135,6 +193,24 @@ pub fn allocate_next_version(component_id: &str) -> Result<Option<String>> {
 // ──────────────────────────────────────────────
 //  Delivery manifest construction
 // ──────────────────────────────────────────────
+
+// ⚠ CONCURRENT VERSION ALLOCATION RISK
+//
+// Two concurrent HCR acceptance flows with different idempotency_keys
+// may both query the Deployment Harness at the same time, observe the
+// same current version (e.g. "0.1.0"), and independently compute the
+// next version ("0.1.1").  Only one succeeds at deployment time; the
+// other fails the Deployment Harness monotonicity check.
+//
+// This is a **known medium-priority debt**:
+//  - No data corruption — the DH rejects the non‑monotonic deployment.
+//  - The next submission after the conflict correctly allocates the
+//    version that follows the first successful deployment.
+//  - The HCR ExecutionStore (file lock) only serialises by the same
+//    idempotency_key, not across different keys.
+//
+// The proper fix requires atomic version allocation on the DH side
+// or a distributed lock in the acceptance pipeline.
 
 /// Construct the final delivery `ServiceManifest` from a component
 /// artifact manifest and the verified artifact digest.
@@ -280,6 +356,57 @@ fn extract_http_body(raw: &[u8]) -> &[u8] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::atomic::{AtomicU16, Ordering};
+    use std::thread;
+    use std::time::Duration;
+
+    // ── parse_status_code tests ────────────────────────────
+
+    #[test]
+    fn parse_status_200() {
+        assert_eq!(
+            parse_status_code(b"HTTP/1.1 200 OK\r\nContent-Type: text\r\n\r\n{}").unwrap(),
+            200
+        );
+    }
+
+    #[test]
+    fn parse_status_404() {
+        assert_eq!(
+            parse_status_code(b"HTTP/1.1 404 Not Found\r\n\r\n{}").unwrap(),
+            404
+        );
+    }
+
+    #[test]
+    fn parse_status_401() {
+        assert_eq!(
+            parse_status_code(b"HTTP/1.1 401 Unauthorized\r\n\r\n{}").unwrap(),
+            401
+        );
+    }
+
+    #[test]
+    fn parse_status_500() {
+        assert_eq!(
+            parse_status_code(b"HTTP/1.1 500 Internal Server Error\r\n\r\n").unwrap(),
+            500
+        );
+    }
+
+    #[test]
+    fn parse_status_no_crlf_fails() {
+        assert!(parse_status_code(b"HTTP/1.1 200 OK").is_err());
+    }
+
+    #[test]
+    fn parse_status_empty_fails() {
+        assert!(parse_status_code(b"").is_err());
+    }
+
+    // ── increment_patch tests ──────────────────────────────
 
     #[test]
     fn increment_patch_basic() {
@@ -302,6 +429,8 @@ mod tests {
         let next = increment_patch(orig).unwrap();
         assert_ne!(orig, next);
     }
+
+    // ── build_delivery_manifest tests ──────────────────────
 
     #[test]
     fn build_delivery_manifest_sets_correct_version() {
@@ -354,5 +483,150 @@ mod tests {
         )
         .unwrap();
         assert_ne!(m1.manifest_id, m2.manifest_id);
+    }
+
+    // ── Mock server helpers ────────────────────────────────
+
+    /// Start a mock TCP server that responds with a fixed HTTP response.
+    /// Returns the port number.
+    fn start_mock(response: &'static [u8]) -> u16 {
+        static NEXT_PORT: AtomicU16 = AtomicU16::new(18000);
+        let port = NEXT_PORT.fetch_add(1, Ordering::SeqCst);
+        thread::spawn(move || {
+            let addr = format!("127.0.0.1:{port}");
+            let listener = TcpListener::bind(&addr).unwrap();
+            if let Ok((mut stream, _)) = listener.accept() {
+                stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(response);
+                let _ = stream.flush();
+            }
+        });
+        port
+    }
+
+    fn with_server<F>(response: &'static [u8], token: &str, f: F)
+    where
+        F: FnOnce(),
+    {
+        let port = start_mock(response);
+        std::env::set_var("AGENT_CORE_DEPLOYMENT_HARNESS_READ_URL", format!("http://127.0.0.1:{port}"));
+        std::env::set_var("AGENT_CORE_DEPLOYMENT_HARNESS_READ_TOKEN", token);
+        // Give the server thread a moment to start
+        thread::sleep(Duration::from_millis(50));
+        f();
+        std::env::remove_var("AGENT_CORE_DEPLOYMENT_HARNESS_READ_URL");
+        std::env::remove_var("AGENT_CORE_DEPLOYMENT_HARNESS_READ_TOKEN");
+    }
+
+    // ── query_deployed_version fail‑closed tests ───────────
+
+    #[test]
+    fn version_query_404_returns_none() {
+        let resp = b"HTTP/1.1 404 Not Found\r\n\r\n{}";
+        with_server(resp, "test-token-32-chars-minimum-length!!", || {
+            let result = query_deployed_version("test-component").unwrap();
+            assert_eq!(result, None);
+        });
+    }
+
+    #[test]
+    fn version_query_200_returns_version() {
+        let resp = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"ok\":true,\"version\":\"0.1.0\"}";
+        with_server(resp, "test-token-32-chars-minimum-length!!", || {
+            let result = query_deployed_version("test-component").unwrap();
+            assert_eq!(result, Some("0.1.0".into()));
+        });
+    }
+
+    #[test]
+    fn version_query_200_missing_version_fails() {
+        let resp = b"HTTP/1.1 200 OK\r\n\r\n{\"ok\":true}";
+        with_server(resp, "test-token-32-chars-minimum-length!!", || {
+            assert!(query_deployed_version("test-component").is_err());
+        });
+    }
+
+    #[test]
+    fn version_query_200_empty_version_fails() {
+        let resp = b"HTTP/1.1 200 OK\r\n\r\n{\"ok\":true,\"version\":\"\"}";
+        with_server(resp, "test-token-32-chars-minimum-length!!", || {
+            assert!(query_deployed_version("test-component").is_err());
+        });
+    }
+
+    #[test]
+    fn version_query_401_fails_closed() {
+        let resp = b"HTTP/1.1 401 Unauthorized\r\n\r\n{}";
+        with_server(resp, "test-token-32-chars-minimum-length!!", || {
+            let err = query_deployed_version("test-component").unwrap_err();
+            let msg = format!("{err:?}");
+            assert!(msg.contains("401"), "expected 401 error, got: {msg}");
+        });
+    }
+
+    #[test]
+    fn version_query_403_fails_closed() {
+        let resp = b"HTTP/1.1 403 Forbidden\r\n\r\n{}";
+        with_server(resp, "test-token-32-chars-minimum-length!!", || {
+            let err = query_deployed_version("test-component").unwrap_err();
+            let msg = format!("{err:?}");
+            assert!(msg.contains("403"), "expected 403 error, got: {msg}");
+        });
+    }
+
+    #[test]
+    fn version_query_500_fails_closed() {
+        let resp = b"HTTP/1.1 500 Internal Server Error\r\n\r\n{}";
+        with_server(resp, "test-token-32-chars-minimum-length!!", || {
+            let err = query_deployed_version("test-component").unwrap_err();
+            let msg = format!("{err:?}");
+            assert!(msg.contains("500"), "expected 500 error, got: {msg}");
+        });
+    }
+
+    #[test]
+    fn version_query_malformed_body_fails_closed() {
+        let resp = b"HTTP/1.1 200 OK\r\n\r\n{invalid json}";
+        with_server(resp, "test-token-32-chars-minimum-length!!", || {
+            assert!(query_deployed_version("test-component").is_err());
+        });
+    }
+
+    #[test]
+    fn version_query_200_ok_not_true_fails() {
+        let resp = b"HTTP/1.1 200 OK\r\n\r\n{\"ok\":false}";
+        with_server(resp, "test-token-32-chars-minimum-length!!", || {
+            assert!(query_deployed_version("test-component").is_err());
+        });
+    }
+
+    // ── allocate_next_version propagation tests ────────────
+
+    #[test]
+    fn version_allocation_returns_next_patch_when_component_exists() {
+        let resp = b"HTTP/1.1 200 OK\r\n\r\n{\"ok\":true,\"version\":\"0.1.0\"}";
+        with_server(resp, "test-token-32-chars-minimum-length!!", || {
+            let result = allocate_next_version("test-component").unwrap();
+            assert_eq!(result, Some("0.1.1".into()));
+        });
+    }
+
+    #[test]
+    fn version_allocation_returns_none_when_not_deployed() {
+        let resp = b"HTTP/1.1 404 Not Found\r\n\r\n{}";
+        with_server(resp, "test-token-32-chars-minimum-length!!", || {
+            let result = allocate_next_version("test-component").unwrap();
+            assert_eq!(result, None);
+        });
+    }
+
+    #[test]
+    fn version_allocation_does_not_fall_back_to_initial_on_query_error() {
+        let resp = b"HTTP/1.1 401 Unauthorized\r\n\r\n{}";
+        with_server(resp, "test-token-32-chars-minimum-length!!", || {
+            assert!(allocate_next_version("test-component").is_err());
+        });
     }
 }
