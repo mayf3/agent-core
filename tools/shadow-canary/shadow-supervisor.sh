@@ -232,7 +232,9 @@ if [ "${VARIANT}" = "dirty" ]; then
         "${DEPLOYMENT_HARNESS_BIN}"
 
     # Start failure proxy on port 7400 (Node.js version)
-    SHADOW_FAILURE_COUNT=1 \
+    # SHADOW_FAILURE_COUNT=2: 1st deploy (Phase A) forwarded, 2nd deploy (Phase B) fails,
+    # subsequent deploys (Phase C) forwarded (remaining=0).
+    SHADOW_FAILURE_COUNT=2 \
     start_service "failure-proxy" "${PID_DIR}/failure-proxy.pid" \
         npx tsx "${SHADOW_TOOLS_DIR}/tools/shadow-canary/failure-proxy.ts"
 else
