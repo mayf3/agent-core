@@ -1,1 +1,0 @@
-Implementation plan approved with 7 constraints. Implementing now.

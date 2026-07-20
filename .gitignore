@@ -31,3 +31,8 @@ temp/
 artifacts/
 runtime.env
 .env
+
+# Accidental repository artifacts (prevent re-addition)
+.zcode/plans/
+canary-runtime
+package-lock.json
