@@ -5,7 +5,11 @@
  * Sits between Kernel and Deployment Harness:
  *   Kernel -> Failure Proxy (:7400) -> Deployment Harness (:7401)
  *
- * On the first POST /v1/deployments, returns a definitive rejection.
+ * Forward policy:
+ *   1. Forward the first SHADOW_FAILURE_AFTER deploy requests (Phase A)
+ *   2. Fail the next SHADOW_FAILURE_COUNT deploy requests (Phase B)
+ *   3. Forward all remaining requests (Phase C + rest)
+ *
  * Non-deploy requests (health, disable, rollback, status) are always forwarded.
  */
 
@@ -13,9 +17,11 @@ import * as http from "node:http";
 
 const PROXY_PORT = parseInt(process.env.PROXY_PORT || "7400", 10);
 const HARNESS_PORT = parseInt(process.env.HARNESS_PORT || "7401", 10);
+const FAILURE_AFTER = parseInt(process.env.SHADOW_FAILURE_AFTER || "1", 10);
 const FAILURE_COUNT = parseInt(process.env.SHADOW_FAILURE_COUNT || "1", 10);
 const HARNESS_HOST = "127.0.0.1";
 
+let deployCount = 0;
 let remainingFailures = FAILURE_COUNT;
 
 const proxy = http.createServer((clientReq, clientRes) => {
@@ -26,23 +32,27 @@ const proxy = http.createServer((clientReq, clientRes) => {
     const body = Buffer.concat(chunks);
     const isDeploy = clientReq.method === "POST" && clientReq.url === "/v1/deployments";
 
-    if (isDeploy && remainingFailures > 0) {
-      remainingFailures--;
-      console.error(`[failure-proxy] INJECTING FAILURE on deploy (remaining=${remainingFailures})`);
+    if (isDeploy) {
+      deployCount++;
+      if (deployCount > FAILURE_AFTER && remainingFailures > 0) {
+        remainingFailures--;
+        console.error(`[failure-proxy] INJECTING FAILURE on deploy #${deployCount} (remaining=${remainingFailures})`);
 
-      // Return definitive rejection
-      const respBody = JSON.stringify({
-        "protocol_version": "deployment.effect.v0",
-        "ok": false,
-        "error_code": "service_unhealthy",
-      });
-      clientRes.writeHead(422, {
-        "Content-Type": "application/json",
-        "Content-Length": Buffer.byteLength(respBody),
-        "Connection": "close",
-      });
-      clientRes.end(respBody);
-      return;
+        // Return definitive rejection
+        const respBody = JSON.stringify({
+          "protocol_version": "deployment.effect.v0",
+          "ok": false,
+          "error_code": "service_unhealthy",
+        });
+        clientRes.writeHead(422, {
+          "Content-Type": "application/json",
+          "Content-Length": Buffer.byteLength(respBody),
+          "Connection": "close",
+        });
+        clientRes.end(respBody);
+        return;
+      }
+      console.error(`[failure-proxy] forwarding deploy #${deployCount}`);
     }
 
     // Forward to real harness
@@ -79,5 +89,5 @@ const proxy = http.createServer((clientReq, clientRes) => {
 
 proxy.listen(PROXY_PORT, HARNESS_HOST, () => {
   console.error(`[failure-proxy] listening on ${HARNESS_HOST}:${PROXY_PORT}, forwarding to ${HARNESS_HOST}:${HARNESS_PORT}`);
-  console.error(`[failure-proxy] failure_count=${FAILURE_COUNT}`);
+  console.error(`[failure-proxy] failure_after=${FAILURE_AFTER}, failure_count=${FAILURE_COUNT}`);
 });
