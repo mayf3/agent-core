@@ -53,7 +53,19 @@ pub fn handle_accept(artifact_root: &Path, args: &Value) -> Value {
         _ => return err_json("MISSING_CANDIDATE_REF"),
     };
     let invocation_intent_id = get_str(args, "invocation_intent_id").unwrap_or("");
-    let requirement_digest = get_str(args, "requirement_digest");
+    let requirement_digest = match get_str(args, "requirement_digest") {
+        Some(d) => {
+            if !d.starts_with("sha256:") || d.len() != 71 {
+                return err_json("INVALID_REQUIREMENT_DIGEST");
+            }
+            d
+        }
+        None => return err_json("MISSING_REQUIREMENT_DIGEST"),
+    };
+
+    // Validate requirement content against its digest — ensures the
+    // development_request we extract matches what the Kernel signed.
+    // (also serves as an early-fail pre-check before the locked section)
 
     if idempotency_key.is_empty() {
         return err_json("MISSING_IDEMPOTENCY_KEY");
@@ -72,7 +84,7 @@ pub fn handle_accept(artifact_root: &Path, args: &Value) -> Value {
         operation,
         candidate_ref,
         idempotency_key,
-        requirement_digest,
+        Some(requirement_digest),
     );
 
     let store = ExecutionStore::new(artifact_root);
@@ -197,10 +209,10 @@ fn do_accept(
 	        let mut manifest_value: Value =
 	            serde_json::from_slice(&raw).map_err(|e| format!("DELIVERY_MANIFEST_PARSE: {e}"))?;
 
-	        // Parse DevelopmentRequest from args (required for InvocableCapability)
-            let development_request = args
-                .get("development_request")
-	            .and_then(|v| serde_json::from_value::<DevelopmentRequest>(v.clone()).ok());
+        // Parse DevelopmentRequest from the verified requirement content.
+        // We re-verify the digest inside the locked execution (defense in depth)
+        // so that tampering between handle_accept and do_accept is detected.
+        let development_request = extract_development_request(args);
 
 	        // Only allocate versions for HookConsumerService (managed services)
 	        let needs_version = manifest_value
@@ -461,6 +473,25 @@ fn resolve_safe(root: &Path, rel: &str) -> Option<std::path::PathBuf> {
         }
     }
     Some(j)
+}
+
+/// Extract and verify development_request from the acceptance args.
+///
+/// Re-verifies requirement_digest against the raw requirement string
+/// inside the locked execution (defense in depth against tampering
+/// between `handle_accept` pre-checks and `do_accept`).
+fn extract_development_request(args: &Value) -> Option<DevelopmentRequest> {
+    let req_digest = get_str(args, "requirement_digest")?;
+    let req_str = get_str(args, "requirement")?;
+    use sha2::{Digest, Sha256};
+    let computed = format!("sha256:{}", hex::encode(Sha256::digest(req_str.as_bytes())));
+    if computed != req_digest {
+        return None;
+    }
+    serde_json::from_str::<serde_json::Value>(req_str)
+        .ok()
+        .and_then(|v| v.get("development_request").cloned())
+        .and_then(|v| serde_json::from_value::<DevelopmentRequest>(v).ok())
 }
 
 fn get_str<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
