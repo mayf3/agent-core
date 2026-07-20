@@ -18,11 +18,12 @@ use crate::domain::*;
 use crate::gateway::Gateway;
 use crate::hcr::{settlement::settle_hcr, worker::execute_hcr};
 use crate::journal::JournalStore;
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use chrono::Utc;
 use receipt::AppendReceiptResult;
 use response_validation::{validate_harness_response, RequestContext};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::net::TcpStream;
 
@@ -184,11 +185,43 @@ pub fn handle(
         bail!("EVIDENCE_DIGEST_FORMAT: invalid evidence_digest");
     }
 
-    // 6f. Validate subject_digest matches the candidate_digest from the
-    //     validated response (the response's candidate_digest IS the subject_digest)
-    //     This is validated implicitly below when we parse the detailed response.
+	// 6f. Validate subject_digest matches the candidate_digest from the
+	//     validated response (the response's candidate_digest IS the subject_digest)
+	//     This is validated implicitly below when we parse the detailed response.
 
-    // ── 7. Parse detailed response fields for persistence ────────────────
+	// 6g. Verify opaque_payload_digest — this binds the full detailed
+	//     acceptance response (including delivery_manifest_digest) to the
+	//     receipt.  We strip envelope-only keys to reconstruct the original
+	//     AcceptanceResponse bytes that were hashed by the Harness.
+	if let Some(ref expected_opaque) = envelope.opaque_payload_digest {
+	    let mut detailed_only = result_value.clone();
+	    // Envelope-only keys that are NOT part of AcceptanceResponse
+	    const ENVELOPE_ONLY: &[&str] = &[
+	        "schema_version",
+	        "invocation_intent_id",
+	        "issuer",
+	        "subject_digest",
+	        "outcome",
+	        "opaque_payload_digest",
+	        "receipt_digest",
+	    ];
+	    if let Some(obj) = detailed_only.as_object_mut() {
+	        for key in ENVELOPE_ONLY {
+	            obj.remove(*key);
+	        }
+	    }
+	    let detailed_bytes = serde_json::to_vec(&detailed_only)
+            .map_err(|e| anyhow::anyhow!("OPAQUE_SERIALIZATION: {e}"))?;
+	    let computed = format!(
+	        "sha256:{}",
+	        hex::encode(sha2::Sha256::digest(&detailed_bytes))
+	    );
+	    if *expected_opaque != computed {
+	        bail!("OPAQUE_PAYLOAD_MISMATCH");
+	    }
+	}
+	
+	// ── 7. Parse detailed response fields for persistence ────────────────
     //
     // The envelope's opaque_payload binds the internal evidence. The Kernel
     // also extracts structural fields (gate_results, candidate_id, etc.)
@@ -241,6 +274,8 @@ pub fn handle(
         "artifact_ref": validated.artifact_ref,
         "artifact_digest": validated.artifact_digest,
         "component_manifest_digest": validated.component_manifest_digest,
+        "delivery_manifest_ref": validated.delivery_manifest_ref,
+        "delivery_manifest_digest": validated.delivery_manifest_digest,
         "evidence_digest": validated.evidence_digest,
         "gate_count": validated.gate_count,
     });
@@ -258,6 +293,8 @@ pub fn handle(
         candidate_digest: validated.candidate_digest.clone(),
         artifact_ref: validated.artifact_ref.clone(),
         artifact_digest: validated.artifact_digest.clone(),
+        delivery_manifest_ref: validated.delivery_manifest_ref.clone(),
+        delivery_manifest_digest: validated.delivery_manifest_digest.clone(),
         evidence_digest: envelope.evidence_digest.clone(),
         receipt_digest: envelope.receipt_digest.clone(),
         opaque_payload_digest: envelope.opaque_payload_digest.clone(),
@@ -307,6 +344,8 @@ pub fn handle(
         "artifact_ref": validated.artifact_ref,
         "artifact_digest": validated.artifact_digest,
         "component_manifest_digest": validated.component_manifest_digest,
+        "delivery_manifest_ref": validated.delivery_manifest_ref,
+        "delivery_manifest_digest": validated.delivery_manifest_digest,
         "evidence_digest": validated.evidence_digest,
         "settlement_id": settlement_id,
         "settlement_result": format!("{:?}", settlement),
