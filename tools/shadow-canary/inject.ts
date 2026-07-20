@@ -696,7 +696,7 @@ async function waitForActivationFailed(
     if (resp?.ok && resp.data?.events) {
       for (const ev of resp.data.events) {
         // Check for ActivationFailed events linked to this proposal
-        if (ev.event_kind === "TrustedActivationFailed" || ev.event_kind === "CapabilityApprovalFailed") {
+        if (ev.event_kind === "CapabilityChangeActivationFailed") {
           const payloadStr = JSON.stringify(ev.payload || {});
           if (payloadStr.includes(proposalId)) {
             return true;
