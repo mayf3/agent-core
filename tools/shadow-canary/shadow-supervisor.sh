@@ -225,16 +225,16 @@ start_service "capability-host" "${PID_DIR}/capability-host.pid" \
     "${CAPABILITY_HOST_BIN}"
 
 # 1e. Deployment Harness (fresh: 7400, dirty: 7401 with proxy on 7400)
-if [ "${VARIANT}" = "dirty" ] && [ -x "${FAILURE_PROXY_BIN}" ]; then
+if [ "${VARIANT}" = "dirty" ]; then
     # Dirty: harness on 7401, proxy on 7400 (Kernel connects to proxy)
     DEPLOYMENT_HARNESS_LISTEN_ADDR=127.0.0.1:7401 \
     start_service "deployment-harness" "${PID_DIR}/deployment-harness.pid" \
         "${DEPLOYMENT_HARNESS_BIN}"
 
-    # Start failure proxy on port 7400
-    SHADOW_FAILURE_COUNT=1 SHADOW_FAILURE_RETRY_AFTER=0 \
+    # Start failure proxy on port 7400 (Node.js version)
+    SHADOW_FAILURE_COUNT=1 \
     start_service "failure-proxy" "${PID_DIR}/failure-proxy.pid" \
-        "${FAILURE_PROXY_BIN}"
+        npx tsx "${SHADOW_TOOLS_DIR}/tools/shadow-canary/failure-proxy.ts"
 else
     # Fresh: harness on 7400, no proxy
     start_service "deployment-harness" "${PID_DIR}/deployment-harness.pid" \
@@ -254,7 +254,7 @@ for svc in kernel coding-harness capability-host deployment-harness${ADDITIONAL_
         coding-harness) port=7200; timeout=15 ;;
         capability-host) port=7300; timeout=15 ;;
         deployment-harness)
-            if [ "${VARIANT}" = "dirty" ] && [ -x "${FAILURE_PROXY_BIN}" ]; then
+            if [ "${VARIANT}" = "dirty" ]; then
                 port=7401
             else
                 port=7400
@@ -283,7 +283,7 @@ for svc in kernel coding-harness capability-host deployment-harness; do
     fi
 done
 # Also check failure-proxy for dirty variant
-if [ "${VARIANT}" = "dirty" ] && [ -x "${FAILURE_PROXY_BIN}" ]; then
+if [ "${VARIANT}" = "dirty" ]; then
     if ! check_process_alive "failure-proxy"; then
         ALL_ALIVE=false
     fi
