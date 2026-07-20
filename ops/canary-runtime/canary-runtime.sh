@@ -810,15 +810,17 @@ cmd_stop() {
         " 2>/dev/null || true
     done
 
-    # Also kill any orphan processes
-    vm_exec "
-        pkill -f 'agent-core-kernel.*serve' 2>/dev/null || true
-        pkill -f 'coding-harness' 2>/dev/null || true
-        pkill -f 'deployment-harness' 2>/dev/null || true
-        pkill -f 'capability-host' 2>/dev/null || true
-        pkill -f 'tsx.*connectors/feishu' 2>/dev/null || true
-        pkill -f 'node.*feishu' 2>/dev/null || true
-    " 2>/dev/null || true
+	    # Also kill any orphan processes (production + shadow)
+	    vm_exec "
+	        pkill -f 'agent-core-kernel.*serve' 2>/dev/null || true
+	        pkill -f 'coding-harness' 2>/dev/null || true
+	        pkill -f 'deployment-harness' 2>/dev/null || true
+	        pkill -f 'capability-host' 2>/dev/null || true
+	        pkill -f 'tsx.*connectors/feishu' 2>/dev/null || true
+	        pkill -f 'node.*feishu' 2>/dev/null || true
+	        pkill -f 'inject\.ts' 2>/dev/null || true
+	        pkill -f 'connector-shadow\.ts' 2>/dev/null || true
+	    " 2>/dev/null || true
 
     sleep 2
     echo "All services stopped."
