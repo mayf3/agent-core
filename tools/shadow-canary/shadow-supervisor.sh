@@ -224,18 +224,21 @@ start_service "coding-harness" "${PID_DIR}/coding-harness.pid" \
 start_service "capability-host" "${PID_DIR}/capability-host.pid" \
     "${CAPABILITY_HOST_BIN}"
 
-# 1e. Deployment Harness
-start_service "deployment-harness" "${PID_DIR}/deployment-harness.pid" \
-    "${DEPLOYMENT_HARNESS_BIN}"
-
-# 1f. Failure Proxy (dirty variant only)
+# 1e. Deployment Harness (fresh: 7400, dirty: 7401 with proxy on 7400)
 if [ "${VARIANT}" = "dirty" ] && [ -x "${FAILURE_PROXY_BIN}" ]; then
+    # Dirty: harness on 7401, proxy on 7400 (Kernel connects to proxy)
+    DEPLOYMENT_HARNESS_LISTEN_ADDR=127.0.0.1:7401 \
+    start_service "deployment-harness" "${PID_DIR}/deployment-harness.pid" \
+        "${DEPLOYMENT_HARNESS_BIN}"
+
+    # Start failure proxy on port 7400
     SHADOW_FAILURE_COUNT=1 SHADOW_FAILURE_RETRY_AFTER=0 \
     start_service "failure-proxy" "${PID_DIR}/failure-proxy.pid" \
-        "${FAILURE_PROXY_BIN}" &
-    # Note: failure proxy listens on :7400, so deployment-harness needs :7401
-    # For now, skip proxy and deploy normally
-    echo "[supervisor] ⚠️  Failure proxy available but not wired yet"
+        "${FAILURE_PROXY_BIN}"
+else
+    # Fresh: harness on 7400, no proxy
+    start_service "deployment-harness" "${PID_DIR}/deployment-harness.pid" \
+        "${DEPLOYMENT_HARNESS_BIN}"
 fi
 
 echo "[supervisor] All services launched, waiting for readiness..."
@@ -245,12 +248,20 @@ echo ""
 echo "[supervisor] Waiting for services to be ready..."
 FAILED=false
 
-for svc in kernel coding-harness capability-host deployment-harness; do
+for svc in kernel coding-harness capability-host deployment-harness${ADDITIONAL_WAIT:-}; do
     case "$svc" in
         kernel) port=4130; timeout=30 ;;
         coding-harness) port=7200; timeout=15 ;;
         capability-host) port=7300; timeout=15 ;;
-        deployment-harness) port=7400; timeout=15 ;;
+        deployment-harness)
+            if [ "${VARIANT}" = "dirty" ] && [ -x "${FAILURE_PROXY_BIN}" ]; then
+                port=7401
+            else
+                port=7400
+            fi
+            timeout=15
+            ;;
+        failure-proxy) port=7400; timeout=10 ;;
     esac
     if ! wait_for_port "$port" "$svc" "$timeout"; then
         FAILED=true
@@ -271,6 +282,12 @@ for svc in kernel coding-harness capability-host deployment-harness; do
         ALL_ALIVE=false
     fi
 done
+# Also check failure-proxy for dirty variant
+if [ "${VARIANT}" = "dirty" ] && [ -x "${FAILURE_PROXY_BIN}" ]; then
+    if ! check_process_alive "failure-proxy"; then
+        ALL_ALIVE=false
+    fi
+fi
 
 if [ "$ALL_ALIVE" = "false" ]; then
     echo "[supervisor] ❌ Process(es) exited during startup — aborting"
