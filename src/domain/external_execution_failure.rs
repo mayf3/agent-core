@@ -129,6 +129,8 @@ impl ExternalExecutionFailureClass {
         } else if message.contains("SANDBOX")
             || message.contains("CODING_ACCEPTANCE_INFRASTRUCTURE_FAILURE")
             || message.contains("GENERATOR_COMPILE_PROBE_INFRASTRUCTURE_FAILURE")
+            || message.contains("DEPLOYMENT_HARNESS")
+            || message.contains("CODING_OWNER_NOT_CONFIGURED")
         {
             Self::ExternalInfrastructureFailure
         } else {

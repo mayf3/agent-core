@@ -666,7 +666,7 @@ fn query_deployment_harness_version(component_id: &str) -> Result<Option<String>
     }
 
     let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5))
-        .map_err(|_| anyhow::anyhow!("DEPLOYMENT_HARNESS_CONNECT_FAILED"))?;
+        .map_err(|_| anyhow::anyhow!("DEPLOYMENT_HARNESS_TCP_CONNECTION_REFUSED"))?;
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .ok();
