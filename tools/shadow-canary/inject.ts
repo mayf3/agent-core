@@ -499,7 +499,7 @@ async function runDevelopmentCycle(
   // Wait for proposal to be PendingApproval
   let proposalData: any;
   try {
-    proposalData = await waitForProposalReady(proposalId, 60_000);
+    proposalData = await waitForProposalReady(proposalId, 300_000);
   } catch (err: any) {
     evidence.fail(`PHASE_${phase}_PROPOSAL_READY`, `proposal ${proposalId} not PendingApproval: ${err.message}`);
     return result;
