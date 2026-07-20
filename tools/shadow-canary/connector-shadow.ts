@@ -201,7 +201,10 @@ export async function simulateFeishuMessage(
     }
     console.error(`[shadow] simulateFeishuMessage all retries exhausted: ${lastError.message}`);
     return { ok: false };
-}
+  } catch (error: any) {
+    console.error(`[shadow] simulateFeishuMessage unexpected error: ${error.message}`);
+    return { ok: false };
+  }
 
 /**
  * Simulate a card approval callback being received by the Connector.
