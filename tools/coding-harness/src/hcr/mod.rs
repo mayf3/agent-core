@@ -15,6 +15,7 @@
 
 pub mod acceptance;
 pub mod candidate;
+pub mod manifest_builder;
 pub mod command;
 pub mod errors;
 pub mod executor;

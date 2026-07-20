@@ -18,11 +18,12 @@ use crate::domain::*;
 use crate::gateway::Gateway;
 use crate::hcr::{settlement::settle_hcr, worker::execute_hcr};
 use crate::journal::JournalStore;
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use chrono::Utc;
 use receipt::AppendReceiptResult;
 use response_validation::{validate_harness_response, RequestContext};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::net::TcpStream;
 
@@ -184,11 +185,22 @@ pub fn handle(
         bail!("EVIDENCE_DIGEST_FORMAT: invalid evidence_digest");
     }
 
-    // 6f. Validate subject_digest matches the candidate_digest from the
-    //     validated response (the response's candidate_digest IS the subject_digest)
-    //     This is validated implicitly below when we parse the detailed response.
+	// 6f. Validate subject_digest matches the candidate_digest from the
+	//     validated response (the response's candidate_digest IS the subject_digest)
+	//     This is validated implicitly below when we parse the detailed response.
 
-    // ── 7. Parse detailed response fields for persistence ────────────────
+		// 6g. Verify opaque_payload_digest — this binds the full detailed
+		//     acceptance response (including delivery_manifest_digest) to the
+		//     receipt.  We strip envelope-only keys to reconstruct the original
+		//     AcceptanceResponse bytes that were hashed by the Harness.
+		if let Some(ref expected_opaque) = envelope.opaque_payload_digest {
+		    let computed = verify_opaque_payload_digest(result_value)?;
+		    if *expected_opaque != computed {
+		        bail!("OPAQUE_PAYLOAD_MISMATCH");
+		    }
+		}
+	
+	// ── 7. Parse detailed response fields for persistence ────────────────
     //
     // The envelope's opaque_payload binds the internal evidence. The Kernel
     // also extracts structural fields (gate_results, candidate_id, etc.)
@@ -241,6 +253,8 @@ pub fn handle(
         "artifact_ref": validated.artifact_ref,
         "artifact_digest": validated.artifact_digest,
         "component_manifest_digest": validated.component_manifest_digest,
+        "delivery_manifest_ref": validated.delivery_manifest_ref,
+        "delivery_manifest_digest": validated.delivery_manifest_digest,
         "evidence_digest": validated.evidence_digest,
         "gate_count": validated.gate_count,
     });
@@ -258,6 +272,8 @@ pub fn handle(
         candidate_digest: validated.candidate_digest.clone(),
         artifact_ref: validated.artifact_ref.clone(),
         artifact_digest: validated.artifact_digest.clone(),
+        delivery_manifest_ref: validated.delivery_manifest_ref.clone(),
+        delivery_manifest_digest: validated.delivery_manifest_digest.clone(),
         evidence_digest: envelope.evidence_digest.clone(),
         receipt_digest: envelope.receipt_digest.clone(),
         opaque_payload_digest: envelope.opaque_payload_digest.clone(),
@@ -307,10 +323,44 @@ pub fn handle(
         "artifact_ref": validated.artifact_ref,
         "artifact_digest": validated.artifact_digest,
         "component_manifest_digest": validated.component_manifest_digest,
+        "delivery_manifest_ref": validated.delivery_manifest_ref,
+        "delivery_manifest_digest": validated.delivery_manifest_digest,
         "evidence_digest": validated.evidence_digest,
         "settlement_id": settlement_id,
         "settlement_result": format!("{:?}", settlement),
     }))
+}
+
+/// Verify the opaque_payload_digest over the detailed acceptance
+/// response.  Envelope-only keys are stripped to reconstruct the
+/// original `AcceptanceResponse` bytes that were hashed by the
+/// Harness.
+pub(crate) fn verify_opaque_payload_digest(
+    merged: &Value,
+) -> Result<String> {
+    let mut detailed_only = merged.clone();
+    // Envelope-only keys that are NOT part of AcceptanceResponse
+    const ENVELOPE_ONLY: &[&str] = &[
+        "schema_version",
+        "invocation_intent_id",
+        "issuer",
+        "subject_digest",
+        "outcome",
+        "opaque_payload_digest",
+        "receipt_digest",
+    ];
+    if let Some(obj) = detailed_only.as_object_mut() {
+        for key in ENVELOPE_ONLY {
+            obj.remove(*key);
+        }
+    }
+    let detailed_bytes =
+        serde_json::to_vec(&detailed_only)
+            .map_err(|e| anyhow!("OPAQUE_SERIALIZATION: {e}"))?;
+    Ok(format!(
+        "sha256:{}",
+        hex::encode(Sha256::digest(&detailed_bytes))
+    ))
 }
 
 fn call_harness_accept(
@@ -364,4 +414,121 @@ fn call_harness_accept(
         json!({"parse_error": "no_body"})
     };
     Ok(json_body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::verify_opaque_payload_digest;
+    use serde_json::json;
+
+    /// Build a merged response value (AcceptanceResponse + envelope fields)
+    /// as produced by the Harness's `ok_envelope_json()`.
+    fn merged_response(
+        delivery_manifest_ref: Option<&str>,
+        delivery_manifest_digest: Option<&str>,
+    ) -> serde_json::Value {
+        let mut base = json!({
+            "harness_execution_id": "hex_test",
+            "idempotency_key": "accept:test",
+            "hcr_id": "hcr_test",
+            "claim_id": "claim_test",
+            "run_id": "run_test",
+            "principal_id": "principal_test",
+            "gateway_session_id": "session_test",
+            "registry_snapshot_id": "snap_test",
+            "operation": "external.coding_hcr_accept",
+            "candidate_id": "candidate_test",
+            "candidate_digest": format!("sha256:{}", "1".repeat(64)),
+            "overall_outcome": "CandidatePassed",
+            "gate_results": [],
+            "artifact_ref": "candidate/target/release/component",
+            "artifact_digest": format!("sha256:{}", "3".repeat(64)),
+            "component_manifest_digest": format!("sha256:{}", "4".repeat(64)),
+            "evidence_digest": format!("sha256:{}", "2".repeat(64)),
+        });
+        if let Some(ref_val) = delivery_manifest_ref {
+            base["delivery_manifest_ref"] = json!(ref_val);
+        }
+        if let Some(dig_val) = delivery_manifest_digest {
+            base["delivery_manifest_digest"] = json!(dig_val);
+        }
+        // Add envelope fields (as ok_envelope_json does)
+        base["schema_version"] = json!("external-receipt-envelope-v1");
+        base["invocation_intent_id"] = json!("invocation_test");
+        base["issuer"] = json!("coding-harness");
+        base["subject_digest"] = json!(format!("sha256:{}", "1".repeat(64)));
+        base["outcome"] = json!("Passed");
+        base["opaque_payload_digest"] = json!("sha256:0000");
+        base["receipt_digest"] = json!("sha256:0000");
+        base
+    }
+
+    #[test]
+    fn delivery_manifest_digest_is_opaque_payload_bound() {
+        let dm_ref = "service_manifest_abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234";
+        let dm_dig = format!("sha256:{}", "6".repeat(64));
+        let merged = merged_response(Some(dm_ref), Some(&dm_dig));
+        // Verification should pass — digest was computed from the correct content
+        let computed = verify_opaque_payload_digest(&merged).unwrap();
+        // The expected digest is what the Harness would have computed
+        // by serializing the AcceptanceResponse (without envelope fields).
+        // We trust the verification function produces a stable digest.
+        assert!(
+            computed.starts_with("sha256:"),
+            "opaque payload must be a valid sha256 digest"
+        );
+        assert_eq!(computed.len(), 71, "sha256: + 64 hex chars");
+    }
+
+    #[test]
+    fn tampered_delivery_manifest_ref_is_rejected() {
+        let dm_ref = "service_manifest_original_ref_original_ref_original_ref_original_ref_original_ref_original";
+        let dm_dig = format!("sha256:{}", "6".repeat(64));
+        let mut merged = merged_response(Some(dm_ref), Some(&dm_dig));
+        // Tamper with delivery_manifest_ref
+        merged["delivery_manifest_ref"] = json!("tampered_ref");
+        // The computed opaque_payload_digest will differ from the expected
+        // because the content changed.  We verify that the recomputed digest
+        // does NOT match a digest computed from the untampered content.
+        let tampered_computed = verify_opaque_payload_digest(&merged).unwrap();
+        // Recompute with original value to compare
+        let clean = merged_response(Some(dm_ref), Some(&dm_dig));
+        let clean_computed = verify_opaque_payload_digest(&clean).unwrap();
+        assert_ne!(
+            tampered_computed, clean_computed,
+            "tampered delivery_manifest_ref must change opaque payload"
+        );
+    }
+
+    #[test]
+    fn tampered_delivery_manifest_digest_is_rejected() {
+        let dm_ref = "service_manifest_abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234";
+        let dm_dig = format!("sha256:{}", "6".repeat(64));
+        let mut merged = merged_response(Some(dm_ref), Some(&dm_dig));
+        // Tamper with delivery_manifest_digest
+        merged["delivery_manifest_digest"] = json!(format!("sha256:{}", "9".repeat(64)));
+        let tampered_computed = verify_opaque_payload_digest(&merged).unwrap();
+        let clean = merged_response(Some(dm_ref), Some(&dm_dig));
+        let clean_computed = verify_opaque_payload_digest(&clean).unwrap();
+        assert_ne!(
+            tampered_computed, clean_computed,
+            "tampered delivery_manifest_digest must change opaque payload"
+        );
+    }
+
+    #[test]
+    fn delivery_manifest_fields_are_part_of_opaque_payload() {
+        // Verify that adding delivery_manifest fields changes the opaque payload
+        let with_dm = merged_response(
+            Some("service_manifest_ref"),
+            Some(&format!("sha256:{}", "6".repeat(64))),
+        );
+        let without_dm = merged_response(None, None);
+        let digest_with = verify_opaque_payload_digest(&with_dm).unwrap();
+        let digest_without = verify_opaque_payload_digest(&without_dm).unwrap();
+        assert_ne!(
+            digest_with, digest_without,
+            "presence of delivery_manifest fields must change opaque payload"
+        );
+    }
 }

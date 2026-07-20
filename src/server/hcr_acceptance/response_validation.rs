@@ -30,6 +30,8 @@ pub struct ValidatedResponse {
     pub artifact_ref: Option<String>,
     pub artifact_digest: Option<String>,
     pub component_manifest_digest: Option<String>,
+    pub delivery_manifest_ref: Option<String>,
+    pub delivery_manifest_digest: Option<String>,
     pub evidence_digest: String,
     pub gate_count: usize,
 }
@@ -141,6 +143,17 @@ pub fn validate_harness_response(
         "CandidatePassed" => Some(valid_sha256(r, "component_manifest_digest")?.to_string()),
         _ => None,
     };
+    let delivery_manifest_ref = match overall_outcome {
+        "CandidatePassed" => {
+            let d = non_empty(r, "delivery_manifest_ref")?;
+            Some(d.to_string())
+        }
+        _ => None,
+    };
+    let delivery_manifest_digest = match overall_outcome {
+        "CandidatePassed" => Some(valid_sha256(r, "delivery_manifest_digest")?.to_string()),
+        _ => None,
+    };
 
     // ── 7. Artifact ref must be a controlled relative path ──
     let artifact_ref = r
@@ -169,6 +182,8 @@ pub fn validate_harness_response(
         artifact_ref,
         artifact_digest,
         component_manifest_digest,
+        delivery_manifest_ref,
+        delivery_manifest_digest,
         evidence_digest: evidence_digest.to_string(),
         gate_count: gates.len(),
     })
@@ -253,6 +268,8 @@ mod tests {
                 "artifact_ref": "candidate/target/release/component",
                 "artifact_digest": format!("sha256:{}", "3".repeat(64)),
                 "component_manifest_digest": format!("sha256:{}", "4".repeat(64)),
+                "delivery_manifest_ref": "service_manifest_".to_string() + &"5".repeat(64),
+                "delivery_manifest_digest": format!("sha256:{}", "6".repeat(64)),
                 "gate_results": [
                     {"gate_kind":"scaffold", "passed":true},
                     {"gate_kind":"build", "passed":true},

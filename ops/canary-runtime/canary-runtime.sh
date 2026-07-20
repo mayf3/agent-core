@@ -802,23 +802,59 @@ cmd_stop() {
     for svc in $svcs; do
         local pid_file="/home/yanfenma.guest/.agent-core/pids/${svc}.pid"
         vm_exec "
+            target=''
             if [ -f '$pid_file' ]; then
-                kill \$(cat '$pid_file') 2>/dev/null || true
+                fp=\$(cat '$pid_file')
+                # Ownership verification: PID must exist and cmdline must match
+                if kill -0 \$fp 2>/dev/null; then
+                    exe=\$(readlink -f /proc/\${fp}/exe 2>/dev/null || echo '')
+                    case '$svc' in
+                        kernel)
+                            if echo \"\$exe\" | grep -q 'agent-core-kernel'; then
+                                target=\$fp
+                            else
+                                echo '  PID \$fp (file) exe=\$exe does not match kernel — skipping'
+                            fi ;;
+                        connector)
+                            if echo \"\$exe\" | grep -q 'node' && grep -q 'connectors/feishu' /proc/\${fp}/cmdline 2>/dev/null; then
+                                target=\$fp
+                            else
+                                echo '  PID \$fp (file) does not match connector — skipping'
+                            fi ;;
+                        coding-harness)
+                            if echo \"\$exe\" | grep -q 'coding-harness'; then
+                                target=\$fp
+                            else
+                                echo '  PID \$fp (file) does not match coding-harness — skipping'
+                            fi ;;
+                        capability-host)
+                            if echo \"\$exe\" | grep -q 'capability-host'; then
+                                target=\$fp
+                            else
+                                echo '  PID \$fp (file) does not match capability-host — skipping'
+                            fi ;;
+                        deployment-harness)
+                            if echo \"\$exe\" | grep -q 'deployment-harness'; then
+                                target=\$fp
+                            else
+                                echo '  PID \$fp (file) does not match deployment-harness — skipping'
+                            fi ;;
+                    esac
+                else
+                    echo '  PID file stale: \$fp not running'
+                fi
+            else
+                echo '  No PID file for $svc'
+            fi
+            if [ -n \"\$target\" ]; then
+                kill \$target 2>/dev/null || true
+                sleep 1
+                kill -0 \$target 2>/dev/null && kill -9 \$target 2>/dev/null || true
                 rm -f '$pid_file'
-                echo 'Stopped $svc'
+                echo 'Stopped $svc (PID \$target)'
             fi
         " 2>/dev/null || true
     done
-
-    # Also kill any orphan processes
-    vm_exec "
-        pkill -f 'agent-core-kernel.*serve' 2>/dev/null || true
-        pkill -f 'coding-harness' 2>/dev/null || true
-        pkill -f 'deployment-harness' 2>/dev/null || true
-        pkill -f 'capability-host' 2>/dev/null || true
-        pkill -f 'tsx.*connectors/feishu' 2>/dev/null || true
-        pkill -f 'node.*feishu' 2>/dev/null || true
-    " 2>/dev/null || true
 
     sleep 2
     echo "All services stopped."
