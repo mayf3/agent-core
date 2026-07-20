@@ -18,6 +18,7 @@ fn config(root: &TempDir) -> DeploymentHarnessConfig {
         artifact_root,
         state_root,
         control_token: "c".repeat(32),
+        read_token: Some("r".repeat(32)),
         event_observe_url: "http://127.0.0.1:4130/v1/events".into(),
         event_observe_token: "o".repeat(32),
     }

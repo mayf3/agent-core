@@ -9,6 +9,11 @@ pub struct DeploymentHarnessConfig {
     pub artifact_root: PathBuf,
     pub state_root: PathBuf,
     pub control_token: String,
+    /// Optional read-only token.  When set, this token is accepted
+    /// for GET requests (component status) but NOT for POST requests
+    /// (deploy, disable, rollback).  The `control_token` continues to
+    /// authorise all operations.
+    pub read_token: Option<String>,
     pub event_observe_url: String,
     pub event_observe_token: String,
 }
@@ -21,6 +26,7 @@ impl DeploymentHarnessConfig {
         let artifact_root = required_root("DEPLOYMENT_HARNESS_ARTIFACT_ROOT")?;
         let state_root = required_root("DEPLOYMENT_HARNESS_STATE_ROOT")?;
         let control_token = required_secret("DEPLOYMENT_HARNESS_CONTROL_TOKEN")?;
+        let read_token = std::env::var("DEPLOYMENT_HARNESS_READ_TOKEN").ok();
         let event_observe_url = std::env::var("DEPLOYMENT_HARNESS_EVENT_OBSERVE_URL")
             .unwrap_or_else(|_| "http://127.0.0.1:4130/v1/events".into());
         let event_observe_token = required_secret("DEPLOYMENT_HARNESS_EVENT_OBSERVE_TOKEN")?;
@@ -29,6 +35,7 @@ impl DeploymentHarnessConfig {
             artifact_root,
             state_root,
             control_token,
+            read_token,
             event_observe_url,
             event_observe_token,
         };
@@ -44,6 +51,14 @@ impl DeploymentHarnessConfig {
         validate_token(&self.event_observe_token)?;
         if self.control_token == self.event_observe_token {
             bail!("DEPLOYMENT_HARNESS_TOKENS_MUST_DIFFER");
+        }
+        if let Some(ref rt) = self.read_token {
+            if rt.len() < 32 || rt.len() > 512 || rt.bytes().any(|byte| byte.is_ascii_whitespace()) {
+                bail!("DEPLOYMENT_HARNESS_READ_TOKEN_INVALID");
+            }
+            if rt == &self.control_token || rt == &self.event_observe_token {
+                bail!("DEPLOYMENT_HARNESS_TOKENS_MUST_DIFFER");
+            }
         }
         validate_loopback_url(&self.event_observe_url, "/v1/events")?;
         ensure_safe_root(&self.artifact_root)?;
@@ -160,6 +175,7 @@ mod tests {
             artifact_root,
             state_root,
             control_token: "c".repeat(32),
+            read_token: Some("r".repeat(32)),
             event_observe_url: "http://127.0.0.1:4130/v1/events".into(),
             event_observe_token: "o".repeat(32),
         };

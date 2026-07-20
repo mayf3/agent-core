@@ -91,8 +91,9 @@ pub fn append_or_compare_receipt(
         "INSERT INTO hcr_receipt_identities
          (hcr_id, claim_id, run_id, idempotency_key, payload_digest, receipt_event_id,
           harness_execution_id, overall_outcome, candidate_id, invocation_id, candidate_digest,
-          artifact_ref, artifact_digest, evidence_digest, receipt_digest, opaque_payload_digest, created_at)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+          artifact_ref, artifact_digest, delivery_manifest_ref, delivery_manifest_digest,
+          evidence_digest, receipt_digest, opaque_payload_digest, created_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
         params![
             hcr_id,
             claim_id,
@@ -107,6 +108,8 @@ pub fn append_or_compare_receipt(
             identity_fields.candidate_digest,
             identity_fields.artifact_ref,
             identity_fields.artifact_digest,
+            identity_fields.delivery_manifest_ref,
+            identity_fields.delivery_manifest_digest,
             identity_fields.evidence_digest,
             identity_fields.receipt_digest,
             identity_fields.opaque_payload_digest,
@@ -168,6 +171,10 @@ pub struct ReceiptIdentityFields {
     pub candidate_digest: String,
     pub artifact_ref: Option<String>,
     pub artifact_digest: Option<String>,
+    /// Delivery manifest content-addressed ref (e.g. "service_manifest_<sha256>").
+    pub delivery_manifest_ref: Option<String>,
+    /// Delivery manifest ContentStore digest ("sha256:<hex>").
+    pub delivery_manifest_digest: Option<String>,
     pub evidence_digest: String,
     /// The receipt_digest from the ExternalReceiptEnvelope.
     pub receipt_digest: String,
