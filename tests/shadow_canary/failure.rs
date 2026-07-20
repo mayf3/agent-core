@@ -85,6 +85,7 @@ fn activation_failed_does_not_block_new_proposal() {
         1,
         "should have one CapabilityChangeProposed even after failure"
     );
+    assert_eq!(failed[0].event_kind, "CapabilityChangeActivationFailed", "event kind should be ActivationFailed");
     assert_eq!(
         proposals[0].payload["proposal_id"], "prop_new",
         "proposal payload should be intact"
