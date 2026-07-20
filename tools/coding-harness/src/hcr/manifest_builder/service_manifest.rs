@@ -13,13 +13,14 @@ use agent_core_kernel::domain::service_manifest::{
 use anyhow::{anyhow, Result};
 use serde_json::Value;
 
-/// Construct the final delivery `ServiceManifest` from a component
-/// artifact manifest and the verified artifact digest.
+/// Construct the final `ServiceManifest` for a HookConsumerService
+/// component from the immutable candidate artifact manifest and the
+/// verified artifact digest.
 ///
 /// The version field is already resolved by the time this function
 /// is called — it either comes from the generator (initial version)
 /// or was overridden via `super::version_allocation::allocate_next_version`.
-pub fn build_delivery_manifest(
+pub fn build_service_manifest(
     component: &Value,
     artifact_digest: &str,
 ) -> Result<ServiceManifest> {

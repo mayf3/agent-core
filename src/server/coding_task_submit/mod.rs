@@ -14,7 +14,7 @@
 //! - Persists governance facts (approval, deployment intent, registry)
 
 pub mod handler;
-pub mod invocable;
+pub mod invocation_journal;
 
 #[cfg(test)]
 pub mod tests;

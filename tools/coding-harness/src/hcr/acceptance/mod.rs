@@ -20,6 +20,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 	use super::candidate::snapshot_candidate;
 	use super::gates::{run_all_gates_for_acceptance, GateKind, GateResult};
 	use super::manifest_builder::{allocate_next_version, build_delivery_manifest};
+	use agent_core_kernel::domain::DevelopmentRequest;
 	use execution_store::ExecutionStore;
 	use protocol::{
 	    canonical_evidence_bytes, compute_evidence_digest, compute_fingerprint, AcceptanceResponse,
@@ -114,7 +115,7 @@ pub fn handle_accept(artifact_root: &Path, args: &Value) -> Value {
 /// Core acceptance logic (runs under file lock, called at most once per key).
 fn do_accept(
     artifact_root: &Path,
-    _args: &Value,
+    args: &Value,
     fingerprint: &protocol::RequestFingerprint,
     hcr_id: &str,
     claim_id: &str,
@@ -183,50 +184,56 @@ fn do_accept(
         None
     };
 
-    // ── Post‑acceptance: version allocation + delivery manifest ──
-    // The original candidate manifest.json is never modified on disk.
-    // We work on an in‑memory copy so the accepted candidate stays
-    // immutable.  The resulting delivery manifest is stored in the
-    // shared ContentStore and bound by the opaque_payload_digest.
-    let (delivery_manifest_ref, delivery_manifest_digest) = if outcome == "CandidatePassed" {
-        let raw = std::fs::read(snapshot.candidate_path.join("manifest.json"))
-            .map_err(|e| format!("DELIVERY_MANIFEST_READ: {e}"))?;
-        let mut manifest_value: Value =
-            serde_json::from_slice(&raw).map_err(|e| format!("DELIVERY_MANIFEST_PARSE: {e}"))?;
+	// ── Post‑acceptance: version allocation + delivery manifest ──
+	    // The original candidate manifest.json is never modified on disk.
+	    // We work on an in‑memory copy so the accepted candidate stays
+	    // immutable.  The resulting delivery manifest bytes are stored in
+	    // the shared ContentStore and bound by the opaque_payload_digest.
+	    let (delivery_manifest_ref, delivery_manifest_digest) = if outcome == "CandidatePassed" {
+	        let raw = std::fs::read(snapshot.candidate_path.join("manifest.json"))
+	            .map_err(|e| format!("DELIVERY_MANIFEST_READ: {e}"))?;
+	        let mut manifest_value: Value =
+	            serde_json::from_slice(&raw).map_err(|e| format!("DELIVERY_MANIFEST_PARSE: {e}"))?;
 
-        // Only allocate versions for HookConsumerService (managed services)
-        let needs_version = manifest_value
-            .get("service")
-            .and_then(|s| s.get("version"))
-            .is_some();
-        if needs_version {
-            let component_id = manifest_value["component_id"]
-                .as_str()
-                .unwrap_or("")
-                .to_string();
-            let new_ver = allocate_next_version(&component_id)
-                .map_err(|e| format!("VERSION_ALLOCATION: {e}"))?;
-            if let Some(ver) = new_ver {
-                manifest_value["service"]["version"] = serde_json::json!(ver);
-            }
-        }
+	        // Parse DevelopmentRequest from args (required for InvocableCapability)
+            let development_request = args
+                .get("development_request")
+	            .and_then(|v| serde_json::from_value::<DevelopmentRequest>(v.clone()).ok());
 
-        let artifact_digest_str = artifact_digest.as_deref().unwrap_or("");
-        let delivery = build_delivery_manifest(&manifest_value, artifact_digest_str)
-            .map_err(|e| format!("DELIVERY_MANIFEST_BUILD: {e}"))?;
-        let delivery_ref = delivery.manifest_id.clone();
-        let delivery_bytes = serde_json::to_vec(&delivery)
-            .map_err(|e| format!("DELIVERY_MANIFEST_SERIALIZE: {e}"))?;
-        let store = agent_core_kernel::capabilities::store::ContentStore::new(
-            artifact_root.to_path_buf(),
-        );
-        let stored = store
-            .store(&delivery_bytes)
-            .map_err(|e| format!("DELIVERY_MANIFEST_STORE: {e}"))?;
-        (Some(delivery_ref), Some(stored.as_str().to_string()))
-    } else {
-        (None, None)
-    };
+	        // Only allocate versions for HookConsumerService (managed services)
+	        let needs_version = manifest_value
+	            .get("service")
+	            .and_then(|s| s.get("version"))
+	            .is_some();
+	        if needs_version {
+	            let component_id = manifest_value["component_id"]
+	                .as_str()
+	                .unwrap_or("")
+	                .to_string();
+	            let new_ver = allocate_next_version(&component_id)
+	                .map_err(|e| format!("VERSION_ALLOCATION: {e}"))?;
+	            if let Some(ver) = new_ver {
+	                manifest_value["service"]["version"] = serde_json::json!(ver);
+	            }
+	        }
+
+	        let artifact_digest_str = artifact_digest.as_deref().unwrap_or("");
+	        let (delivery_ref, delivery_bytes) = build_delivery_manifest(
+	            &manifest_value,
+	            artifact_digest_str,
+	            development_request.as_ref(),
+	        )
+	        .map_err(|e| format!("DELIVERY_MANIFEST_BUILD: {e}"))?;
+	        let store = agent_core_kernel::capabilities::store::ContentStore::new(
+	            artifact_root.to_path_buf(),
+	        );
+	        let stored = store
+	            .store(&delivery_bytes)
+	            .map_err(|e| format!("DELIVERY_MANIFEST_STORE: {e}"))?;
+	        (Some(delivery_ref), Some(stored.as_str().to_string()))
+	    } else {
+	        (None, None)
+	    };
 
     validate_gate_consistency(&results, &outcome, &artifact_digest)?;
 
