@@ -802,25 +802,33 @@ cmd_stop() {
     for svc in $svcs; do
         local pid_file="/home/yanfenma.guest/.agent-core/pids/${svc}.pid"
         vm_exec "
-            if [ -f '$pid_file' ]; then
-                kill \$(cat '$pid_file') 2>/dev/null || true
+            target=''
+            # 1. Discover by port (ss gives the real listening PID)
+            case '$svc' in
+                kernel)    p=4130 ;; connector) p=4131 ;;
+                coding-harness) p=7200 ;; capability-host) p=7300 ;;
+                deployment-harness) p=7400 ;;
+            esac
+            target=\$(ss -tlnp 2>/dev/null | grep \":\$p \" | grep -oP 'pid=\K[0-9]+' | head -1)
+            # 2. Fall back to PID file if ss found nothing (non-listening services)
+            if [ -z \"\$target\" ] && [ -f '$pid_file' ]; then
+                fp=\$(cat '$pid_file')
+                if kill -0 \$fp 2>/dev/null; then
+                    target=\$fp
+                fi
+            fi
+            if [ -n \"\$target\" ]; then
+                # SIGTERM, wait briefly, then SIGKILL if still alive
+                kill \$target 2>/dev/null || true
+                sleep 1
+                kill -0 \$target 2>/dev/null && kill -9 \$target 2>/dev/null || true
                 rm -f '$pid_file'
                 echo 'Stopped $svc'
+            else
+                echo '  $svc: already stopped'
             fi
         " 2>/dev/null || true
     done
-
-	    # Also kill any orphan processes (production + shadow)
-	    vm_exec "
-	        pkill -f 'agent-core-kernel.*serve' 2>/dev/null || true
-	        pkill -f 'coding-harness' 2>/dev/null || true
-	        pkill -f 'deployment-harness' 2>/dev/null || true
-	        pkill -f 'capability-host' 2>/dev/null || true
-	        pkill -f 'tsx.*connectors/feishu' 2>/dev/null || true
-	        pkill -f 'node.*feishu' 2>/dev/null || true
-	        pkill -f 'inject\.ts' 2>/dev/null || true
-	        pkill -f 'connector-shadow\.ts' 2>/dev/null || true
-	    " 2>/dev/null || true
 
     sleep 2
     echo "All services stopped."

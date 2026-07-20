@@ -103,6 +103,11 @@ start_service() {
     local pid=$!
     echo "$pid" > "$pid_file"
     SPAWNED_PIDS+=("$pid")
+    # Record process evidence for PID-scoped cleanup verification
+    echo "shadow_run_id=${RUN_ID}" > "${PID_DIR}/process_${name}.txt"
+    echo "shadow_root=${SHADOW_ROOT}" >> "${PID_DIR}/process_${name}.txt"
+    echo "pid=${pid}" >> "${PID_DIR}/process_${name}.txt"
+    echo "cmdline=$*" >> "${PID_DIR}/process_${name}.txt"
     echo "[supervisor] started $name (PID $pid) log=$log_file"
 }
 
@@ -303,13 +308,26 @@ echo ""
 echo "[supervisor] Running inject.ts (${VARIANT})..."
 echo ""
 
-INJECT_EXIT_CODE=0
 cd "${SHADOW_TOOLS_DIR}/tools/shadow-canary"
-npx tsx "${INJECT_SCRIPT}" "${VARIANT}" || INJECT_EXIT_CODE=$?
+# Run inject.ts in the background and track its PID so cleanup()
+# can verify and kill it by PID (not by process name) if needed.
+npx tsx "${INJECT_SCRIPT}" "${VARIANT}" &
+INJECT_PID=$!
+echo "$INJECT_PID" > "${PID_DIR}/inject.pid"
+SPAWNED_PIDS+=("$INJECT_PID")
+echo "[supervisor] inject.ts PID $INJECT_PID"
+
+# Wait for inject to complete
+INJECT_EXIT_CODE=0
+wait "$INJECT_PID" 2>/dev/null || INJECT_EXIT_CODE=$?
 
 echo ""
 echo "[supervisor] inject.ts finished with exit code ${INJECT_EXIT_CODE}"
 
 # ---- Step 5: Exit with inject's exit code ----
-# cleanup() trap will handle stopping all services
+# cleanup() trap will handle stopping all services.
+# Because inject's PID is in SPAWNED_PIDS, cleanup() will:
+#   1. Verify PID belongs to this shadow run (via pid file)
+#   2. Send SIGTERM, wait, then SIGKILL if unresponsive
+#  This is PID-scoped — never uses pkill, killall, or name matching.
 exit "$INJECT_EXIT_CODE"
