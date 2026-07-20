@@ -86,6 +86,11 @@ async function main() {
       await runInvocableDirtyShadow();
       break;
     }
+    case "requirement-tamper": {
+      const { runRequirementTamperTest } = await import("./scenarios/requirement-tamper.ts");
+      await runRequirementTamperTest();
+      break;
+    }
     default:
       console.error(`Unknown variant: ${variant}`);
       evidence.fail("CONFIG", `unknown variant: ${variant}`);
