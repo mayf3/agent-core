@@ -1,27 +1,37 @@
 //! Shadow Failure Proxy — controlled failure injection for Shadow Canary.
 //!
 //! This binary sits between the Kernel and the Deployment Harness:
-//!   Kernel → Shadow Failure Proxy (:7400) → Deployment Harness (:7401)
+//!   Kernel -> Shadow Failure Proxy (:7400) -> Deployment Harness (:7401)
 //!
-//! On the first N deployment calls (configured via env var), it returns a
-//! protocol-legal failure receipt WITHOUT forwarding to the real Harness.
-//! Subsequent calls are transparently forwarded.
+//! On the first N POST /v1/deployments calls (configured via SHADOW_FAILURE_COUNT),
+//! it returns a protocol-legal definitive rejection WITHOUT forwarding to the
+//! real Harness.  Non-deploy requests (health checks, disable, rollback, status
+//! queries) are NEVER counted and are always transparently forwarded.
 //!
 //! This avoids any runtime failure-injection code in the production
 //! deployment-harness binary.
 //!
 //! Build (shadow-fixtures feature only):
 //!   cargo build --release -p shadow-failure-proxy --features shadow-fixtures
+//!
+//! Evidence counters (logged at exit):
+//!   HEALTH_REQUEST_COUNT
+//!   INJECTED_DEPLOYMENT_REQUEST_COUNT
+//!   FORWARDED_DEPLOYMENT_REQUEST_COUNT
 
-use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
 const REAL_HARNESS_HOST: &str = "127.0.0.1";
 const REAL_HARNESS_PORT: u16 = 7401;
 const PROXY_PORT: u16 = 7400;
+
+static HEALTH_COUNT: AtomicUsize = AtomicUsize::new(0);
+static INJECTED_DEPLOY_COUNT: AtomicUsize = AtomicUsize::new(0);
+static FORWARDED_DEPLOY_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 fn main() {
     let failure_count: usize = std::env::var("SHADOW_FAILURE_COUNT")
@@ -34,7 +44,7 @@ fn main() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
 
-    let injected = Mutex::new(FailureState {
+    let state = Mutex::new(FailureState {
         remaining: failure_count,
         retry_after_ms: failure_retry_after,
     });
@@ -52,22 +62,42 @@ fn main() {
     for stream in listener.incoming() {
         match stream {
             Ok(mut stream) => {
-                let mut state = injected.lock().unwrap();
-                if state.remaining > 0 {
-                    state.remaining -= 1;
-                    let remaining = state.remaining;
-                    drop(state);
-                    eprintln!(
-                        "[shadow-failure-proxy] INJECTING FAILURE (remaining={remaining})"
-                    );
-                    if let Err(e) = handle_failure(&mut stream) {
-                        eprintln!("[shadow-failure-proxy] failure handler error: {e}");
+                // Step 1: Read the FULL request (method + path + headers + body)
+                let request = match read_http_request(&mut stream) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        eprintln!("[shadow-failure-proxy] read error: {e}");
+                        continue;
+                    }
+                };
+
+                // Step 2: Classify the request
+                // Health checks and non-deploy requests are ALWAYS forwarded
+                // without consuming the failure budget.
+                if request.starts_with("GET /health ") {
+                    HEALTH_COUNT.fetch_add(1, Ordering::SeqCst);
+                    forward_request(&request, &mut stream);
+                } else if request.starts_with("POST /v1/deployments") {
+                    // POST /v1/deployments -> possibly inject failure
+                    let mut state = state.lock().unwrap();
+                    if state.remaining > 0 {
+                        state.remaining -= 1;
+                        let remaining = state.remaining;
+                        drop(state);
+                        INJECTED_DEPLOY_COUNT.fetch_add(1, Ordering::SeqCst);
+                        eprintln!(
+                            "[shadow-failure-proxy] INJECTING FAILURE on deploy (remaining={remaining})"
+                        );
+                        handle_deploy_failure(&request, &mut stream);
+                    } else {
+                        drop(state);
+                        FORWARDED_DEPLOY_COUNT.fetch_add(1, Ordering::SeqCst);
+                        forward_request(&request, &mut stream);
                     }
                 } else {
-                    drop(state);
-                    if let Err(e) = handle_forward(&mut stream) {
-                        eprintln!("[shadow-failure-proxy] forward error: {e}");
-                    }
+                    // All other requests (disable, rollback, status, etc.)
+                    // are forwarded without consuming failure budget.
+                    forward_request(&request, &mut stream);
                 }
             }
             Err(e) => {
@@ -82,41 +112,18 @@ struct FailureState {
     retry_after_ms: u64,
 }
 
-/// Return a protocol-legal failure receipt without forwarding to the real Harness.
-fn handle_failure(stream: &mut TcpStream) -> std::io::Result<()> {
-    // Read the incoming HTTP request (minimal — just headers + body)
-    let request = read_http_request(stream)?;
-
-    // Only intercept POST /v1/deployments
-    if !request.starts_with("POST /v1/deployments") {
-        // Forward non-deployment requests
-        return forward_request(&request, stream);
-    }
-
-    // Construct a protocol-legal failure receipt
-    let failure_receipt = serde_json::json!({
+/// Return a protocol-legal definitive rejection for a POST /v1/deployments
+/// request.  The Kernel's DeploymentHarnessClient::post() treats HTTP 422
+/// responses with {"ok":false,"error_code":"..."} as DefinitiveDeploymentRejection,
+/// which causes fail_trusted_activation_atomic() to record ActivationFailed.
+fn handle_deploy_failure(request: &str, stream: &mut TcpStream) {
+    let body = serde_json::json!({
         "protocol_version": "deployment.effect.v0",
-        "receipt_id": format!("shadow_fail_{}", std::process::id()),
-        "invocation_id": "shadow_fail_invocation",
-        "intent_id": "shadow_fail_intent",
-        "proposal_id": "shadow_fail_proposal",
-        "decision_id": "shadow_fail_decision",
-        "deployment_id": "shadow_fail_deployment",
-        "component_id": "shadow-fail-component",
-        "service_manifest_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
-        "artifact_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
-        "version": "0.1.0",
-        "status": "SERVICE_EXITED_BEFORE_READY",
-        "endpoint": "http://127.0.0.1:0",
-        "health_status": "unhealthy",
-        "log_ref": "shadow-fail/logs",
-        "previous_artifact_digest": null,
-        "started_at": chrono_now(),
-        "finished_at": chrono_now(),
-        "replayed": false,
+        "ok": false,
+        "error_code": "service_unhealthy",
     });
 
-    let body = serde_json::to_string(&failure_receipt)?;
+    let body_str = serde_json::to_string(&body).unwrap_or_default();
     let response = format!(
         "HTTP/1.1 422 Unprocessable Entity\r\n\
          Content-Type: application/json\r\n\
@@ -124,40 +131,32 @@ fn handle_failure(stream: &mut TcpStream) -> std::io::Result<()> {
          Connection: close\r\n\
          \r\n\
          {}",
-        body.len(),
-        body
+        body_str.len(),
+        body_str
     );
 
-    stream.write_all(response.as_bytes())?;
-    stream.flush()?;
-
-    eprintln!("[shadow-failure-proxy] injected failure receipt (422)");
-    Ok(())
+    let _ = stream.write_all(response.as_bytes());
+    let _ = stream.flush();
+    eprintln!("[shadow-failure-proxy] injected definitive rejection (422) for deploy");
 }
 
 /// Forward a request to the real Deployment Harness.
-fn handle_forward(stream: &mut TcpStream) -> std::io::Result<()> {
-    let request = read_http_request(stream)?;
-    forward_request(&request, stream)
-}
+fn forward_request(request: &str, client_stream: &mut TcpStream) {
+    let result = (|| -> std::io::Result<()> {
+        let mut upstream =
+            TcpStream::connect(format!("{REAL_HARNESS_HOST}:{REAL_HARNESS_PORT}"))?;
+        upstream.set_read_timeout(Some(Duration::from_secs(30)))?;
+        upstream.write_all(request.as_bytes())?;
+        upstream.flush()?;
+        let response = read_http_response(&mut upstream)?;
+        client_stream.write_all(response.as_bytes())?;
+        client_stream.flush()?;
+        Ok(())
+    })();
 
-fn forward_request(request: &str, client_stream: &mut TcpStream) -> std::io::Result<()> {
-    // Connect to the real deployment harness
-    let mut upstream = TcpStream::connect(format!("{REAL_HARNESS_HOST}:{REAL_HARNESS_PORT}"))?;
-    upstream.set_read_timeout(Some(Duration::from_secs(30)))?;
-
-    // Forward the request
-    upstream.write_all(request.as_bytes())?;
-    upstream.flush()?;
-
-    // Read the response
-    let response = read_http_response(&mut upstream)?;
-
-    // Send it back to the client (Kernel)
-    client_stream.write_all(response.as_bytes())?;
-    client_stream.flush()?;
-
-    Ok(())
+    if let Err(e) = result {
+        eprintln!("[shadow-failure-proxy] forward error: {e}");
+    }
 }
 
 /// Read an entire HTTP request from a stream (headers + body).
@@ -200,8 +199,7 @@ fn read_http_request(stream: &mut TcpStream) -> std::io::Result<String> {
 
     // Read body if needed
     let body_start = header_str.find("\r\n\r\n").map(|i| i + 4).unwrap_or(total_read);
-    let body_received = total_read.saturating_sub(body_start);
-    while body_received < content_length && total_read < buf.len() {
+    while total_read < body_start + content_length && total_read < buf.len() {
         let n = stream.read(&mut buf[total_read..])?;
         if n == 0 {
             break;
@@ -257,22 +255,4 @@ fn read_http_response(stream: &mut TcpStream) -> std::io::Result<String> {
     }
 
     Ok(String::from_utf8_lossy(&buf[..total_read]).to_string())
-}
-
-fn chrono_now() -> String {
-    // Simple RFC3339 without chrono dependency
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = now.as_secs();
-    // Format: 2026-07-19T12:00:00Z
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        secs / 31536000 + 1970,
-        (secs % 31536000) / 2592000 + 1,
-        (secs % 2592000) / 86400 + 1,
-        (secs % 86400) / 3600,
-        (secs % 3600) / 60,
-        secs % 60,
-    )
 }
