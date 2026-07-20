@@ -442,7 +442,7 @@ cmd_start() {
     local connector_release="/home/yanfenma.guest/.agent-core/current"
     # Find the latest release that has connectors/feishu
     local latest_release
-    latest_release=$(vm_exec "ls -d /home/yanfenma.guest/.agent-core/releases/*/connectors/feishu/src/index.ts 2>/dev/null | sort | tail -1 | xargs dirname | xargs dirname | xargs dirname || echo ''")
+    latest_release=$(vm_exec "ls -d /home/yanfenma.guest/.agent-core/releases/*/connectors/feishu/src/index.ts 2>/dev/null | sort | tail -1 | xargs dirname | xargs dirname | xargs dirname | xargs dirname || echo ''")
     if [ -n "$latest_release" ]; then
         echo "Using connector release: $(basename "$latest_release")"
         vm_exec "
