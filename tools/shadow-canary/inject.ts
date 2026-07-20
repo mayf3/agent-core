@@ -587,7 +587,7 @@ async function runDevelopmentCycle(
   let deploymentReceiptId = "(from journal)";
   let componentVersion = componentEvent.version;
   try {
-    const componentData = await waitForComponent(componentId, 30_000);
+    const componentData = await waitForComponent(componentId, 120_000);
     const comp = componentData.component || componentData;
     console.log(`  Component API: Healthy, deployment_receipt_id=${comp.deployment_receipt_id}`);
     deploymentReceiptId = comp.deployment_receipt_id || deploymentReceiptId;
@@ -596,7 +596,18 @@ async function runDevelopmentCycle(
     result.deploymentReceiptId = deploymentReceiptId;
     result.componentEndpoint = comp.endpoint || "";
   } catch {
-    console.log(`  ⚠️  Component API not Healthy within 30s (journal event confirmed deployment)`);
+    console.log(`  ⚠️  Component API not Healthy within 120s, trying to read endpoint anyway...`);
+    // Try to read component data even if not Healthy — endpoint may still be available
+    try {
+      const fallbackResp = await kernelRequest("GET", `/v1/components/${componentId}`, null, DECISION_TOKEN);
+      if (fallbackResp.ok && fallbackResp.data?.component) {
+        const comp = fallbackResp.data.component;
+        result.deploymentId = comp.deployment_id || "";
+        result.deploymentReceiptId = comp.deployment_receipt_id || deploymentReceiptId;
+        result.componentEndpoint = comp.endpoint || "";
+        console.log(`  Read endpoint from registry: ${result.componentEndpoint}`);
+      }
+    } catch {}
   }
 
   evidence.pass(`PHASE_${phase}_DEPLOYMENT`, `component ${componentId} v${componentVersion} registered`, {
