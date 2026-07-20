@@ -165,29 +165,42 @@ export async function simulateFeishuMessage(
       auth_context: { authenticated: true },
     };
 
-    const response = await fetch(config.kernelUrl, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${config.ipcToken}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(ingressBody),
-    });
+    // Retry up to 5 times with exponential backoff
+    let lastError: any = null;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      if (attempt > 0) {
+        const delay = Math.min(1000 * Math.pow(2, attempt - 1), 10_000);
+        console.log(`[shadow] retrying ingress in ${delay}ms (attempt ${attempt + 1})...`);
+        await new Promise(r => setTimeout(r, delay));
+      }
+      try {
+        const response = await fetch(config.kernelUrl, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${config.ipcToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(ingressBody),
+          signal: AbortSignal.timeout(30_000),
+        });
 
-    let data: any = {};
-    try { data = await response.json(); } catch { /* ignore parse errors */ }
+        let data: any = {};
+        try { data = await response.json(); } catch { /* ignore parse errors */ }
 
-    console.log(`[shadow] ingress response: HTTP ${response.status} status=${data.status || "unknown"}`);
+        console.log(`[shadow] ingress response: HTTP ${response.status} status=${data.status || "unknown"}`);
 
-    return {
-      ok: response.ok,
-      status: response.status,
-      kernelEventId: data.kernel_event_id || data.run_id || "",
-    };
-  } catch (error: any) {
-    console.error(`[shadow] simulateFeishuMessage error: ${error.message}`);
+        return {
+          ok: response.ok,
+          status: response.status,
+          kernelEventId: data.kernel_event_id || data.run_id || "",
+        };
+      } catch (error: any) {
+        lastError = error;
+        console.error(`[shadow] simulateFeishuMessage attempt ${attempt + 1} error: ${error.message}`);
+      }
+    }
+    console.error(`[shadow] simulateFeishuMessage all retries exhausted: ${lastError.message}`);
     return { ok: false };
-  }
 }
 
 /**
