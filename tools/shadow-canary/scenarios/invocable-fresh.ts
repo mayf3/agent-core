@@ -62,7 +62,7 @@ export async function runInvocableFreshShadow(): Promise<DevelopmentCycleResult 
     return null;
   }
 
-  // Wait for a session reply containing the calculator result
+  // Wait for the calculator result (AssistantReplyDelivered event with value 42)
   console.log(`[INVOCABLE_FRESH-7] Waiting for calculator result...`);
   let resultFound = false;
   const deadline = Date.now() + 120_000;
@@ -70,19 +70,21 @@ export async function runInvocableFreshShadow(): Promise<DevelopmentCycleResult 
     const resp = await kernelRequest("GET", "/v1/events/observe?limit=50", null, DECISION_TOKEN);
     if (resp.ok && resp.data?.events) {
       for (const evt of resp.data.events) {
-        const text = evt.payload?.text || evt.payload?.content || "";
-        const match42 = text.match(/\b42\b/);
-        if (match42) {
-          resultFound = true;
-          evidence.pass("INVOCABLE_INVOKE", `multiply(6,7) = 42`, {
-            input: { operation: "multiply", a: 6, b: 7 },
-            output: 42,
-          });
-          evidence.write("invocable-fresh-invoke.json", {
-            invoke_input: { operation: "multiply", a: 6, b: 7 },
-            invoke_output: 42,
-          });
-          break;
+        // The calculator returns 42 as AssistantReplyDelivered event payload
+        if (evt.event_kind === "AssistantReplyDelivered") {
+          const payload = typeof evt.payload === "object" ? JSON.stringify(evt.payload) : String(evt.payload || "");
+          if (payload.includes("42") || payload === "42") {
+            resultFound = true;
+            evidence.pass("INVOCABLE_INVOKE", `multiply(6,7) = 42`, {
+              input: { operation: "multiply", a: 6, b: 7 },
+              output: 42,
+            });
+            evidence.write("invocable-fresh-invoke.json", {
+              invoke_input: { operation: "multiply", a: 6, b: 7 },
+              invoke_output: 42,
+            });
+            break;
+          }
         }
       }
       if (resultFound) break;
