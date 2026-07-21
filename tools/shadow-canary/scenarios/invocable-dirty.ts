@@ -28,7 +28,7 @@ async function verifyCalculator(
   phase: string,
   expected: number,
 ): Promise<boolean> {
-  const invokeMsgId = `inv_dirty_${phase}_${RUN_ID}`;
+  const invokeMsgId = `inv_dirty_invoke_${phase}_${RUN_ID}`;
   const calcResult = await invokeCalculator(invokeMsgId, SENDER_OPEN_ID);
   if (!calcResult.ok) {
     evidence.fail(`PHASE_${phase}_INVOKE`, `invoke failed: ${calcResult.error}`);
