@@ -67,9 +67,16 @@ export async function runInvocableDirtyShadow(): Promise<void> {
   );
   if (!resultA.componentId) return;
   oldManifestDigest = resultA.activatedManifestDigest || resultA.manifestDigest || "";
+  const phaseASnapshot = resultA.componentSnapshotId || "";
 
   // Verify multiply(6,7)=42 on old version
   if (!(await verifyCalculator("A", 42))) return;
+
+  // Allow registry to stabilize after Phase A activation before sending
+  // the next development request. Without this delay, the next message's
+  // run may capture the pre-activation snapshot, causing
+  // SOURCE_REGISTRY_SNAPSHOT_CHANGED at decision time.
+  await sleep(3_000);
 
   // ═══════════════════════════════════════════════════════════════
   // Phase B: Upgrade with expected decision rejection
@@ -103,6 +110,11 @@ export async function runInvocableDirtyShadow(): Promise<void> {
     invoke_after_failure: 42,
   });
 
+  // Allow registry to stabilize after Phase B (even though callback_failure
+  // doesn't change the registry, the next message's run must capture the
+  // post-Phase-A snapshot).
+  await sleep(3_000);
+
   // ═══════════════════════════════════════════════════════════════
   // Phase C: Successful activation
   // ═══════════════════════════════════════════════════════════════
@@ -116,6 +128,7 @@ export async function runInvocableDirtyShadow(): Promise<void> {
   );
   if (!resultC.componentId) return;
   successManifestDigest = resultC.activatedManifestDigest || resultC.manifestDigest || "";
+  const phaseCSnapshot = resultC.componentSnapshotId || "";
 
   // Verify multiply(6,7)=42 on new version
   if (!(await verifyCalculator("C", 42))) return;
