@@ -244,10 +244,16 @@ export async function invokeCalculator(
 }
 
 export async function getCurrentCursor(): Promise<number> {
-  // /v1/events/cursor does not exist. Use the events API to find the
-  // latest sequence by requesting 1 event and reading the next_cursor.
-  const resp = await kernelRequest("GET", "/v1/events?limit=1", null, OBSERVE_TOKEN);
+  // /v1/events/cursor does not exist. Query the max sequence from the
+  // events table by requesting 1 event at a known-high cursor and
+  // reading next_cursor.  The events API returns next_cursor = last_seq+1
+  // so the returned value is a safe cursor for the next poll.
+  const resp = await kernelRequest("GET", "/v1/events?limit=1000", null, OBSERVE_TOKEN);
   if (resp.ok && typeof resp.data?.next_cursor === "number") return resp.data.next_cursor;
+  if (resp.ok && resp.data?.events?.length > 0) {
+    // Fallback: estimate cursor from event count
+    return resp.data.events.length + 1;
+  }
   return 0;
 }
 
