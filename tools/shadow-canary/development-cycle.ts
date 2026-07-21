@@ -66,7 +66,7 @@ export async function waitForAnyProposal(
         return {
           proposal_id: payload.proposal_id,
           hcr_id: payload.hcr_id,
-          candidate_ref: payload.candidate_ref || payload.artifact_ref || "",
+          candidate_ref: payload.candidate_ref || (payload.candidate_id ? `generated/${payload.candidate_id}/candidate` : ""),
           claim_id: payload.claim_id || "",
           run_id: event.run_id || payload.run_id || "",
           principal_id: event.principal_id || payload.submitter || "",
