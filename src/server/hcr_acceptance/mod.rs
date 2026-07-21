@@ -39,6 +39,20 @@ pub fn handle(
     hcr_id: &str,
     body: &Value,
 ) -> Result<Value> {
+    let result = handle_inner(journal, gateway, config, hcr_id, body);
+    if let Err(ref e) = result {
+        eprintln!("[HCR_ACCEPT] handle failed for hcr_id={hcr_id}: {e}");
+    }
+    result
+}
+
+fn handle_inner(
+    journal: &JournalStore,
+    gateway: &Gateway,
+    config: &KernelConfig,
+    hcr_id: &str,
+    body: &Value,
+) -> Result<Value> {
     let candidate_ref = match body.get("candidate_ref").and_then(Value::as_str) {
         Some(c) if !c.is_empty() => c,
         _ => bail!("MISSING_CANDIDATE_REF"),
@@ -151,6 +165,20 @@ pub fn handle(
 
     // ── 6. ExternalReceiptEnvelope validation (H1/H2) ─────────────────────
     let result_value = harness_response.get("result").unwrap_or(&harness_response);
+
+    // 6z. Check for error responses from the coding harness (e.g. MISSING_TARGET_KIND)
+    if result_value.get("error_code").and_then(Value::as_str).is_some()
+        || result_value.get("error").and_then(Value::as_str).is_some()
+        || harness_response.get("ok").and_then(Value::as_bool) == Some(false)
+    {
+        let error_code = result_value
+            .get("error_code")
+            .and_then(Value::as_str)
+            .or_else(|| result_value.get("error").and_then(Value::as_str))
+            .or_else(|| harness_response.get("error_code").and_then(Value::as_str))
+            .unwrap_or("HARNESS_ACCEPTANCE_FAILED");
+        bail!("HARNESS_ACCEPTANCE_FAILED: {error_code}");
+    }
 
     let envelope: ExternalReceiptEnvelope = match serde_json::from_value(result_value.clone()) {
         Ok(env) => env,

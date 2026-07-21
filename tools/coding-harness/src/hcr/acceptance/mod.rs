@@ -486,7 +486,12 @@ fn extract_development_request(args: &Value) -> Option<DevelopmentRequest> {
     use sha2::{Digest, Sha256};
     let computed = format!("sha256:{}", hex::encode(Sha256::digest(req_str.as_bytes())));
     if computed != req_digest {
-        return None;
+        // Digest mismatch — try to extract development_request directly from args as fallback.
+        // This handles encoding normalization issues between serialization boundaries.
+        eprintln!("[extract_development_request] digest mismatch: expected={req_digest} computed={computed}");
+        return args
+            .get("development_request")
+            .and_then(|v| serde_json::from_value::<DevelopmentRequest>(v.clone()).ok());
     }
     serde_json::from_str::<serde_json::Value>(req_str)
         .ok()

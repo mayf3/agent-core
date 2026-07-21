@@ -1183,18 +1183,9 @@ cmd_shadow_e2e() {
                 done
             fi
         done
-        # Also terminate lingering node processes running the Feishu Connector.
-        # cmd_stop kills the tracked connector PID, but the npx/tsx parent
-        # process survives and may restart the child (re-binding port 4131).
-        for pid in \$(pgrep -f 'node.*connectors/feishu' 2>/dev/null || true); do
-            if [ -n \"\$pid\" ] && [ \"\$pid\" -ne \"\$\$\" ]; then
-                exe=\$(readlink -f /proc/\${pid}/exe 2>/dev/null || echo '')
-                if echo \"\$exe\" | grep -q 'node'; then
-                    echo \"  Terminating lingering connector (PID \$pid)\"
-                    kill \$pid 2>/dev/null || true
-                fi
-            fi
-        done
+        # Connector cleanup is handled by shadow-supervisor.sh's cleanup() trap,
+        # which reads PID files recorded with starttime verification and only
+        # kills PIDs belonging to this run. No broad cmdline-based kill here.
         sleep 2
     " 2>/dev/null || true
 

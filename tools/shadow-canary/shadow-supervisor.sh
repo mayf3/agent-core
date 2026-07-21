@@ -110,10 +110,15 @@ start_service() {
     local pid=$!
     echo "$pid" > "$pid_file"
     SPAWNED_PIDS+=("$pid")
-    # Record process evidence for PID-scoped cleanup verification
+    # Record process evidence for PID-scoped cleanup verification.
+    # Record the process starttime from /proc/PID/stat to verify PID
+    # ownership during cleanup — prevents killing a recycled PID.
+    local proc_starttime
+    proc_starttime=$(awk '{print $22}' /proc/${pid}/stat 2>/dev/null || echo "0")
     echo "shadow_run_id=${RUN_ID}" > "${PID_DIR}/process_${name}.txt"
     echo "shadow_root=${SHADOW_ROOT}" >> "${PID_DIR}/process_${name}.txt"
     echo "pid=${pid}" >> "${PID_DIR}/process_${name}.txt"
+    echo "starttime=${proc_starttime}" >> "${PID_DIR}/process_${name}.txt"
     echo "cmdline=$*" >> "${PID_DIR}/process_${name}.txt"
     echo "[supervisor] started $name (PID $pid) log=$log_file"
 }

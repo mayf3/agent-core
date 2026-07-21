@@ -15,10 +15,16 @@ fn missing_owner_open_id_fails_preflight() -> Result<()> {
     // deeper validate_private_owner_context. We verify the router
     // correctly identifies valid development requests.
     let result = coding_router::parse_coding_intent(
-        "开发一个 failure-viewer，通过 event.observe.v0 监控失败事件"
+        "开发一个 failure-viewer，通过 event.observe.v0 监控失败事件",
     )?;
-    assert!(result.development_request.required_contracts.contains(&"event.observe.v0".to_string()));
-    assert_eq!(result.development_request.target_kind, agent_core_kernel::domain::TargetKind::HookConsumerService);
+    assert!(result
+        .development_request
+        .required_contracts
+        .contains(&"event.observe.v0".to_string()));
+    assert_eq!(
+        result.development_request.target_kind,
+        agent_core_kernel::domain::TargetKind::HookConsumerService
+    );
     Ok(())
 }
 
