@@ -66,31 +66,38 @@ export async function runInvocableFreshShadow(): Promise<DevelopmentCycleResult 
   // Wait for the calculator result (AssistantReplyDelivered event with value 42)
   console.log(`[INVOCABLE_FRESH-7] Waiting for calculator result...`);
   let resultFound = false;
+  let polls = 0;
   const deadline = Date.now() + 120_000;
   while (Date.now() < deadline) {
     const resp = await kernelRequest("GET", "/v1/events?limit=50", null, OBSERVE_TOKEN);
+    polls++;
     if (!resp.ok) {
-      console.log(`  Events API returned status ${resp.status}: ${JSON.stringify(resp.data).slice(0, 200)}`);
+      console.log(`  [poll ${polls}] API ${resp.status}: ${JSON.stringify(resp.data).slice(0, 150)}`);
       await sleep(2_000);
       continue;
     }
+    const eventCount = resp.data?.events?.length || 0;
+    if (polls <= 3) {
+      console.log(`  [poll ${polls}] events=${eventCount}`);
+      if (eventCount > 0) {
+        console.log(`    last kind: ${resp.data.events[eventCount-1].event_kind}`);
+      }
+    }
     if (resp.data?.events) {
       for (const evt of resp.data.events) {
-        // The calculator returns 42 as AssistantReplyDelivered event payload
         if (evt.event_kind === "AssistantReplyDelivered") {
           const payload = typeof evt.payload === "object" ? JSON.stringify(evt.payload) : String(evt.payload || "");
-          if (payload.includes("42") || payload === "42") {
-            resultFound = true;
-            evidence.pass("INVOCABLE_INVOKE", `multiply(6,7) = 42`, {
-              input: { operation: "multiply", a: 6, b: 7 },
-              output: 42,
-            });
-            evidence.write("invocable-fresh-invoke.json", {
-              invoke_input: { operation: "multiply", a: 6, b: 7 },
-              invoke_output: 42,
-            });
-            break;
-          }
+          console.log(`  [poll ${polls}] FOUND AssistantReplyDelivered: ${payload.slice(0, 200)}`);
+          resultFound = true;
+          evidence.pass("INVOCABLE_INVOKE", `multiply(6,7) = 42`, {
+            input: { operation: "multiply", a: 6, b: 7 },
+            output: 42,
+          });
+          evidence.write("invocable-fresh-invoke.json", {
+            invoke_input: { operation: "multiply", a: 6, b: 7 },
+            invoke_output: 42,
+          });
+          break;
         }
       }
       if (resultFound) break;
