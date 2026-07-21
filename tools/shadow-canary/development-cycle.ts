@@ -153,6 +153,98 @@ export async function injectShadowMarker(
   return kernelRequest("POST", "/v1/event", body, DECISION_TOKEN);
 }
 
+// ── Calculator invoke helpers ─────────────────────────────────────────────
+
+const OBSERVE_TOKEN = process.env.AGENT_CORE_EVENT_OBSERVE_TOKEN || "";
+
+/**
+ * Find the run_id spawned to process a given ingress kernelEventId.
+ */
+async function findRunForIngress(
+  kernelEventId: string,
+  timeoutMs: number = 30_000,
+): Promise<string | null> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const resp = await kernelRequest("GET", `/v1/events?limit=200`, null, OBSERVE_TOKEN);
+    if (!resp.ok || !resp.data?.events) {
+      await sleep(1_000);
+      continue;
+    }
+    for (const evt of resp.data.events) {
+      if (evt.event_kind === "RunStarted" && evt.payload?.trigger_event_id === kernelEventId) {
+        return evt.run_id || null;
+      }
+    }
+    await sleep(1_000);
+  }
+  return null;
+}
+
+/**
+ * Wait for an AssistantReplyDelivered event belonging to a specific run,
+ * parse the real result text from its payload, and return it as a number.
+ * Returns null on timeout.
+ */
+async function waitForCalculatorResult(
+  invokeRunId: string,
+  timeoutMs: number = 120_000,
+): Promise<number | null> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const resp = await kernelRequest("GET", `/v1/events?limit=100`, null, OBSERVE_TOKEN);
+    if (!resp.ok || !resp.data?.events) {
+      await sleep(1_000);
+      continue;
+    }
+    for (const evt of resp.data.events) {
+      if (
+        evt.event_kind === "AssistantReplyDelivered" &&
+        evt.run_id === invokeRunId
+      ) {
+        const rawText = evt.payload?.text;
+        if (rawText === undefined || rawText === null) return null;
+        const parsed = typeof rawText === "number" ? rawText : Number(rawText);
+        if (!Number.isFinite(parsed)) return null;
+        return parsed;
+      }
+    }
+    await sleep(1_000);
+  }
+  return null;
+}
+
+/**
+ * Invoke the north-star calculator via the smoke sentence ingress and
+ * return the real numeric result. The calculator_router matches the
+ * fixed sentence and triggers calculator_delivery → capability host.
+ *
+ * @returns {Promise<{ok:boolean, result?:number, runId?:string, error?:string}>}
+ */
+export async function invokeCalculator(
+  messageId: string,
+  senderOpenId: string,
+): Promise<{ ok: boolean; result?: number; runId?: string; error?: string }> {
+  const invokeResult = await simulateFeishuMessage(
+    "用 external.calculator 计算 6 * 7",
+    messageId,
+    senderOpenId,
+  );
+  if (!invokeResult.ok) {
+    return { ok: false, error: `smoke sentence ingress failed: ${invokeResult.status}` };
+  }
+  const invokeKernelEventId = invokeResult.kernelEventId || "";
+  const runId = await findRunForIngress(invokeKernelEventId);
+  if (!runId) {
+    return { ok: false, error: `could not find RunStarted for ingress ${invokeKernelEventId}` };
+  }
+  const rawResult = await waitForCalculatorResult(runId);
+  if (rawResult === null) {
+    return { ok: false, error: `calculator did not return a numeric result for run ${runId} within timeout` };
+  }
+  return { ok: true, result: rawResult, runId };
+}
+
 export async function getCurrentCursor(): Promise<number> {
   const resp = await kernelRequest("GET", "/v1/events/cursor", null, DECISION_TOKEN);
   if (resp.ok && typeof resp.data?.cursor === "number") return resp.data.cursor;
