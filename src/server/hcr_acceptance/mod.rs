@@ -63,19 +63,31 @@ fn handle_inner(
     let worker_instance_id = format!("kernel_hcr_accept");
     let outcome = execute_hcr(journal, hcr_id, &run_id, &worker_instance_id)?;
 
-    // 2. Create/get session
+    // 2. Create/get session — use the HCR's principal context (Feishu p2p)
+    //    so the proposal origin context is correct for the connector's
+    //    Feishu/p2p approval binding check.
+    let hcr = journal
+        .get_harness_change_request(hcr_id)?
+        .ok_or_else(|| anyhow::anyhow!("HCR_NOT_FOUND"))?;
+    let conversation_key = if hcr.channel.eq_ignore_ascii_case("Feishu") {
+        hcr.principal_id.clone()
+    } else {
+        format!("hcr-accept-{hcr_id}")
+    };
     let session_target = SessionTarget {
         agent_id: AgentId::new(),
-        channel: ChannelKind::Cli,
-        conversation_key: format!("hcr-accept-{hcr_id}"),
+        channel: if hcr.channel.eq_ignore_ascii_case("Feishu") {
+            ChannelKind::Feishu
+        } else {
+            ChannelKind::Cli
+        },
+        conversation_key,
     };
     let session = journal.get_or_create_session(&session_target)?;
 
     // 3. Create Run with RunMode::Hcr
     let trigger_event_id = EventId::new();
-    let hcr = journal
-        .get_harness_change_request(hcr_id)?
-        .ok_or_else(|| anyhow::anyhow!("HCR_NOT_FOUND"))?;
+    // hcr was loaded in step 2 above
     let harness_id = hcr.harness_id.clone();
     let gate_harness_id = harness_id.clone();
 
