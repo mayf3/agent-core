@@ -72,20 +72,28 @@ export async function runInvocableDirtyShadow(): Promise<void> {
   if (!(await verifyCalculator("A", 42))) return;
 
   // ═══════════════════════════════════════════════════════════════
-  // Phase B: Upgrade with Activation failure
+  // Phase B: Upgrade with expected decision rejection
   // ═══════════════════════════════════════════════════════════════
-  console.log(`\n--- Phase B: Upgrade with controlled Activation failure ---`);
+  // For the calculator (invocable capability), Phase A's activation
+  // advances the registry snapshot. Phase B's proposal references the
+  // OLD snapshot, so the Kernel rejects the decision with Conflict
+  // ("SOURCE_REGISTRY_SNAPSHOT_CHANGED"). This is the calculator's
+  // equivalent of the "controlled failure" that the failure proxy
+  // provides for hook consumers via the deployment harness.
+  console.log(`\n--- Phase B: Upgrade expected to fail (stale source snapshot) ---`);
   const phaseBStart = await getCurrentCursor();
   const msgIdB = `inv_dirty_B_${RUN_ID}`;
 
+  // Run development cycle through proposal creation, but expect the
+  // callback to fail (stale snapshot), not the deployment.
   const resultB = await runDevelopmentCycle(
     "B", MESSAGE_TEXT, msgIdB, SENDER_OPEN_ID,
-    phaseBStart, COMPONENT_ID, "failure",
+    phaseBStart, COMPONENT_ID, "callback_failure",
   );
-  if (!resultB.failedReceiptId) return;
+  if (!resultB.proposalId) return;
   failedManifestDigest = resultB.manifestDigest || "";
 
-  // Verify old capability still works after failure
+  // Verify old capability still works after the stale-snapshot rejection
   if (!(await verifyCalculator("B", 42))) return;
 
   evidence.write("invocable-dirty-phase-b.json", {
