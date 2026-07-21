@@ -5,13 +5,13 @@ import { evidence } from "./evidence.ts";
 import {
   simulateFeishuMessage,
   simulateCardApproval,
-  waitForProposal,
   config,
 } from "./connector-shadow.ts";
 import type { CapturedCardPayload } from "./capture-transport.ts";
 
 const DECISION_TOKEN = process.env.AGENT_CORE_CAPABILITY_DECISION_TOKEN || "";
 const IPC_TOKEN = process.env.AGENT_CORE_IPC_TOKEN || "";
+const OBSERVE_TOKEN = process.env.AGENT_CORE_EVENT_OBSERVE_TOKEN || IPC_TOKEN;
 const KERNEL_PORT = parseInt(process.env.AGENT_CORE_KERNEL_PORT || "4130", 10);
 const KERNEL_BASE = `http://127.0.0.1:${KERNEL_PORT}`;
 
@@ -34,16 +34,50 @@ export async function waitForCardCapture(
   throw new Error(`card not captured for ${proposalId} within ${timeoutMs}ms`);
 }
 
+/**
+ * Wait for any CapabilityChangeProposed event to appear in the journal.
+ *
+ * Polls the event observe endpoint for CapabilityChangeProposed events
+ * after the given cursor sequence. Returns the event payload which
+ * contains proposal_id and (for HCR-derived proposals) hcr_id.
+ *
+ * This replaces the previous implementation that incorrectly passed a
+ * numeric literal as a proposal ID to waitForProposal().
+ */
 export async function waitForAnyProposal(
   timeoutMs: number = 180_000,
   afterSequence?: number,
 ): Promise<any> {
   const deadline = Date.now() + timeoutMs;
+  const cursor = typeof afterSequence === "number" ? afterSequence : 0;
+
   while (Date.now() < deadline) {
     try {
-      const proposalEvent = await waitForProposal(120_000, afterSequence);
-      if (proposalEvent) return proposalEvent;
-    } catch {}
+      const resp = await kernelRequest(
+        "GET",
+        `/v1/events?event_kind=CapabilityChangeProposed&cursor=${cursor}&limit=10`,
+        null,
+        OBSERVE_TOKEN,
+      );
+      if (resp.ok && resp.data?.events?.length > 0) {
+        const event = resp.data.events[0];
+        const payload = event.payload || {};
+        console.log(`  Found CapabilityChangeProposed event: proposal_id=${payload.proposal_id} event_id=${event.event_id}`);
+        return {
+          proposal_id: payload.proposal_id,
+          hcr_id: payload.hcr_id,
+          candidate_ref: payload.candidate_ref || payload.artifact_ref || "",
+          claim_id: payload.claim_id || "",
+          run_id: event.run_id || payload.run_id || "",
+          principal_id: event.principal_id || payload.submitter || "",
+          session_id: event.session_id || payload.session_id || "",
+          registry_snapshot_id: payload.expected_snapshot_id || payload.registry_snapshot_id || "",
+          ...payload,
+        };
+      }
+    } catch (err: any) {
+      console.log(`  waitForAnyProposal poll error: ${err.message}`);
+    }
     await sleep(2_000);
   }
   throw new Error(`no proposal found within ${timeoutMs}ms`);

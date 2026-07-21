@@ -37,10 +37,18 @@ pub fn build_delivery_manifest(
 ) -> Result<(String, Vec<u8>)> {
     let target_kind = component
         .get("target_kind")
+        .or_else(|| component.get("kind"))
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow!("MISSING_TARGET_KIND"))?;
 
-    match target_kind {
+    // Map manifest kind values to canonical target kind names
+    let canon = match target_kind {
+        "invocable_capability" | "InvocableCapability" => "InvocableCapability",
+        "hook_consumer_service" | "HookConsumerService" => "HookConsumerService",
+        other => other,
+    };
+
+    match canon {
         "HookConsumerService" => {
             let manifest = build_service_manifest(component, artifact_digest)?;
             let bytes = serde_json::to_vec(&manifest)?;

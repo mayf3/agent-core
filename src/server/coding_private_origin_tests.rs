@@ -90,8 +90,5 @@ fn coding_delivery_routes_only_feishu_p2p_events() {
         EventSource::Feishu,
         Some("group")
     )));
-    assert!(!coding_delivery::matches(&ingress(
-        EventSource::Cli,
-        None
-    )));
+    assert!(!coding_delivery::matches(&ingress(EventSource::Cli, None)));
 }

@@ -31,7 +31,10 @@ fn existing_version_allocates_next_patch() -> Result<()> {
     assert_eq!(compare_version("0.1.1", "0.1.2"), std::cmp::Ordering::Less);
     assert_eq!(compare_version("0.1.9", "0.2.0"), std::cmp::Ordering::Less);
     assert_eq!(compare_version("0.9.9", "1.0.0"), std::cmp::Ordering::Less);
-    assert_eq!(compare_version("0.99.99", "1.0.0"), std::cmp::Ordering::Less);
+    assert_eq!(
+        compare_version("0.99.99", "1.0.0"),
+        std::cmp::Ordering::Less
+    );
     Ok(())
 }
 
@@ -40,7 +43,10 @@ fn equal_version_is_rejected() -> Result<()> {
     // Production verify: equal version must be Ordering::Equal (not Greater)
     assert_eq!(compare_version("0.1.0", "0.1.0"), std::cmp::Ordering::Equal);
     assert_eq!(compare_version("1.0.0", "1.0.0"), std::cmp::Ordering::Equal);
-    assert_eq!(compare_version("99.99.99", "99.99.99"), std::cmp::Ordering::Equal);
+    assert_eq!(
+        compare_version("99.99.99", "99.99.99"),
+        std::cmp::Ordering::Equal
+    );
     Ok(())
 }
 
@@ -50,16 +56,22 @@ fn journal_preserves_component_version_registration() -> Result<()> {
     let journal = JournalStore::in_memory()?;
     let run = RunId("r_version".to_string());
     let session = SessionId("s_version".to_string());
-    
+
     journal.append_event(
-        JournalEventKind::ComponentRegistered, Some(&run), Some(&session),
-        Some("corr_v1"), json!({"component_id": "test-c", "version": "0.1.0"}),
+        JournalEventKind::ComponentRegistered,
+        Some(&run),
+        Some(&session),
+        Some("corr_v1"),
+        json!({"component_id": "test-c", "version": "0.1.0"}),
     )?;
     journal.append_event(
-        JournalEventKind::ComponentRegistered, Some(&run), Some(&session),
-        Some("corr_v2"), json!({"component_id": "test-c", "version": "0.1.1"}),
+        JournalEventKind::ComponentRegistered,
+        Some(&run),
+        Some(&session),
+        Some("corr_v2"),
+        json!({"component_id": "test-c", "version": "0.1.1"}),
     )?;
-    
+
     let events = journal.events()?;
     assert_eq!(events[0].payload["version"], "0.1.0");
     assert_eq!(events[1].payload["version"], "0.1.1");

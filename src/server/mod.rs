@@ -529,6 +529,9 @@ mod capability_routes_support;
 #[path = "capability_routes_tests.rs"]
 mod capability_routes_tests;
 #[cfg(test)]
+#[path = "event_routing_tests.rs"]
+mod event_routing_tests;
+#[cfg(test)]
 #[path = "harness_endpoint_tests.rs"]
 mod harness_endpoint_tests;
 #[cfg(test)]
