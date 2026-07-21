@@ -15,6 +15,7 @@ import { config, simulateFeishuMessage } from "../connector-shadow.ts";
 
 const DECISION_TOKEN = process.env.AGENT_CORE_CAPABILITY_DECISION_TOKEN || "";
 const IPC_TOKEN = process.env.AGENT_CORE_IPC_TOKEN || "";
+const OBSERVE_TOKEN = process.env.AGENT_CORE_EVENT_OBSERVE_TOKEN || IPC_TOKEN;
 const RUN_ID = process.env.SHADOW_RUN_ID || `shadow_${Date.now()}`;
 const SENDER_OPEN_ID = config.feishuOwnerOpenId || "ou_shadow_owner";
 const COMPONENT_ID = "external.calculator";
@@ -67,7 +68,7 @@ export async function runInvocableFreshShadow(): Promise<DevelopmentCycleResult 
   let resultFound = false;
   const deadline = Date.now() + 120_000;
   while (Date.now() < deadline) {
-    const resp = await kernelRequest("GET", "/v1/events/observe?limit=50", null, DECISION_TOKEN);
+    const resp = await kernelRequest("GET", "/v1/events/observe?limit=50", null, OBSERVE_TOKEN);
     if (resp.ok && resp.data?.events) {
       for (const evt of resp.data.events) {
         // The calculator returns 42 as AssistantReplyDelivered event payload
