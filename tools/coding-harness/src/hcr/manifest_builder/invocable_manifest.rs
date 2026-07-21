@@ -8,9 +8,7 @@
 //! product‑specific fields (capability‑host‑v0, input/output schemas,
 //! idempotent, description, etc.) stay outside Kernel governance paths.
 
-use agent_core_kernel::domain::DevelopmentRequest;
-#[cfg(test)]
-use agent_core_kernel::domain::TargetKind;
+use agent_core_kernel::domain::{DevelopmentRequest, TargetKind};
 use agent_core_kernel::harness::manifest::HarnessManifest;
 use anyhow::{anyhow, Result};
 use chrono::Utc;
@@ -32,12 +30,10 @@ pub fn build_invocable_manifest(
     request: &DevelopmentRequest,
 ) -> Result<HarnessManifest> {
     // ── Target kind gate ──────────────────────────────────────────────
-    let target_kind = component
-        .get("target_kind")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow!("MISSING_TARGET_KIND"))?;
-    if target_kind != "InvocableCapability" {
-        return Err(anyhow!("UNEXPECTED_TARGET_KIND: {target_kind}"));
+    // Validated by delivery.rs caller. Just verify the request target_kind.
+    match request.target_kind {
+        TargetKind::InvocableCapability => {} // expected
+        _ => return Err(anyhow!("UNEXPECTED_TARGET_KIND_IN_REQUEST: {:?}", request.target_kind)),
     }
 
     // ── Schema & kind identity ────────────────────────────────────────

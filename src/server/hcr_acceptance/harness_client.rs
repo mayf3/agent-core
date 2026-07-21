@@ -98,7 +98,8 @@ pub fn call_harness_accept(
 /// Recompute the opaque_payload_digest from a merged response value
 /// (AcceptanceResponse + envelope fields).  Envelope-only keys are
 /// stripped to reconstruct the original `AcceptanceResponse` bytes
-/// that were hashed by the Harness.
+/// that were hashed by the Harness.  Keys are sorted alphabetically
+/// to ensure canonical serialization regardless of insertion order.
 pub fn verify_opaque_payload_digest(merged: &Value) -> Result<String> {
     let mut detailed_only = merged.clone();
     const ENVELOPE_ONLY: &[&str] = &[
@@ -115,10 +116,27 @@ pub fn verify_opaque_payload_digest(merged: &Value) -> Result<String> {
             obj.remove(*key);
         }
     }
+    // Serialize with sorted keys for canonical digest computation
+    let sorted = sort_object_keys(&detailed_only);
     let detailed_bytes =
-        serde_json::to_vec(&detailed_only).map_err(|e| anyhow!("OPAQUE_SERIALIZATION: {e}"))?;
+        serde_json::to_vec(&sorted).map_err(|e| anyhow!("OPAQUE_SERIALIZATION: {e}"))?;
     Ok(format!(
         "sha256:{}",
         hex::encode(Sha256::digest(&detailed_bytes))
     ))
+}
+
+/// Recursively sort all object keys for canonical serialization.
+fn sort_object_keys(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut sorted: serde_json::Map<String, Value> = map.iter().map(|(k, v)| {
+                (k.clone(), sort_object_keys(v))
+            }).collect();
+            sorted.sort_keys();
+            Value::Object(sorted)
+        }
+        Value::Array(arr) => Value::Array(arr.iter().map(sort_object_keys).collect()),
+        other => other.clone(),
+    }
 }
