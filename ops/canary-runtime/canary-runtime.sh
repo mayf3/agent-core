@@ -1006,9 +1006,9 @@ generate_shadow_env() {
     echo "SHADOW_RUN_ID=${run_id}" >> "$dst"
     echo "SHADOW_EVIDENCE_DIR=${shadow_root}/evidence" >> "$dst"
     echo "SHADOW_STATE_DIR=${shadow_root}/state" >> "$dst"
-    # Disable outbox dispatcher in shadow mode to prevent SQLite lock
-    # contention with the acceptance handler worker thread.
-    echo "AGENT_CORE_OUTBOX_DISPATCHER_ENABLED=false" >> "$dst"
+    # Outbox dispatcher needed for card delivery. Migration fix in place
+    # so the lock contention with acceptance handler is resolved.
+    # echo "AGENT_CORE_OUTBOX_DISPATCHER_ENABLED=false" >> "$dst"
     
     echo "shadow.env generated at ${dst}"
 }
