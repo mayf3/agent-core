@@ -5,14 +5,13 @@ import {
   runDevelopmentCycle,
   getCurrentCursor,
   waitForComponent,
-  loopbackRequest,
   DevelopmentCycleResult,
 } from "../development-cycle.ts";
 import {
   kernelRequest,
   sleep,
 } from "../clients/http-client.ts";
-import { config } from "../connector-shadow.ts";
+import { config, simulateFeishuMessage } from "../connector-shadow.ts";
 
 const DECISION_TOKEN = process.env.AGENT_CORE_CAPABILITY_DECISION_TOKEN || "";
 const IPC_TOKEN = process.env.AGENT_CORE_IPC_TOKEN || "";
@@ -46,28 +45,54 @@ export async function runInvocableFreshShadow(): Promise<DevelopmentCycleResult 
     activated_manifest_digest: result.activatedManifestDigest,
   });
 
-  // ── Invoke multiply(6,7) via capability host ──
-  console.log(`\n[INVOCABLE_FRESH-6] Invoking multiply(6,7)...`);
-  const IPC_TOKEN = process.env.AGENT_CORE_IPC_TOKEN || "";
-  const invokeResult = await invokeCapability(
-    "external.calculator",
-    "external.calculator",
-    { operation: "multiply", a: 6, b: 7 },
+  // ── Invoke multiply(6,7) via north-star calculator fixture ──
+  // The calculator is invoked by sending the smoke-sentence ingress message
+  // that triggers the calculator_router → calculator_delivery pipeline.
+  // There is no POST /v1/invoke HTTP route on the kernel.
+  console.log(`\n[INVOCABLE_FRESH-6] Invoking multiply(6,7) via calculator smoke sentence...`);
+  const invokeMsgId = `invoke_${RUN_ID}`;
+  const invokeResult = await simulateFeishuMessage(
+    "用 external.calculator 计算 6 * 7",
+    invokeMsgId,
+    SENDER_OPEN_ID,
   );
 
-  if (invokeResult.ok && invokeResult.data?.result === 42) {
-    evidence.pass("INVOCABLE_INVOKE", `multiply(6,7) = ${invokeResult.data.result}`, {
-      input: { operation: "multiply", a: 6, b: 7 },
-      output: invokeResult.data.result,
-      expected: 42,
-    });
-    evidence.write("invocable-fresh-invoke.json", {
-      invoke_input: { operation: "multiply", a: 6, b: 7 },
-      invoke_output: invokeResult.data,
-    });
-  } else {
-    evidence.fail("INVOCABLE_INVOKE", `multiply(6,7) failed: ${JSON.stringify(invokeResult)}`, invokeResult);
-    return result;
+  if (!invokeResult.ok) {
+    evidence.fail("INVOCABLE_INVOKE", `calculator smoke sentence failed: ${invokeResult.status}`, invokeResult);
+    return null;
+  }
+
+  // Wait for a session reply containing the calculator result
+  console.log(`[INVOCABLE_FRESH-7] Waiting for calculator result...`);
+  let resultFound = false;
+  const deadline = Date.now() + 120_000;
+  while (Date.now() < deadline) {
+    const resp = await kernelRequest("GET", "/v1/events/observe?limit=50", null, DECISION_TOKEN);
+    if (resp.ok && resp.data?.events) {
+      for (const evt of resp.data.events) {
+        const text = evt.payload?.text || evt.payload?.content || "";
+        const match42 = text.match(/\b42\b/);
+        if (match42) {
+          resultFound = true;
+          evidence.pass("INVOCABLE_INVOKE", `multiply(6,7) = 42`, {
+            input: { operation: "multiply", a: 6, b: 7 },
+            output: 42,
+          });
+          evidence.write("invocable-fresh-invoke.json", {
+            invoke_input: { operation: "multiply", a: 6, b: 7 },
+            invoke_output: 42,
+          });
+          break;
+        }
+      }
+      if (resultFound) break;
+    }
+    await sleep(2_000);
+  }
+
+  if (!resultFound) {
+    evidence.fail("INVOCABLE_INVOKE", `calculator did not return 42 within timeout`);
+    return null;
   }
 
   // ── Verify multiply(6,7)=42 ──
@@ -81,19 +106,4 @@ export async function runInvocableFreshShadow(): Promise<DevelopmentCycleResult 
   });
 
   return result;
-}
-
-/** Invoke a capability through the Kernel's invoke API. */
-async function invokeCapability(
-  componentId: string,
-  operation: string,
-  args: any,
-): Promise<any> {
-  const body = {
-    protocol_version: "process-harness-v1",
-    operation,
-    component_id: componentId,
-    arguments: args,
-  };
-  return kernelRequest("POST", "/v1/invoke", body, IPC_TOKEN);
 }
