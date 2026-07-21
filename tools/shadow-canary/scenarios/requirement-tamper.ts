@@ -94,7 +94,8 @@ export async function runRequirementTamperTest(): Promise<void> {
   }
 
   // Step 4: Read the actual HCR requirement from Kernel API
-  const hcrResp = await kernelRequest("GET", `/v1/harness-change-requests/${hcrId}`, null, DECISION_TOKEN);
+  // HCR endpoint requires IPC token, not decision token
+  const hcrResp = await kernelRequest("GET", `/v1/harness-change-requests/${hcrId}`, null, IPC_TOKEN);
   if (!hcrResp.ok || !hcrResp.data?.requirement) {
     evidence.fail("TAMPER_HCR_READ", `cannot read HCR ${hcrId}`, hcrResp);
     return;

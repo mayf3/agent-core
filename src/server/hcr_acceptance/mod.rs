@@ -246,6 +246,7 @@ fn handle_inner(
 
     // ── 8. Persist five gate attempts + evidence ─────────────────────────
     let harness_result = harness_response.get("result").unwrap_or(&harness_response);
+    eprintln!("[HCR_ACCEPT_DEBUG] step 8: persist_gates start");
     gate_evidence::persist_gates(
         journal,
         harness_result,
@@ -254,6 +255,7 @@ fn handle_inner(
         &outcome.run_id.0,
         &gate_harness_id,
     )?;
+    eprintln!("[HCR_ACCEPT_DEBUG] step 8: persist_gates done");
 
     // 9. Determine receipt status from envelope
     let receipt_status = match envelope.outcome {
@@ -276,6 +278,7 @@ fn handle_inner(
     });
 
     // 10. Atomic receipt append-or-compare (H3/H6)
+    eprintln!("[HCR_ACCEPT_DEBUG] step 10: append_or_compare_receipt start");
     let identity_fields = receipt::ReceiptIdentityFields {
         harness_execution_id: validated.harness_execution_id.clone(),
         overall_outcome: validated.overall_outcome.clone(),
