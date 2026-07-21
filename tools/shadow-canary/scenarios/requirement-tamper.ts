@@ -151,7 +151,9 @@ export async function runRequirementTamperTest(): Promise<void> {
   const errorCode = resultBody.error_code
     || (resultBody.result?.error_code)
     || "";
-  const isRejected = errorCode !== "" && harnessResp.status !== undefined && !harnessResp.ok;
+  const isRejected = errorCode !== ""
+    || resultBody.ok === false
+    || (harnessResp.data?.ok === false);
   
   // The digest mismatch is detected by extract_development_request which returns
   // None when the requirement digest doesn't match. This propagates through
