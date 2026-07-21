@@ -472,19 +472,19 @@ impl JournalStore {
                     ))?;
                     conn.pragma_update(None, "user_version", 13)?;
                 }
-	                13 => {
-	                    conn.execute_batch(include_str!(
-	                        "../../migrations/0014_external_receipt_envelope_digests.sql"
-	                    ))?;
-	                    conn.pragma_update(None, "user_version", 14)?;
-	                }
-	                14 => {
-	                    conn.execute_batch(include_str!(
-	                        "../../migrations/0015_delivery_manifest_columns.sql"
-	                    ))?;
-	                    conn.pragma_update(None, "user_version", 15)?;
-	                }
-	                _ => break,
+                13 => {
+                    conn.execute_batch(include_str!(
+                        "../../migrations/0014_external_receipt_envelope_digests.sql"
+                    ))?;
+                    conn.pragma_update(None, "user_version", 14)?;
+                }
+                14 => {
+                    conn.execute_batch(include_str!(
+                        "../../migrations/0015_delivery_manifest_columns.sql"
+                    ))?;
+                    conn.pragma_update(None, "user_version", 15)?;
+                }
+                _ => break,
             }
         }
         if applied >= 1 {

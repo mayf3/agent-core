@@ -68,11 +68,18 @@ pub fn call_harness_accept(
 
     let body_str = serde_json::to_string(&body)?;
     // Debug: log body length and presence of key fields
-    eprintln!("[call_harness_accept] body_len={} has_dev_req={} has_req_digest={} has_requirement={}",
+    eprintln!(
+        "[call_harness_accept] body_len={} has_dev_req={} has_req_digest={} has_requirement={}",
         body_str.len(),
-        body.get("arguments").and_then(|a| a.get("development_request")).is_some(),
-        body.get("arguments").and_then(|a| a.get("requirement_digest").and_then(Value::as_str)).is_some(),
-        body.get("arguments").and_then(|a| a.get("requirement").and_then(Value::as_str)).is_some(),
+        body.get("arguments")
+            .and_then(|a| a.get("development_request"))
+            .is_some(),
+        body.get("arguments")
+            .and_then(|a| a.get("requirement_digest").and_then(Value::as_str))
+            .is_some(),
+        body.get("arguments")
+            .and_then(|a| a.get("requirement").and_then(Value::as_str))
+            .is_some(),
     );
     let request = format!(
         "POST /execute HTTP/1.1\r\nHost: 127.0.0.1:7200\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -132,9 +139,10 @@ pub fn verify_opaque_payload_digest(merged: &Value) -> Result<String> {
 pub(crate) fn sort_object_keys(value: &Value) -> Value {
     match value {
         Value::Object(map) => {
-            let mut sorted: serde_json::Map<String, Value> = map.iter().map(|(k, v)| {
-                (k.clone(), sort_object_keys(v))
-            }).collect();
+            let mut sorted: serde_json::Map<String, Value> = map
+                .iter()
+                .map(|(k, v)| (k.clone(), sort_object_keys(v)))
+                .collect();
             sorted.sort_keys();
             Value::Object(sorted)
         }
