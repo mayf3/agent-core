@@ -244,8 +244,10 @@ export async function invokeCalculator(
 }
 
 export async function getCurrentCursor(): Promise<number> {
-  const resp = await kernelRequest("GET", "/v1/events/cursor", null, DECISION_TOKEN);
-  if (resp.ok && typeof resp.data?.cursor === "number") return resp.data.cursor;
+  // /v1/events/cursor does not exist. Use the events API to find the
+  // latest sequence by requesting 1 event and reading the next_cursor.
+  const resp = await kernelRequest("GET", "/v1/events?limit=1", null, OBSERVE_TOKEN);
+  if (resp.ok && typeof resp.data?.next_cursor === "number") return resp.data.next_cursor;
   return 0;
 }
 
