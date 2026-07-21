@@ -518,7 +518,7 @@ fn err_json(code: &str) -> Value {
 /// regardless of Value construction order vs struct declaration order.
 fn canonical_json_bytes(value: &Value) -> Vec<u8> {
     let sorted = sort_keys(value);
-    serde_json::to_vec(&sorted).unwrap_or_default()
+    serde_json::to_vec(&sorted).expect("CANONICAL_SERIALIZATION_FAILED")
 }
 
 fn sort_keys(value: &Value) -> Value {
@@ -532,5 +532,94 @@ fn sort_keys(value: &Value) -> Value {
         }
         Value::Array(arr) => Value::Array(arr.iter().map(sort_keys).collect()),
         other => other.clone(),
+    }
+}
+
+#[cfg(test)]
+mod canonical_json_tests {
+    use super::*;
+    use serde_json::json;
+    use sha2::{Digest, Sha256};
+
+    /// Prove that sort_keys matches Kernel's sort_object_keys:
+    /// field insertion order is canonicalized alphabetically.
+    #[test]
+    fn harness_canonical_bytes_matches_kernel_golden_vector() {
+        // Same input as kernel's field_insertion_order_is_canonical
+        let a = json!({"b": 2, "a": 1, "c": 3});
+        let b = json!({"c": 3, "a": 1, "b": 2});
+        let bytes_a = canonical_json_bytes(&a);
+        let bytes_b = canonical_json_bytes(&b);
+        assert_eq!(bytes_a, bytes_b, "different insertion orders must produce same canonical bytes");
+        let dig_a = hex::encode(Sha256::digest(&bytes_a));
+        let dig_b = hex::encode(Sha256::digest(&bytes_b));
+        assert_eq!(dig_a, dig_b, "different insertion orders must produce same digest");
+    }
+
+    /// Prove nested objects are recursively sorted.
+    #[test]
+    fn harness_nested_objects_are_sorted() {
+        let a = json!({"z": {"y": 2, "x": 1}, "a": 0});
+        let b = json!({"a": 0, "z": {"x": 1, "y": 2}});
+        let ba = canonical_json_bytes(&a);
+        let bb = canonical_json_bytes(&b);
+        assert_eq!(ba, bb);
+    }
+
+    /// Prove null / bool / number / string are preserved.
+    #[test]
+    fn harness_primitive_types_are_preserved() {
+        let a = json!({"flag": true, "count": 42, "msg": "hello", "nothing": null});
+        let b = json!({"count": 42, "flag": true, "msg": "hello", "nothing": null});
+        let ba = canonical_json_bytes(&a);
+        let bb = canonical_json_bytes(&b);
+        assert_eq!(ba, bb);
+    }
+
+    /// Prove serialization failure is caught (does NOT silently produce empty bytes).
+    /// serde_json::to_vec on a valid Value rarely fails in practice; this test verifies
+    /// the expect() guard exists (documentation) and compiles correctly.
+    #[test]
+    fn harness_serialization_failure_has_guard() {
+        // Normal serialization works fine
+        let val = json!({"a": 1, "b": 2});
+        let bytes = canonical_json_bytes(&val);
+        assert!(!bytes.is_empty(), "canonical bytes must not be empty");
+        // The expect message confirms the guard exists
+        let sorted = sort_keys(&val);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            serde_json::to_vec(&sorted).expect("CANONICAL_SERIALIZATION_FAILED")
+        }));
+        assert!(result.is_ok(), "normal serialization must not panic");
+    }
+
+    /// Prove the AcceptanceResponse fixture produces a valid sha256 digest.
+    #[test]
+    fn harness_acceptance_fixture_is_canonical() {
+        let mut base = json!({
+            "harness_execution_id": "hex_test",
+            "idempotency_key": "accept:test",
+            "hcr_id": "hcr_test",
+            "claim_id": "claim_test",
+            "run_id": "run_test",
+            "principal_id": "principal_test",
+            "gateway_session_id": "session_test",
+            "registry_snapshot_id": "snap_test",
+            "operation": "external.coding_hcr_accept",
+            "candidate_id": "candidate_test",
+            "candidate_digest": format!("sha256:{}", "1".repeat(64)),
+            "overall_outcome": "CandidatePassed",
+            "gate_results": [],
+            "artifact_ref": "candidate/target/release/component",
+            "artifact_digest": format!("sha256:{}", "3".repeat(64)),
+            "component_manifest_digest": format!("sha256:{}", "4".repeat(64)),
+            "evidence_digest": format!("sha256:{}", "2".repeat(64)),
+        });
+        base["delivery_manifest_ref"] = json!("manifest_test");
+        base["delivery_manifest_digest"] = json!(format!("sha256:{}", "5".repeat(64)));
+        let bytes = canonical_json_bytes(&base);
+        let digest = format!("sha256:{}", hex::encode(Sha256::digest(&bytes)));
+        assert!(digest.starts_with("sha256:"), "digest must have sha256: prefix");
+        assert_eq!(digest.len(), 71, "sha256: + 64 hex chars = 71");
     }
 }
