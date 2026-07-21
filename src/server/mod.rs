@@ -167,7 +167,8 @@ fn handle_connection(
         || (request.method == "GET"
             && (request.path.starts_with(GET_CAP_PREFIX)
                 || request.path.starts_with("/v1/events")
-                || request.path.starts_with("/v1/components/")));
+                || request.path.starts_with("/v1/components/")
+                || request.path.starts_with("/v1/harness-change-requests/")));
     if !method_allows || !request.path.starts_with("/v1/") {
         return write_json(stream, 404, json!({ "ok": false, "error": "not_found" }));
     }
@@ -231,7 +232,36 @@ fn handle_connection(
             stream,
             harness_routes::handle_disable(&gateway, &journal, &body),
         )
-    } else if path == "/v1/harness-change-requests" {
+	    } else if path.starts_with("/v1/harness-change-requests/") && request.method == "GET" {
+	        // GET /v1/harness-change-requests/<hcr_id> — read an HCR
+	        let hcr_id = path.strip_prefix("/v1/harness-change-requests/").unwrap_or("");
+	        if hcr_id.is_empty() || hcr_id.contains('/') {
+	            write_json(stream, 400, json!({"ok":false,"error":"invalid_hcr_id"}))
+	        } else {
+	            match journal.get_harness_change_request(hcr_id) {
+	                Ok(Some(hcr)) => {
+	                    let result = json!({
+	                        "ok": true,
+	                        "request_id": hcr.request_id,
+	                        "source": hcr.source,
+	                        "source_message_id": hcr.source_message_id,
+	                        "session_id": hcr.session_id,
+	                        "principal_id": hcr.principal_id,
+	                        "channel": hcr.channel,
+	                        "chat_type": hcr.chat_type,
+	                        "harness_id": hcr.harness_id,
+	                        "requirement": hcr.requirement,
+	                        "requirement_digest": crate::server::hcr_acceptance::request_binding::build_requirement_binding(&hcr.requirement).requirement_digest,
+	                        "status": hcr.status,
+	                        "error_code": hcr.error_code,
+	                    });
+	                    write_json(stream, 200, result)
+	                }
+	                Ok(None) => write_json(stream, 404, json!({"ok":false,"error":"hcr_not_found"})),
+	                Err(e) => write_json(stream, 500, json!({"ok":false,"error":e.to_string()})),
+	            }
+	        }
+	    } else if path == "/v1/harness-change-requests" {
         let body: Value = serde_json::from_slice(&request.body)?;
         harness_change_request::handle_http(stream, &journal, &gateway, config, &body)
     } else if path.starts_with("/v1/hcr/") && path.ends_with("/accept") {
