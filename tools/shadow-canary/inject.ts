@@ -24,6 +24,7 @@
 import * as fs from "node:fs";
 import { evidence } from "./evidence.ts";
 import { closeServer, config } from "./connector-shadow.ts";
+import { kernelRequest } from "./clients/http-client.ts";
 
 const RUN_ID = process.env.SHADOW_RUN_ID || `shadow_${Date.now()}`;
 const VARIANT = (process.argv[2] || process.env.SHADOW_VARIANT || "hook-fresh").toLowerCase();
@@ -63,6 +64,25 @@ async function main() {
   // Wait for connector to be ready
   console.log("Waiting for shadow connector to be ready...");
   await new Promise(r => setTimeout(r, 3_000));
+
+  // ── Preflight: verify event observer token ──
+  const eventToken = process.env.AGENT_CORE_EVENT_OBSERVE_TOKEN || "";
+  if (!eventToken || eventToken.length < 32) {
+    evidence.fail("TOKEN_PREFLIGHT", `AGENT_CORE_EVENT_OBSERVE_TOKEN missing or too short (len=${eventToken.length})`);
+    return;
+  }
+  // Verify the token works against /v1/events
+  const tokenCheck = await kernelRequest("GET", "/v1/events?limit=1", null, eventToken);
+  if (!tokenCheck.ok) {
+    evidence.fail("TOKEN_PREFLIGHT", `event observe token rejected: HTTP ${tokenCheck.status} ${JSON.stringify(tokenCheck.data)}`);
+    return;
+  }
+  const wrongTokenCheck = await kernelRequest("GET", "/v1/events?limit=1", null, "invalid-token-for-test");
+  if (wrongTokenCheck.ok) {
+    evidence.fail("TOKEN_PREFLIGHT", "wrong token was accepted! auth is broken");
+    return;
+  }
+  evidence.pass("TOKEN_PREFLIGHT", "event observer token valid, wrong token rejected");
 
   // Dispatch to the appropriate scenario
   switch (variant) {
