@@ -12,7 +12,7 @@ import type { CapturedCardPayload } from "./capture-transport.ts";
 
 const DECISION_TOKEN = process.env.AGENT_CORE_CAPABILITY_DECISION_TOKEN || "";
 const IPC_TOKEN = process.env.AGENT_CORE_IPC_TOKEN || "";
-const OBSERVE_TOKEN = process.env.AGENT_CORE_EVENT_OBSERVE_TOKEN || IPC_TOKEN;
+const OBSERVE_TOKEN = process.env.AGENT_CORE_EVENT_OBSERVE_TOKEN || "";
 const KERNEL_PORT = parseInt(process.env.AGENT_CORE_KERNEL_PORT || "4130", 10);
 const KERNEL_BASE = `http://127.0.0.1:${KERNEL_PORT}`;
 
