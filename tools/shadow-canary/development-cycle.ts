@@ -155,8 +155,6 @@ export async function injectShadowMarker(
 
 // ── Calculator invoke helpers ─────────────────────────────────────────────
 
-const OBSERVE_TOKEN = process.env.AGENT_CORE_EVENT_OBSERVE_TOKEN || "";
-
 /**
  * Find the run_id spawned to process a given ingress kernelEventId.
  */
