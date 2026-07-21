@@ -329,20 +329,22 @@ export interface DevelopmentCycleResult {
 
 // ── Core development cycle ────────────────────────────────────────────────
 
-/**
- * Run one complete development cycle:
- *   message → proposal → card → approval → deployment/activation
- *
- * @param expectDeployment - "success" or "failure"
- */
-export async function runDevelopmentCycle(
-  phase: string,
-  messageText: string,
-  messageId: string,
-  senderOpenId: string,
-  phaseStartCursor: number,
-  expectedComponentId: string,
-  expectDeployment: "success" | "failure",
+  /**
+   * Run one complete development cycle:
+   *   message → proposal → card → approval → deployment/activation
+   *
+   * @param expectDeployment - "success", "failure", or "callback_failure"
+   *   (callback_failure: the approval callback is expected to return an error,
+   *    e.g. stale snapshot conflict for invocable capabilities)
+   */
+  export async function runDevelopmentCycle(
+    phase: string,
+    messageText: string,
+    messageId: string,
+    senderOpenId: string,
+    phaseStartCursor: number,
+    expectedComponentId: string,
+    expectDeployment: "success" | "failure" | "callback_failure",
 ): Promise<DevelopmentCycleResult> {
   const result: DevelopmentCycleResult = {
     phase, messageId, externalEventId: messageId,
@@ -414,6 +416,22 @@ export async function runDevelopmentCycle(
   // Step 4: Card approval callback
   console.log(`\n[${phase}-4] Simulating card approval callback...`);
   const callbackResult = await simulateCardApproval(result.proposalId);
+
+  if (expectDeployment === "callback_failure") {
+    // Expected callback failure (e.g. stale snapshot for calculator upgrades).
+    // The callback is expected to return an error; mark this as a PASS.
+    if (!callbackResult.ok) {
+      evidence.pass(`PHASE_${phase}_CALLBACK`, `callback correctly failed: ${callbackResult.toast}`, callbackResult);
+      evidence.pass(`PHASE_${phase}_CALLBACK_FAILURE`, `expected callback failure confirmed`, {
+        toast: callbackResult.toast,
+      });
+      return result;
+    }
+    // Callback succeeded but was expected to fail — this is a test failure.
+    evidence.fail(`PHASE_${phase}_CALLBACK`, `callback unexpectedly succeeded (expected failure)`, callbackResult);
+    return result;
+  }
+
   if (!callbackResult.ok) {
     evidence.fail(`PHASE_${phase}_CALLBACK`, `callback failed: ${callbackResult.toast}`, callbackResult);
     return result;
