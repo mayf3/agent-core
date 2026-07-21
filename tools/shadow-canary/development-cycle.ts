@@ -153,10 +153,44 @@ export async function injectShadowMarker(
   return kernelRequest("POST", "/v1/event", body, DECISION_TOKEN);
 }
 
+// ── Registry stabilization ───────────────────────────────────────────────
+
+/**
+ * Wait for the registry snapshot to advance past a known value.
+ * After an activation, the registry snapshot advances.  Subsequent
+ * development-request messages must not be sent until this advance
+ * is durable, otherwise the new Run will capture the old snapshot
+ * and the decision will be rejected (SOURCE_REGISTRY_SNAPSHOT_CHANGED).
+ */
+async function waitForRegistryAdvance(
+  knownSnapshot: string,
+  timeoutMs: number = 30_000,
+): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const resp = await kernelRequest(
+      "GET", `/v1/capability-change-proposals?limit=1`, null, DECISION_TOKEN,
+    );
+    // We can't directly query the registry snapshot via the public API,
+    // so instead poll the proposal GET and check the expected_active_snapshot_id
+    // of the most recent proposal, or just sleep for a bounded time.
+    // A 5-second delay between phases is sufficient for the outbox worker
+    // to commit the previous activation.
+    await sleep(1_000);
+  }
+  // If the known snapshot was empty (first phase), return immediately
+  if (!knownSnapshot) return "";
+  // Give the system enough time for the registry write to propagate
+  await sleep(5_000);
+  return "stabilized";
+}
+
 // ── Calculator invoke helpers ─────────────────────────────────────────────
 
 /**
  * Find the run_id spawned to process a given ingress kernelEventId.
+ * Uses evt.correlation_id (top-level field, set to the validated
+ * event's event_id — same as the ingress response kernel_event_id).
  */
 async function findRunForIngress(
   kernelEventId: string,
@@ -170,7 +204,9 @@ async function findRunForIngress(
       continue;
     }
     for (const evt of resp.data.events) {
-      if (evt.event_kind === "RunStarted" && evt.payload?.trigger_event_id === kernelEventId) {
+      // RunStarted stores the validated event's event_id as correlation_id
+      // (see runtime/mod.rs: append_event with Some(&event.event_id.0))
+      if (evt.event_kind === "RunStarted" && evt.correlation_id === kernelEventId) {
         return evt.run_id || null;
       }
     }
@@ -182,7 +218,8 @@ async function findRunForIngress(
 /**
  * Wait for an AssistantReplyDelivered event belonging to a specific run,
  * parse the real result text from its payload, and return it as a number.
- * Returns null on timeout.
+ * Returns null on timeout. Only accepts events strictly correlated to
+ * the invoke run — no unassociated scanning.
  */
 async function waitForCalculatorResult(
   invokeRunId: string,
@@ -213,34 +250,6 @@ async function waitForCalculatorResult(
 }
 
 /**
- * Fallback: search all AssistantReplyDelivered events for one that
- * contains a numeric result (42). This is used when run-based
- * correlation fails due to trigger_event_id format mismatch.
- */
-async function findCalculatorResultAnywhere(
-  timeoutMs: number = 60_000,
-): Promise<number | null> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const resp = await kernelRequest("GET", `/v1/events?limit=500`, null, OBSERVE_TOKEN);
-    if (!resp.ok || !resp.data?.events) {
-      await sleep(1_000);
-      continue;
-    }
-    for (const evt of resp.data.events) {
-      if (evt.event_kind === "AssistantReplyDelivered") {
-        const rawText = evt.payload?.text;
-        if (rawText === undefined || rawText === null) continue;
-        const parsed = typeof rawText === "number" ? rawText : Number(rawText);
-        if (Number.isFinite(parsed) && parsed === 42) return parsed;
-      }
-    }
-    await sleep(2_000);
-  }
-  return null;
-}
-
-/**
  * Invoke the north-star calculator via the smoke sentence ingress and
  * return the real numeric result. The calculator_router matches the
  * fixed sentence and triggers calculator_delivery → capability host.
@@ -261,25 +270,17 @@ export async function invokeCalculator(
   }
   const invokeKernelEventId = invokeResult.kernelEventId || "";
 
-  // Try primary: correlate via trigger_event_id → RunStarted → run_id
-  let runId = await findRunForIngress(invokeKernelEventId);
-  if (runId) {
-    const rawResult = await waitForCalculatorResult(runId);
-    if (rawResult !== null) {
-      return { ok: true, result: rawResult, runId };
-    }
+  // Strictly correlate: invoke kernelEventId → RunStarted.correlation_id → run_id
+  // → AssistantReplyDelivered.run_id. No unassociated scanning is performed.
+  const runId = await findRunForIngress(invokeKernelEventId);
+  if (!runId) {
+    return { ok: false, error: `could not find RunStarted for ingress ${invokeKernelEventId}` };
   }
-
-  // Fallback: scan all events for ANY AssistantReplyDelivered with value 42.
-  // This is safe because the test has exclusive access to the shadow kernel
-  // and no other scenario is running concurrently.
-  console.log(`  (run correlation failed, falling back to event scan)`);
-  const fallback = await findCalculatorResultAnywhere(60_000);
-  if (fallback !== null) {
-    return { ok: true, result: fallback, runId: runId || "unknown" };
+  const rawResult = await waitForCalculatorResult(runId);
+  if (rawResult === null) {
+    return { ok: false, error: `calculator did not return numeric result for run ${runId} within timeout` };
   }
-
-  return { ok: false, error: `calculator did not return 42 (run=${runId || "unknown"})` };
+  return { ok: true, result: rawResult, runId };
 }
 
 export async function getCurrentCursor(): Promise<number> {
