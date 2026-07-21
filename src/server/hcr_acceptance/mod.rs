@@ -179,7 +179,10 @@ fn handle_inner(
     let result_value = harness_response.get("result").unwrap_or(&harness_response);
 
     // 6z. Check for error responses from the coding harness (e.g. MISSING_TARGET_KIND)
-    if result_value.get("error_code").and_then(Value::as_str).is_some()
+    if result_value
+        .get("error_code")
+        .and_then(Value::as_str)
+        .is_some()
         || result_value.get("error").and_then(Value::as_str).is_some()
         || harness_response.get("ok").and_then(Value::as_bool) == Some(false)
     {

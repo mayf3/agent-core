@@ -6,9 +6,11 @@
 use super::capability_routes_support::*;
 use crate::domain::capability_change::*;
 use crate::domain::*;
+use crate::gateway::Gateway;
 use crate::journal::JournalStore;
 use crate::server::capability_routes::handle_decision;
 use anyhow::Result;
+use rusqlite::params;
 use serde_json::json;
 
 // ── Negative longitudinal tests ────────────────────────────────────────────

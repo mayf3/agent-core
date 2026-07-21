@@ -19,7 +19,10 @@ import { startExecuteServer } from "../../connectors/feishu/src/execute-server.j
 import {
   normalizeMessageEvent,
 } from "../../connectors/feishu/src/kernel.js";
-import type { ApprovalConfig } from "../../connectors/feishu/src/approval.js";
+import {
+  handleProposalCardAction,
+  type ApprovalConfig,
+} from "../../connectors/feishu/src/approval.js";
 import { CaptureFeishuTransport } from "./capture-transport.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -211,6 +214,17 @@ export async function simulateFeishuMessage(
  * the simulated callback uses the exact same bindings that the Connector
  * put into the card, catching mismatches.
  *
+ * The simulated event only provides what a real Feishu card callback would
+ * provide (operator.open_id + action.value identifiers). It does NOT
+ * inject TrustedDecisionBody, manifest digests, or other already-trusted
+ * fields — those are read and verified by the production Connector code
+ * (handleProposalCardAction → fetchProposal → assertApprovalBinding).
+ *
+ * Same-human-user flow (developer requests + human approves) is the
+ * legitimate North Star path. Connector validates the real card operator;
+ * Kernel validates final authorization and delivery object consistency.
+ * Agent/Harness cannot self-approve.
+ *
  * @param proposalId - The proposal_id to approve (looks up captured card)
  * @returns The card callback response
  */
@@ -236,15 +250,9 @@ export async function simulateCardApproval(
   console.log(`  approval_id: ${approval_id}`);
   console.log(`  decision_nonce: ${decision_nonce}`);
 
-	  // Build a fake card.action.trigger event with the REAL bindings.
-	  // Use a DIFFERENT operator than the message owner so that the
-	  // Kernel does NOT reject the decision as "self_decision".
-	  const shadow_approver_open_id = "ou_shadow_approver";
-	  const fakeCardEvent = {
-	    event: {
-	      operator: {
-	        open_id: shadow_approver_open_id,
-	      },
+  // Build a fake card.action.trigger event with the REAL bindings.
+  // The operator is the same human Feishu user who sent the original
+  // message — this is the legitimate same-human-user approval path.
   const fakeCardEvent = {
     event: {
       operator: {
@@ -262,53 +270,23 @@ export async function simulateCardApproval(
   };
 
   try {
-    // First, fetch the proposal from the Kernel to get authoritative binding values
-    const proposalUrl = `${config.kernelDecisionApiUrl}/v1/capability-change-proposals/${proposalId}`;
-    const proposalResp = await fetch(proposalUrl, {
-      headers: { Authorization: `Bearer ${config.kernelDecisionToken}` },
-      signal: AbortSignal.timeout(30_000),
-    });
-    const proposalData: any = await proposalResp.json();
-    
-    if (!proposalData?.approval?.approval_id) {
-      console.error(`[shadow] cannot fetch proposal ${proposalId}: ${JSON.stringify(proposalData)}`);
-      return { ok: false, toast: "无法获取 Proposal" };
-    }
-    
-    // Send the decision DIRECTLY to the Kernel, bypassing the Connector's
-    // approvalOperatorError check (which requires the operator to be the owner,
-    // conflicting with the Kernel's self_decision prevention).
-    const kernelUrl = `${config.kernelDecisionApiUrl}/v1/capability-change-proposals/${proposalId}/decision`;
-    const decisionBody = {
-      decision: "approved",
-      approval_id: approval_id,
-      decision_nonce: decision_nonce,
-      principal_id: `feishu:open_id:${config.feishuOwnerOpenId || "ou_shadow_approver"}`,
-      expected_source_snapshot_id: proposalData.approval.expected_source_snapshot_id || "",
-      candidate_digest: proposalData.approval.candidate_digest || "",
-      artifact_digest: proposalData.approval.artifact_digest || "",
-      manifest_digest: proposalData.approval.manifest_digest || "",
-    };
-    
-    const response = await fetch(kernelUrl, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${config.kernelDecisionToken}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(decisionBody),
-      signal: AbortSignal.timeout(60_000),
-    });
-    
-    let data: any = {};
-    try { data = await response.json(); } catch { /* ignore parse errors */ }
-    
-    const succeeded = response.ok && (data.status === "Approved" || data.status === "Activated" || data.status === "ActivationFailed" || data.status === "deployment_pending");
-    console.log(`[shadow] direct decision result: HTTP ${response.status} status=${data.status}`);
-    
+    // Call the production Connector handler. This goes through the full
+    // production approval path:
+    //   handleProposalCardAction
+    //   → parseProposalCardAction
+    //   → approvalOperatorError (validates real card operator == owner)
+    //   → executeProposalDecision
+    //     → fetchProposal (Kernel GET — reads authoritative binding data)
+    //     → assertApprovalBinding (validates approval fields)
+    //     → POST /v1/.../decision to Kernel (with full TrustedDecisionBody)
+    const result = await handleProposalCardAction(approvalConfig, fakeCardEvent);
+
+    const succeeded = result.toast.type === "success";
+    console.log(`[shadow] production handler result: toast=${result.toast.type} content=${result.toast.content}`);
+
     return {
       ok: succeeded,
-      toast: succeeded ? "审批成功" : (data.error || "审批失败"),
+      toast: succeeded ? "审批成功" : (result.toast.content || "审批失败"),
     };
   } catch (error: any) {
     console.error(`[shadow] simulateCardApproval error: ${error.message}`);

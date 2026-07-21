@@ -118,12 +118,14 @@ fn primitive_types_are_preserved() {
 /// Both Harness and Kernel must compute the SAME digest.
 #[test]
 fn acceptance_response_full_fixture_is_canonical() {
-    let dm_ref =
-        "manifest_abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234";
+    let dm_ref = "manifest_abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234";
     let dm_dig = format!("sha256:{}", "6".repeat(64));
     let merged = merged_response(Some(dm_ref), Some(&dm_dig));
     let digest = verify_opaque_payload_digest(&merged).unwrap();
-    assert!(digest.starts_with("sha256:"), "digest must have sha256: prefix");
+    assert!(
+        digest.starts_with("sha256:"),
+        "digest must have sha256: prefix"
+    );
     assert_eq!(digest.len(), 71, "sha256: + 64 hex chars = 71");
     // Two calls must produce identical digest
     let digest2 = verify_opaque_payload_digest(&merged).unwrap();
@@ -213,10 +215,22 @@ fn sort_object_keys_returns_new_value() {
     let original = serde_json::Value::Object(map);
     let sorted = sort_object_keys(&original);
     // Sorted output must have a before z (alphabetical)
-    let sorted_keys: Vec<&str> = sorted.as_object().unwrap().keys().map(|k| k.as_str()).collect();
-    assert_eq!(sorted_keys, vec!["a", "z"], "sorted must have alphabetical order");
+    let sorted_keys: Vec<&str> = sorted
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(|k| k.as_str())
+        .collect();
+    assert_eq!(
+        sorted_keys,
+        vec!["a", "z"],
+        "sorted must have alphabetical order"
+    );
     // The function passed to sort returns a digest — verify it works
     let digest = verify_opaque_payload_digest(&original).unwrap();
-    assert!(digest.starts_with("sha256:"), "digest must have sha256: prefix");
+    assert!(
+        digest.starts_with("sha256:"),
+        "digest must have sha256: prefix"
+    );
     assert_eq!(digest.len(), 71, "sha256: + 64 hex chars = 71");
 }
