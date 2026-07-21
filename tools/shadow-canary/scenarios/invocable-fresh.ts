@@ -68,8 +68,13 @@ export async function runInvocableFreshShadow(): Promise<DevelopmentCycleResult 
   let resultFound = false;
   const deadline = Date.now() + 120_000;
   while (Date.now() < deadline) {
-    const resp = await kernelRequest("GET", "/v1/events/observe?limit=50", null, OBSERVE_TOKEN);
-    if (resp.ok && resp.data?.events) {
+    const resp = await kernelRequest("GET", "/v1/events?limit=50", null, OBSERVE_TOKEN);
+    if (!resp.ok) {
+      console.log(`  Events API returned status ${resp.status}: ${JSON.stringify(resp.data).slice(0, 200)}`);
+      await sleep(2_000);
+      continue;
+    }
+    if (resp.data?.events) {
       for (const evt of resp.data.events) {
         // The calculator returns 42 as AssistantReplyDelivered event payload
         if (evt.event_kind === "AssistantReplyDelivered") {
