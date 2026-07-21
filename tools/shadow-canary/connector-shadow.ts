@@ -283,6 +283,12 @@ export async function simulateCardApproval(
 
     const succeeded = result.toast.type === "success";
     console.log(`[shadow] production handler result: toast=${result.toast.type} content=${result.toast.content}`);
+    if (!succeeded) {
+      // Extract error text from card data (embedded in elements)
+      const cardStr = JSON.stringify(result.card?.data || {});
+      const errorMatch = cardStr.match(/结果[：:][^"\\}]+/);
+      console.log(`[shadow] error detail: ${errorMatch ? errorMatch[0] : JSON.stringify(result).slice(0, 500)}`);
+    }
 
     return {
       ok: succeeded,

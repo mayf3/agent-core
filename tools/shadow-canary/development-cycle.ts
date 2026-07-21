@@ -328,22 +328,29 @@ export async function runDevelopmentCycle(
   console.log(`\n[${phase}-5] Waiting for ${expectDeployment === "success" ? "successful" : "failed"} deployment...`);
 
   if (expectDeployment === "success") {
-    // Wait for the component to appear
+    // Wait for the component to appear (service components) or
+    // for the proposal to reach Activated state (invocable capabilities).
     let componentData: any;
     try {
-      componentData = await waitForComponent(expectedComponentId, 300_000);
-    } catch (err: any) {
-      evidence.fail(`PHASE_${phase}_DEPLOYMENT`, `component ${expectedComponentId} not found: ${err.message}`);
-      return result;
+      componentData = await waitForComponent(expectedComponentId, 60_000);
+    } catch {
+      // Component not found within 60s — may be an invocable capability
+      // (e.g. external.calculator) that doesn't register a component entry.
+      // Fall back to checking proposal status.
+      const activated = await waitForActivated(result.proposalId, 300_000);
+      componentData = activated ? { component: { component_id: expectedComponentId } } : null;
+      if (!componentData) {
+        evidence.fail(`PHASE_${phase}_DEPLOYMENT`, `proposal ${result.proposalId} not Activated`);
+        return result;
+      }
+      console.log(`  Proposal ${result.proposalId} Activated (invocable capability)`);
+      result.activatedManifestDigest = activated?.activated_manifest_digest || result.manifestDigest || "";
     }
-    result.componentId = componentData.component?.component_id;
-    result.componentSnapshotId = componentData.component_snapshot_id;
-    result.version = componentData.component?.version;
-    result.deploymentId = componentData.component?.deployment_id;
-
-    // Wait for the activated manifest digest
-    if (componentData.component?.activated_manifest?.manifest_digest) {
-      result.activatedManifestDigest = componentData.component.activated_manifest.manifest_digest;
+    if (componentData) {
+      result.componentId = componentData.component?.component_id || expectedComponentId;
+      result.componentSnapshotId = componentData.component_snapshot_id || "";
+      result.version = componentData.component?.version || "";
+      result.deploymentId = componentData.component?.deployment_id || "";
     }
 
     evidence.pass(`PHASE_${phase}_DEPLOYMENT`, `component ${expectedComponentId} deployed`, {
@@ -366,6 +373,25 @@ export async function runDevelopmentCycle(
   }
 
   return result;
+}
+
+// ── Activation waiters ────────────────────────────────────────────────────
+
+async function waitForActivated(
+  proposalId: string,
+  timeoutMs: number = 180_000,
+): Promise<any> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const resp = await kernelRequest(
+      "GET", `/v1/capability-change-proposals/${proposalId}`, null, DECISION_TOKEN,
+    );
+    if (resp.ok && resp.data?.status === "Activated") {
+      return resp.data;
+    }
+    await sleep(2_000);
+  }
+  return null;
 }
 
 // ── Activation-failed waiter ──────────────────────────────────────────────
