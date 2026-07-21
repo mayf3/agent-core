@@ -127,7 +127,9 @@ pub fn verify_opaque_payload_digest(merged: &Value) -> Result<String> {
 }
 
 /// Recursively sort all object keys for canonical serialization.
-fn sort_object_keys(value: &Value) -> Value {
+/// `pub(crate)` so test code can verify golden vector alignment
+/// with the coding harness's identical `sort_keys()`.
+pub(crate) fn sort_object_keys(value: &Value) -> Value {
     match value {
         Value::Object(map) => {
             let mut sorted: serde_json::Map<String, Value> = map.iter().map(|(k, v)| {
