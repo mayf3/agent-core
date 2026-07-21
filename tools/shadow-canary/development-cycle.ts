@@ -92,7 +92,7 @@ export async function waitForProposalReady(
     const resp = await kernelRequest(
       "GET", `/v1/capability-change-proposals/${proposalId}`, null, DECISION_TOKEN,
     );
-    if (resp.ok && resp.data?.approval?.status === "PendingApproval") {
+    if (resp.ok && (resp.data?.approval?.status === "Pending" || resp.data?.status === "PendingApproval")) {
       return resp.data;
     }
     await sleep(2_000);
