@@ -322,22 +322,25 @@ fn do_accept(
 }
 
 /// Wrap the acceptance response in an `ExternalReceiptEnvelope`.
-fn ok_envelope_json(
-    acceptance: &AcceptanceResponse,
-    invocation_intent_id: &str,
-    detailed_result: Value,
-) -> Value {
-    // Map the harness outcome to the envelope's ExternalOutcome
-    let outcome = match acceptance.overall_outcome.as_str() {
-        "CandidatePassed" => ExternalOutcome::Passed,
-        _ => ExternalOutcome::Failed,
-    };
-
-    // Compute opaque_payload_digest as SHA-256 of the full AcceptanceResponse JSON.
-    // This binds the detailed acceptance data without the Kernel parsing it.
-    let resp_bytes = serde_json::to_vec(acceptance).unwrap_or_default();
-    use sha2::{Digest, Sha256};
-    let opaque_payload_digest = format!("sha256:{}", hex::encode(Sha256::digest(&resp_bytes)));
+	fn ok_envelope_json(
+	    acceptance: &AcceptanceResponse,
+	    invocation_intent_id: &str,
+	    detailed_result: Value,
+	) -> Value {
+	    // Map the harness outcome to the envelope's ExternalOutcome
+	    let outcome = match acceptance.overall_outcome.as_str() {
+	        "CandidatePassed" => ExternalOutcome::Passed,
+	        _ => ExternalOutcome::Failed,
+	    };
+	
+	    // Compute opaque_payload_digest as SHA-256 of the full AcceptanceResponse JSON
+	    // with CANONICAL (alphabetically sorted) key order. Both the coding harness and
+	    // the Kernel reproduce the same canonical serialization so the digest matches
+	    // regardless of Value construction order vs struct declaration order.
+	    use sha2::{Digest, Sha256};
+	    let resp_value = serde_json::to_value(acceptance).unwrap_or_default();
+	    let canonical_bytes = canonical_json_bytes(&resp_value);
+	    let opaque_payload_digest = format!("sha256:{}", hex::encode(Sha256::digest(&canonical_bytes)));
 
     // Build the envelope
     let env = ExternalReceiptEnvelope {
@@ -486,17 +489,20 @@ fn extract_development_request(args: &Value) -> Option<DevelopmentRequest> {
     use sha2::{Digest, Sha256};
     let computed = format!("sha256:{}", hex::encode(Sha256::digest(req_str.as_bytes())));
     if computed != req_digest {
-        // Digest mismatch — try to extract development_request directly from args as fallback.
-        // This handles encoding normalization issues between serialization boundaries.
-        eprintln!("[extract_development_request] digest mismatch: expected={req_digest} computed={computed}");
-        return args
-            .get("development_request")
-            .and_then(|v| serde_json::from_value::<DevelopmentRequest>(v.clone()).ok());
+        eprintln!("[extract_development_request] FATAL: digest mismatch. No fallback allowed. Must fail closed.");
+        return None;
     }
-    serde_json::from_str::<serde_json::Value>(req_str)
-        .ok()
-        .and_then(|v| v.get("development_request").cloned())
-        .and_then(|v| serde_json::from_value::<DevelopmentRequest>(v).ok())
+    let parsed: serde_json::Value = serde_json::from_str(req_str).ok()?;
+    let dev_req_val = parsed.get("development_request").cloned()?;
+    match serde_json::from_value::<DevelopmentRequest>(dev_req_val.clone()) {
+        Ok(dr) => Some(dr),
+        Err(e) => {
+            eprintln!("[extract_development_request] DevelopmentRequest deserialization failed: {e}");
+            eprintln!("[extract_development_request] development_request value keys: {:?}",
+                dev_req_val.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>()));
+            None
+        }
+    }
 }
 
 fn get_str<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
@@ -505,4 +511,26 @@ fn get_str<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
 
 fn err_json(code: &str) -> Value {
     serde_json::json!({"protocol_version":"external-harness-v1","ok":false,"error_code":code})
+}
+
+/// Canonical JSON serialization with alphabetically sorted keys.
+/// Ensures both coding harness and Kernel compute the same digest
+/// regardless of Value construction order vs struct declaration order.
+fn canonical_json_bytes(value: &Value) -> Vec<u8> {
+    let sorted = sort_keys(value);
+    serde_json::to_vec(&sorted).unwrap_or_default()
+}
+
+fn sort_keys(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut sorted: serde_json::Map<String, Value> = map.iter().map(|(k, v)| {
+                (k.clone(), sort_keys(v))
+            }).collect();
+            sorted.sort_keys();
+            Value::Object(sorted)
+        }
+        Value::Array(arr) => Value::Array(arr.iter().map(sort_keys).collect()),
+        other => other.clone(),
+    }
 }

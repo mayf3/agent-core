@@ -24,12 +24,12 @@ pub fn build_service_manifest(
     component: &Value,
     artifact_digest: &str,
 ) -> Result<ServiceManifest> {
-    let target_kind = component
-        .get("target_kind")
+    let kind = component
+        .get("kind")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow!("MISSING_TARGET_KIND"))?;
-    if target_kind != "HookConsumerService" {
-        return Err(anyhow!("UNEXPECTED_TARGET_KIND: {target_kind}"));
+        .ok_or_else(|| anyhow!("COMPONENT_MISSING_KIND"))?;
+    if kind != "hook_consumer_service" {
+        return Err(anyhow!("UNEXPECTED_KIND: {kind}"));
     }
     let _schema_version = component
         .get("schema_version")
