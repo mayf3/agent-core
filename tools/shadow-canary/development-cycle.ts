@@ -6,6 +6,7 @@ import {
   simulateFeishuMessage,
   simulateCardApproval,
   config,
+  transport as shadowTransport,
 } from "./connector-shadow.ts";
 import type { CapturedCardPayload } from "./capture-transport.ts";
 
@@ -21,10 +22,9 @@ export async function waitForCardCapture(
   proposalId: string,
   timeoutMs: number = 120_000,
 ): Promise<CapturedCardPayload> {
-  const { captureTransport } = await import("./capture-transport.ts");
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const card = captureTransport.cards.get(proposalId);
+    const card = shadowTransport.findCardByProposalId(proposalId);
     if (card) {
       console.log(`  Card captured at t=${Date.now() - (deadline - timeoutMs)}ms`);
       return card;
