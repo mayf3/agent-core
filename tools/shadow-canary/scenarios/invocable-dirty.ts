@@ -1,12 +1,15 @@
 //! InvocableCapability Dirty Shadow — calculator upgrade failure + rollback + invoke verify.
+//!
+//! Phase A: Initial calculator activation + multiply(6,7)=42
+//! Phase B: Upgrade with controlled Activation failure → old calculator still returns 42
+//! Phase C: Successful upgrade → new calculator returns 42
+//! Phase D: Rollback to old version → calculator returns 42 again
 
 import { evidence } from "../evidence.ts";
 import {
   runDevelopmentCycle,
   getCurrentCursor,
-  waitForComponent,
-  waitForComponentCursor,
-  loopbackRequest,
+  invokeCalculator,
   DevelopmentCycleResult,
 } from "../development-cycle.ts";
 import {
@@ -16,19 +19,31 @@ import {
 import { config } from "../connector-shadow.ts";
 
 const DECISION_TOKEN = process.env.AGENT_CORE_CAPABILITY_DECISION_TOKEN || "";
-const IPC_TOKEN = process.env.AGENT_CORE_IPC_TOKEN || "";
 const RUN_ID = process.env.SHADOW_RUN_ID || `shadow_${Date.now()}`;
 const SENDER_OPEN_ID = config.feishuOwnerOpenId || "ou_shadow_owner";
 const COMPONENT_ID = "external.calculator";
 const MESSAGE_TEXT = "开发一个 external.calculator，支持加减乘除";
 
-async function invokeMultiply(): Promise<any> {
-  return kernelRequest("POST", "/v1/invoke", {
-    protocol_version: "process-harness-v1",
-    operation: "external.calculator",
-    component_id: COMPONENT_ID,
-    arguments: { operation: "multiply", a: 6, b: 7 },
-  }, IPC_TOKEN);
+async function verifyCalculator(
+  phase: string,
+  expected: number,
+): Promise<boolean> {
+  const invokeMsgId = `inv_dirty_${phase}_${RUN_ID}`;
+  const calcResult = await invokeCalculator(invokeMsgId, SENDER_OPEN_ID);
+  if (!calcResult.ok) {
+    evidence.fail(`PHASE_${phase}_INVOKE`, `invoke failed: ${calcResult.error}`);
+    return false;
+  }
+  const result = calcResult.result!;
+  if (result !== expected) {
+    evidence.fail(`PHASE_${phase}_INVOKE`, `calculator returned ${result}, expected ${expected}`);
+    return false;
+  }
+  evidence.pass(`PHASE_${phase}_INVOKE`, `Phase ${phase}: multiply(6,7)=${result}`, {
+    invoke_result: result,
+    invoke_run_id: calcResult.runId,
+  });
+  return true;
 }
 
 export async function runInvocableDirtyShadow(): Promise<void> {
@@ -54,16 +69,7 @@ export async function runInvocableDirtyShadow(): Promise<void> {
   oldManifestDigest = resultA.activatedManifestDigest || resultA.manifestDigest || "";
 
   // Verify multiply(6,7)=42 on old version
-  const invokeA = await invokeMultiply();
-  if (invokeA.ok && invokeA.data?.result === 42) {
-    evidence.pass("PHASE_A_INVOKE", `Phase A: multiply(6,7)=42 (before upgrade)`, {
-      invoke_result: invokeA.data.result,
-      manifest_digest: oldManifestDigest,
-    });
-  } else {
-    evidence.fail("PHASE_A_INVOKE", `Phase A: multiply failed: ${JSON.stringify(invokeA)}`, invokeA);
-    return;
-  }
+  if (!(await verifyCalculator("A", 42))) return;
 
   // ═══════════════════════════════════════════════════════════════
   // Phase B: Upgrade with Activation failure
@@ -80,23 +86,13 @@ export async function runInvocableDirtyShadow(): Promise<void> {
   failedManifestDigest = resultB.manifestDigest || "";
 
   // Verify old capability still works after failure
-  const invokeB = await invokeMultiply();
-  if (invokeB.ok && invokeB.data?.result === 42) {
-    evidence.pass("PHASE_B_INVOKE", `Phase B: multiply(6,7)=42 (after failure)`, {
-      invoke_result: invokeB.data.result,
-      manifest_digest: oldManifestDigest,
-    });
-  } else {
-    evidence.fail("PHASE_B_INVOKE", `Phase B: multiply failed: ${JSON.stringify(invokeB)}`, invokeB);
-    return;
-  }
+  if (!(await verifyCalculator("B", 42))) return;
 
   evidence.write("invocable-dirty-phase-b.json", {
     old_manifest_digest: oldManifestDigest,
     failed_manifest_digest: failedManifestDigest,
     failed_receipt_id: resultB.failedReceiptId,
-    registry_after_failure: { manifest_digest: oldManifestDigest },
-    invoke_after_failure: { result: 42 },
+    invoke_after_failure: 42,
   });
 
   // ═══════════════════════════════════════════════════════════════
@@ -114,25 +110,13 @@ export async function runInvocableDirtyShadow(): Promise<void> {
   successManifestDigest = resultC.activatedManifestDigest || resultC.manifestDigest || "";
 
   // Verify multiply(6,7)=42 on new version
-  const invokeC = await invokeMultiply();
-  if (invokeC.ok && invokeC.data?.result === 42) {
-    evidence.pass("PHASE_C_INVOKE", `Phase C: multiply(6,7)=42 (after success)`, {
-      invoke_result: invokeC.data.result,
-      manifest_digest: successManifestDigest,
-    });
-  } else {
-    evidence.fail("PHASE_C_INVOKE", `Phase C: multiply failed: ${JSON.stringify(invokeC)}`, invokeC);
-    return;
-  }
+  if (!(await verifyCalculator("C", 42))) return;
 
   // ═══════════════════════════════════════════════════════════════
   // Phase D: Rollback to old version
   // ═══════════════════════════════════════════════════════════════
   console.log(`\n--- Phase D: Rollback ---`);
-  // Trigger rollback by activating a new proposal with the old manifest
-  // (In practice, this goes through the disable/rollback path)
-  // For the shadow test, we simulate rollback via disable + re-propose
-  
+
   // Disable the current (C) version
   if (resultC.componentSnapshotId && resultC.deploymentId) {
     const disableBody = {
@@ -147,11 +131,9 @@ export async function runInvocableDirtyShadow(): Promise<void> {
     }
   }
 
-  // Re-activate the old manifest via a new development cycle
+  // Re-activate via a new development cycle
   const phaseDStart = await getCurrentCursor();
   const msgIdD = `inv_dirty_D_${RUN_ID}`;
-  // For rollback we need a fresh development request pointing to the old candidate
-  // Re-use same message text — the generator creates a deterministic candidate
   const resultD = await runDevelopmentCycle(
     "D", MESSAGE_TEXT, msgIdD, SENDER_OPEN_ID,
     phaseDStart, COMPONENT_ID, "success",
@@ -160,23 +142,13 @@ export async function runInvocableDirtyShadow(): Promise<void> {
   rollbackManifestDigest = resultD.activatedManifestDigest || "";
 
   // Verify multiply(6,7)=42 after rollback
-  const invokeD = await invokeMultiply();
-  if (invokeD.ok && invokeD.data?.result === 42) {
-    evidence.pass("PHASE_D_INVOKE", `Phase D: multiply(6,7)=42 (after rollback)`, {
-      invoke_result: invokeD.data.result,
-      manifest_digest: rollbackManifestDigest,
-    });
-  } else {
-    evidence.fail("PHASE_D_INVOKE", `Phase D: multiply failed: ${JSON.stringify(invokeD)}`, invokeD);
-    return;
-  }
+  if (!(await verifyCalculator("D", 42))) return;
 
   evidence.write("invocable-dirty-summary.json", {
     old_manifest_digest: oldManifestDigest,
     failed_manifest_digest: failedManifestDigest,
     successful_manifest_digest: successManifestDigest,
     rollback_manifest_digest: rollbackManifestDigest,
-    registry_after_failure: { manifest_digest: oldManifestDigest },
     invoke_after_failure: 42,
     invoke_after_success: 42,
     invoke_after_rollback: 42,
