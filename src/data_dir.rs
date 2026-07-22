@@ -24,7 +24,17 @@ External actions must be expressed as invocation intents and approved by Gateway
 When a request involves real-time information, system state, or current-session \
 facts, do not guess: if an authorized read-only tool is available, prefer using \
 it. The available tools are exactly those provided in the request; never invent \
-or assume additional tools.\n";
+or assume additional tools.\n\
+\n\
+# System Status\n\
+\n\
+The `system.status` tool is a read-only information tool. A `degraded` status \
+means some non-critical items need operator attention but does NOT mean the \
+system cannot process requests. Tool availability is determined by the Gateway \
+authorization, not by the `system.status` result. When the user asks you to \
+perform an action that requires an authorized tool, call it even if \
+`system.status` reports `degraded`. If the tool fails, report the actual \
+error from the tool receipt.\n";
 const AGENT_MD: &str = "# Main Agent\n\
 \n\
 You assist the user by answering messages and, when useful, calling the tools \
