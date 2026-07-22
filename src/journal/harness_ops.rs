@@ -3,13 +3,14 @@
 
 use crate::domain::*;
 use crate::harness::manifest::HarnessManifest;
+use crate::registry::snapshot::{BindingKind, OperationSpec, Risk};
 use crate::registry::store::builtin_specs;
-use crate::registry::snapshot::BindingKind;
 
 use anyhow::{anyhow, bail, Result};
 use chrono::Utc;
 use rusqlite::{params, Transaction};
-use serde_json::Value;
+use serde_json::{json, Value};
+use std::collections::HashMap;
 
 impl super::JournalStore {
     /// Register a new harness manifest. Idempotent: same content produces the
@@ -493,10 +494,12 @@ impl super::JournalStore {
     ///
     /// Iterates the builtin specification catalog and registers a
     /// `HarnessManifest` for each operation whose `binding_kind` is
-    /// `External`.  These manifests are REQUIRED for the runtime tool
-    /// dispatch path — without them, model-initiated tool calls to
-    /// operations like `external.coding_task_submit` fail with
-    /// `external_harness_manifest_not_found`.
+    /// `External`.  Returns a map of `operation_name → manifest_id`.
+    ///
+    /// The caller MUST use these manifest_ids to update the registry
+    /// snapshot's binding keys (see `bind_external_manifest_ids_to_snapshot`),
+    /// otherwise dispatch will fail because `dispatch_builtin_binding`
+    /// uses `binding_key` as the `manifest_id` to load the harness manifest.
     ///
     /// # Idempotency
     ///
@@ -513,8 +516,9 @@ impl super::JournalStore {
         &self,
         coding_harness_api_url: &str,
         coding_harness_artifact_digest: &str,
-    ) -> Result<()> {
+    ) -> Result<HashMap<String, String>> {
         let specs = builtin_specs();
+        let mut result = HashMap::new();
         for spec in &specs {
             if spec.binding_kind != BindingKind::External {
                 continue;
@@ -539,8 +543,75 @@ impl super::JournalStore {
             manifest.manifest_id = computed_id;
 
             // register_harness_manifest handles idempotency and drift.
-            let _mid = self.register_harness_manifest(&manifest)?;
+            let mid = self.register_harness_manifest(&manifest)?;
+            result.insert(spec.name.clone(), mid);
         }
+        Ok(result)
+    }
+
+    /// Create and activate a new registry snapshot whose External operation
+    /// binding keys are updated to match the actual content-addressed
+    /// harness manifest IDs.
+    ///
+    /// This must be called AFTER `bootstrap_builtin_external_manifests` so
+    /// that the binding_key in the active registry snapshot points to a
+    /// real `HarnessManifest` row that `dispatch_builtin_binding` can load.
+    ///
+    /// # Identity invariant
+    ///
+    /// ```text
+    /// registry_snapshot_operations.binding_key
+    ///   == harness_manifests.manifest_id
+    /// ```
+    ///
+    /// The old snapshot is never modified (registry snapshots are immutable).
+    /// A new snapshot is created with corrected bindings and atomically
+    /// activated via CAS.
+    pub fn bind_external_manifest_ids_to_snapshot(
+        &self,
+        manifest_map: &HashMap<String, String>,
+    ) -> Result<()> {
+        // Load the current active snapshot.
+        let current_snapshot_id = self.current_registry_snapshot_id()?;
+        let current = self.load_registry_snapshot(&current_snapshot_id)?;
+
+        // Build new spec list with updated External binding keys.
+        let mut new_specs: Vec<OperationSpec> = current
+            .operations
+            .iter()
+            .map(|op| {
+                let mut spec = op.clone();
+                if spec.binding_kind == BindingKind::External {
+                    if let Some(manifest_id) = manifest_map.get(&spec.name) {
+                        spec.binding_key = manifest_id.clone();
+                    }
+                }
+                spec
+            })
+            .collect();
+
+        // If nothing changed, skip.
+        if new_specs == current.operations {
+            return Ok(());
+        }
+
+        // Sort for deterministic snapshot ID.
+        new_specs.sort_by(|a, b| a.name.cmp(&b.name));
+        let new_snapshot = self.create_registry_snapshot(new_specs)?;
+        let new_id = new_snapshot.snapshot_id.clone();
+
+        // Activate atomically with CAS.
+        let decision_id = format!(
+            "bind_external_manifest_ids:{}:{}",
+            current_snapshot_id.get(..16).unwrap_or(&current_snapshot_id),
+            new_id.get(..16).unwrap_or(&new_id)
+        );
+        self.activate_snapshot_transactional(
+            &current_snapshot_id,
+            &new_id,
+            &decision_id,
+            "external_manifest_binding",
+        )?;
         Ok(())
     }
 }

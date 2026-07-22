@@ -69,10 +69,15 @@ pub fn serve(config: KernelConfig) -> Result<()> {
              when external operation bindings are active"
         );
     }
-    journal.bootstrap_builtin_external_manifests(
+    let manifest_map = journal.bootstrap_builtin_external_manifests(
         &config.coding_harness_api_url,
         &config.coding_harness_artifact_digest,
     )?;
+
+    // Bind the actual content-addressed manifest IDs into the registry
+    // snapshot so that dispatch_builtin_binding can load the manifest
+    // using the operation's binding_key as the manifest_id.
+    journal.bind_external_manifest_ids_to_snapshot(&manifest_map)?;
 
     let recovered = journal.recover_unknown_invocations()?;
     if recovered > 0 {
