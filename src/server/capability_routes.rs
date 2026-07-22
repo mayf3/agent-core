@@ -99,11 +99,14 @@ pub fn map_capability_result(
     match result {
         Ok(v) => Ok((200, v)),
         Err(e) => {
+            let detail = format!("{:#}", e);
             if let Some(cap_err) = e.downcast_ref::<CapabilityRouteError>() {
+                eprintln!("[capability_error] safe={} detail={}", cap_err.safe_error(), detail);
                 let status = cap_err.http_status();
                 let body = serde_json::json!({"ok": false, "error": cap_err.safe_error()});
                 Ok((status, body))
             } else {
+                eprintln!("[capability_error] internal detail={}", detail);
                 Ok((
                     500,
                     serde_json::json!({"ok": false, "error": "internal_error"}),
