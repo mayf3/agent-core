@@ -72,11 +72,11 @@ export async function runInvocableDirtyShadow(): Promise<void> {
   // Verify multiply(6,7)=42 on old version
   if (!(await verifyCalculator("A", 42))) return;
 
-  // Allow registry to stabilize after Phase A activation before sending
-  // the next development request. Without this delay, the next message's
-  // run may capture the pre-activation snapshot, causing
-  // SOURCE_REGISTRY_SNAPSHOT_CHANGED at decision time.
-  await sleep(3_000);
+  // Allow registry and worker queue to stabilize after Phase A activation.
+  // The coding harness worker may capture the registry snapshot before
+  // the activation commits, causing a mismatch between the HCR acceptance
+  // run's snapshot and the proposal's post-activation snapshot.
+  await sleep(5_000);
 
   // ═══════════════════════════════════════════════════════════════
   // Phase B: Upgrade with expected decision rejection
@@ -110,10 +110,8 @@ export async function runInvocableDirtyShadow(): Promise<void> {
     invoke_after_failure: 42,
   });
 
-  // Allow registry to stabilize after Phase B (even though callback_failure
-  // doesn't change the registry, the next message's run must capture the
-  // post-Phase-A snapshot).
-  await sleep(3_000);
+  // Allow registry to stabilize before Phase C.
+  await sleep(5_000);
 
   // ═══════════════════════════════════════════════════════════════
   // Phase C: Successful activation
