@@ -92,7 +92,7 @@ pub struct KernelConfig {
     /// Maximum number of tool-call rounds per Run (each round is one LLM
     /// invocation that returns one or more tool calls). When the model
     /// reaches this limit without producing a final reply, the Run completes
-    /// with ToolBudgetExhausted. Range 1–64, default 12. Configured via
+    /// with ToolBudgetExhausted. Range 1–128, default 12. Configured via
     /// AGENT_CORE_MAX_TOOL_ROUNDS. A value outside the range causes a startup
     /// error (process exits with diagnostic).
     pub max_tool_rounds: usize,
@@ -370,12 +370,12 @@ fn env_max_tool_rounds(key: &str, fallback: usize) -> usize {
     let parsed: usize = match raw.parse() {
         Ok(n) => n,
         Err(_) => {
-            eprintln!("invalid_config: {key} must be an integer between 1 and 64, got {raw:?}");
+            eprintln!("invalid_config: {key} must be an integer between 1 and 128, got {raw:?}");
             std::process::exit(1);
         }
     };
-    if parsed < 1 || parsed > 64 {
-        eprintln!("invalid_config: {key} must be between 1 and 64, got {parsed}");
+    if parsed < 1 || parsed > 128 {
+        eprintln!("invalid_config: {key} must be between 1 and 128, got {parsed}");
         std::process::exit(1);
     }
     parsed
