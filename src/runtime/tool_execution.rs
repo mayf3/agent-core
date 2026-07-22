@@ -207,7 +207,23 @@ pub(crate) fn dispatch_builtin_binding(
                         .get("error_category")
                         .and_then(|v: &serde_json::Value| v.as_str())
                         .unwrap_or("harness_failed");
-                    format!("status: execution_failed\nerror_category: {cat}")
+                    let mut text = format!("status: execution_failed\nerror_category: {cat}");
+                    if let Some(detail_code) = receipt
+                        .output
+                        .get("detail_code")
+                        .and_then(serde_json::Value::as_str)
+                    {
+                        text.push_str("\ndetail_code: ");
+                        text.push_str(detail_code);
+                    }
+                    if let Some(http_code) = receipt
+                        .output
+                        .get("http_code")
+                        .and_then(serde_json::Value::as_u64)
+                    {
+                        text.push_str(&format!("\nhttp_code: {http_code}"));
+                    }
+                    text
                 }
                 ReceiptStatus::Unknown => {
                     "status: execution_failed\nerror_category: unknown_outcome".to_string()
