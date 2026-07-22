@@ -2,12 +2,14 @@
 //! All activation transactions use CAS (compare-and-swap) to prevent races.
 
 use crate::domain::*;
-
 use crate::harness::manifest::HarnessManifest;
+use crate::registry::store::builtin_specs;
+use crate::registry::snapshot::BindingKind;
 
 use anyhow::{anyhow, bail, Result};
 use chrono::Utc;
 use rusqlite::{params, Transaction};
+use serde_json::Value;
 
 impl super::JournalStore {
     /// Register a new harness manifest. Idempotent: same content produces the
@@ -485,5 +487,60 @@ impl super::JournalStore {
             )
             .ok();
         Ok(result)
+    }
+
+    /// Bootstrap harness manifests for builtin external operations.
+    ///
+    /// Iterates the builtin specification catalog and registers a
+    /// `HarnessManifest` for each operation whose `binding_kind` is
+    /// `External`.  These manifests are REQUIRED for the runtime tool
+    /// dispatch path — without them, model-initiated tool calls to
+    /// operations like `external.coding_task_submit` fail with
+    /// `external_harness_manifest_not_found`.
+    ///
+    /// # Idempotency
+    ///
+    /// Already-registered manifests whose canonical content matches are
+    /// accepted (safe replay).  Manifests with the same manifest_id but
+    /// different content are rejected as a drift/conflict.
+    ///
+    /// # Fail-closed
+    ///
+    /// If `coding_harness_api_url` or `coding_harness_artifact_digest`
+    /// are empty, no manifests are registered.  The caller (serve) should
+    /// verify these are configured when external bindings are active.
+    pub fn bootstrap_builtin_external_manifests(
+        &self,
+        coding_harness_api_url: &str,
+        coding_harness_artifact_digest: &str,
+    ) -> Result<()> {
+        let specs = builtin_specs();
+        for spec in &specs {
+            if spec.binding_kind != BindingKind::External {
+                continue;
+            }
+            let created_at = Utc::now();
+            let manifest = HarnessManifest {
+                manifest_id: String::new(), // will be computed
+                harness_id: "coding-harness-v0".into(),
+                artifact_digest: coding_harness_artifact_digest.to_string(),
+                protocol_version: "external-harness-v1".into(),
+                endpoint: coding_harness_api_url.to_string(),
+                operation_name: spec.name.clone(),
+                description: spec.description.clone(),
+                input_schema: spec.parameters.clone(),
+                output_schema: serde_json::json!({"type": "object"}),
+                idempotent: spec.idempotent,
+                created_at,
+            };
+            // Compute manifest_id from canonical content.
+            let computed_id = manifest.compute_manifest_id()?;
+            let mut manifest = manifest;
+            manifest.manifest_id = computed_id;
+
+            // register_harness_manifest handles idempotency and drift.
+            let _mid = self.register_harness_manifest(&manifest)?;
+        }
+        Ok(())
     }
 }

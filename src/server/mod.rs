@@ -55,6 +55,25 @@ pub fn serve(config: KernelConfig) -> Result<()> {
     let journal = Arc::new(JournalStore::open(&config.db_path)?);
     // Initialize the registry (creates baseline snapshot, sets current,
     journal.initialize_registry()?;
+
+    // Bootstrap harness manifests for builtin External operations.
+    // The Coding Harness API URL and artifact digest are required when
+    // external bindings (external.coding_task_submit, etc.) are active.
+    // Without them, model-initiated tool calls to these operations fail.
+    if config.coding_harness_api_url.is_empty()
+        || config.coding_harness_artifact_digest.is_empty()
+    {
+        bail!(
+            "AGENT_CORE_CODING_HARNESS_API_URL and \
+             AGENT_CORE_CODING_HARNESS_ARTIFACT_DIGEST are required \
+             when external operation bindings are active"
+        );
+    }
+    journal.bootstrap_builtin_external_manifests(
+        &config.coding_harness_api_url,
+        &config.coding_harness_artifact_digest,
+    )?;
+
     let recovered = journal.recover_unknown_invocations()?;
     if recovered > 0 {
         println!("agent-core recovered {recovered} unknown invocation(s)");
