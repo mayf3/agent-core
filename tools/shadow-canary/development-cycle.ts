@@ -227,7 +227,7 @@ async function waitForCalculatorResult(
 ): Promise<number | null> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const resp = await kernelRequest("GET", `/v1/events?limit=100`, null, OBSERVE_TOKEN);
+    const resp = await kernelRequest("GET", `/v1/events?limit=500`, null, OBSERVE_TOKEN);
     if (!resp.ok || !resp.data?.events) {
       await sleep(1_000);
       continue;
