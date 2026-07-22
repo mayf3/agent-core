@@ -490,35 +490,20 @@ impl super::JournalStore {
         Ok(result)
     }
 
-    /// Bootstrap harness manifests for builtin external operations.
-    ///
-    /// Iterates the builtin specification catalog and registers a
-    /// `HarnessManifest` for each operation whose `binding_kind` is
-    /// `External`.  Returns a map of `operation_name → manifest_id`.
-    ///
-    /// The caller MUST use these manifest_ids to update the registry
-    /// snapshot's binding keys (see `bind_external_manifest_ids_to_snapshot`),
-    /// otherwise dispatch will fail because `dispatch_builtin_binding`
-    /// uses `binding_key` as the `manifest_id` to load the harness manifest.
-    ///
-    /// # Idempotency
-    ///
-    /// Already-registered manifests whose canonical content matches are
-    /// accepted (safe replay).  Manifests with the same manifest_id but
-    /// different content are rejected as a drift/conflict.
-    ///
-    /// # Fail-closed
-    ///
-    /// If `coding_harness_api_url` or `coding_harness_artifact_digest`
-    /// are empty, no manifests are registered.  The caller (serve) should
-    /// verify these are configured when external bindings are active.
+    /// Bootstrap content-addressed manifests for builtin External operations.
+    /// The caller must bind the returned IDs into the active snapshot.
+    /// A changed builtin spec appends a manifest while preserving the old row
+    /// for historical snapshots and Runs. Only manifests constructed from the
+    /// trusted `builtin_specs()` catalog use this replacement path; public
+    /// registration still rejects duplicate operation names. Configuration is
+    /// validated by the caller before external bindings are activated.
     pub fn bootstrap_builtin_external_manifests(
         &self,
         coding_harness_api_url: &str,
         coding_harness_artifact_digest: &str,
     ) -> Result<HashMap<String, String>> {
         let specs = builtin_specs();
-        let mut result = HashMap::new();
+        let mut manifests = Vec::new();
         for spec in &specs {
             if spec.binding_kind != BindingKind::External {
                 continue;
@@ -541,11 +526,24 @@ impl super::JournalStore {
             let computed_id = manifest.compute_manifest_id()?;
             let mut manifest = manifest;
             manifest.manifest_id = computed_id;
-
-            // register_harness_manifest handles idempotency and drift.
-            let mid = self.register_harness_manifest(&manifest)?;
-            result.insert(spec.name.clone(), mid);
+            manifest.validate_all()?;
+            manifests.push((spec.name.clone(), manifest));
         }
+
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow!("journal mutex poisoned"))?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let mut result = HashMap::new();
+        for (operation_name, manifest) in manifests {
+            // Builtin specs are trusted bootstrap inputs. The replacement path
+            // permits a new content-addressed manifest for an existing builtin
+            // operation while preserving the old immutable row.
+            let mid = self.register_harness_manifest_replace_tx(&tx, &manifest)?;
+            result.insert(operation_name, mid);
+        }
+        tx.commit()?;
         Ok(result)
     }
 
@@ -603,7 +601,9 @@ impl super::JournalStore {
         // Activate atomically with CAS.
         let decision_id = format!(
             "bind_external_manifest_ids:{}:{}",
-            current_snapshot_id.get(..16).unwrap_or(&current_snapshot_id),
+            current_snapshot_id
+                .get(..16)
+                .unwrap_or(&current_snapshot_id),
             new_id.get(..16).unwrap_or(&new_id)
         );
         self.activate_snapshot_transactional(
