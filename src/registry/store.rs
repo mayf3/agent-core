@@ -78,7 +78,10 @@ pub fn builtin_specs() -> Vec<OperationSpec> {
                             "source_subject": {"type": "string"},
                             "source_scope": {"type": "string"},
                             "source_message_id": {"type": "string"},
-                            "target_kind": {"type": "string", "enum": [
+                            "target_kind": {
+                                "type": "string",
+                                "description": "Selects the catalogued component and deployment profiles. For invocable_capability use build_profile=invocable-capability-v0 and deployment_profile=capability-host-v0. For every other target_kind use deployment_profile=managed-service-v0; build_profile mappings are hook_consumer_service=hook-consumer-service-v0, context_provider=context-provider-v0, context_transformer=context-transformer-v0, scheduled_worker or scheduler_service=scheduled-worker-v0, ingress_router or connector_extension=router-service-v0, and multi_run_orchestrator=multi-run-orchestrator-v0.",
+                                "enum": [
                                 "invocable_capability", "hook_consumer_service", "context_provider",
                                 "context_transformer", "scheduled_worker", "scheduler_service",
                                 "ingress_router", "multi_run_orchestrator", "connector_extension"
@@ -87,8 +90,14 @@ pub fn builtin_specs() -> Vec<OperationSpec> {
                             "requirements": {"type": "array", "items": {"type": "string"}},
                             "required_contracts": {"type": "array", "items": {"type": "string"}},
                             "requested_permissions": {"type": "array", "items": {"type": "string"}},
-                            "build_profile": {"type": "string"},
-                            "deployment_profile": {"type": "string"},
+                            "build_profile": {
+                                "type": "string",
+                                "description": "Must match target_kind exactly: invocable-capability-v0, hook-consumer-service-v0, context-provider-v0, context-transformer-v0, scheduled-worker-v0, router-service-v0, or multi-run-orchestrator-v0 according to the target_kind mapping."
+                            },
+                            "deployment_profile": {
+                                "type": "string",
+                                "description": "Must be capability-host-v0 for invocable_capability; must be managed-service-v0 for every other target_kind."
+                            },
                             "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
                             "idempotency_key": {"type": "string"},
                             "contract_catalog_version": {"type": "string"}
@@ -452,6 +461,40 @@ mod tests {
                 .pointer("/additionalProperties")
                 .and_then(|v| v.as_bool()),
             Some(false)
+        );
+    }
+
+    #[test]
+    fn coding_task_submit_exposes_profile_mapping_to_llm() {
+        let submit = builtin_specs()
+            .into_iter()
+            .find(|spec| spec.name == crate::domain::operation::external::TASK_SUBMIT)
+            .unwrap();
+        let request = submit
+            .parameters
+            .pointer("/properties/development_request")
+            .unwrap();
+
+        let target_kind_description = request
+            .pointer("/properties/target_kind/description")
+            .and_then(|value| value.as_str())
+            .unwrap();
+        assert!(target_kind_description.contains(
+            "invocable_capability use build_profile=invocable-capability-v0 and deployment_profile=capability-host-v0"
+        ));
+        assert!(target_kind_description.contains("hook_consumer_service=hook-consumer-service-v0"));
+
+        assert_eq!(
+            request
+                .pointer("/properties/build_profile/description")
+                .and_then(|value| value.as_str()),
+            Some("Must match target_kind exactly: invocable-capability-v0, hook-consumer-service-v0, context-provider-v0, context-transformer-v0, scheduled-worker-v0, router-service-v0, or multi-run-orchestrator-v0 according to the target_kind mapping.")
+        );
+        assert_eq!(
+            request
+                .pointer("/properties/deployment_profile/description")
+                .and_then(|value| value.as_str()),
+            Some("Must be capability-host-v0 for invocable_capability; must be managed-service-v0 for every other target_kind.")
         );
     }
 
