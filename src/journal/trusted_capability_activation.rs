@@ -330,7 +330,6 @@ pub(super) fn validate_pending(
         |r| r.get(0),
     )?;
     if active != i.expected_source_snapshot_id {
-        eprintln!("[VALIDATE_PENDING_MISMATCH] active={} expected={}", active, i.expected_source_snapshot_id);
         bail!("SOURCE_REGISTRY_SNAPSHOT_CHANGED");
     }
     Ok(())
@@ -338,12 +337,10 @@ pub(super) fn validate_pending(
 
 pub(super) fn validate_decidable(b: &Binding) -> Result<()> {
     if b.approval_status != "Pending" || b.proposal_status != "PendingApproval" {
-        eprintln!("[VALIDATE_DECIDABLE_FAIL] approval_status={} proposal_status={}", b.approval_status, b.proposal_status);
         bail!("APPROVAL_NOT_PENDING");
     }
     let expires = DateTime::parse_from_rfc3339(&b.approval_expires_at)?.with_timezone(&Utc);
     if Utc::now() >= expires {
-        eprintln!("[VALIDATE_DECIDABLE_EXPIRED] expires_at={}", b.approval_expires_at);
         bail!("APPROVAL_EXPIRED");
     }
     Ok(())
