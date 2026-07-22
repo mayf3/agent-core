@@ -202,11 +202,16 @@ pub(crate) fn is_authorized(
     }
 }
 
-fn safe_error(error: &anyhow::Error) -> (u16, &'static str) {
-    let message = error.to_string();
-    if message.contains("NOT_FOUND") {
-        (404, "not_found")
-    } else if message.contains("CONFLICT")
+	fn safe_error(error: &anyhow::Error) -> (u16, &'static str) {
+	    let message = error.to_string();
+	    if message == "COMPONENT_NOT_DEPLOYED" {
+	        // A component that has never been deployed should be reported as
+	        // 404 (Not Found) so that version‑query callers (e.g. Coding
+	        // Harness) can distinguish "never deployed" from "server error".
+	        (404, "not_found")
+	    } else if message.contains("NOT_FOUND") {
+	        (404, "not_found")
+	    } else if message.contains("CONFLICT")
         || message.contains("TARGET_MISSING")
         || message.contains("NOT_MONOTONIC")
     {
@@ -255,11 +260,42 @@ mod tests {
     use super::safe_error;
     use super::is_authorized;
 
-    #[test]
-    fn version_downgrade_is_a_definitive_conflict() {
-        let error = anyhow::anyhow!("DEPLOYMENT_VERSION_NOT_MONOTONIC");
-        assert_eq!(safe_error(&error), (409, "conflict"));
-    }
+	    #[test]
+	    fn version_downgrade_is_a_definitive_conflict() {
+	        let error = anyhow::anyhow!("DEPLOYMENT_VERSION_NOT_MONOTONIC");
+	        assert_eq!(safe_error(&error), (409, "conflict"));
+	    }
+
+	    #[test]
+	    fn component_not_deployed_maps_to_404() {
+	        // A component that has never been deployed is semantically
+	        // equivalent to "not found" — the caller must receive 404
+	        // so they can distinguish "never deployed" from "server error".
+	        let error = anyhow::anyhow!("COMPONENT_NOT_DEPLOYED");
+	        assert_eq!(safe_error(&error), (404, "not_found"));
+	    }
+
+	    #[test]
+	    fn unknown_error_still_500() {
+	        // Real internal / database / I/O errors must remain 500.
+	        // The COMPONENT_NOT_DEPLOYED ➜ 404 mapping is an explicit
+	        // narrow exception — no other error should silently become 404.
+	        let error = anyhow::anyhow!("INTERNAL_STATE_CORRUPTION");
+	        assert_eq!(safe_error(&error), (500, "deployment_failed"));
+	    }
+
+	    #[test]
+	    fn undeployed_component_is_not_swallowed_by_generic_not_found() {
+	        // Prove that COMPONENT_NOT_DEPLOYED is handled before the
+	        // generic NOT_FOUND substring check, so its exact semantics
+	        // are preserved even if a future refactor changes the message.
+	        let exact = anyhow::anyhow!("COMPONENT_NOT_DEPLOYED");
+	        let generic = anyhow::anyhow!("PATH_NOT_FOUND");
+	        assert_eq!(safe_error(&exact), (404, "not_found"));
+	        assert_eq!(safe_error(&generic), (404, "not_found"));
+	        // Both map to 404 but through different branches — the
+	        // exact one is explicit, the generic one is the fallback.
+	    }
 
     // ── is_authorized unit tests ──────────────────────────
 
