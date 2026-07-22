@@ -39,6 +39,20 @@ pub(crate) fn handle(
     body: &Value,
     expected_agent: &AgentId,
 ) -> Result<Value> {
+    let result = handle_inner(journal, store, proposal_id, body, expected_agent);
+    if let Err(ref e) = result {
+        eprintln!("[CALCULATOR_HANDLE_ERROR] {} proposal_id={}", e, proposal_id);
+    }
+    result
+}
+
+fn handle_inner(
+    journal: &JournalStore,
+    store: &ContentStore,
+    proposal_id: &str,
+    body: &Value,
+    expected_agent: &AgentId,
+) -> Result<Value> {
     let input = parse_input(body)?;
     let identity = decision_identity(proposal_id, &input)?;
     let approval = journal
