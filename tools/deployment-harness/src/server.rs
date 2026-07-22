@@ -21,6 +21,7 @@ pub fn serve(config: DeploymentHarnessConfig) -> Result<()> {
 pub fn serve_listener(listener: TcpListener, config: DeploymentHarnessConfig) -> Result<()> {
     config.validate()?;
     let config = Arc::new(config);
+    manager::start_health_monitor(Arc::clone(&config));
     for stream in listener.incoming() {
         let mut stream = stream?;
         let config = Arc::clone(&config);
