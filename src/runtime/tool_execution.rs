@@ -100,12 +100,16 @@ fn rejected_result(
 pub(crate) enum ToolDispatchError {
     RetiredBuiltinOperation(String),
     UnknownBuiltinBinding(String),
+    HarnessManifestNotFound(String),
+    HarnessManifestLoadFailed(String),
 }
 impl ToolDispatchError {
     pub fn error_category(&self) -> &'static str {
         match self {
             Self::RetiredBuiltinOperation(_) => "retired_builtin_operation",
             Self::UnknownBuiltinBinding(_) => "registry_binding_invalid",
+            Self::HarnessManifestNotFound(_) => "external_manifest_not_found",
+            Self::HarnessManifestLoadFailed(_) => "external_manifest_load_failed",
         }
     }
 }
@@ -114,6 +118,10 @@ impl std::fmt::Display for ToolDispatchError {
         match self {
             Self::RetiredBuiltinOperation(key) => write!(f, "retired_builtin_operation: {key}"),
             Self::UnknownBuiltinBinding(key) => write!(f, "registry_binding_invalid: {key}"),
+            Self::HarnessManifestNotFound(id) => write!(f, "external_manifest_not_found: {id}"),
+            Self::HarnessManifestLoadFailed(msg) => {
+                write!(f, "external_manifest_load_failed: {msg}")
+            }
         }
     }
 }
@@ -173,11 +181,11 @@ pub(crate) fn dispatch_builtin_binding(
                             registry_snapshot_id,
                         )
                     }
-                    Ok(None) => Err(anyhow::anyhow!(
-                        "external_harness_manifest_not_found: {manifest_id}"
+                    Ok(None) => Err(anyhow::Error::from(
+                        ToolDispatchError::HarnessManifestNotFound(manifest_id.to_string()),
                     )),
-                    Err(e) => Err(anyhow::anyhow!(
-                        "external_harness_manifest_load_failed: {e}"
+                    Err(e) => Err(anyhow::Error::from(
+                        ToolDispatchError::HarnessManifestLoadFailed(e.to_string()),
                     )),
                 }
             } else {
