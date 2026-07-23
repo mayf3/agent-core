@@ -22,8 +22,13 @@ use std::time::Duration;
 #[path = "calculator_helpers.rs"]
 mod helpers;
 
+const NETNS_MARKER: &str = "AGENT_CORE_PR3A_ISOLATED_NETNS";
+
 #[test]
 fn authenticated_sentence_creates_real_pending_proposal() -> Result<()> {
+    if run_in_isolated_network_if_needed()? {
+        return Ok(());
+    }
     let artifact_root = unique_temp_dir("pr3a-real-artifacts");
     std::fs::create_dir_all(&artifact_root)?;
 
@@ -42,6 +47,7 @@ fn authenticated_sentence_creates_real_pending_proposal() -> Result<()> {
 
     let journal = JournalStore::in_memory()?;
     let config = owner_config(&artifact_root);
+    bootstrap_coding_manifests(&journal, &config)?;
     let gateway = Gateway::new(config.clone());
     let session = journal.get_or_create_session(&SessionTarget {
         agent_id: config.agent_id.clone(),
@@ -75,7 +81,7 @@ fn authenticated_sentence_creates_real_pending_proposal() -> Result<()> {
     journal.insert_run(&run)?;
 
     let request = development_request(
-        "开发一个 external.calculator，支持加减乘除",
+        "开发一个 external.calculator，通过 component.invoke.v0 支持加减乘除",
         &run,
         &session,
         "om_pr3a_real_message",
@@ -143,6 +149,30 @@ fn authenticated_sentence_creates_real_pending_proposal() -> Result<()> {
     Ok(())
 }
 
+fn run_in_isolated_network_if_needed() -> Result<bool> {
+    if std::env::var(NETNS_MARKER).as_deref() == Ok("1") {
+        return Ok(false);
+    }
+    let executable = std::env::current_exe()?;
+    let status = std::process::Command::new("unshare")
+        .args(["--user", "--map-root-user", "--net", "--"])
+        .arg("/bin/sh")
+        .args(["-c", "ip link set lo up && exec \"$@\"", "sh"])
+        .arg(executable)
+        .args([
+            "--exact",
+            "authenticated_sentence_creates_real_pending_proposal",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(NETNS_MARKER, "1")
+        .status()?;
+    if !status.success() {
+        anyhow::bail!("isolated PR3A child failed: {status}");
+    }
+    Ok(true)
+}
+
 fn same_message_twenty_way_is_exactly_once(
     artifact_root: &std::path::Path,
     base_config: &agent_core_kernel::config::KernelConfig,
@@ -150,6 +180,7 @@ fn same_message_twenty_way_is_exactly_once(
     let journal = Arc::new(JournalStore::in_memory()?);
     let mut config = base_config.clone();
     config.harness_artifact_root = artifact_root.to_path_buf();
+    bootstrap_coding_manifests(&journal, &config)?;
     let gateway = Arc::new(Gateway::new(config.clone()));
     let session = Arc::new(journal.get_or_create_session(&SessionTarget {
         agent_id: config.agent_id.clone(),
@@ -181,7 +212,7 @@ fn same_message_twenty_way_is_exactly_once(
     });
     journal.insert_run(&run)?;
     let request = Arc::new(development_request(
-        "开发一个 external.calculator，支持加减乘除",
+        "开发一个 external.calculator，通过 component.invoke.v0 支持加减乘除",
         &run,
         &session,
         "om_pr3a_twenty_way",
@@ -247,6 +278,18 @@ fn same_message_twenty_way_is_exactly_once(
     Ok(())
 }
 
+fn bootstrap_coding_manifests(
+    journal: &JournalStore,
+    config: &agent_core_kernel::config::KernelConfig,
+) -> Result<()> {
+    let manifests = journal.bootstrap_builtin_external_manifests(
+        &config.coding_harness_api_url,
+        &config.coding_harness_artifact_digest,
+    )?;
+    journal.bind_external_manifest_ids_to_snapshot(&manifests)?;
+    Ok(())
+}
+
 #[test]
 fn missing_submit_grant_fails_before_hcr_creation() -> Result<()> {
     let artifact_root = unique_temp_dir("pr3a-no-grant");
@@ -280,7 +323,7 @@ fn missing_submit_grant_fails_before_hcr_creation() -> Result<()> {
     };
     journal.insert_run(&run)?;
     let request = development_request(
-        "开发计算器，实现四则运算",
+        "开发 external.calculator，通过 component.invoke.v0 实现四则运算",
         &run,
         &session,
         "om_pr3a_intruder",

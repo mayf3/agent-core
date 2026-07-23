@@ -74,6 +74,7 @@ pub fn start_kernel(
     db_path: &Path,
     artifact_root: &Path,
     connector_port: u16,
+    model_port: u16,
 ) -> Result<()> {
     let mut config: KernelConfig = helpers::kcfg(&artifact_root.to_path_buf());
     config.db_path = db_path.to_path_buf();
@@ -90,6 +91,10 @@ pub fn start_kernel(
     config.outbox_dispatcher_poll_interval_ms = 10;
     config.capability_decision_token = Some(DECISION_TOKEN.into());
     config.capability_submit_token = Some("pr3b-submit-token".into());
+    config.openai_base_url = format!("http://127.0.0.1:{model_port}/v1");
+    config.openai_api_key = "pr3b-model-key".into();
+    config.model = "pr3b-model-stub".into();
+    config.model_timeout_ms = 10_000;
     thread::spawn(move || agent_core_kernel::server::serve(config).expect("Kernel server failed"));
     Ok(())
 }
@@ -217,7 +222,9 @@ fn handle_connector_request(mut stream: TcpStream, captured: Arc<Mutex<Vec<Value
     )
 }
 
-fn read_http_request(stream: &mut TcpStream) -> Result<(String, HashMap<String, String>, Vec<u8>)> {
+pub(super) fn read_http_request(
+    stream: &mut TcpStream,
+) -> Result<(String, HashMap<String, String>, Vec<u8>)> {
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut request_line = String::new();
@@ -285,7 +292,7 @@ pub fn http_json(
     Ok(HttpResponse { status, body })
 }
 
-fn write_http_response(stream: &mut TcpStream, status: u16, body: Value) -> Result<()> {
+pub(super) fn write_http_response(stream: &mut TcpStream, status: u16, body: Value) -> Result<()> {
     let payload = serde_json::to_vec(&body)?;
     let reason = if status == 200 { "OK" } else { "Error" };
     write!(

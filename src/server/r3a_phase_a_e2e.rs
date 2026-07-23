@@ -14,11 +14,13 @@ const B: &str = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 const C: &str = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 
 #[test]
-fn north_star_routes_to_structured_intent() {
-    let intent = parse_coding_intent("开发一个 external.calculator，支持加减乘除").unwrap();
+fn invocable_contract_routes_to_structured_intent() {
+    let intent =
+        parse_coding_intent("开发一个 external.calculator，通过 component.invoke.v0 提供加减乘除")
+            .unwrap();
     assert_eq!(intent.operation, "external.calculator");
-    assert_eq!(intent.functions, ["add", "subtract", "multiply", "divide"]);
-    assert_eq!(intent.schema_version, "calculator-fixture-v0");
+    assert!(intent.functions.is_empty());
+    assert_eq!(intent.schema_version, "invocable-capability-v0");
     assert_eq!(
         intent.development_request.build_profile,
         "invocable-capability-v0"

@@ -49,13 +49,19 @@ pub fn build_delivery_manifest(
     let expected_kind = match request.target_kind {
         TargetKind::InvocableCapability => "invocable_capability",
         TargetKind::HookConsumerService => "hook_consumer_service",
-        _ => return Err(anyhow!("UNSUPPORTED_TARGET_KIND: {:?}", request.target_kind)),
+        _ => {
+            return Err(anyhow!(
+                "UNSUPPORTED_TARGET_KIND: {:?}",
+                request.target_kind
+            ))
+        }
     };
 
     if candidate_kind != expected_kind {
         return Err(anyhow!(
             "CANDIDATE_KIND_MISMATCH: request.target_kind={:?} candidate.kind={}",
-            request.target_kind, candidate_kind
+            request.target_kind,
+            candidate_kind
         ));
     }
 

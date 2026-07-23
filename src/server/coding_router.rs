@@ -2,8 +2,7 @@
 //!
 //! The router recognizes a development verb plus Contract Catalog references,
 //! derives a component kind/profile, and emits a data-only draft. It does not
-//! execute code or mint Kernel intents. The old calculator sentence is kept as
-//! a fixture adapter and follows the same generic request path.
+//! execute code or mint Kernel intents.
 
 use crate::contract_catalog::ContractCatalog;
 use crate::domain::{DevelopmentRequestDraft, TargetKind};
@@ -19,7 +18,7 @@ pub enum CodingIntentKind {
 pub struct CodingIntent {
     pub kind: CodingIntentKind,
     pub development_request: DevelopmentRequestDraft,
-    /// Compatibility fields used only by the frozen calculator E2E.
+    /// Generic summary fields retained for compatibility with existing callers.
     pub operation: String,
     pub functions: Vec<String>,
     pub schema_version: String,
@@ -35,34 +34,6 @@ pub fn parse_coding_intent(text: &str) -> Result<CodingIntent> {
     }
     if !contains_development_verb(&normalized) {
         bail!("UNSUPPORTED_CODING_REQUEST");
-    }
-
-    if is_calculator_fixture_request(&normalized) {
-        let mut draft = DevelopmentRequestDraft::new(
-            TargetKind::InvocableCapability,
-            "external.calculator".to_string(),
-        );
-        draft.requirements = vec![
-            "provide add, subtract, multiply, and divide operations".to_string(),
-            "implement the component.invoke.v0 process contract".to_string(),
-        ];
-        draft.required_contracts = vec!["component.invoke.v0".to_string()];
-        draft.requested_permissions = vec!["component.invoke".to_string()];
-        draft.acceptance_criteria = vec![
-            "trusted calculator fixture tests pass".to_string(),
-            "multiply 6 by 7 returns 42".to_string(),
-            "divide by zero returns a structured error".to_string(),
-        ];
-        return Ok(CodingIntent {
-            kind: CodingIntentKind::DevelopComponent,
-            development_request: draft,
-            operation: "external.calculator".to_string(),
-            functions: ["add", "subtract", "multiply", "divide"]
-                .into_iter()
-                .map(str::to_string)
-                .collect(),
-            schema_version: "calculator-fixture-v0".to_string(),
-        });
     }
 
     let catalog = ContractCatalog::v1();
@@ -214,22 +185,6 @@ fn contains_development_verb(text: &str) -> bool {
         .any(|value| text.contains(value))
 }
 
-fn is_calculator_fixture_request(text: &str) -> bool {
-    let calculator = text.contains("calculator") || text.contains("计算器");
-    let arithmetic = [
-        "加减乘除",
-        "四则",
-        "add",
-        "subtract",
-        "multiply",
-        "divide",
-        "arithmetic",
-    ]
-    .iter()
-    .any(|value| text.contains(value));
-    calculator && arithmetic
-}
-
 fn contains_shell_pattern(text: &str) -> bool {
     [
         "`", "$(", "; ", "| ", "&&", "||", "> ", ">> ", "rm ", "sudo ", "chmod ", "chown ",
@@ -250,8 +205,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn calculator_is_a_compatibility_fixture_on_the_generic_profile() {
-        let intent = parse_coding_intent("开发一个 external.calculator，支持加减乘除").unwrap();
+    fn component_invoke_contract_selects_invocable_profile() {
+        let intent = parse_coding_intent(
+            "开发一个 external.calculator，通过 component.invoke.v0 提供加减乘除",
+        )
+        .unwrap();
         assert_eq!(intent.kind, CodingIntentKind::DevelopComponent);
         assert_eq!(intent.operation, "external.calculator");
         assert_eq!(
@@ -262,7 +220,8 @@ mod tests {
             intent.development_request.build_profile,
             "invocable-capability-v0"
         );
-        assert_eq!(intent.schema_version, "calculator-fixture-v0");
+        assert_eq!(intent.schema_version, "invocable-capability-v0");
+        assert!(intent.functions.is_empty());
     }
 
     #[test]

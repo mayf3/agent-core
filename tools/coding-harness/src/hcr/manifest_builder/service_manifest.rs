@@ -7,8 +7,8 @@
 //! and bound by the receipt's `opaque_payload_digest`.
 
 use agent_core_kernel::domain::service_manifest::{
-    ListenPolicy, RollbackPolicy, SERVICE_MANIFEST_SCHEMA, ServiceHealthcheck, ServiceManifest,
-    UpgradePolicy,
+    ListenPolicy, RollbackPolicy, ServiceHealthcheck, ServiceManifest, UpgradePolicy,
+    SERVICE_MANIFEST_SCHEMA,
 };
 use anyhow::{anyhow, Result};
 use serde_json::Value;
@@ -20,10 +20,7 @@ use serde_json::Value;
 /// The version field is already resolved by the time this function
 /// is called — it either comes from the generator (initial version)
 /// or was overridden via `super::version_allocation::allocate_next_version`.
-pub fn build_service_manifest(
-    component: &Value,
-    artifact_digest: &str,
-) -> Result<ServiceManifest> {
+pub fn build_service_manifest(component: &Value, artifact_digest: &str) -> Result<ServiceManifest> {
     let kind = component
         .get("kind")
         .and_then(|v| v.as_str())
@@ -58,13 +55,21 @@ pub fn build_service_manifest(
     let required_contracts: Vec<String> = component
         .get("required_contracts")
         .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
         .ok_or_else(|| anyhow!("MISSING_REQUIRED_CONTRACTS"))?;
 
     let requested_permissions: Vec<String> = component
         .get("requested_permissions")
         .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
         .ok_or_else(|| anyhow!("MISSING_REQUESTED_PERMISSIONS"))?;
 
     let mut manifest = ServiceManifest {

@@ -50,11 +50,6 @@ pub fn build_invocable_manifest(
     if kind != "invocable_capability" {
         return Err(anyhow!("UNEXPECTED_KIND: {kind}"));
     }
-    let target_kind = required_str(component, "target_kind")?;
-    if target_kind != "InvocableCapability" {
-        return Err(anyhow!("UNEXPECTED_TARGET_KIND: {target_kind}"));
-    }
-
     // ── DevelopmentRequest identity checks ────────────────────────────
     // These validations were previously in the Kernel's invocable_manifest().
     // They are preserved here so that acceptance fails fast if the candidate
@@ -222,7 +217,6 @@ mod tests {
             "required_contracts": ["component.invoke.v0"],
             "requested_permissions": ["component.invoke"],
             "deployment_profile": "capability-host-v0",
-            "target_kind": "InvocableCapability",
             "capability": {
                 "operation_name": "external.calculator",
                 "description": "Calculator supporting add, subtract, multiply, and divide.",
@@ -373,13 +367,13 @@ mod tests {
     #[test]
     fn hook_consumer_rejected_by_invocable_builder() {
         let mut comp = calculator_component();
-        comp["target_kind"] = serde_json::json!("HookConsumerService");
+        comp["kind"] = serde_json::json!("hook_consumer_service");
         let result = build_invocable_manifest(&comp, &artifact_digest(), &request());
         assert!(result.is_err());
         let err = format!("{}", result.unwrap_err());
         assert!(
-            err.contains("UNEXPECTED_TARGET_KIND"),
-            "expected UNEXPECTED_TARGET_KIND, got: {err}"
+            err.contains("UNEXPECTED_KIND"),
+            "expected UNEXPECTED_KIND, got: {err}"
         );
     }
 }
