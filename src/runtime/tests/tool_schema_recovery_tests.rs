@@ -454,3 +454,24 @@ fn coding_submit_schema_exposes_exact_contract_catalog_version() {
         .unwrap()
         .contains("exact active Contract Catalog version"));
 }
+
+#[test]
+fn coding_submit_schema_requires_active_contract_ids() {
+    let submit = crate::registry::store::builtin_specs()
+        .into_iter()
+        .find(|spec| spec.name == crate::domain::operation::external::TASK_SUBMIT)
+        .unwrap();
+    let contracts = submit
+        .parameters
+        .pointer("/properties/development_request/properties/required_contracts")
+        .unwrap();
+    assert_eq!(contracts["minItems"], 1);
+    assert_eq!(contracts["uniqueItems"], true);
+    let schema_ids = contracts["items"]["enum"].as_array().unwrap();
+    let catalog_ids: Vec<Value> = crate::contract_catalog::ContractCatalog::v1()
+        .contracts
+        .into_iter()
+        .map(|contract| json!(contract.contract_id))
+        .collect();
+    assert_eq!(schema_ids, &catalog_ids);
+}
