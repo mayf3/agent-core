@@ -88,7 +88,7 @@ pub fn builtin_specs() -> Vec<OperationSpec> {
                             ]},
                             "name": {"type": "string"},
                             "requirements": {"type": "array", "items": {"type": "string"}},
-                            "required_contracts": {"type": "array", "items": {"type": "string"}},
+                            "required_contracts": {"type": "array", "description": "Select active Contract Catalog IDs compatible with target_kind. invocable_capability uses component.invoke.v0; hook_consumer_service uses event.observe.v0 and optionally feishu.reply.v0.", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "enum": ["event.observe.v0", "context.prepare.v0", "context.load.v0", "context.compress.v0", "route.proposal.v0", "run.create.v0", "component.invoke.v0", "deployment.effect.v0", "feishu.reply.v0"]}},
                             "requested_permissions": {"type": "array", "items": {"type": "string"}},
                             "build_profile": {
                                 "type": "string",

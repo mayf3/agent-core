@@ -5,6 +5,7 @@
 //! - `properties`, `required`, `additionalProperties: false`
 //! - `minimum`, `maximum` for numeric types
 //! - `enum` for string values
+//! - `minItems`, `uniqueItems` for arrays
 //!
 //! Unknown schema keywords cause validation to fail (fail-closed).
 
@@ -27,6 +28,7 @@ pub enum SchemaValidationIssue {
     },
     TypeMismatch,
     OutOfRange,
+    DuplicateItem,
 }
 
 impl SchemaValidationIssue {
@@ -36,7 +38,8 @@ impl SchemaValidationIssue {
             | Self::UnexpectedProperty { .. }
             | Self::EnumMismatch { .. }
             | Self::TypeMismatch
-            | Self::OutOfRange => "invalid_arguments",
+            | Self::OutOfRange
+            | Self::DuplicateItem => "invalid_arguments",
         }
     }
 }
@@ -55,6 +58,8 @@ pub fn validate_schema_structure(schema: &Value) -> Result<()> {
             | "items"
             | "minimum"
             | "maximum"
+            | "minItems"
+            | "uniqueItems"
             | "description"
             | "enum" => {}
             _ => bail!("unknown schema keyword: {key}"),
@@ -108,11 +113,24 @@ pub fn validate_schema_structure(schema: &Value) -> Result<()> {
             bail!("additionalProperties must be a boolean");
         }
     }
+    if let Some(min_items) = schema_obj.get("minItems") {
+        if min_items.as_u64().is_none() {
+            bail!("minItems must be a non-negative integer");
+        }
+    }
+    if let Some(unique_items) = schema_obj.get("uniqueItems") {
+        if !unique_items.is_boolean() {
+            bail!("uniqueItems must be a boolean");
+        }
+    }
     // Recursively validate sub-schemas.
     if let Some(properties) = schema_obj.get("properties").and_then(Value::as_object) {
         for (_, prop_schema) in properties {
             validate_schema_structure(prop_schema)?;
         }
+    }
+    if let Some(items) = schema_obj.get("items") {
+        validate_schema_structure(items)?;
     }
     Ok(())
 }
@@ -142,6 +160,8 @@ pub fn validate_against_schema_detailed(
             | "items"
             | "minimum"
             | "maximum"
+            | "minItems"
+            | "uniqueItems"
             | "description"
             | "enum" => {}
             _ => return Err(SchemaValidationIssue::TypeMismatch),
@@ -278,6 +298,22 @@ fn validate_array_detailed(
     let arr = value
         .as_array()
         .ok_or(SchemaValidationIssue::TypeMismatch)?;
+    if let Some(min_items) = schema.get("minItems").and_then(Value::as_u64) {
+        if arr.len() < min_items as usize {
+            return Err(SchemaValidationIssue::OutOfRange);
+        }
+    }
+    if schema
+        .get("uniqueItems")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        for (index, item) in arr.iter().enumerate() {
+            if arr[..index].contains(item) {
+                return Err(SchemaValidationIssue::DuplicateItem);
+            }
+        }
+    }
     if let Some(items) = schema.get("items") {
         for item in arr {
             validate_against_schema_detailed(items, item)?;
@@ -356,5 +392,43 @@ mod tests {
             "properties":{"nested":{"type":"object","properties":{"x":{"type":"string","enum":["a"]}}}}
         }));
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn array_constraints_are_structurally_validated() {
+        let valid = json!({
+            "type":"array", "minItems":1, "uniqueItems":true,
+            "items":{"type":"string","enum":["a","b"]}
+        });
+        assert!(validate_schema_structure(&valid).is_ok());
+        assert!(validate_schema_structure(
+            &json!({"type":"array","minItems":-1,"items":{"type":"string"}})
+        )
+        .is_err());
+        assert!(validate_schema_structure(
+            &json!({"type":"array","uniqueItems":"yes","items":{"type":"string"}})
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn array_constraints_reject_empty_duplicate_and_unknown_items() {
+        let schema = json!({
+            "type":"array", "minItems":1, "uniqueItems":true,
+            "items":{"type":"string","enum":["a","b"]}
+        });
+        assert_eq!(
+            validate_against_schema_detailed(&schema, &json!([])),
+            Err(SchemaValidationIssue::OutOfRange)
+        );
+        assert_eq!(
+            validate_against_schema_detailed(&schema, &json!(["a", "a"])),
+            Err(SchemaValidationIssue::DuplicateItem)
+        );
+        assert!(matches!(
+            validate_against_schema_detailed(&schema, &json!(["c"])),
+            Err(SchemaValidationIssue::EnumMismatch { .. })
+        ));
+        assert!(validate_against_schema_detailed(&schema, &json!(["a", "b"])).is_ok());
     }
 }
