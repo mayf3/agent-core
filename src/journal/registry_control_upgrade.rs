@@ -1,6 +1,6 @@
 //! Restart-safe seeding of the governed Coding Harness control operations.
 
-use crate::registry::snapshot::RegistrySnapshot;
+use crate::registry::snapshot::{OperationSpec, RegistrySnapshot};
 use crate::registry::store::builtin_specs;
 use anyhow::Result;
 use std::sync::Arc;
@@ -25,10 +25,11 @@ impl super::JournalStore {
                     .ok_or_else(|| anyhow::anyhow!("coding_control_spec_missing"))
             })
             .collect::<Result<_>>()?;
-        if expected
-            .iter()
-            .all(|spec| current.lookup(&spec.name) == Some(spec))
-        {
+        if expected.iter().all(|spec| {
+            current
+                .lookup(&spec.name)
+                .is_some_and(|active| governed_control_spec_matches(active, spec))
+        }) {
             return Ok(false);
         }
         // An older deployment may already have a general-purpose operation
@@ -50,5 +51,34 @@ impl super::JournalStore {
             "seed_coding_control_operations",
         )?;
         Ok(true)
+    }
+}
+
+fn governed_control_spec_matches(active: &OperationSpec, expected: &OperationSpec) -> bool {
+    active.name == expected.name
+        && active.risk == expected.risk
+        && active.description == expected.description
+        && active.parameters == expected.parameters
+        && active.idempotent == expected.idempotent
+        && active.binding_kind == expected.binding_kind
+        && !active.binding_key.is_empty()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::governed_control_spec_matches;
+    use crate::registry::store::builtin_specs;
+
+    #[test]
+    fn content_addressed_manifest_binding_does_not_reseed_control_schema() {
+        let expected = builtin_specs()
+            .into_iter()
+            .find(|spec| spec.name == crate::domain::operation::external::TASK_SUBMIT)
+            .unwrap();
+        let mut active = expected.clone();
+        active.binding_key = format!("manifest_{}", "a".repeat(64));
+        assert!(governed_control_spec_matches(&active, &expected));
+        active.parameters = serde_json::json!({"type":"object"});
+        assert!(!governed_control_spec_matches(&active, &expected));
     }
 }

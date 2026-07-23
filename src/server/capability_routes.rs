@@ -4,6 +4,7 @@ use crate::capabilities::store::{ContentStore, Sha256Digest};
 use crate::domain::capability_change::*;
 use crate::domain::*;
 use crate::gateway::Gateway;
+use crate::harness::manifest::HarnessManifest;
 use crate::journal::JournalStore;
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
@@ -211,18 +212,23 @@ pub fn handle_decision(
         .load_proposal(proposal_id)?
         .ok_or_else(|| CapabilityRouteError::NotFound("proposal_not_found".into()))?;
     // HCR-derived proposals are never allowed through the legacy digest-only
-    // path. Their Approval/HCR identities must be revalidated at decision
-    // time and effects must go through their dedicated external harness.
-    if proposal.requested_operations == ["external.calculator"] {
-        return super::capability_decision::handle(
-            journal,
-            store,
-            proposal_id,
-            body,
-            config_agent_id,
-        );
-    }
+    // path. Dispatch by the authenticated content-addressed delivery Manifest,
+    // never by a product operation name.
     if journal.load_proposal_hcr_link(proposal_id)?.is_some() {
+        let manifest_bytes = store
+            .load(&Sha256Digest::parse(&proposal.manifest_digest)?)
+            .map_err(|error| CapabilityRouteError::Internal(format!("{error}")))?;
+        if serde_json::from_slice::<HarnessManifest>(&manifest_bytes)
+            .is_ok_and(|manifest| manifest.validate_all().is_ok())
+        {
+            return super::capability_decision::handle(
+                journal,
+                store,
+                proposal_id,
+                body,
+                config_agent_id,
+            );
+        }
         return super::service_decision::handle(journal, store, proposal_id, body, config_agent_id);
     }
     let input: DecisionBody = serde_json::from_value(body.clone())

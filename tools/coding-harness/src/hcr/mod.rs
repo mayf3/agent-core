@@ -15,11 +15,11 @@
 
 pub mod acceptance;
 pub mod candidate;
-pub mod manifest_builder;
 pub mod command;
 pub mod errors;
 pub mod executor;
 pub mod gates;
+pub mod manifest_builder;
 pub mod process;
 pub mod profile;
 pub mod sandbox;

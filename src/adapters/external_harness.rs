@@ -259,10 +259,7 @@ pub fn execute_external_harness_with_config(
                         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | ':' | '.'))
             })
             .map(str::to_string);
-        if manifest.operation_name == "external.calculator"
-            && config.bearer_token.is_some()
-            && external_ref.is_none()
-        {
+        if config.bearer_token.is_some() && external_ref.is_none() {
             return Ok(Receipt {
                 invocation_id,
                 status: ReceiptStatus::Failed,

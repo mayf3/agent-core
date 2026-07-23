@@ -12,20 +12,20 @@ pub mod verification_receipt;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use agent_core_kernel::domain::external_receipt_envelope::{
-	    compute_external_receipt_digest, ExternalOutcome, ExternalReceiptEnvelope, SCHEMA_VERSION,
-	};
-	use serde_json::Value;
-	
-	use super::candidate::snapshot_candidate;
-	use super::gates::{run_all_gates_for_acceptance, GateKind, GateResult};
-	use super::manifest_builder::{allocate_next_version, build_delivery_manifest};
-	use agent_core_kernel::domain::DevelopmentRequest;
-	use execution_store::ExecutionStore;
-	use protocol::{
-	    canonical_evidence_bytes, compute_evidence_digest, compute_fingerprint, AcceptanceResponse,
-	    GateResultEntry,
-	};
+use agent_core_kernel::domain::external_receipt_envelope::{
+    compute_external_receipt_digest, ExternalOutcome, ExternalReceiptEnvelope, SCHEMA_VERSION,
+};
+use serde_json::Value;
+
+use super::candidate::snapshot_candidate;
+use super::gates::{run_all_gates_for_acceptance, GateKind, GateResult};
+use super::manifest_builder::{allocate_next_version, build_delivery_manifest};
+use agent_core_kernel::domain::DevelopmentRequest;
+use execution_store::ExecutionStore;
+use protocol::{
+    canonical_evidence_bytes, compute_evidence_digest, compute_fingerprint, AcceptanceResponse,
+    GateResultEntry,
+};
 
 /// Global gate execution counter (test observation only).
 static GATE_EXECUTION_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -109,6 +109,9 @@ pub fn handle_accept(artifact_root: &Path, args: &Value) -> Value {
         .and_then(|resp| serde_json::to_value(resp).map_err(|e| e.to_string()))
     }) {
         Ok(result) => {
+            if let Some(error) = completed_execution_error(&result) {
+                return err_json(error);
+            }
             // Deserialize the AcceptanceResponse to build the envelope
             let acceptance: AcceptanceResponse = match serde_json::from_value(result.clone()) {
                 Ok(a) => a,
@@ -124,6 +127,13 @@ pub fn handle_accept(artifact_root: &Path, args: &Value) -> Value {
         }
         Err(e) => err_json(&format!("EXECUTION_FAILED: {e}")),
     }
+}
+
+fn completed_execution_error(result: &Value) -> Option<&str> {
+    result
+        .get("error")
+        .and_then(Value::as_str)
+        .filter(|error| !error.is_empty())
 }
 
 /// Core acceptance logic (runs under file lock, called at most once per key).
@@ -198,56 +208,55 @@ fn do_accept(
         None
     };
 
-	// ── Post‑acceptance: version allocation + delivery manifest ──
-	    // The original candidate manifest.json is never modified on disk.
-	    // We work on an in‑memory copy so the accepted candidate stays
-	    // immutable.  The resulting delivery manifest bytes are stored in
-	    // the shared ContentStore and bound by the opaque_payload_digest.
-	    let (delivery_manifest_ref, delivery_manifest_digest) = if outcome == "CandidatePassed" {
-	        let raw = std::fs::read(snapshot.candidate_path.join("manifest.json"))
-	            .map_err(|e| format!("DELIVERY_MANIFEST_READ: {e}"))?;
-	        let mut manifest_value: Value =
-	            serde_json::from_slice(&raw).map_err(|e| format!("DELIVERY_MANIFEST_PARSE: {e}"))?;
+    // ── Post‑acceptance: version allocation + delivery manifest ──
+    // The original candidate manifest.json is never modified on disk.
+    // We work on an in‑memory copy so the accepted candidate stays
+    // immutable.  The resulting delivery manifest bytes are stored in
+    // the shared ContentStore and bound by the opaque_payload_digest.
+    let (delivery_manifest_ref, delivery_manifest_digest) = if outcome == "CandidatePassed" {
+        let raw = std::fs::read(snapshot.candidate_path.join("manifest.json"))
+            .map_err(|e| format!("DELIVERY_MANIFEST_READ: {e}"))?;
+        let mut manifest_value: Value =
+            serde_json::from_slice(&raw).map_err(|e| format!("DELIVERY_MANIFEST_PARSE: {e}"))?;
 
         // Parse DevelopmentRequest from the verified requirement content.
         // We re-verify the digest inside the locked execution (defense in depth)
         // so that tampering between handle_accept and do_accept is detected.
         let development_request = extract_development_request(args);
 
-	        // Only allocate versions for HookConsumerService (managed services)
-	        let needs_version = manifest_value
-	            .get("service")
-	            .and_then(|s| s.get("version"))
-	            .is_some();
-	        if needs_version {
-	            let component_id = manifest_value["component_id"]
-	                .as_str()
-	                .unwrap_or("")
-	                .to_string();
-	            let new_ver = allocate_next_version(&component_id)
-	                .map_err(|e| format!("VERSION_ALLOCATION: {e}"))?;
-	            if let Some(ver) = new_ver {
-	                manifest_value["service"]["version"] = serde_json::json!(ver);
-	            }
-	        }
+        // Only allocate versions for HookConsumerService (managed services)
+        let needs_version = manifest_value
+            .get("service")
+            .and_then(|s| s.get("version"))
+            .is_some();
+        if needs_version {
+            let component_id = manifest_value["component_id"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+            let new_ver = allocate_next_version(&component_id)
+                .map_err(|e| format!("VERSION_ALLOCATION: {e}"))?;
+            if let Some(ver) = new_ver {
+                manifest_value["service"]["version"] = serde_json::json!(ver);
+            }
+        }
 
-	        let artifact_digest_str = artifact_digest.as_deref().unwrap_or("");
-	        let (delivery_ref, delivery_bytes) = build_delivery_manifest(
-	            &manifest_value,
-	            artifact_digest_str,
-	            development_request.as_ref(),
-	        )
-	        .map_err(|e| format!("DELIVERY_MANIFEST_BUILD: {e}"))?;
-	        let store = agent_core_kernel::capabilities::store::ContentStore::new(
-	            artifact_root.to_path_buf(),
-	        );
-	        let stored = store
-	            .store(&delivery_bytes)
-	            .map_err(|e| format!("DELIVERY_MANIFEST_STORE: {e}"))?;
-	        (Some(delivery_ref), Some(stored.as_str().to_string()))
-	    } else {
-	        (None, None)
-	    };
+        let artifact_digest_str = artifact_digest.as_deref().unwrap_or("");
+        let (delivery_ref, delivery_bytes) = build_delivery_manifest(
+            &manifest_value,
+            artifact_digest_str,
+            development_request.as_ref(),
+        )
+        .map_err(|e| format!("DELIVERY_MANIFEST_BUILD: {e}"))?;
+        let store =
+            agent_core_kernel::capabilities::store::ContentStore::new(artifact_root.to_path_buf());
+        let stored = store
+            .store(&delivery_bytes)
+            .map_err(|e| format!("DELIVERY_MANIFEST_STORE: {e}"))?;
+        (Some(delivery_ref), Some(stored.as_str().to_string()))
+    } else {
+        (None, None)
+    };
 
     validate_gate_consistency(&results, &outcome, &artifact_digest)?;
 
@@ -322,25 +331,25 @@ fn do_accept(
 }
 
 /// Wrap the acceptance response in an `ExternalReceiptEnvelope`.
-	fn ok_envelope_json(
-	    acceptance: &AcceptanceResponse,
-	    invocation_intent_id: &str,
-	    detailed_result: Value,
-	) -> Value {
-	    // Map the harness outcome to the envelope's ExternalOutcome
-	    let outcome = match acceptance.overall_outcome.as_str() {
-	        "CandidatePassed" => ExternalOutcome::Passed,
-	        _ => ExternalOutcome::Failed,
-	    };
-	
-	    // Compute opaque_payload_digest as SHA-256 of the full AcceptanceResponse JSON
-	    // with CANONICAL (alphabetically sorted) key order. Both the coding harness and
-	    // the Kernel reproduce the same canonical serialization so the digest matches
-	    // regardless of Value construction order vs struct declaration order.
-	    use sha2::{Digest, Sha256};
-	    let resp_value = serde_json::to_value(acceptance).unwrap_or_default();
-	    let canonical_bytes = canonical_json_bytes(&resp_value);
-	    let opaque_payload_digest = format!("sha256:{}", hex::encode(Sha256::digest(&canonical_bytes)));
+fn ok_envelope_json(
+    acceptance: &AcceptanceResponse,
+    invocation_intent_id: &str,
+    detailed_result: Value,
+) -> Value {
+    // Map the harness outcome to the envelope's ExternalOutcome
+    let outcome = match acceptance.overall_outcome.as_str() {
+        "CandidatePassed" => ExternalOutcome::Passed,
+        _ => ExternalOutcome::Failed,
+    };
+
+    // Compute opaque_payload_digest as SHA-256 of the full AcceptanceResponse JSON
+    // with CANONICAL (alphabetically sorted) key order. Both the coding harness and
+    // the Kernel reproduce the same canonical serialization so the digest matches
+    // regardless of Value construction order vs struct declaration order.
+    use sha2::{Digest, Sha256};
+    let resp_value = serde_json::to_value(acceptance).unwrap_or_default();
+    let canonical_bytes = canonical_json_bytes(&resp_value);
+    let opaque_payload_digest = format!("sha256:{}", hex::encode(Sha256::digest(&canonical_bytes)));
 
     // Build the envelope
     let env = ExternalReceiptEnvelope {
@@ -497,9 +506,15 @@ fn extract_development_request(args: &Value) -> Option<DevelopmentRequest> {
     match serde_json::from_value::<DevelopmentRequest>(dev_req_val.clone()) {
         Ok(dr) => Some(dr),
         Err(e) => {
-            eprintln!("[extract_development_request] DevelopmentRequest deserialization failed: {e}");
-            eprintln!("[extract_development_request] development_request value keys: {:?}",
-                dev_req_val.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>()));
+            eprintln!(
+                "[extract_development_request] DevelopmentRequest deserialization failed: {e}"
+            );
+            eprintln!(
+                "[extract_development_request] development_request value keys: {:?}",
+                dev_req_val
+                    .as_object()
+                    .map(|o| o.keys().cloned().collect::<Vec<_>>())
+            );
             None
         }
     }
@@ -524,9 +539,8 @@ fn canonical_json_bytes(value: &Value) -> Vec<u8> {
 fn sort_keys(value: &Value) -> Value {
     match value {
         Value::Object(map) => {
-            let mut sorted: serde_json::Map<String, Value> = map.iter().map(|(k, v)| {
-                (k.clone(), sort_keys(v))
-            }).collect();
+            let mut sorted: serde_json::Map<String, Value> =
+                map.iter().map(|(k, v)| (k.clone(), sort_keys(v))).collect();
             sorted.sort_keys();
             Value::Object(sorted)
         }
@@ -550,10 +564,16 @@ mod canonical_json_tests {
         let b = json!({"c": 3, "a": 1, "b": 2});
         let bytes_a = canonical_json_bytes(&a);
         let bytes_b = canonical_json_bytes(&b);
-        assert_eq!(bytes_a, bytes_b, "different insertion orders must produce same canonical bytes");
+        assert_eq!(
+            bytes_a, bytes_b,
+            "different insertion orders must produce same canonical bytes"
+        );
         let dig_a = hex::encode(Sha256::digest(&bytes_a));
         let dig_b = hex::encode(Sha256::digest(&bytes_b));
-        assert_eq!(dig_a, dig_b, "different insertion orders must produce same digest");
+        assert_eq!(
+            dig_a, dig_b,
+            "different insertion orders must produce same digest"
+        );
     }
 
     /// Prove nested objects are recursively sorted.
@@ -619,7 +639,22 @@ mod canonical_json_tests {
         base["delivery_manifest_digest"] = json!(format!("sha256:{}", "5".repeat(64)));
         let bytes = canonical_json_bytes(&base);
         let digest = format!("sha256:{}", hex::encode(Sha256::digest(&bytes)));
-        assert!(digest.starts_with("sha256:"), "digest must have sha256: prefix");
+        assert!(
+            digest.starts_with("sha256:"),
+            "digest must have sha256: prefix"
+        );
         assert_eq!(digest.len(), 71, "sha256: + 64 hex chars = 71");
+    }
+
+    #[test]
+    fn persisted_execution_error_is_not_masked_as_envelope_deserialization() {
+        let result = json!({
+            "error": "DELIVERY_MANIFEST_BUILD: CANDIDATE_KIND_MISMATCH",
+            "overall_outcome": "InfrastructureFailure"
+        });
+        assert_eq!(
+            completed_execution_error(&result),
+            Some("DELIVERY_MANIFEST_BUILD: CANDIDATE_KIND_MISMATCH")
+        );
     }
 }

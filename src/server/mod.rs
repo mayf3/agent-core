@@ -2,8 +2,6 @@ use crate::config::KernelConfig;
 use crate::domain::{OutboxDispatchStatus, RunId};
 use crate::gateway::Gateway;
 use crate::journal::JournalStore;
-mod calculator_delivery;
-mod calculator_router;
 mod capability_decision;
 mod capability_host_client;
 mod capability_http;

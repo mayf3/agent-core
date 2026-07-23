@@ -221,7 +221,10 @@ fn verify_acceptance_evidence(candidate: &CandidateSnapshot, ctx: &GateContext) 
         return GateResult::infrastructure_failure(
             GateKind::TrustedTest,
             "TRUSTED_TEST_BINARY_NOT_FOUND",
-            &format!("candidate binary not found at: {}", candidate_binary.display()),
+            &format!(
+                "candidate binary not found at: {}",
+                candidate_binary.display()
+            ),
             candidate,
         );
     }
@@ -357,13 +360,17 @@ mod tests {
         )
         .unwrap();
         // Create a dummy binary so the binary-existence check passes
-        let binary_path = tmp.join("target").join("release").join("generated-hook-consumer");
+        let binary_path = tmp
+            .join("target")
+            .join("release")
+            .join("generated-hook-consumer");
         std::fs::create_dir_all(binary_path.parent().unwrap()).unwrap();
         std::fs::write(&binary_path, b"#!/bin/dummy").unwrap();
         let snapshot = CandidateSnapshot {
             candidate_id: "test-candidate".into(),
             candidate_path: tmp.clone(),
-            candidate_digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
+            candidate_digest:
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
         };
         let ctx = GateContext {
             work_base: tmp.join("work"),
@@ -395,21 +402,31 @@ mod tests {
 
     #[test]
     fn acceptance_pass_evidence_drives_trusted_test() {
-        let (candidate, ctx) =
-            make_candidate(manifest_with_bundle("bundle_sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"));
+        let (candidate, ctx) = make_candidate(manifest_with_bundle(
+            "bundle_sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
+        ));
         let result = check(&candidate, &ctx);
-        assert!(result.passed, "trusted_test should pass with valid acceptance evidence");
+        assert!(
+            result.passed,
+            "trusted_test should pass with valid acceptance evidence"
+        );
         assert!(result.stdout.contains("acceptance_evidence_driven"));
     }
 
     #[test]
     fn trusted_test_does_not_require_literal_ok_true() {
-        let (candidate, ctx) =
-            make_candidate(manifest_with_bundle("bundle_sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"));
+        let (candidate, ctx) = make_candidate(manifest_with_bundle(
+            "bundle_sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
+        ));
         let result = check(&candidate, &ctx);
-        assert!(result.passed, "must pass without checking for literal \"ok\":true");
-        assert!(!result.stdout.contains(r#""ok":true"#),
-            "must not contain literal ok:true output check");
+        assert!(
+            result.passed,
+            "must pass without checking for literal \"ok\":true"
+        );
+        assert!(
+            !result.stdout.contains(r#""ok":true"#),
+            "must not contain literal ok:true output check"
+        );
     }
 
     #[test]
@@ -425,7 +442,10 @@ mod tests {
         });
         let (candidate, ctx) = make_candidate(invalid);
         let result = check(&candidate, &ctx);
-        assert!(!result.passed, "should fail when acceptance_bundle_digest is missing");
+        assert!(
+            !result.passed,
+            "should fail when acceptance_bundle_digest is missing"
+        );
         assert_eq!(
             result.error_code.as_deref(),
             Some("TRUSTED_TEST_NO_ACCEPTANCE_EVIDENCE")
@@ -457,14 +477,18 @@ mod tests {
         ));
         std::fs::create_dir_all(tmp.join("src")).unwrap();
         // Create a dummy binary so the binary-existence check passes
-        let binary_path = tmp.join("target").join("release").join("generated-hook-consumer");
+        let binary_path = tmp
+            .join("target")
+            .join("release")
+            .join("generated-hook-consumer");
         std::fs::create_dir_all(binary_path.parent().unwrap()).unwrap();
         std::fs::write(&binary_path, b"#!/bin/dummy").unwrap();
         // No manifest.json written
         let candidate = CandidateSnapshot {
             candidate_id: "test-candidate".into(),
             candidate_path: tmp.clone(),
-            candidate_digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
+            candidate_digest:
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
         };
         let ctx = GateContext {
             work_base: tmp.join("work"),

@@ -149,10 +149,6 @@ fn deliver_event(
         let hook_client: Box<dyn HookClient> = Box::new(HttpHookClient::new());
         runtime = runtime.with_hook(hook_client, config.context_prepare_hook.clone());
     }
-    if super::calculator_router::matches(&validated) {
-        super::calculator_delivery::deliver(config, journal, gateway, validated)?;
-        return Ok(());
-    }
     runtime.deliver(journal, gateway, validated)?;
     Ok(())
 }

@@ -5,6 +5,8 @@
 
 #[path = "calculator_helpers.rs"]
 mod helpers;
+#[path = "pr3b_north_star/model_stub.rs"]
+mod model_stub;
 #[path = "pr3b_north_star/support.rs"]
 mod support;
 
@@ -30,11 +32,39 @@ fn one_sentence_develops_activates_and_executes_calculator() -> Result<()> {
     std::fs::create_dir_all(&artifact_root)?;
 
     let connector = MockFeishuSender::start()?;
+    let model = model_stub::ModelStub::start(vec![
+        model_stub::tool_call(
+            "call_submit_calculator",
+            "external.coding_task_submit",
+            json!({
+                "development_request": {
+                    "target_kind": "invocable_capability",
+                    "name": "external.calculator",
+                    "requirements": ["provide add, subtract, multiply, and divide operations"],
+                    "required_contracts": ["component.invoke.v0"],
+                    "acceptance_criteria": ["multiply 6 by 7 returns 42"]
+                }
+            }),
+        ),
+        model_stub::text_reply("Proposal ready for approval."),
+        model_stub::tool_call(
+            "call_calculator_multiply",
+            "external.calculator",
+            json!({"operation":"multiply","a":6,"b":7}),
+        ),
+        model_stub::text_reply("42"),
+    ])?;
     configure_host_clients(&artifact_root);
     start_harness(&artifact_root)?;
     start_capability_host()?;
     let kernel_port = free_port()?;
-    start_kernel(kernel_port, &db_path, &artifact_root, connector.port)?;
+    start_kernel(
+        kernel_port,
+        &db_path,
+        &artifact_root,
+        connector.port,
+        model.port,
+    )?;
 
     let kernel = format!("http://127.0.0.1:{kernel_port}");
     wait_for_health(&kernel, Duration::from_secs(20))?;
@@ -108,9 +138,13 @@ fn one_sentence_develops_activates_and_executes_calculator() -> Result<()> {
     assert!(deployment_id.starts_with("chd_"));
     let s1 = required_string(&activated.body, "activated_snapshot_id")?;
     assert_ne!(s1, s0);
-    let deployed: Value = serde_json::from_slice(&std::fs::read(
-        artifact_root.join(".capability-host/external.calculator.json"),
-    )?)?;
+    let deployed = std::fs::read_dir(artifact_root.join(".capability-host"))?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().and_then(|value| value.to_str()) == Some("json"))
+        .filter_map(|entry| std::fs::read(entry.path()).ok())
+        .filter_map(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .find(|record| record["operation_name"] == "external.calculator")
+        .context("durable external.calculator deployment record missing")?;
     assert_eq!(deployed["deployment_id"], deployment_id);
     assert_eq!(deployed["proposal_id"], proposal_id);
     assert_eq!(deployed["target_registry_snapshot_id"], s1);
@@ -162,6 +196,7 @@ fn one_sentence_develops_activates_and_executes_calculator() -> Result<()> {
         journal.verify_hash_chain()?,
         "Journal hash chain must verify"
     );
+    model.assert_exhausted()?;
     std::fs::remove_dir_all(root).ok();
     Ok(())
 }
