@@ -33,7 +33,12 @@ pub fn build_invocable_manifest(
     // Validated by delivery.rs caller. Just verify the request target_kind.
     match request.target_kind {
         TargetKind::InvocableCapability => {} // expected
-        _ => return Err(anyhow!("UNEXPECTED_TARGET_KIND_IN_REQUEST: {:?}", request.target_kind)),
+        _ => {
+            return Err(anyhow!(
+                "UNEXPECTED_TARGET_KIND_IN_REQUEST: {:?}",
+                request.target_kind
+            ))
+        }
     }
 
     // ── Schema & kind identity ────────────────────────────────────────
@@ -44,6 +49,10 @@ pub fn build_invocable_manifest(
     let kind = required_str(component, "kind")?;
     if kind != "invocable_capability" {
         return Err(anyhow!("UNEXPECTED_KIND: {kind}"));
+    }
+    let target_kind = required_str(component, "target_kind")?;
+    if target_kind != "InvocableCapability" {
+        return Err(anyhow!("UNEXPECTED_TARGET_KIND: {target_kind}"));
     }
 
     // ── DevelopmentRequest identity checks ────────────────────────────
@@ -68,23 +77,23 @@ pub fn build_invocable_manifest(
 
     let contract_catalog_version = required_str(component, "contract_catalog_version")?;
     if contract_catalog_version != request.contract_catalog_version {
-        return Err(anyhow!(
-            "COMPONENT_MANIFEST_CONTRACT_CATALOG_MISMATCH"
-        ));
+        return Err(anyhow!("COMPONENT_MANIFEST_CONTRACT_CATALOG_MISMATCH"));
     }
 
     let deployment_profile = required_str(component, "deployment_profile")?;
     if deployment_profile != request.deployment_profile {
-        return Err(anyhow!(
-            "COMPONENT_MANIFEST_DEPLOYMENT_PROFILE_MISMATCH"
-        ));
+        return Err(anyhow!("COMPONENT_MANIFEST_DEPLOYMENT_PROFILE_MISMATCH"));
     }
 
     if !string_set_matches(component, "required_contracts", &request.required_contracts)? {
         return Err(anyhow!("COMPONENT_MANIFEST_CONTRACT_MISMATCH"));
     }
 
-    if !string_set_matches(component, "requested_permissions", &request.requested_permissions)? {
+    if !string_set_matches(
+        component,
+        "requested_permissions",
+        &request.requested_permissions,
+    )? {
         return Err(anyhow!("COMPONENT_MANIFEST_PERMISSION_MISMATCH"));
     }
 
@@ -239,12 +248,9 @@ mod tests {
 
     #[test]
     fn invocable_candidate_builds_harness_manifest() {
-        let manifest = build_invocable_manifest(
-            &calculator_component(),
-            &artifact_digest(),
-            &request(),
-        )
-        .unwrap();
+        let manifest =
+            build_invocable_manifest(&calculator_component(), &artifact_digest(), &request())
+                .unwrap();
         assert_eq!(manifest.harness_id, "capability-host-v0");
         assert_eq!(manifest.endpoint, "http://127.0.0.1:7300/execute");
         assert_eq!(manifest.operation_name, "external.calculator");
@@ -256,12 +262,9 @@ mod tests {
 
     #[test]
     fn invocable_manifest_preserves_old_semantics() {
-        let manifest = build_invocable_manifest(
-            &calculator_component(),
-            &artifact_digest(),
-            &request(),
-        )
-        .unwrap();
+        let manifest =
+            build_invocable_manifest(&calculator_component(), &artifact_digest(), &request())
+                .unwrap();
         // Compare against the known‑good semantics from the old Kernel builder
         assert_eq!(manifest.harness_id, "capability-host-v0");
         assert_eq!(manifest.endpoint, "http://127.0.0.1:7300/execute");
@@ -276,23 +279,17 @@ mod tests {
         assert_eq!(manifest.artifact_digest, artifact_digest());
         assert_eq!(manifest.protocol_version, "external-harness-v1");
         // manifest_id must be deterministic for the same content
-        let manifest2 = build_invocable_manifest(
-            &calculator_component(),
-            &artifact_digest(),
-            &request(),
-        )
-        .unwrap();
+        let manifest2 =
+            build_invocable_manifest(&calculator_component(), &artifact_digest(), &request())
+                .unwrap();
         assert_eq!(manifest.manifest_id, manifest2.manifest_id);
     }
 
     #[test]
     fn invocable_manifest_uses_verified_artifact_digest() {
-        let manifest = build_invocable_manifest(
-            &calculator_component(),
-            &artifact_digest(),
-            &request(),
-        )
-        .unwrap();
+        let manifest =
+            build_invocable_manifest(&calculator_component(), &artifact_digest(), &request())
+                .unwrap();
         assert_eq!(manifest.artifact_digest, artifact_digest());
     }
 
@@ -335,12 +332,9 @@ mod tests {
 
     #[test]
     fn invocable_manifest_is_stored_by_digest() {
-        let manifest = build_invocable_manifest(
-            &calculator_component(),
-            &artifact_digest(),
-            &request(),
-        )
-        .unwrap();
+        let manifest =
+            build_invocable_manifest(&calculator_component(), &artifact_digest(), &request())
+                .unwrap();
         let bytes = serde_json::to_vec(&manifest).unwrap();
         use sha2::{Digest, Sha256};
         let computed = format!("sha256:{}", hex::encode(Sha256::digest(&bytes)));

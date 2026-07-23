@@ -38,7 +38,8 @@ fn hcr_config() -> KernelConfig {
         harness_read_timeout_ms: 10_000,
         harness_artifact_root: std::env::temp_dir().join(format!("ha_root_{}", std::process::id())),
         coding_harness_api_url: "http://127.0.0.1:7200".into(),
-        coding_harness_artifact_digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
+        coding_harness_artifact_digest:
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
         max_tool_rounds: 12,
         feishu_coding_owner_id: Some("ou_owner123".to_string()),
         capability_submit_token: None,

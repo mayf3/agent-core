@@ -72,6 +72,10 @@ fn main() {
         respond_error("unsupported_protocol");
         return;
     }
+    if operation == "__agent_core_describe" {
+        let _ = writeln!(std::io::stdout(), "{{\"ok\":true,\"result\":{{\"descriptor_version\":\"invocable-execution-v0\",\"operation_name\":\"external.calculator\",\"probe_arguments\":{{\"operation\":\"multiply\",\"a\":6,\"b\":7}}}}}}");
+        return;
+    }
     let Some(a) = number_field(&input, "a") else {
         respond_error("invalid_arguments");
         return;

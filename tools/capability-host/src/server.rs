@@ -268,7 +268,7 @@ pub(crate) fn handle_execute(body: &str, config: &CapabilityHostConfig) -> Strin
         }
     };
 
-    let req = match protocol::parse_harness_request(&body_json) {
+    let mut req = match protocol::parse_harness_request(&body_json) {
         Ok(r) => r,
         Err(msg) => {
             return http_response(
@@ -284,6 +284,11 @@ pub(crate) fn handle_execute(body: &str, config: &CapabilityHostConfig) -> Strin
 
     let deployment = match deployment::authorize_execution(config, &req) {
         Ok(record) => record,
+        Err(error) => return ok_json(false, error.code()),
+    };
+    let execution_arguments = req.arguments.clone();
+    req.arguments = match deployment::process_arguments(&deployment, &req.arguments) {
+        Ok(arguments) => arguments,
         Err(error) => return ok_json(false, error.code()),
     };
 
@@ -333,13 +338,20 @@ pub(crate) fn handle_execute(body: &str, config: &CapabilityHostConfig) -> Strin
                 return ok_json(false, "artifact_failed");
             }
 
+            let Some(result) = response_body_value.get("result") else {
+                return ok_json(false, "artifact_protocol_error");
+            };
+            if let Err(error) = deployment::validate_output(&deployment, result) {
+                return ok_json(false, error.code());
+            }
+
             if let Some(object) = response_body_value.as_object_mut() {
                 object.insert(
                     "capability_host_execution_id".into(),
                     serde_json::Value::String(deployment::execution_id(
                         &deployment.deployment_id,
                         &req.invocation_id,
-                        &req.arguments,
+                        &execution_arguments,
                     )),
                 );
             }

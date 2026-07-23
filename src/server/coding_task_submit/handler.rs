@@ -5,12 +5,13 @@ use crate::domain::capability_change::CapabilityChangeProposal;
 use crate::domain::*;
 use crate::gateway::Gateway;
 use crate::journal::{CodingTaskSubmissionClaim, JournalStore};
-use crate::server::{coding_harness_client, hcr_acceptance};
+use crate::server::hcr_acceptance;
 use anyhow::{bail, Result};
 use chrono::Utc;
+use serde::Serialize;
 use serde_json::{json, Value};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CodingTaskSubmitResult {
     pub development_request_id: String,
     pub contract_catalog_version: String,
@@ -28,6 +29,12 @@ pub struct CodingTaskSubmitResult {
     pub evidence_digest: String,
     pub settlement_id: String,
     pub proposal_id: String,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("coding harness rejected submission: {code}")]
+pub struct CodingHarnessRejection {
+    pub code: String,
 }
 
 /// Execute the real submit → candidate → HCR acceptance → Proposal chain.
@@ -290,11 +297,29 @@ fn execute_new_submission(
     super::invocation_journal::append_invocation_proposed(journal, run, session, &submit_intent)?;
     let approved = gateway.approve_invocation(submit_intent, run, session, snapshot)?;
     super::invocation_journal::append_invocation_approved(journal, run, session, &approved)?;
-    let result = coding_harness_client::execute(
+    let spec = snapshot
+        .lookup(crate::domain::operation::external::TASK_SUBMIT)
+        .filter(|value| value.binding_kind == crate::registry::snapshot::BindingKind::External)
+        .ok_or_else(|| anyhow::anyhow!("CODING_TASK_MANIFEST_BINDING_MISSING"))?;
+    let manifest = journal
+        .load_harness_manifest(&spec.binding_key)?
+        .ok_or_else(|| anyhow::anyhow!("CODING_TASK_MANIFEST_NOT_FOUND"))?;
+    if manifest.operation_name != crate::domain::operation::external::TASK_SUBMIT {
+        bail!("CODING_TASK_MANIFEST_OPERATION_MISMATCH");
+    }
+    let transport = crate::adapters::external_harness::ExternalHarnessTransportConfig {
+        read_timeout: std::time::Duration::from_millis(config.harness_read_timeout_ms.max(900_000)),
+        max_response_bytes: 128 * 1024,
+        bearer_token: None,
+        ..Default::default()
+    };
+    let receipt = crate::adapters::external_harness::execute_external_harness_with_config(
+        &manifest,
         &approved,
-        std::time::Duration::from_millis(config.harness_read_timeout_ms.max(900_000)),
+        &transport,
+        &run.registry_snapshot_id,
     )?;
-    let submitted = validate_submit_result(&result, request)?;
+    let result = receipt.output.clone();
     journal.append_event(
         JournalEventKind::ReceiptReceived,
         Some(&run.id),
@@ -303,10 +328,22 @@ fn execute_new_submission(
         json!({
             "invocation_id": invocation_id.0,
             "operation": crate::domain::operation::external::TASK_SUBMIT,
-            "status": "Succeeded",
-            "output": result,
+            "failed_stage": (receipt.status == ReceiptStatus::Failed).then_some("external_execution"),
+            "status": format!("{:?}", receipt.status),
+            "output": result.clone(),
+            "external_ref": receipt.external_ref,
         }),
     )?;
+    if receipt.status != ReceiptStatus::Succeeded {
+        let code = result
+            .get("detail_code")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("CODING_HARNESS_EXECUTION_FAILED")
+            .to_string();
+        return Err(CodingHarnessRejection { code }.into());
+    }
+    let submitted = validate_submit_result(&result, request)?;
     Ok((result, submitted))
 }
 

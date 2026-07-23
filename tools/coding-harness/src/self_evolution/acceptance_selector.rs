@@ -46,6 +46,10 @@ pub fn select(request: &DevelopmentRequest) -> Result<AcceptanceSelection, Strin
             "failure-event-viewer-v0",
             acceptance_bundle_digest("failure-event-viewer-v0"),
         )),
+        "external.failure_viewer_query" => Ok(AcceptanceSelection::new(
+            "failure-viewer-query-v0",
+            acceptance_bundle_digest("failure-viewer-query-v0"),
+        )),
         _ => Err("ACCEPTANCE_KIT_SELECTION_REQUIRED".to_string()),
     }
 }
@@ -59,6 +63,7 @@ fn acceptance_bundle_digest(bundle_ref: &str) -> &'static str {
     match bundle_ref {
         "token-dashboard-v0" => env!("TOKEN_DASHBOARD_BUNDLE_DIGEST"),
         "failure-event-viewer-v0" => env!("FAILURE_VIEWER_BUNDLE_DIGEST"),
+        "failure-viewer-query-v0" => env!("FAILURE_VIEWER_QUERY_BUNDLE_DIGEST"),
         _ => "unknown",
     }
 }

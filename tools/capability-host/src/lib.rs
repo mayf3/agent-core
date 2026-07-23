@@ -7,3 +7,4 @@ pub mod deployment;
 pub mod process;
 pub mod protocol;
 pub mod server;
+pub mod upstream;

@@ -123,7 +123,7 @@ impl RegistrySnapshot {
             .map(|name| format!("{name} - {}", self.description_for(name)))
             .collect::<Vec<_>>()
             .join("\n");
-        format!("Available tools (authorized for this request, read-only):\n{rows}")
+        format!("Available tools (authorized for this request):\n{rows}")
     }
 
     fn description_for(&self, name: &str) -> &str {

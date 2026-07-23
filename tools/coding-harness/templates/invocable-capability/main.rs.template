@@ -1,0 +1,85 @@
+mod component {
+    use serde_json::{json, Map, Value};
+    include!("component.rs");
+}
+
+use serde_json::{json, Value};
+use std::io::{Read, Write};
+
+const OPERATION_NAME: &str = "__OPERATION_NAME__";
+const UPSTREAM_COMPONENT_ID: &str = "__UPSTREAM_COMPONENT_ID__";
+const UPSTREAM_PATH: &str = "__UPSTREAM_PATH__";
+
+fn main() {
+    let mut input = String::new();
+    if std::io::stdin().read_to_string(&mut input).is_err() {
+        respond_error("request_read_failed");
+        return;
+    }
+    let request: Value = match serde_json::from_str(&input) {
+        Ok(value) => value,
+        Err(_) => {
+            respond_error("malformed_request");
+            return;
+        }
+    };
+    let protocol = request
+        .get("protocol_version")
+        .or_else(|| request.get("protocol"))
+        .and_then(Value::as_str);
+    if protocol != Some("process-harness-v1") {
+        respond_error("unsupported_protocol");
+        return;
+    }
+    let operation = request
+        .get("operation_name")
+        .or_else(|| request.get("operation"))
+        .and_then(Value::as_str);
+    if operation == Some("__agent_core_describe") {
+        respond(json!({
+            "ok": true,
+            "result": {
+                "descriptor_version": "invocable-execution-v0",
+                "operation_name": OPERATION_NAME,
+                "probe_arguments": {},
+                "upstream": {
+                    "component_id": UPSTREAM_COMPONENT_ID,
+                    "method": "GET",
+                    "path": UPSTREAM_PATH
+                }
+            }
+        }));
+        return;
+    }
+    if operation != Some(OPERATION_NAME) {
+        respond_error("unsupported_operation");
+        return;
+    }
+    let Some(arguments) = request.get("arguments").and_then(Value::as_object) else {
+        respond_error("invalid_arguments");
+        return;
+    };
+    let Some(upstream) = arguments.get("__agent_core_upstream_state") else {
+        respond_error("upstream_state_missing");
+        return;
+    };
+    let result = std::panic::catch_unwind(|| component::transform(upstream));
+    match result {
+        Ok(result) => respond(json!({"ok": true, "result": result})),
+        Err(_) => respond_error("transform_failed"),
+    }
+}
+
+fn respond(value: Value) {
+    let _ = writeln!(
+        std::io::stdout(),
+        "{}",
+        serde_json::to_string(&value).unwrap_or_else(|_| {
+            r#"{"ok":false,"error":{"code":"response_encode_failed"}}"#.to_string()
+        })
+    );
+}
+
+fn respond_error(code: &str) {
+    respond(json!({"ok": false, "error": {"code": code}}));
+}

@@ -329,6 +329,7 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
         text: &str,
     ) -> std::result::Result<super::RuntimeOutcome, anyhow::Error> {
         let mut intent = self.reply_intent(run, session, text, message_id, chat_id);
+        super::apply_pending_proposal_presentation(journal, run, &mut intent)?;
         intent.idempotency_key = Some(format!("failure-reply:{}", run.id.0));
         let correlation_id = intent.invocation_id.0.clone();
         journal.append_event(

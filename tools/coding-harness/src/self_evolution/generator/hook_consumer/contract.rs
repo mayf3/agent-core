@@ -90,6 +90,9 @@ pub(super) fn validate_source(bundle_ref: &str, source: &str) -> Result<(), Stri
             // Failure Event Viewer has no additional source policies.
             Ok(())
         }
+        crate::self_evolution::acceptance_kit::AcceptanceKitId::FailureViewerQueryV0 => {
+            Err("ACCEPTANCE_KIT_PROFILE_MISMATCH".into())
+        }
     }
 }
 

@@ -65,22 +65,17 @@ pub fn builtin_specs() -> Vec<OperationSpec> {
         OperationSpec {
             name: crate::domain::operation::external::TASK_SUBMIT.into(),
             risk: Risk::Write,
-            description: "Submit a catalogued Generic DevelopmentRequest to the Coding Harness."
+            description: "Submit a semantic development draft to the governed Coding Harness. Use this when the authorized user asks to create an external component or capability. Kernel binds authenticated origin, idempotency, active catalog version, permissions, and profiles; supply only the requested behavior, target kind, contracts, and acceptance criteria."
                 .into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "session_id": {"type": "string"},
                     "development_request": {
                         "type": "object",
                         "properties": {
-                            "request_id": {"type": "string", "description": "Optional compatibility field. Omit it for new requests; the Coding Harness derives the content-addressed ID. If supplied, it must match the derived ID exactly."},
-                            "source_subject": {"type": "string"},
-                            "source_scope": {"type": "string"},
-                            "source_message_id": {"type": "string"},
                             "target_kind": {
                                 "type": "string",
-                                "description": "Selects the catalogued component and deployment profiles. For invocable_capability use build_profile=invocable-capability-v0 and deployment_profile=capability-host-v0. For every other target_kind use deployment_profile=managed-service-v0; build_profile mappings are hook_consumer_service=hook-consumer-service-v0, context_provider=context-provider-v0, context_transformer=context-transformer-v0, scheduled_worker or scheduler_service=scheduled-worker-v0, ingress_router or connector_extension=router-service-v0, and multi_run_orchestrator=multi-run-orchestrator-v0.",
+                                "description": "Select the component kind. Kernel derives the catalogued build and deployment profiles; never supply profile fields.",
                                 "enum": [
                                 "invocable_capability", "hook_consumer_service", "context_provider",
                                 "context_transformer", "scheduled_worker", "scheduler_service",
@@ -88,31 +83,17 @@ pub fn builtin_specs() -> Vec<OperationSpec> {
                             ]},
                             "name": {"type": "string"},
                             "requirements": {"type": "array", "items": {"type": "string"}},
-                            "required_contracts": {"type": "array", "description": "Select active Contract Catalog IDs compatible with target_kind. invocable_capability uses component.invoke.v0; hook_consumer_service uses event.observe.v0 and optionally feishu.reply.v0.", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "enum": ["event.observe.v0", "context.prepare.v0", "context.load.v0", "context.compress.v0", "route.proposal.v0", "run.create.v0", "component.invoke.v0", "deployment.effect.v0", "feishu.reply.v0"]}},
-                            "requested_permissions": {"type": "array", "items": {"type": "string"}},
-                            "build_profile": {
-                                "type": "string",
-                                "description": "Must match target_kind exactly: invocable-capability-v0, hook-consumer-service-v0, context-provider-v0, context-transformer-v0, scheduled-worker-v0, router-service-v0, or multi-run-orchestrator-v0 according to the target_kind mapping."
-                            },
-                            "deployment_profile": {
-                                "type": "string",
-                                "description": "Must be capability-host-v0 for invocable_capability; must be managed-service-v0 for every other target_kind."
-                            },
-                            "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
-                            "idempotency_key": {"type": "string"},
-                            "contract_catalog_version": {"type": "string", "description": "Use the exact active Contract Catalog version; aliases such as v1, latest, stable, or default are invalid.", "enum": [crate::contract_catalog::CONTRACT_CATALOG_VERSION]}
+                            "required_contracts": {"type": "array", "description": "Select active Contract Catalog IDs compatible with target_kind. invocable_capability uses component.invoke.v0; hook_consumer_service uses event.observe.v0 and optionally feishu.reply.v0. Kernel derives permissions from these contracts.", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "enum": ["event.observe.v0", "context.prepare.v0", "context.load.v0", "context.compress.v0", "route.proposal.v0", "run.create.v0", "component.invoke.v0", "deployment.effect.v0", "feishu.reply.v0"]}},
+                            "acceptance_criteria": {"type": "array", "items": {"type": "string"}}
                         },
                         "required": [
-                            "source_subject", "source_scope", "source_message_id",
                             "target_kind", "name", "requirements", "required_contracts",
-                            "requested_permissions", "build_profile", "deployment_profile",
-                            "acceptance_criteria", "idempotency_key", "contract_catalog_version"
+                            "acceptance_criteria"
                         ],
                         "additionalProperties": false
-                    },
-                    "idempotency_key": {"type": "string"}
+                    }
                 },
-                "required": ["session_id", "development_request", "idempotency_key"],
+                "required": ["development_request"],
                 "additionalProperties": false,
             }),
             idempotent: true,
@@ -465,7 +446,7 @@ mod tests {
     }
 
     #[test]
-    fn coding_task_submit_exposes_profile_mapping_to_llm() {
+    fn coding_task_submit_keeps_control_plane_fields_kernel_owned() {
         let submit = builtin_specs()
             .into_iter()
             .find(|spec| spec.name == crate::domain::operation::external::TASK_SUBMIT)
@@ -479,22 +460,23 @@ mod tests {
             .pointer("/properties/target_kind/description")
             .and_then(|value| value.as_str())
             .unwrap();
-        assert!(target_kind_description.contains(
-            "invocable_capability use build_profile=invocable-capability-v0 and deployment_profile=capability-host-v0"
-        ));
-        assert!(target_kind_description.contains("hook_consumer_service=hook-consumer-service-v0"));
-
+        assert!(target_kind_description.contains("Kernel derives"));
+        for field in [
+            "request_id",
+            "source_subject",
+            "source_scope",
+            "source_message_id",
+            "requested_permissions",
+            "build_profile",
+            "deployment_profile",
+            "idempotency_key",
+            "contract_catalog_version",
+        ] {
+            assert!(request.pointer(&format!("/properties/{field}")).is_none());
+        }
         assert_eq!(
-            request
-                .pointer("/properties/build_profile/description")
-                .and_then(|value| value.as_str()),
-            Some("Must match target_kind exactly: invocable-capability-v0, hook-consumer-service-v0, context-provider-v0, context-transformer-v0, scheduled-worker-v0, router-service-v0, or multi-run-orchestrator-v0 according to the target_kind mapping.")
-        );
-        assert_eq!(
-            request
-                .pointer("/properties/deployment_profile/description")
-                .and_then(|value| value.as_str()),
-            Some("Must be capability-host-v0 for invocable_capability; must be managed-service-v0 for every other target_kind.")
+            submit.parameters["required"],
+            serde_json::json!(["development_request"])
         );
     }
 
