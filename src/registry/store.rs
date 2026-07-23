@@ -100,7 +100,7 @@ pub fn builtin_specs() -> Vec<OperationSpec> {
                             },
                             "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
                             "idempotency_key": {"type": "string"},
-                            "contract_catalog_version": {"type": "string"}
+                            "contract_catalog_version": {"type": "string", "description": "Use the exact active Contract Catalog version; aliases such as v1, latest, stable, or default are invalid.", "enum": [crate::contract_catalog::CONTRACT_CATALOG_VERSION]}
                         },
                         "required": [
                             "source_subject", "source_scope", "source_message_id",

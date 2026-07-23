@@ -434,3 +434,23 @@ fn coding_submit_schema_does_not_require_model_to_compute_request_id() {
         .unwrap()
         .contains("Omit it for new requests"));
 }
+
+#[test]
+fn coding_submit_schema_exposes_exact_contract_catalog_version() {
+    let submit = crate::registry::store::builtin_specs()
+        .into_iter()
+        .find(|spec| spec.name == crate::domain::operation::external::TASK_SUBMIT)
+        .unwrap();
+    let version = submit
+        .parameters
+        .pointer("/properties/development_request/properties/contract_catalog_version")
+        .unwrap();
+    assert_eq!(
+        version["enum"],
+        json!([crate::contract_catalog::CONTRACT_CATALOG_VERSION])
+    );
+    assert!(version["description"]
+        .as_str()
+        .unwrap()
+        .contains("exact active Contract Catalog version"));
+}
