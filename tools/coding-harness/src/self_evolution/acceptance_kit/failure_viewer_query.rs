@@ -97,12 +97,37 @@ pub fn public_spec() -> Value {
             "path": "/api/state",
             "discovery": "deployment-harness-component-registry"
         },
+        "upstream_schema": {
+            "shape": "The upstream value passed to transform is the full /api/state JSON body. Failure events live at upstream[\"rendered\"][\"failure_events\"], NOT at the top level.",
+            "rendered_path": "rendered",
+            "failure_events_path": "rendered.failure_events",
+            "example_input": {
+                "rendered": {
+                    "component_id": "failure-viewer",
+                    "component_version": "0.1.2",
+                    "health": "ready",
+                    "failure_count": 1,
+                    "failure_events": [
+                        {
+                            "capability_name": "external.example",
+                            "failed_stage": "external_execution",
+                            "error_category": "timeout",
+                            "detail_code": "UPSTREAM_TIMEOUT",
+                            "run_id": "run-example",
+                            "invocation_id": "inv-example",
+                            "receipt_status": "Failed",
+                            "receipt_time": "2026-01-01T00:00:00Z"
+                        }
+                    ]
+                }
+            }
+        },
         "transform_interface": "pub fn transform(upstream: &Value) -> Value",
         "requirements": [
-            "Read only from the supplied failure-viewer /api/state response",
+            "Read failure_events from upstream[\"rendered\"][\"failure_events\"] (nested under the \"rendered\" key, not at the top level)",
             "Select the most recent failure_events entry by receipt_time",
-            "Return capability_name, failed_stage, error_category, detail_code, run_id, invocation_id, receipt_status, and receipt_time without inventing values",
-            "Return a structured no_failures result when failure_events is empty"
+            "Return capability_name, failed_stage, error_category, detail_code, run_id, invocation_id, receipt_status, and receipt_time from the selected entry, plus source_component set to the literal string \"failure-viewer\"",
+            "Return {\"status\":\"no_failures\",\"source_component\":\"failure-viewer\"} when failure_events is empty or the rendered key is absent"
         ],
         "output_example": {
             "capability_name": "external.example",
