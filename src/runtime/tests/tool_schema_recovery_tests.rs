@@ -416,3 +416,21 @@ fn coding_manifest_schema_reaches_llm_tool_definition_intact() {
     assert!(ws_enum.contains(&json!("agent-dev")));
     assert!(j.verify_hash_chain().unwrap());
 }
+
+#[test]
+fn coding_submit_schema_does_not_require_model_to_compute_request_id() {
+    let submit = crate::registry::store::builtin_specs()
+        .into_iter()
+        .find(|spec| spec.name == crate::domain::operation::external::TASK_SUBMIT)
+        .unwrap();
+    let request = submit
+        .parameters
+        .pointer("/properties/development_request")
+        .unwrap();
+    let required = request["required"].as_array().unwrap();
+    assert!(!required.contains(&json!("request_id")));
+    assert!(request["properties"]["request_id"]["description"]
+        .as_str()
+        .unwrap()
+        .contains("Omit it for new requests"));
+}

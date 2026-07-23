@@ -74,7 +74,7 @@ pub fn builtin_specs() -> Vec<OperationSpec> {
                     "development_request": {
                         "type": "object",
                         "properties": {
-                            "request_id": {"type": "string"},
+                            "request_id": {"type": "string", "description": "Optional compatibility field. Omit it for new requests; the Coding Harness derives the content-addressed ID. If supplied, it must match the derived ID exactly."},
                             "source_subject": {"type": "string"},
                             "source_scope": {"type": "string"},
                             "source_message_id": {"type": "string"},
@@ -103,7 +103,7 @@ pub fn builtin_specs() -> Vec<OperationSpec> {
                             "contract_catalog_version": {"type": "string"}
                         },
                         "required": [
-                            "request_id", "source_subject", "source_scope", "source_message_id",
+                            "source_subject", "source_scope", "source_message_id",
                             "target_kind", "name", "requirements", "required_contracts",
                             "requested_permissions", "build_profile", "deployment_profile",
                             "acceptance_criteria", "idempotency_key", "contract_catalog_version"
