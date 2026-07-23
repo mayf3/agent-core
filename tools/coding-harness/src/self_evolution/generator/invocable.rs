@@ -35,6 +35,12 @@ The fixed runtime imports serde_json::{json, Map, Value}. Your module may use th
 
 pub fn transform(upstream: &Value) -> Value
 
+To avoid lifetime errors, prefer owned values over borrowed returns in helpers. For example, extract string fields with a closure that returns Value, not a function that returns &str:
+
+    let get_str = |key: &str| event.get(key).and_then(Value::as_str).map(Value::from).unwrap_or(Value::Null);
+
+Never write a helper that returns Option<&str> or &str from a borrowed Value parameter unless you also write explicit lifetime annotations for every reference. Prefer .to_string(), .clone(), or Value::from over returning references.
+
 The supplied upstream value is the trusted JSON response described in the acceptance specification. Transform only that value. Do not define main. Do not import or reference any other crate or std path. Do not invent missing failure facts. Return a deterministic JSON value that satisfies the acceptance contract."#;
 
 pub(super) fn generate(
