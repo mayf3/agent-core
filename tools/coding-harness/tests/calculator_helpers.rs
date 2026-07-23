@@ -206,6 +206,8 @@ pub fn kcfg(artifact_root: &PathBuf) -> KernelConfig {
         primary_tool_name_indexed: false,
         harness_read_timeout_ms: 30_000,
         harness_artifact_root: artifact_root.clone(),
+        coding_harness_api_url: "http://127.0.0.1:7200".into(),
+        coding_harness_artifact_digest: format!("sha256:{}", "a".repeat(64)),
         max_tool_rounds: 12,
         tool_loop_timeout_ms: 300_000,
         capability_submit_token: Some("test-submit-token".into()),

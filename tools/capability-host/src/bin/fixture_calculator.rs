@@ -10,6 +10,15 @@ fn main() {
     if std::io::stdin().read_to_string(&mut input).is_err() {
         std::process::exit(1);
     }
+    let harness_operation = string_field(&input, "operation_name").unwrap_or_default();
+    if harness_operation == "__agent_core_describe" {
+        let _ = writeln!(
+            std::io::stdout(),
+            "{}",
+            r#"{"ok":true,"result":{"descriptor_version":"invocable-execution-v0","operation_name":"external.calculator","probe_arguments":{"operation":"multiply","a":6,"b":7}}}"#
+        );
+        return;
+    }
     let operation = string_field(&input, "operation").unwrap_or_default();
     let Some(a) = number_field(&input, "a") else {
         return error("invalid_arguments");

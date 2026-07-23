@@ -80,10 +80,12 @@ fn twenty_concurrent_identical_deploys_create_one_record() {
     }
     assert_eq!(deployment_ids.len(), 1);
     assert_eq!(fresh, 1);
-    let record = root
-        .join(".capability-host")
-        .join("external.calculator.json");
-    assert!(record.is_file());
+    let records = std::fs::read_dir(root.join(".capability-host"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().and_then(|value| value.to_str()) == Some("json"))
+        .count();
+    assert_eq!(records, 1);
 }
 
 #[test]

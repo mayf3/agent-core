@@ -41,7 +41,7 @@ where
     unreachable!("the final model attempt always returns")
 }
 
-pub(super) fn retryable_model_output_error(code: &str) -> bool {
+pub(in crate::self_evolution::generator) fn retryable_model_output_error(code: &str) -> bool {
     matches!(
         code,
         "GENERATOR_MODEL_UNAVAILABLE" | "GENERATOR_MODEL_RESPONSE_INVALID"

@@ -10,7 +10,7 @@ use crate::registry::snapshot::RegistrySnapshot;
 use anyhow::Result;
 use serde_json::json;
 use std::time::Duration;
-fn append_or_fatal(
+pub(super) fn append_or_fatal(
     journal: &JournalStore,
     kind: JournalEventKind,
     run: &Run,
@@ -95,196 +95,7 @@ fn rejected_result(
     };
     ToolCallOutcome::ToolResult { text }
 }
-/// Typed dispatch error — maps to fixed error_category, no string matching.
-#[derive(Debug, Clone)]
-pub(crate) enum ToolDispatchError {
-    RetiredBuiltinOperation(String),
-    UnknownBuiltinBinding(String),
-    HarnessManifestNotFound(String),
-    HarnessManifestLoadFailed(String),
-}
-impl ToolDispatchError {
-    pub fn error_category(&self) -> &'static str {
-        match self {
-            Self::RetiredBuiltinOperation(_) => "retired_builtin_operation",
-            Self::UnknownBuiltinBinding(_) => "registry_binding_invalid",
-            Self::HarnessManifestNotFound(_) => "external_manifest_not_found",
-            Self::HarnessManifestLoadFailed(_) => "external_manifest_load_failed",
-        }
-    }
-}
-impl std::fmt::Display for ToolDispatchError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::RetiredBuiltinOperation(key) => write!(f, "retired_builtin_operation: {key}"),
-            Self::UnknownBuiltinBinding(key) => write!(f, "registry_binding_invalid: {key}"),
-            Self::HarnessManifestNotFound(id) => write!(f, "external_manifest_not_found: {id}"),
-            Self::HarnessManifestLoadFailed(msg) => {
-                write!(f, "external_manifest_load_failed: {msg}")
-            }
-        }
-    }
-}
-impl std::error::Error for ToolDispatchError {}
-/// Authoritative binding_key → handler dispatch. External dispatch preserves
-/// the adapter's actual receipt status.
-pub(crate) fn dispatch_builtin_binding(
-    spec: &crate::registry::snapshot::OperationSpec,
-    approved: &ApprovedInvocation,
-    journal: &JournalStore,
-    run: &Run,
-    session: &Session,
-    correlation_id: &str,
-    harness_read_timeout: Duration,
-    registry_snapshot_id: &str,
-) -> ToolCallOutcome {
-    let receipt_result: Result<Receipt> = match spec.binding_key.as_str() {
-        "builtin.session_recall_recent" => {
-            super::tool_rejection::execute_session_recall(journal, &session.id, approved).map(
-                |(status, output, _text)| Receipt {
-                    invocation_id: approved.intent().invocation_id.clone(),
-                    status,
-                    output,
-                    external_ref: None,
-                    occurred_at: chrono::Utc::now(),
-                },
-            )
-        }
-        "builtin.system_status" => crate::capabilities::execute(journal).map(|output| Receipt {
-            invocation_id: approved.intent().invocation_id.clone(),
-            status: ReceiptStatus::Succeeded,
-            output,
-            external_ref: None,
-            occurred_at: chrono::Utc::now(),
-        }),
-        _ if spec.binding_key == "builtin.time_now" => {
-            // Retired builtin operation — no longer has a runtime handler.
-            // Historical Runs referencing this binding get fail-closed.
-            Err(anyhow::Error::from(
-                ToolDispatchError::RetiredBuiltinOperation(spec.binding_key.clone()),
-            ))
-        }
-        _ => {
-            if spec.binding_kind == crate::registry::snapshot::BindingKind::External {
-                let manifest_id = &spec.binding_key;
-                match journal.load_harness_manifest(manifest_id) {
-                    Ok(Some(manifest)) => {
-                        let transport_config =
-                            crate::adapters::external_harness::ExternalHarnessTransportConfig {
-                                read_timeout: harness_read_timeout,
-                                ..Default::default()
-                            };
-                        crate::adapters::external_harness::execute_external_harness_with_config(
-                            &manifest,
-                            approved,
-                            &transport_config,
-                            registry_snapshot_id,
-                        )
-                    }
-                    Ok(None) => Err(anyhow::Error::from(
-                        ToolDispatchError::HarnessManifestNotFound(manifest_id.to_string()),
-                    )),
-                    Err(e) => Err(anyhow::Error::from(
-                        ToolDispatchError::HarnessManifestLoadFailed(e.to_string()),
-                    )),
-                }
-            } else {
-                Err(anyhow::Error::from(
-                    ToolDispatchError::UnknownBuiltinBinding(spec.binding_key.clone()),
-                ))
-            }
-        }
-    };
-    let (status, output, external_ref, text) = match receipt_result {
-        Ok(receipt) => {
-            let text = match receipt.status {
-                ReceiptStatus::Succeeded => {
-                    format!("status: succeeded\noutput: {:?}", receipt.output)
-                }
-                ReceiptStatus::Failed => {
-                    let cat: &str = receipt
-                        .output
-                        .get("error_category")
-                        .and_then(|v: &serde_json::Value| v.as_str())
-                        .unwrap_or("harness_failed");
-                    let mut text = format!("status: execution_failed\nerror_category: {cat}");
-                    if let Some(detail_code) = receipt
-                        .output
-                        .get("detail_code")
-                        .and_then(serde_json::Value::as_str)
-                    {
-                        text.push_str("\ndetail_code: ");
-                        text.push_str(detail_code);
-                    }
-                    if let Some(http_code) = receipt
-                        .output
-                        .get("http_code")
-                        .and_then(serde_json::Value::as_u64)
-                    {
-                        text.push_str(&format!("\nhttp_code: {http_code}"));
-                    }
-                    text
-                }
-                ReceiptStatus::Unknown => {
-                    "status: execution_failed\nerror_category: unknown_outcome".to_string()
-                }
-            };
-            (receipt.status, receipt.output, receipt.external_ref, text)
-        }
-        Err(e) => {
-            // First try typed ToolDispatchError downcast for precise category.
-            // Fall back to string-based categorization for external harness errors.
-            let cat = if let Some(de) = e.downcast_ref::<ToolDispatchError>() {
-                de.error_category()
-            } else if e.to_string().contains("timed out") || e.to_string().contains("timeout") {
-                "timeout"
-            } else if e.to_string().contains("connect failed") {
-                "connect_failed"
-            } else if e.to_string().contains("protocol version mismatch")
-                || e.to_string().contains("protocol")
-            {
-                "protocol_mismatch"
-            } else if e.to_string().contains("non-2xx") || e.to_string().contains("HTTP") {
-                "http_error"
-            } else if e.to_string().contains("schema violation")
-                || e.to_string().contains("output schema")
-            {
-                "output_schema_violation"
-            } else if e.to_string().contains("exceeds 64 KiB") {
-                "response_too_large"
-            } else if e.to_string().contains("malformed")
-                || e.to_string().contains("invalid JSON")
-                || e.to_string().contains("UTF-8")
-            {
-                "malformed_response"
-            } else {
-                "harness_failed"
-            };
-            (
-                ReceiptStatus::Failed,
-                json!({"error_category": cat}),
-                None,
-                format!("status: execution_failed\nerror_category: {cat}"),
-            )
-        }
-    };
-    if let Some(fatal) = append_or_fatal(
-        journal,
-        JournalEventKind::ReceiptReceived,
-        run,
-        session,
-        Some(correlation_id),
-        json!({
-            "invocation_id": approved.intent().invocation_id,
-            "status": format!("{:?}", status),
-            "output": output,
-            "external_ref": external_ref,
-        }),
-    ) {
-        return fatal;
-    }
-    ToolCallOutcome::ToolResult { text }
-}
+pub(crate) use super::tool_dispatch::dispatch_builtin_binding;
 impl<L: LlmClient + 'static> super::Runtime<L> {
     pub(crate) fn handle_malformed_tool_call(
         &self,
@@ -476,6 +287,17 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
                     }
                 }
             }
+        }
+
+        if approved.intent().operation == crate::domain::operation::external::TASK_SUBMIT {
+            return Ok(self.dispatch_coding_task_submit(
+                &approved,
+                journal,
+                gateway,
+                run,
+                session,
+                &correlation_id,
+            ));
         }
 
         return Ok(dispatch_builtin_binding(

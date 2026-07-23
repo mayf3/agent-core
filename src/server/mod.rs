@@ -8,8 +8,6 @@ mod capability_decision;
 mod capability_host_client;
 mod capability_http;
 pub mod capability_routes;
-mod coding_delivery;
-mod coding_harness_client;
 pub mod coding_router;
 pub mod coding_task_submit;
 mod component_control;
@@ -60,8 +58,7 @@ pub fn serve(config: KernelConfig) -> Result<()> {
     // The Coding Harness API URL and artifact digest are required when
     // external bindings (external.coding_task_submit, etc.) are active.
     // Without them, model-initiated tool calls to these operations fail.
-    if config.coding_harness_api_url.is_empty()
-        || config.coding_harness_artifact_digest.is_empty()
+    if config.coding_harness_api_url.is_empty() || config.coding_harness_artifact_digest.is_empty()
     {
         bail!(
             "AGENT_CORE_CODING_HARNESS_API_URL and \

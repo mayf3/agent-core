@@ -429,30 +429,35 @@ fn coding_submit_schema_does_not_require_model_to_compute_request_id() {
         .unwrap();
     let required = request["required"].as_array().unwrap();
     assert!(!required.contains(&json!("request_id")));
-    assert!(request["properties"]["request_id"]["description"]
-        .as_str()
-        .unwrap()
-        .contains("Omit it for new requests"));
+    assert!(request.pointer("/properties/request_id").is_none());
 }
 
 #[test]
-fn coding_submit_schema_exposes_exact_contract_catalog_version() {
+fn coding_submit_schema_does_not_expose_kernel_owned_fields() {
     let submit = crate::registry::store::builtin_specs()
         .into_iter()
         .find(|spec| spec.name == crate::domain::operation::external::TASK_SUBMIT)
         .unwrap();
-    let version = submit
+    let request = submit
         .parameters
-        .pointer("/properties/development_request/properties/contract_catalog_version")
+        .pointer("/properties/development_request")
         .unwrap();
+    for field in [
+        "source_subject",
+        "source_scope",
+        "source_message_id",
+        "requested_permissions",
+        "build_profile",
+        "deployment_profile",
+        "idempotency_key",
+        "contract_catalog_version",
+    ] {
+        assert!(request.pointer(&format!("/properties/{field}")).is_none());
+    }
     assert_eq!(
-        version["enum"],
-        json!([crate::contract_catalog::CONTRACT_CATALOG_VERSION])
+        submit.parameters["required"],
+        json!(["development_request"])
     );
-    assert!(version["description"]
-        .as_str()
-        .unwrap()
-        .contains("exact active Contract Catalog version"));
 }
 
 #[test]

@@ -1,4 +1,4 @@
-//! Kernel-owned, replay-safe decision transaction for trusted calculator Proposals.
+//! Kernel-owned, replay-safe decision transaction for trusted capability Proposals.
 
 use crate::domain::{AgentId, CapabilityApprovalStatus, JournalEventKind, RunId, SessionId};
 use crate::harness::manifest::HarnessManifest;
@@ -11,8 +11,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use super::activation_core::Binding;
-
-pub(crate) const CALCULATOR: &str = "external.calculator";
 
 #[derive(Clone, Debug)]
 pub struct TrustedDecisionIdentity {
@@ -76,13 +74,13 @@ impl super::JournalStore {
 
     /// Compute the S1 identity that must be sent to Capability Host. Activation
     /// recomputes it inside BEGIN IMMEDIATE, so this read is only preparation.
-    pub fn trusted_calculator_prospective_snapshot(
+    pub fn trusted_capability_prospective_snapshot(
         &self,
         identity: &TrustedDecisionIdentity,
         manifest: &HarnessManifest,
         expected_agent: &AgentId,
     ) -> Result<String> {
-        super::activation_core::validate_calculator_manifest(manifest, identity)?;
+        super::activation_core::validate_capability_manifest(manifest, identity)?;
         let conn = self
             .conn
             .lock()
@@ -99,18 +97,18 @@ impl super::JournalStore {
                 .ok_or_else(|| anyhow::anyhow!("APPROVAL_REPLAY_RESULT_CORRUPT"));
         }
         validate_pending(&conn, &binding, identity)?;
-        let specs = super::activation_core::calculator_specs(&conn, identity, manifest)?;
+        let specs = super::activation_core::capability_specs(&conn, identity, manifest)?;
         compute_snapshot_id(&specs)
     }
 
-    pub fn activate_trusted_calculator_atomic(
+    pub fn activate_trusted_capability_atomic(
         &self,
         identity: &TrustedDecisionIdentity,
         manifest: &HarnessManifest,
         deployment: &TrustedHostDeployment,
         expected_agent: &AgentId,
     ) -> Result<TrustedDecisionResult> {
-        super::activation_core::validate_calculator_manifest(manifest, identity)?;
+        super::activation_core::validate_capability_manifest(manifest, identity)?;
         if deployment.deployment_id.trim().is_empty() {
             bail!("HOST_DEPLOYMENT_ID_MISSING");
         }
@@ -134,7 +132,7 @@ impl super::JournalStore {
             return Ok(result);
         }
         validate_decidable(&binding)?;
-        let specs = super::activation_core::calculator_specs(&tx, identity, manifest)?;
+        let specs = super::activation_core::capability_specs(&tx, identity, manifest)?;
         let prospective = compute_snapshot_id(&specs)?;
         if deployment.target_snapshot_id != prospective {
             bail!("HOST_DEPLOYMENT_SNAPSHOT_MISMATCH");
@@ -154,7 +152,7 @@ impl super::JournalStore {
         }
 
         let grant = CreateGrantParams {
-            operation: CALCULATOR.into(),
+            operation: manifest.operation_name.clone(),
             grantee_principal_id: identity.principal_id.clone(),
             channel: "Feishu".into(),
             conversation_kind: "p2p".into(),
@@ -192,6 +190,7 @@ impl super::JournalStore {
             identity,
             &activation.new_snapshot_id,
             &deployment.deployment_id,
+            &manifest.operation_name,
         )?;
         if grant_inserted {
             super::activation_core::append_grant_event(
@@ -200,6 +199,7 @@ impl super::JournalStore {
                 identity,
                 &grant_id,
                 &activation.new_snapshot_id,
+                &manifest.operation_name,
             )?;
         }
         tx.commit()?;
