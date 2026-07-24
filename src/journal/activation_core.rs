@@ -1,6 +1,6 @@
 //! Shared Registry Snapshot composition and compare-and-swap activation.
 
-use super::trusted_capability_activation::{TrustedDecisionIdentity, CALCULATOR};
+use super::trusted_capability_activation::TrustedDecisionIdentity;
 use crate::capabilities::store::Sha256Digest;
 use crate::domain::{JournalEventKind, RunId, SessionId};
 use crate::harness::manifest::HarnessManifest;
@@ -130,45 +130,38 @@ pub(crate) fn activate_registry_tx(
     })
 }
 
-pub(crate) fn validate_calculator_manifest(
+pub(crate) fn validate_capability_manifest(
     manifest: &HarnessManifest,
     identity: &TrustedDecisionIdentity,
 ) -> Result<()> {
     manifest.validate_all()?;
     if manifest.compute_manifest_id()? != manifest.manifest_id
-        || manifest.operation_name != CALCULATOR
         || manifest.harness_id != "capability-host-v0"
         || manifest.endpoint != "http://127.0.0.1:7300/execute"
-        || !manifest.idempotent
         || manifest.artifact_digest != identity.artifact_digest
-        || manifest.input_schema
-            != json!({"type":"object","properties":{
-                "operation":{"type":"string","enum":["add","subtract","multiply","divide"]},
-                "a":{"type":"number"},"b":{"type":"number"}},
-                "required":["operation","a","b"],"additionalProperties":false})
-        || manifest.output_schema != json!({"type":"number"})
+        || !manifest.operation_name.starts_with("external.")
     {
-        bail!("CALCULATOR_MANIFEST_MISMATCH");
+        bail!("CAPABILITY_MANIFEST_MISMATCH");
     }
     if Sha256Digest::compute(&serde_json::to_vec(manifest)?).as_str() != identity.manifest_digest {
-        bail!("CALCULATOR_MANIFEST_DIGEST_MISMATCH");
+        bail!("CAPABILITY_MANIFEST_DIGEST_MISMATCH");
     }
     Ok(())
 }
 
-pub(crate) fn calculator_specs(
+pub(crate) fn capability_specs(
     conn: &rusqlite::Connection,
     identity: &TrustedDecisionIdentity,
     manifest: &HarnessManifest,
 ) -> Result<Vec<OperationSpec>> {
     let snapshot =
         super::JournalStore::load_snapshot_from_conn(conn, &identity.expected_source_snapshot_id)?;
-    if snapshot.lookup(CALCULATOR).is_some() {
-        bail!("CALCULATOR_ALREADY_REGISTERED");
+    if snapshot.lookup(&manifest.operation_name).is_some() {
+        bail!("CAPABILITY_ALREADY_REGISTERED");
     }
     let mut specs = snapshot.operations;
     specs.push(OperationSpec {
-        name: CALCULATOR.into(),
+        name: manifest.operation_name.clone(),
         risk: Risk::ReadOnly,
         description: manifest.description.clone(),
         parameters: manifest.input_schema.clone(),
@@ -202,6 +195,7 @@ pub(crate) fn append_approved_events(
     identity: &TrustedDecisionIdentity,
     snapshot: &str,
     deployment: &str,
+    operation: &str,
 ) -> Result<()> {
     append_approval_event(tx, binding, identity)?;
     let run = RunId(binding.origin_run.clone());
@@ -212,7 +206,7 @@ pub(crate) fn append_approved_events(
         Some(&run),
         Some(&session),
         Some(&identity.decision_id),
-        json!({"action":"trusted_calculator_activation",
+        json!({"action":"trusted_capability_activation","operation":operation,
             "previous_snapshot_id":identity.expected_source_snapshot_id,
             "new_snapshot_id":snapshot,"decision_id":identity.decision_id,
             "host_deployment_id":deployment}),
@@ -236,6 +230,7 @@ pub(crate) fn append_grant_event(
     identity: &TrustedDecisionIdentity,
     grant_id: &str,
     snapshot: &str,
+    operation: &str,
 ) -> Result<()> {
     super::queue::append_event_tx(
         tx,
@@ -243,7 +238,7 @@ pub(crate) fn append_grant_event(
         Some(&RunId(binding.origin_run.clone())),
         Some(&SessionId(binding.origin_session.clone())),
         Some(grant_id),
-        json!({"grant_id":grant_id,"operation":CALCULATOR,
+        json!({"grant_id":grant_id,"operation":operation,
             "grantee_principal_id":identity.principal_id,"channel":"Feishu",
             "conversation_kind":"p2p","scope":"principal_channel","risk":"ReadOnly",
             "snapshot_id":snapshot,"decision_id":identity.decision_id}),

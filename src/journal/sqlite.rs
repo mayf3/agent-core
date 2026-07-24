@@ -24,7 +24,7 @@ pub struct JournalStore {
 /// The schema `PRAGMA user_version` this kernel writes and understands. Bumped
 /// only when `migrations/` gains a new applied migration. The startup
 /// `migrate()` refuses to run against a DB whose version is newer than this.
-const CURRENT_SCHEMA_VERSION: i64 = 14;
+const CURRENT_SCHEMA_VERSION: i64 = 15;
 
 impl JournalStore {
     pub fn open(path: &Path) -> Result<Self> {
@@ -54,9 +54,9 @@ impl JournalStore {
     /// threads. Returns an error if this is an in-memory store.
     pub fn try_clone(&self) -> Result<Self> {
         let guard = self.db_path.lock().map_err(|_| anyhow::anyhow!("mutex"))?;
-        let path = guard.as_ref().ok_or_else(|| {
-            anyhow::anyhow!("cannot clone in-memory journal store")
-        })?;
+        let path = guard
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("cannot clone in-memory journal store"))?;
         Self::open(path)
     }
 
@@ -390,6 +390,9 @@ impl JournalStore {
             conn.execute_batch(include_str!(
                 "../../migrations/0014_external_receipt_envelope_digests.sql"
             ))?;
+            conn.execute_batch(include_str!(
+                "../../migrations/0015_delivery_manifest_columns.sql"
+            ))?;
             super::queue::migrate(&conn)?;
             backfill_feishu_message_dedup(&conn)?;
             conn.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
@@ -474,6 +477,12 @@ impl JournalStore {
                         "../../migrations/0014_external_receipt_envelope_digests.sql"
                     ))?;
                     conn.pragma_update(None, "user_version", 14)?;
+                }
+                14 => {
+                    conn.execute_batch(include_str!(
+                        "../../migrations/0015_delivery_manifest_columns.sql"
+                    ))?;
+                    conn.pragma_update(None, "user_version", 15)?;
                 }
                 _ => break,
             }

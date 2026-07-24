@@ -94,8 +94,8 @@ impl ExternalExecutionFailureClass {
         }
     }
 
-    /// Parse a failure class from a string found in error messages.
-    /// This is used by the coding_delivery layer for backwards compatibility.
+    /// Parse a bounded failure class from an execution error. Typed Harness
+    /// rejections retain their separate detail code at the Receipt boundary.
     pub fn from_message(message: &str) -> Self {
         if message.contains("ACCEPTANCE_KIT_SELECTION_REQUIRED") {
             Self::ExternalInputRequired

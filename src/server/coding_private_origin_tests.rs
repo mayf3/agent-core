@@ -1,5 +1,4 @@
 use crate::domain::*;
-use crate::server::coding_delivery;
 use chrono::Utc;
 
 use super::super::handler::validate_private_owner_context;
@@ -42,27 +41,6 @@ fn owner_run(session: &Session) -> Run {
     }
 }
 
-fn ingress(source: EventSource, chat_type: Option<&str>) -> ValidatedEvent {
-    ValidatedEvent {
-        event_id: EventId("event_private".into()),
-        source,
-        principal: owner_run(&private_session()).principal,
-        session_target: SessionTarget {
-            agent_id: AgentId("main".into()),
-            channel: ChannelKind::Feishu,
-            conversation_key: "feishu:open_id:owner".into(),
-        },
-        payload: RuntimeEventPayload::UserMessage {
-            text: "开发一个 external.calculator，支持加减乘除".into(),
-            message_id: Some("om_1".into()),
-            chat_id: Some("oc_1".into()),
-        },
-        dedupe_key: "feishu:message:om_1".into(),
-        occurred_at: Utc::now(),
-        chat_type: chat_type.map(str::to_string),
-    }
-}
-
 #[test]
 fn owner_private_context_is_the_only_valid_coding_origin() {
     let private = private_session();
@@ -78,20 +56,4 @@ fn owner_private_context_is_the_only_valid_coding_origin() {
     stranger.principal.subject = PrincipalSubject::FeishuOpenId("stranger".into());
     assert!(validate_private_owner_context(Some("owner"), &stranger, &private).is_err());
     assert!(validate_private_owner_context(None, &owner, &private).is_err());
-}
-
-#[test]
-fn coding_delivery_routes_only_feishu_p2p_events() {
-    assert!(coding_delivery::matches(&ingress(
-        EventSource::Feishu,
-        Some("p2p")
-    )));
-    assert!(!coding_delivery::matches(&ingress(
-        EventSource::Feishu,
-        Some("group")
-    )));
-    assert!(!coding_delivery::matches(&ingress(
-        EventSource::Cli,
-        None
-    )));
 }

@@ -2,12 +2,18 @@
 //! All activation transactions use CAS (compare-and-swap) to prevent races.
 
 use crate::domain::*;
-
 use crate::harness::manifest::HarnessManifest;
+use crate::domain::operation::ExternalOperationGrant;
+use crate::journal::grant_ops::CreateGrantParams;
+use crate::registry::snapshot::{BindingKind, OperationSpec, RegistrySnapshot, Risk};
+use crate::registry::store::builtin_specs;
 
 use anyhow::{anyhow, bail, Result};
 use chrono::Utc;
-use rusqlite::{params, Transaction};
+use rusqlite::{params, Transaction, TransactionBehavior};
+use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::sync::Arc;
 
 impl super::JournalStore {
     /// Register a new harness manifest. Idempotent: same content produces the
@@ -485,5 +491,264 @@ impl super::JournalStore {
             )
             .ok();
         Ok(result)
+    }
+
+    /// Bootstrap content-addressed manifests for builtin External operations.
+    /// The caller must bind the returned IDs into the active snapshot.
+    /// A changed builtin spec appends a manifest while preserving the old row
+    /// for historical snapshots and Runs. Only manifests constructed from the
+    /// trusted `builtin_specs()` catalog use this replacement path; public
+    /// registration still rejects duplicate operation names. Configuration is
+    /// validated by the caller before external bindings are activated.
+    pub fn bootstrap_builtin_external_manifests(
+        &self,
+        coding_harness_api_url: &str,
+        coding_harness_artifact_digest: &str,
+    ) -> Result<HashMap<String, String>> {
+        let specs = builtin_specs();
+        let mut manifests = Vec::new();
+        for spec in &specs {
+            if spec.binding_kind != BindingKind::External {
+                continue;
+            }
+            let created_at = Utc::now();
+            let manifest = HarnessManifest {
+                manifest_id: String::new(), // will be computed
+                harness_id: "coding-harness-v0".into(),
+                artifact_digest: coding_harness_artifact_digest.to_string(),
+                protocol_version: "external-harness-v1".into(),
+                endpoint: coding_harness_api_url.to_string(),
+                operation_name: spec.name.clone(),
+                description: spec.description.clone(),
+                input_schema: spec.parameters.clone(),
+                output_schema: serde_json::json!({"type": "object"}),
+                idempotent: spec.idempotent,
+                created_at,
+            };
+            // Compute manifest_id from canonical content.
+            let computed_id = manifest.compute_manifest_id()?;
+            let mut manifest = manifest;
+            manifest.manifest_id = computed_id;
+            manifest.validate_all()?;
+            manifests.push((spec.name.clone(), manifest));
+        }
+
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow!("journal mutex poisoned"))?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let mut result = HashMap::new();
+        for (operation_name, manifest) in manifests {
+            // Builtin specs are trusted bootstrap inputs. The replacement path
+            // permits a new content-addressed manifest for an existing builtin
+            // operation while preserving the old immutable row.
+            let mid = self.register_harness_manifest_replace_tx(&tx, &manifest)?;
+            result.insert(operation_name, mid);
+        }
+        tx.commit()?;
+        Ok(result)
+    }
+
+    /// Create and activate a new registry snapshot whose External operation
+    /// binding keys are updated to match the actual content-addressed
+    /// harness manifest IDs.
+    ///
+    /// This must be called AFTER `bootstrap_builtin_external_manifests` so
+    /// that the binding_key in the active registry snapshot points to a
+    /// real `HarnessManifest` row that `dispatch_builtin_binding` can load.
+    ///
+    /// # Identity invariant
+    ///
+    /// ```text
+    /// registry_snapshot_operations.binding_key
+    ///   == harness_manifests.manifest_id
+    /// ```
+    ///
+    /// The old snapshot is never modified (registry snapshots are immutable).
+    /// A new snapshot is created with corrected bindings and atomically
+    /// activated via CAS.
+    pub fn bind_external_manifest_ids_to_snapshot(
+        &self,
+        manifest_map: &HashMap<String, String>,
+    ) -> Result<()> {
+        // Load the current active snapshot.
+        let current_snapshot_id = self.current_registry_snapshot_id()?;
+        let current = self.load_registry_snapshot(&current_snapshot_id)?;
+
+        // Build new spec list with updated External binding keys.
+        let mut new_specs: Vec<OperationSpec> = current
+            .operations
+            .iter()
+            .map(|op| {
+                let mut spec = op.clone();
+                if spec.binding_kind == BindingKind::External {
+                    if let Some(manifest_id) = manifest_map.get(&spec.name) {
+                        spec.binding_key = manifest_id.clone();
+                    }
+                }
+                spec
+            })
+            .collect();
+
+        // If nothing changed, skip.
+        if new_specs == current.operations {
+            return Ok(());
+        }
+
+        // Sort for deterministic snapshot ID.
+        new_specs.sort_by(|a, b| a.name.cmp(&b.name));
+        let new_snapshot = self.create_registry_snapshot(new_specs)?;
+        let new_id = new_snapshot.snapshot_id.clone();
+
+        // Activate atomically with CAS.
+        let decision_id = format!(
+            "bind_external_manifest_ids:{}:{}",
+            current_snapshot_id
+                .get(..16)
+                .unwrap_or(&current_snapshot_id),
+            new_id.get(..16).unwrap_or(&new_id)
+        );
+        self.activate_snapshot_transactional(
+            &current_snapshot_id,
+            &new_id,
+            &decision_id,
+            "external_manifest_binding",
+        )?;
+
+        Ok(())
+    }
+
+    /// Carry forward active external operation grants from stale snapshots to
+    /// the current active snapshot, but only for operations whose binding is
+    /// identical between the two snapshots (same `binding_kind` AND
+    /// `binding_key`).  Old grant rows are never modified.
+    ///
+    /// This preserves grant coverage across restart-triggered snapshot
+    /// rotations (manifest binding, legacy-time retirement, coding-control
+    /// upgrade) without mutating history or granting access to operations
+    /// whose manifest changed.
+    ///
+    /// Uses `INSERT OR IGNORE` so repeated calls are idempotent.
+    pub fn carry_forward_external_operation_grants(&self) -> Result<usize> {
+        let current_id = self.current_registry_snapshot_id()?;
+        let current = self.load_registry_snapshot(&current_id)?;
+
+        // Build a name→spec lookup for the current snapshot.
+        let current_ops: HashMap<&str, &OperationSpec> =
+            current.operations.iter().map(|op| (op.name.as_str(), op)).collect();
+
+        // Find all active grants whose snapshot_id differs from the current one.
+        let stale: Vec<ExternalOperationGrant> = {
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|_| anyhow!("journal mutex poisoned"))?;
+            let mut stmt = conn.prepare(
+                "SELECT grant_id, operation, grantee_principal_id, channel,
+                        conversation_kind, scope, risk, snapshot_id, status
+                 FROM external_operation_grants
+                 WHERE status = 'active' AND snapshot_id != ?1",
+            )?;
+            let rows = stmt.query_map(params![current_id], |row| {
+                Ok(ExternalOperationGrant {
+                    grant_id: row.get(0)?,
+                    operation: row.get(1)?,
+                    grantee_principal_id: row.get(2)?,
+                    channel: row.get(3)?,
+                    conversation_kind: row.get(4)?,
+                    scope: row.get(5)?,
+                    risk: row.get(6)?,
+                    snapshot_id: row.get(7)?,
+                    status: row.get(8)?,
+                })
+            })?;
+            rows.filter_map(|r| r.ok()).collect()
+        };
+
+        if stale.is_empty() {
+            return Ok(0);
+        }
+
+        // Pre-load all referenced old snapshots (outside the insert transaction
+        // to avoid nested lock acquisition on self.conn).
+        let mut old_snapshots: HashMap<String, Arc<RegistrySnapshot>> = HashMap::new();
+        {
+            let mut ids: Vec<String> = stale.iter().map(|g| g.snapshot_id.clone()).collect();
+            ids.sort();
+            ids.dedup();
+            for sid in &ids {
+                if let Ok(snap) = self.load_registry_snapshot(sid) {
+                    old_snapshots.insert(sid.clone(), snap);
+                }
+            }
+        }
+
+        let mut carried = 0usize;
+
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow!("journal mutex poisoned"))?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| anyhow!("cannot begin transaction"))?;
+
+        for grant in &stale {
+            // Fetch the preloaded old snapshot.
+            let old_snapshot = match old_snapshots.get(&grant.snapshot_id) {
+                Some(snap) => snap,
+                None => continue,
+            };
+
+            // Operation must exist in both old and current snapshots.
+            let old_op = match old_snapshot.lookup(&grant.operation) {
+                Some(op) => op,
+                None => continue,
+            };
+            let current_op = match current_ops.get(grant.operation.as_str()) {
+                Some(op) => op,
+                None => continue,
+            };
+
+            // Binding must be identical — manifest change means no carry-forward.
+            if old_op.binding_kind != current_op.binding_kind
+                || old_op.binding_key != current_op.binding_key
+            {
+                continue;
+            }
+
+            // Insert a new grant row for the current snapshot.
+            // INSERT OR IGNORE makes this idempotent across restarts.
+            let params = CreateGrantParams {
+                operation: grant.operation.clone(),
+                grantee_principal_id: grant.grantee_principal_id.clone(),
+                channel: grant.channel.clone(),
+                conversation_kind: grant.conversation_kind.clone(),
+                scope: grant.scope.clone(),
+                risk: grant.risk.clone(),
+                capability_id: None,
+                snapshot_id: current_id.clone(),
+                created_by_principal_id: None,
+                decision_reference: None,
+            };
+            let (_grant_id, inserted) =
+                crate::journal::grant_ops::create_external_operation_grant_tx(&tx, &params)?;
+            if inserted {
+                carried += 1;
+            }
+        }
+
+        tx.commit()?;
+        drop(conn);
+
+        if carried > 0 {
+            eprintln!(
+                "carried forward {carried} external operation grant(s) \
+                 to current snapshot {current_id}"
+            );
+        }
+
+        Ok(carried)
     }
 }

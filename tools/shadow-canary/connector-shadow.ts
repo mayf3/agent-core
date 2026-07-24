@@ -18,12 +18,11 @@ import { loadConfig } from "../../connectors/feishu/src/config.js";
 import { startExecuteServer } from "../../connectors/feishu/src/execute-server.js";
 import {
   normalizeMessageEvent,
-  postIngress,
 } from "../../connectors/feishu/src/kernel.js";
 import {
   handleProposalCardAction,
+  type ApprovalConfig,
 } from "../../connectors/feishu/src/approval.js";
-import type { ApprovalConfig } from "../../connectors/feishu/src/approval.js";
 import { CaptureFeishuTransport } from "./capture-transport.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -165,27 +164,44 @@ export async function simulateFeishuMessage(
       auth_context: { authenticated: true },
     };
 
-    const response = await fetch(config.kernelUrl, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${config.ipcToken}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(ingressBody),
-    });
+    // Retry up to 5 times with exponential backoff
+    let lastError: any = null;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      if (attempt > 0) {
+        const delay = Math.min(1000 * Math.pow(2, attempt - 1), 10_000);
+        console.log(`[shadow] retrying ingress in ${delay}ms (attempt ${attempt + 1})...`);
+        await new Promise(r => setTimeout(r, delay));
+      }
+      try {
+        const response = await fetch(config.kernelUrl, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${config.ipcToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(ingressBody),
+          signal: AbortSignal.timeout(30_000),
+        });
 
-    let data: any = {};
-    try { data = await response.json(); } catch { /* ignore parse errors */ }
+        let data: any = {};
+        try { data = await response.json(); } catch { /* ignore parse errors */ }
 
-    console.log(`[shadow] ingress response: HTTP ${response.status} status=${data.status || "unknown"}`);
+        console.log(`[shadow] ingress response: HTTP ${response.status} status=${data.status || "unknown"}`);
 
-    return {
-      ok: response.ok,
-      status: response.status,
-      kernelEventId: data.kernel_event_id || data.run_id || "",
-    };
+        return {
+          ok: response.ok,
+          status: response.status,
+          kernelEventId: data.kernel_event_id || data.run_id || "",
+        };
+      } catch (error: any) {
+        lastError = error;
+        console.error(`[shadow] simulateFeishuMessage attempt ${attempt + 1} error: ${error.message}`);
+      }
+    }
+    console.error(`[shadow] simulateFeishuMessage all retries exhausted: ${lastError.message}`);
+    return { ok: false };
   } catch (error: any) {
-    console.error(`[shadow] simulateFeishuMessage error: ${error.message}`);
+    console.error(`[shadow] simulateFeishuMessage unexpected error: ${error.message}`);
     return { ok: false };
   }
 }
@@ -197,6 +213,17 @@ export async function simulateFeishuMessage(
  * REAL proposal_id, approval_id, and decision_nonce values. This ensures
  * the simulated callback uses the exact same bindings that the Connector
  * put into the card, catching mismatches.
+ *
+ * The simulated event only provides what a real Feishu card callback would
+ * provide (operator.open_id + action.value identifiers). It does NOT
+ * inject TrustedDecisionBody, manifest digests, or other already-trusted
+ * fields — those are read and verified by the production Connector code
+ * (handleProposalCardAction → fetchProposal → assertApprovalBinding).
+ *
+ * Same-human-user flow (developer requests + human approves) is the
+ * legitimate North Star path. Connector validates the real card operator;
+ * Kernel validates final authorization and delivery object consistency.
+ * Agent/Harness cannot self-approve.
  *
  * @param proposalId - The proposal_id to approve (looks up captured card)
  * @returns The card callback response
@@ -223,7 +250,9 @@ export async function simulateCardApproval(
   console.log(`  approval_id: ${approval_id}`);
   console.log(`  decision_nonce: ${decision_nonce}`);
 
-  // Build a fake card.action.trigger event with the REAL bindings
+  // Build a fake card.action.trigger event with the REAL bindings.
+  // The operator is the same human Feishu user who sent the original
+  // message — this is the legitimate same-human-user approval path.
   const fakeCardEvent = {
     event: {
       operator: {
@@ -241,12 +270,29 @@ export async function simulateCardApproval(
   };
 
   try {
-    // Call the production handleProposalCardAction (production code)
+    // Call the production Connector handler. This goes through the full
+    // production approval path:
+    //   handleProposalCardAction
+    //   → parseProposalCardAction
+    //   → approvalOperatorError (validates real card operator == owner)
+    //   → executeProposalDecision
+    //     → fetchProposal (Kernel GET — reads authoritative binding data)
+    //     → assertApprovalBinding (validates approval fields)
+    //     → POST /v1/.../decision to Kernel (with full TrustedDecisionBody)
     const result = await handleProposalCardAction(approvalConfig, fakeCardEvent);
-    console.log(`[shadow] card callback result: toast=${result?.toast?.content} type=${result?.toast?.type}`);
+
+    const succeeded = result.toast.type === "success";
+    console.log(`[shadow] production handler result: toast=${result.toast.type} content=${result.toast.content}`);
+    if (!succeeded) {
+      // Extract error text from card data (embedded in elements)
+      const cardStr = JSON.stringify(result.card?.data || {});
+      const errorMatch = cardStr.match(/结果[：:][^"\\}]+/);
+      console.log(`[shadow] error detail: ${errorMatch ? errorMatch[0] : JSON.stringify(result).slice(0, 500)}`);
+    }
+
     return {
-      ok: result?.toast?.type === "success",
-      toast: result?.toast?.content,
+      ok: succeeded,
+      toast: succeeded ? "审批成功" : (result.toast.content || "审批失败"),
     };
   } catch (error: any) {
     console.error(`[shadow] simulateCardApproval error: ${error.message}`);

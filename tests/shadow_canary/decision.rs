@@ -18,7 +18,9 @@ fn same_decision_does_not_spawn_second_deployment() -> Result<()> {
     let decision_id = "d_replay";
 
     journal.append_event(
-        JournalEventKind::CapabilityChangeActivated, None, None,
+        JournalEventKind::CapabilityChangeActivated,
+        None,
+        None,
         Some("corr_deploy_1"),
         json!({
             "proposal_id": proposal_id,
@@ -29,7 +31,9 @@ fn same_decision_does_not_spawn_second_deployment() -> Result<()> {
 
     // Record a second event with same decision_id (simulating replay)
     journal.append_event(
-        JournalEventKind::CapabilityChangeActivated, None, None,
+        JournalEventKind::CapabilityChangeActivated,
+        None,
+        None,
         Some("corr_deploy_2"),
         json!({
             "proposal_id": proposal_id,

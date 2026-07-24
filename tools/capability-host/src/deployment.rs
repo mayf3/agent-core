@@ -1,4 +1,4 @@
-//! Durable, calculator-only deployment allowlist.
+//! Durable deployment bindings for governed invocable capabilities.
 
 use crate::artifact::{resolve_artifact, ArtifactError, ResolvedArtifact};
 use crate::config::CapabilityHostConfig;
@@ -6,14 +6,14 @@ use crate::process::run_artifact;
 use crate::protocol::{self, HarnessRequest};
 use agent_core_kernel::capabilities::store::{ContentStore, Sha256Digest};
 use agent_core_kernel::harness::manifest::HarnessManifest;
-use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-const OPERATION: &str = "external.calculator";
+mod state;
+
+const DESCRIBE_OPERATION: &str = "__agent_core_describe";
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -28,6 +28,24 @@ pub struct DeployRequest {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
+pub struct UpstreamRead {
+    pub component_id: String,
+    pub method: String,
+    pub path: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionDescriptor {
+    pub descriptor_version: String,
+    pub operation_name: String,
+    pub probe_arguments: Value,
+    #[serde(default)]
+    pub upstream: Option<UpstreamRead>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeploymentRecord {
     pub deployment_id: String,
     pub proposal_id: String,
@@ -38,59 +56,69 @@ pub struct DeploymentRecord {
     pub operation_name: String,
     pub target_registry_snapshot_id: String,
     pub probe_execution_id: String,
+    #[serde(default)]
+    pub input_schema: Value,
+    #[serde(default)]
+    pub output_schema: Value,
+    #[serde(default)]
+    pub execution: Option<ExecutionDescriptor>,
 }
 
 pub fn prepare(config: &CapabilityHostConfig, body: &str) -> Result<Value, DeployError> {
     let request: DeployRequest =
         serde_json::from_str(body).map_err(|_| DeployError::Invalid("malformed_deploy_request"))?;
     validate_identity(&request)?;
-    let _deployment_lock = lock_deploy(config)?;
-    if let Some(existing) = load(config)? {
+    let manifest = load_manifest(&config.artifact_root, &request.manifest_digest)?;
+    validate_manifest(config, &request, &manifest)?;
+    let _deployment_lock = state::lock(config)?;
+    if let Some(existing) = state::load(config, &manifest.operation_name)? {
         if matches_request(&existing, &request) {
             return Ok(response(&existing, true));
         }
         return Err(DeployError::Conflict);
     }
-    let manifest = load_manifest(&config.artifact_root, &request.manifest_digest)?;
-    validate_manifest(config, &request, &manifest)?;
     let artifact = resolve_artifact(&config.artifact_root, &request.artifact_digest)
         .map_err(map_artifact_error)?;
+    let execution = describe(config, &artifact, &manifest)?;
 
     let mut record = DeploymentRecord {
-        deployment_id: deployment_id(&request, &manifest.manifest_id),
+        deployment_id: state::deployment_id(
+            &request,
+            &manifest.manifest_id,
+            &manifest.operation_name,
+        ),
         proposal_id: request.proposal_id,
         decision_id: request.decision_id,
         manifest_digest: request.manifest_digest,
         manifest_id: manifest.manifest_id,
         artifact_digest: request.artifact_digest,
-        operation_name: OPERATION.into(),
+        operation_name: manifest.operation_name,
         target_registry_snapshot_id: request.target_registry_snapshot_id,
         probe_execution_id: String::new(),
+        input_schema: manifest.input_schema,
+        output_schema: manifest.output_schema,
+        execution: Some(execution),
     };
+    let probe_arguments = record
+        .execution
+        .as_ref()
+        .map(|value| value.probe_arguments.clone())
+        .unwrap_or_else(|| json!({}));
     record.probe_execution_id = execution_id(
         &record.deployment_id,
         "capability-host-deploy-probe",
-        &json!({"operation":"multiply","a":6,"b":7}),
+        &probe_arguments,
     );
     probe(config, &artifact, &record)?;
-    persist(config, &record)?;
+    state::persist(config, &record)?;
     Ok(response(&record, false))
-}
-
-fn matches_request(record: &DeploymentRecord, request: &DeployRequest) -> bool {
-    record.proposal_id == request.proposal_id
-        && record.decision_id == request.decision_id
-        && record.manifest_digest == request.manifest_digest
-        && record.artifact_digest == request.artifact_digest
-        && record.target_registry_snapshot_id == request.target_registry_snapshot_id
 }
 
 pub fn authorize_execution(
     config: &CapabilityHostConfig,
     request: &HarnessRequest,
 ) -> Result<DeploymentRecord, DeployError> {
-    validate_calculator_arguments(&request.arguments)?;
-    let record = load(config)?.ok_or(DeployError::NotDeployed)?;
+    let record = state::load(config, &request.operation_name)?.ok_or(DeployError::NotDeployed)?;
     if request.operation_name != record.operation_name
         || request.manifest_id != record.manifest_id
         || request.artifact_digest != record.artifact_digest
@@ -98,7 +126,38 @@ pub fn authorize_execution(
     {
         return Err(DeployError::BindingMismatch);
     }
+    validate_user_arguments(&record.input_schema, &request.arguments)?;
     Ok(record)
+}
+
+pub fn process_arguments(
+    record: &DeploymentRecord,
+    user_arguments: &Value,
+) -> Result<Value, DeployError> {
+    let mut arguments = user_arguments
+        .as_object()
+        .cloned()
+        .ok_or(DeployError::Invalid("invalid_capability_arguments"))?;
+    if arguments.contains_key("__agent_core_upstream_state") {
+        return Err(DeployError::Invalid("reserved_argument_denied"));
+    }
+    if let Some(upstream) = record
+        .execution
+        .as_ref()
+        .and_then(|value| value.upstream.as_ref())
+    {
+        let value = crate::upstream::read(upstream).map_err(|_| DeployError::UpstreamFailed)?;
+        arguments.insert("__agent_core_upstream_state".into(), value);
+    }
+    Ok(Value::Object(arguments))
+}
+
+pub fn validate_output(record: &DeploymentRecord, output: &Value) -> Result<(), DeployError> {
+    if record.output_schema.is_null() {
+        return Ok(());
+    }
+    agent_core_kernel::registry::schema::validate_against_schema(&record.output_schema, output)
+        .map_err(|_| DeployError::Invalid("capability_output_schema_violation"))
 }
 
 pub fn execution_id(deployment_id: &str, invocation_id: &str, arguments: &Value) -> String {
@@ -137,30 +196,7 @@ fn load_manifest(root: &Path, digest: &str) -> Result<HarnessManifest, DeployErr
     let bytes = ContentStore::new(root.to_path_buf())
         .load(&digest)
         .map_err(|_| DeployError::Invalid("manifest_not_found_or_mismatched"))?;
-    let value: Value =
-        serde_json::from_slice(&bytes).map_err(|_| DeployError::Invalid("manifest_invalid"))?;
-    let object = value
-        .as_object()
-        .ok_or(DeployError::Invalid("manifest_invalid"))?;
-    const FIELDS: [&str; 10] = [
-        "manifest_id",
-        "harness_id",
-        "artifact_digest",
-        "protocol_version",
-        "endpoint",
-        "operation_name",
-        "description",
-        "input_schema",
-        "output_schema",
-        "idempotent",
-    ];
-    if object.len() != FIELDS.len() + 1
-        || !FIELDS.iter().all(|field| object.contains_key(*field))
-        || !object.contains_key("created_at")
-    {
-        return Err(DeployError::Invalid("manifest_invalid"));
-    }
-    serde_json::from_value(value).map_err(|_| DeployError::Invalid("manifest_invalid"))
+    serde_json::from_slice(&bytes).map_err(|_| DeployError::Invalid("manifest_invalid"))
 }
 
 fn validate_manifest(
@@ -173,12 +209,9 @@ fn validate_manifest(
         .map_err(|_| DeployError::Invalid("manifest_invalid"))?;
     if manifest.compute_manifest_id().ok().as_deref() != Some(&manifest.manifest_id)
         || manifest.harness_id != "capability-host-v0"
-        || manifest.operation_name != OPERATION
         || manifest.protocol_version != "external-harness-v1"
         || manifest.artifact_digest != request.artifact_digest
-        || manifest.description
-            != "Approved calculator supporting add, subtract, multiply, and divide."
-        || !manifest.idempotent
+        || !safe_operation(&manifest.operation_name)
     {
         return Err(DeployError::Invalid("manifest_binding_invalid"));
     }
@@ -192,42 +225,77 @@ fn validate_manifest(
     if endpoint.path != "/execute" || Some(endpoint.port) != listen_port {
         return Err(DeployError::Invalid("manifest_endpoint_invalid"));
     }
-    if manifest.input_schema != calculator_input_schema()
-        || manifest.output_schema != json!({"type":"number"})
+    Ok(())
+}
+
+fn describe(
+    config: &CapabilityHostConfig,
+    artifact: &ResolvedArtifact,
+    manifest: &HarnessManifest,
+) -> Result<ExecutionDescriptor, DeployError> {
+    let request = HarnessRequest {
+        protocol_version: "external-harness-v1".into(),
+        operation_name: DESCRIBE_OPERATION.into(),
+        invocation_id: "capability-host-describe".into(),
+        arguments: json!({}),
+        manifest_id: manifest.manifest_id.clone(),
+        artifact_digest: manifest.artifact_digest.clone(),
+        registry_snapshot_id: "capability-host-describe".into(),
+    };
+    let stdin = serde_json::to_string(&protocol::build_process_request(&request))
+        .map_err(|_| DeployError::DescriptorInvalid)?;
+    let output = run_artifact(
+        artifact,
+        &stdin,
+        config.exec_timeout,
+        config.max_stdout_bytes,
+        config.max_stderr_bytes,
+    )
+    .map_err(|_| DeployError::DescriptorInvalid)?;
+    let (ok, value) = protocol::map_process_response(&output.stdout);
+    let descriptor: ExecutionDescriptor = value
+        .get("result")
+        .cloned()
+        .filter(|_| ok && output.exit_code == Some(0))
+        .and_then(|value| serde_json::from_value(value).ok())
+        .ok_or(DeployError::DescriptorInvalid)?;
+    validate_descriptor(&descriptor, manifest)?;
+    Ok(descriptor)
+}
+
+fn validate_descriptor(
+    descriptor: &ExecutionDescriptor,
+    manifest: &HarnessManifest,
+) -> Result<(), DeployError> {
+    if descriptor.descriptor_version != "invocable-execution-v0"
+        || descriptor.operation_name != manifest.operation_name
     {
-        return Err(DeployError::Invalid("calculator_schema_invalid"));
+        return Err(DeployError::DescriptorInvalid);
+    }
+    validate_user_arguments(&manifest.input_schema, &descriptor.probe_arguments)?;
+    if let Some(upstream) = &descriptor.upstream {
+        if upstream.method != "GET"
+            || !safe_component_id(&upstream.component_id)
+            || !safe_read_path(&upstream.path)
+        {
+            return Err(DeployError::DescriptorInvalid);
+        }
     }
     Ok(())
 }
 
-fn calculator_input_schema() -> Value {
-    json!({
-        "type":"object",
-        "properties":{
-            "operation":{"type":"string","enum":["add","subtract","multiply","divide"]},
-            "a":{"type":"number"},
-            "b":{"type":"number"}
-        },
-        "required":["operation","a","b"],
-        "additionalProperties":false
-    })
-}
-
-fn validate_calculator_arguments(arguments: &Value) -> Result<(), DeployError> {
+fn validate_user_arguments(schema: &Value, arguments: &Value) -> Result<(), DeployError> {
     let object = arguments
         .as_object()
-        .ok_or(DeployError::Invalid("invalid_calculator_arguments"))?;
-    if object.len() != 3
-        || !matches!(
-            object.get("operation").and_then(Value::as_str),
-            Some("add" | "subtract" | "multiply" | "divide")
-        )
-        || !object.get("a").is_some_and(Value::is_number)
-        || !object.get("b").is_some_and(Value::is_number)
-    {
-        return Err(DeployError::Invalid("invalid_calculator_arguments"));
+        .ok_or(DeployError::Invalid("invalid_capability_arguments"))?;
+    if object.keys().any(|key| key.starts_with("__agent_core_")) {
+        return Err(DeployError::Invalid("reserved_argument_denied"));
     }
-    Ok(())
+    if schema.is_null() {
+        return Ok(());
+    }
+    agent_core_kernel::registry::schema::validate_against_schema(schema, arguments)
+        .map_err(|_| DeployError::Invalid("capability_input_schema_violation"))
 }
 
 fn probe(
@@ -235,11 +303,17 @@ fn probe(
     artifact: &ResolvedArtifact,
     record: &DeploymentRecord,
 ) -> Result<(), DeployError> {
+    let user_arguments = record
+        .execution
+        .as_ref()
+        .map(|value| value.probe_arguments.clone())
+        .ok_or(DeployError::DescriptorInvalid)?;
+    let arguments = process_arguments(record, &user_arguments)?;
     let request = HarnessRequest {
         protocol_version: "external-harness-v1".into(),
-        operation_name: OPERATION.into(),
+        operation_name: record.operation_name.clone(),
         invocation_id: "capability-host-deploy-probe".into(),
-        arguments: json!({"operation":"multiply","a":6,"b":7}),
+        arguments,
         manifest_id: record.manifest_id.clone(),
         artifact_digest: record.artifact_digest.clone(),
         registry_snapshot_id: record.target_registry_snapshot_id.clone(),
@@ -255,101 +329,19 @@ fn probe(
     )
     .map_err(|_| DeployError::ProbeFailed)?;
     let (ok, response) = protocol::map_process_response(&output.stdout);
-    if output.exit_code != Some(0) || !ok || response.get("result") != Some(&json!(42)) {
+    let result = response.get("result").ok_or(DeployError::ProbeFailed)?;
+    if output.exit_code != Some(0) || !ok {
         return Err(DeployError::ProbeFailed);
     }
-    Ok(())
+    validate_output(record, result).map_err(|_| DeployError::ProbeFailed)
 }
 
-fn state_path(config: &CapabilityHostConfig) -> PathBuf {
-    config
-        .artifact_root
-        .join(".capability-host")
-        .join("external.calculator.json")
-}
-
-fn lock_deploy(config: &CapabilityHostConfig) -> Result<std::fs::File, DeployError> {
-    let parent = state_path(config)
-        .parent()
-        .ok_or(DeployError::State)?
-        .to_path_buf();
-    std::fs::create_dir_all(&parent).map_err(|_| DeployError::State)?;
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .open(parent.join("deployment.lock"))
-        .map_err(|_| DeployError::State)?;
-    file.lock_exclusive().map_err(|_| DeployError::State)?;
-    Ok(file)
-}
-
-fn load(config: &CapabilityHostConfig) -> Result<Option<DeploymentRecord>, DeployError> {
-    let path = state_path(config);
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(_) => return Err(DeployError::State),
-    };
-    let record: DeploymentRecord =
-        serde_json::from_slice(&bytes).map_err(|_| DeployError::State)?;
-    let expected_probe = execution_id(
-        &record.deployment_id,
-        "capability-host-deploy-probe",
-        &json!({"operation":"multiply","a":6,"b":7}),
-    );
-    if record.deployment_id != deployment_id_from_record(&record)
-        || record.probe_execution_id != expected_probe
-        || record.operation_name != OPERATION
-    {
-        return Err(DeployError::State);
-    }
-    Ok(Some(record))
-}
-
-fn persist(config: &CapabilityHostConfig, record: &DeploymentRecord) -> Result<(), DeployError> {
-    let path = state_path(config);
-    let parent = path.parent().ok_or(DeployError::State)?;
-    std::fs::create_dir_all(parent).map_err(|_| DeployError::State)?;
-    let temp = parent.join(format!(".deploy.{}.tmp", std::process::id()));
-    let mut file = std::fs::File::create(&temp).map_err(|_| DeployError::State)?;
-    let bytes = serde_json::to_vec(record).map_err(|_| DeployError::State)?;
-    file.write_all(&bytes).map_err(|_| DeployError::State)?;
-    file.sync_all().map_err(|_| DeployError::State)?;
-    std::fs::rename(&temp, &path).map_err(|_| DeployError::State)?;
-    std::fs::File::open(parent)
-        .and_then(|dir| dir.sync_all())
-        .map_err(|_| DeployError::State)?;
-    Ok(())
-}
-
-fn deployment_id(request: &DeployRequest, manifest_id: &str) -> String {
-    deployment_hash(json!({
-        "proposal_id":request.proposal_id,
-        "decision_id":request.decision_id,
-        "manifest_digest":request.manifest_digest,
-        "manifest_id":manifest_id,
-        "artifact_digest":request.artifact_digest,
-        "operation_name":OPERATION,
-        "target_registry_snapshot_id":request.target_registry_snapshot_id,
-    }))
-}
-
-fn deployment_id_from_record(record: &DeploymentRecord) -> String {
-    deployment_hash(json!({
-        "proposal_id":record.proposal_id,
-        "decision_id":record.decision_id,
-        "manifest_digest":record.manifest_digest,
-        "manifest_id":record.manifest_id,
-        "artifact_digest":record.artifact_digest,
-        "operation_name":record.operation_name,
-        "target_registry_snapshot_id":record.target_registry_snapshot_id,
-    }))
-}
-
-fn deployment_hash(value: Value) -> String {
-    let bytes = serde_json::to_vec(&value).unwrap_or_default();
-    format!("chd_{}", hex::encode(Sha256::digest(bytes)))
+fn matches_request(record: &DeploymentRecord, request: &DeployRequest) -> bool {
+    record.proposal_id == request.proposal_id
+        && record.decision_id == request.decision_id
+        && record.manifest_digest == request.manifest_digest
+        && record.artifact_digest == request.artifact_digest
+        && record.target_registry_snapshot_id == request.target_registry_snapshot_id
 }
 
 fn response(record: &DeploymentRecord, replayed: bool) -> Value {
@@ -363,9 +355,29 @@ fn response(record: &DeploymentRecord, replayed: bool) -> Value {
         "manifest_digest":record.manifest_digest,
         "manifest_id":record.manifest_id,
         "artifact_digest":record.artifact_digest,
+        "operation_name":record.operation_name,
         "target_registry_snapshot_id":record.target_registry_snapshot_id,
         "probe_execution_id":record.probe_execution_id,
     })
+}
+
+fn safe_operation(value: &str) -> bool {
+    safe_component_id(value) && value.starts_with("external.")
+}
+
+fn safe_component_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+}
+
+fn safe_read_path(value: &str) -> bool {
+    value.starts_with('/')
+        && value.len() <= 256
+        && !value.contains(['?', '#', '\r', '\n'])
+        && !value.split('/').any(|part| part == "..")
 }
 
 fn map_artifact_error(error: ArtifactError) -> DeployError {
@@ -387,7 +399,9 @@ pub enum DeployError {
     NotDeployed,
     BindingMismatch,
     Conflict,
+    DescriptorInvalid,
     ProbeFailed,
+    UpstreamFailed,
     State,
 }
 
@@ -398,7 +412,9 @@ impl DeployError {
             Self::NotDeployed => "capability_not_deployed",
             Self::BindingMismatch => "deployment_binding_mismatch",
             Self::Conflict => "deployment_conflict",
+            Self::DescriptorInvalid => "capability_descriptor_invalid",
             Self::ProbeFailed => "deployment_probe_failed",
+            Self::UpstreamFailed => "capability_upstream_unavailable",
             Self::State => "deployment_state_error",
         }
     }

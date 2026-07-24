@@ -11,6 +11,7 @@
 //! a bundle_ref string. The Kernel never sets acceptance_kit_ref.
 
 mod failure_event_viewer;
+mod failure_viewer_query;
 mod shared_verifier_engine;
 mod token_dashboard;
 
@@ -47,6 +48,7 @@ pub struct PrivateVerificationCase {
 pub enum AcceptanceKitId {
     TokenDashboardV0,
     FailureEventViewerV0,
+    FailureViewerQueryV0,
 }
 
 impl AcceptanceKitId {
@@ -55,6 +57,7 @@ impl AcceptanceKitId {
         match self {
             Self::TokenDashboardV0 => "token-dashboard-v0",
             Self::FailureEventViewerV0 => "failure-event-viewer-v0",
+            Self::FailureViewerQueryV0 => "failure-viewer-query-v0",
         }
     }
 
@@ -62,6 +65,7 @@ impl AcceptanceKitId {
         match self {
             Self::TokenDashboardV0 => "v0",
             Self::FailureEventViewerV0 => "v0",
+            Self::FailureViewerQueryV0 => "v0",
         }
     }
 
@@ -70,6 +74,7 @@ impl AcceptanceKitId {
         match self {
             Self::TokenDashboardV0 => "hook-consumer-service-v0",
             Self::FailureEventViewerV0 => "hook-consumer-service-v0",
+            Self::FailureViewerQueryV0 => "invocable-capability-v0",
         }
     }
 
@@ -78,6 +83,7 @@ impl AcceptanceKitId {
         match self {
             Self::TokenDashboardV0 => token_dashboard::public_spec(),
             Self::FailureEventViewerV0 => failure_event_viewer::public_spec(),
+            Self::FailureViewerQueryV0 => failure_viewer_query::public_spec(),
         }
     }
 
@@ -97,6 +103,7 @@ impl AcceptanceKitId {
             Self::TokenDashboardV0 => "pv_token_dashboard_v0_002",
             // Bump this tag when failure_event_viewer verification logic changes.
             Self::FailureEventViewerV0 => "pv_failure_viewer_v0_002",
+            Self::FailureViewerQueryV0 => "pv_failure_viewer_query_v0_001",
         }
     }
 
@@ -123,6 +130,7 @@ impl AcceptanceKitId {
         match bundle_ref {
             "token-dashboard-v0" => Ok(Self::TokenDashboardV0),
             "failure-event-viewer-v0" => Ok(Self::FailureEventViewerV0),
+            "failure-viewer-query-v0" => Ok(Self::FailureViewerQueryV0),
             _ => Err("ACCEPTANCE_KIT_SELECTION_REQUIRED"),
         }
     }
@@ -137,6 +145,7 @@ impl AcceptanceKitId {
         match self {
             Self::TokenDashboardV0 => token_dashboard::private_verification_cases(),
             Self::FailureEventViewerV0 => failure_event_viewer::private_verification_cases(),
+            Self::FailureViewerQueryV0 => failure_viewer_query::private_verification_cases(),
         }
     }
 
@@ -159,6 +168,16 @@ impl AcceptanceKitId {
             Self::FailureEventViewerV0 => {
                 failure_event_viewer::verify(request, source, input, stdout)
             }
+            Self::FailureViewerQueryV0 => {
+                failure_viewer_query::verify(request, source, input, stdout)
+            }
+        }
+    }
+
+    pub fn invocable_fixture(self) -> Option<Value> {
+        match self {
+            Self::FailureViewerQueryV0 => Some(failure_viewer_query::fixture()),
+            _ => None,
         }
     }
 }
@@ -223,6 +242,10 @@ mod tests {
         assert_eq!(
             AcceptanceKitId::resolve("failure-event-viewer-v0").unwrap(),
             AcceptanceKitId::FailureEventViewerV0
+        );
+        assert_eq!(
+            AcceptanceKitId::resolve("failure-viewer-query-v0").unwrap(),
+            AcceptanceKitId::FailureViewerQueryV0
         );
     }
 
@@ -349,6 +372,7 @@ mod tests {
         for kit in &[
             AcceptanceKitId::TokenDashboardV0,
             AcceptanceKitId::FailureEventViewerV0,
+            AcceptanceKitId::FailureViewerQueryV0,
         ] {
             let cases = kit.private_verification_cases();
             let mut seen = std::collections::HashSet::new();

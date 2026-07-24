@@ -255,6 +255,13 @@ fn harness_ok_false_through_runtime_records_failed() -> Result<()> {
     let caps = cap.lock().unwrap();
     assert_eq!(caps.len(), 2);
     assert_round2_failed(&caps);
+    let result_content = caps[1]["follow_ups"][0]["result_content"]
+        .as_str()
+        .unwrap_or("");
+    assert!(
+        result_content.contains("detail_code: rate_limited"),
+        "bounded harness detail_code must reach the next model round; got: {result_content}"
+    );
     Ok(())
 }
 

@@ -41,6 +41,7 @@ impl TargetKind {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DevelopmentRequest {
+    #[serde(default)]
     pub request_id: String,
     pub source_subject: String,
     pub source_scope: String,
@@ -66,7 +67,7 @@ impl DevelopmentRequest {
         idempotency_key: String,
         contract_catalog_version: String,
     ) -> Result<Self> {
-        let mut request = Self {
+        let request = Self {
             request_id: String::new(),
             source_subject,
             source_scope,
@@ -82,9 +83,18 @@ impl DevelopmentRequest {
             idempotency_key,
             contract_catalog_version,
         };
-        request.validate_body()?;
-        request.request_id = request.derived_request_id()?;
-        Ok(request)
+        request.with_derived_request_id()
+    }
+
+    /// Derive the content-addressed identity when an untrusted draft omits it.
+    /// A caller-supplied identity is never replaced: mismatches still fail.
+    pub fn with_derived_request_id(mut self) -> Result<Self> {
+        if self.request_id.is_empty() {
+            self.validate_body()?;
+            self.request_id = self.derived_request_id()?;
+        }
+        self.validate()?;
+        Ok(self)
     }
 
     pub fn validate(&self) -> Result<()> {

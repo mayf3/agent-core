@@ -46,8 +46,7 @@ pub fn query_deployed_version(component_id: &str) -> Result<Option<String>> {
     let base_url = std::env::var(ENV_DH_READ_URL)
         .or_else(|_| std::env::var(ENV_DH_CONTROL_URL_FALLBACK))
         .unwrap_or_else(|_| DEFAULT_DH_URL.to_string());
-    let token = std::env::var(ENV_DH_READ_TOKEN)
-        .map_err(|_| anyhow!("MISSING_DH_READ_TOKEN"))?;
+    let token = std::env::var(ENV_DH_READ_TOKEN).map_err(|_| anyhow!("MISSING_DH_READ_TOKEN"))?;
     if token.len() < 32 {
         return Err(anyhow!("DH_READ_TOKEN_TOO_SHORT"));
     }
@@ -61,12 +60,8 @@ pub fn query_deployed_version(component_id: &str) -> Result<Option<String>> {
         Duration::from_secs(5),
     )
     .map_err(|e| anyhow!("DH_CONNECT: {e}"))?;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .ok();
-    stream
-        .set_write_timeout(Some(Duration::from_secs(5)))
-        .ok();
+    stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+    stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
 
     let request = format!(
         "GET {path} HTTP/1.1\r\nHost: {host}\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n",
@@ -91,8 +86,7 @@ pub fn query_deployed_version(component_id: &str) -> Result<Option<String>> {
         404 => Ok(None),
         200 => {
             let body = extract_http_body(&raw);
-            let resp: Value =
-                serde_json::from_slice(body).map_err(|e| anyhow!("DH_JSON: {e}"))?;
+            let resp: Value = serde_json::from_slice(body).map_err(|e| anyhow!("DH_JSON: {e}"))?;
             if resp.get("ok").and_then(|v| v.as_bool()) != Some(true) {
                 return Err(anyhow!("DH_NOT_OK"));
             }
@@ -113,8 +107,8 @@ pub(crate) fn parse_status_code(raw: &[u8]) -> Result<u16> {
         .windows(2)
         .position(|w| w == b"\r\n")
         .ok_or_else(|| anyhow!("DH_NO_STATUS_LINE"))?;
-    let status_line = std::str::from_utf8(&raw[..line_end])
-        .map_err(|_| anyhow!("DH_STATUS_NOT_UTF8"))?;
+    let status_line =
+        std::str::from_utf8(&raw[..line_end]).map_err(|_| anyhow!("DH_STATUS_NOT_UTF8"))?;
     let code_str = status_line
         .split_whitespace()
         .nth(1)

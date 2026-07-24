@@ -15,17 +15,23 @@ fn approval_event_and_intent_are_atomic() -> Result<()> {
 
     // Record the full atomic chain: proposal → approved → activated
     journal.append_event(
-        JournalEventKind::CapabilityChangeProposed, None, None,
+        JournalEventKind::CapabilityChangeProposed,
+        None,
+        None,
         Some("corr_proposal"),
         json!({"proposal_id": "p1", "status": "PendingApproval"}),
     )?;
     journal.append_event(
-        JournalEventKind::CapabilityChangeApproved, None, None,
+        JournalEventKind::CapabilityChangeApproved,
+        None,
+        None,
         Some("corr_approval"),
         json!({"proposal_id": "p1", "status": "Approved"}),
     )?;
     journal.append_event(
-        JournalEventKind::CapabilityChangeActivated, None, None,
+        JournalEventKind::CapabilityChangeActivated,
+        None,
+        None,
         Some("corr_activated"),
         json!({"proposal_id": "p1", "status": "Activated"}),
     )?;
@@ -42,13 +48,15 @@ fn approval_event_and_intent_are_atomic() -> Result<()> {
 #[test]
 fn pending_deployment_intent_is_tracked() -> Result<()> {
     let journal = JournalStore::in_memory()?;
-    
+
     journal.append_event(
-        JournalEventKind::CapabilityChangeActivated, None, None,
+        JournalEventKind::CapabilityChangeActivated,
+        None,
+        None,
         Some("corr_deploy"),
         json!({"proposal_id": "p2", "status": "deployment_pending"}),
     )?;
-    
+
     let events = journal.events()?;
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].payload["status"], "deployment_pending");

@@ -11,6 +11,8 @@ use serde_json::{json, Value};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::thread;
 use std::time::Duration;
 
 use crate::config::DeploymentHarnessConfig;
@@ -294,29 +296,13 @@ pub fn reconcile(config: &DeploymentHarnessConfig) -> Result<()> {
             continue;
         };
         validate_record(config, &record)?;
-        if record.status == "disabled" || record_is_healthy(&record) {
-            continue;
-        }
-        let executable = PathBuf::from(&record.executable_path);
-        let started = process::start(
-            config,
-            &record.manifest.component_id,
-            &record.manifest.version,
-            &executable,
-            &component_root(config, &component_id).join(&record.manifest.state_path),
-            &record.manifest.healthcheck.path,
-            Duration::from_millis(record.manifest.healthcheck.timeout_ms),
-            Some(record.port),
-        )?;
-        if started.endpoint != record.receipt.endpoint {
-            process::stop(started.pid, &executable);
-            bail!("SERVICE_RECOVERY_ENDPOINT_CHANGED");
-        }
-        record.pid = started.pid;
-        record.instance_id = started.instance_id;
-        if let Err(error) = persist_active(config, &record) {
-            process::stop(record.pid, &executable);
-            return Err(error);
+        // Report-only reconcile: do not auto-restart.  The health monitor
+        // will update the status to "unhealthy" so the operator can act.
+        // Full process recovery requires an explicit deploy or a future
+        // limited-retry milestone.
+        if record.status == "healthy" && !record_is_healthy(&record) {
+            record.status = "unhealthy".into();
+            let _ = persist_active(config, &record);
         }
     }
     Ok(())
@@ -330,7 +316,7 @@ fn validate_record(config: &DeploymentHarnessConfig, record: &DeploymentRecord) 
         .validate_for(&record.intent, &record.manifest.component_id)?;
     if !matches!(
         record.status.as_str(),
-        "healthy" | "rolled_back" | "disabled"
+        "healthy" | "unhealthy" | "rolled_back" | "disabled"
     ) || record.instance_id.len() != 73
         || !record.instance_id.starts_with("instance_")
         || !record.instance_id[9..]
@@ -525,4 +511,105 @@ fn replay_control(
         bail!("CONTROL_DECISION_CONFLICT");
     }
     Ok(Some(receipt.clone()))
+}
+
+// ---------------------------------------------------------------------------
+// Health monitoring — periodic process and HTTP health checks
+// ---------------------------------------------------------------------------
+
+/// Default interval between health check rounds.
+const DEFAULT_HEALTH_CHECK_INTERVAL_SECS: u64 = 10;
+
+/// Read the health check interval from the environment, or use the default.
+fn health_check_interval() -> Duration {
+    let secs = std::env::var("DEPLOYMENT_HARNESS_HEALTH_CHECK_INTERVAL_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_HEALTH_CHECK_INTERVAL_SECS);
+    Duration::from_secs(secs.max(1))
+}
+
+/// Start a background health monitor thread.
+///
+/// Polls every `health_check_interval()` seconds, runs health checks
+/// on every managed component, and updates `active.json` when a
+/// component becomes unhealthy.
+pub fn start_health_monitor(config: Arc<DeploymentHarnessConfig>) {
+    let interval = health_check_interval();
+    thread::spawn(move || loop {
+        thread::sleep(interval);
+        if let Err(e) = run_health_checks(&config) {
+            eprintln!("health monitor error: {e}");
+        }
+    });
+}
+
+/// Perform one round of health checks on all managed components.
+///
+/// For each component with `active.json` status = "healthy":
+/// 1. Check if the recorded PID is alive.
+/// 2. If alive, HTTP-probe the health endpoint.
+/// 3. If either check fails, update `active.json` status to "unhealthy".
+pub fn run_health_checks(config: &DeploymentHarnessConfig) -> Result<()> {
+    let components_root = config.state_root.join("components");
+    let entries = match std::fs::read_dir(&components_root) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+
+    for entry in entries {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let component_id = entry.file_name();
+        let Some(component_id) = component_id.to_str() else {
+            continue;
+        };
+        if component_id.is_empty() || component_id.len() > 128 {
+            continue;
+        }
+
+        // Load active record
+        let comp_root = component_root(config, component_id);
+        let active_path = comp_root.join("active.json");
+        let Ok(Some(mut record)) = load_record(&active_path) else {
+            continue;
+        };
+
+        // Only monitor components that are supposed to be healthy
+        if record.status != "healthy" {
+            continue;
+        }
+
+        // Check process existence
+        let pid = record.pid;
+        let pid_alive = unsafe { libc::kill(pid as i32, 0) == 0 };
+
+        // HTTP probe
+        let http_healthy = pid_alive
+            && process::probe(
+                &format!("127.0.0.1:{}", record.port),
+                &record.manifest.healthcheck.path,
+                Duration::from_millis(record.manifest.healthcheck.timeout_ms.min(5000)),
+                &record.manifest.component_id,
+                &record.manifest.version,
+                &record.instance_id,
+            )
+            .is_success();
+
+        if pid_alive && http_healthy {
+            continue; // still healthy
+        }
+
+        // Component is unhealthy — update runtime status projection only.
+        // The Deployment Receipt is immutable historical fact; its status
+        // and health_status must NOT be modified.
+        record.status = "unhealthy".into();
+        if let Err(e) = persist_active(config, &record) {
+            eprintln!("health monitor: failed to update status for {component_id}: {e}");
+        }
+    }
+    Ok(())
 }

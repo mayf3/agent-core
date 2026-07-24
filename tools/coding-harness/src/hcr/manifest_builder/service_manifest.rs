@@ -7,28 +7,26 @@
 //! and bound by the receipt's `opaque_payload_digest`.
 
 use agent_core_kernel::domain::service_manifest::{
-    ListenPolicy, RollbackPolicy, SERVICE_MANIFEST_SCHEMA, ServiceHealthcheck, ServiceManifest,
-    UpgradePolicy,
+    ListenPolicy, RollbackPolicy, ServiceHealthcheck, ServiceManifest, UpgradePolicy,
+    SERVICE_MANIFEST_SCHEMA,
 };
 use anyhow::{anyhow, Result};
 use serde_json::Value;
 
-/// Construct the final delivery `ServiceManifest` from a component
-/// artifact manifest and the verified artifact digest.
+/// Construct the final `ServiceManifest` for a HookConsumerService
+/// component from the immutable candidate artifact manifest and the
+/// verified artifact digest.
 ///
 /// The version field is already resolved by the time this function
 /// is called — it either comes from the generator (initial version)
 /// or was overridden via `super::version_allocation::allocate_next_version`.
-pub fn build_delivery_manifest(
-    component: &Value,
-    artifact_digest: &str,
-) -> Result<ServiceManifest> {
-    let target_kind = component
-        .get("target_kind")
+pub fn build_service_manifest(component: &Value, artifact_digest: &str) -> Result<ServiceManifest> {
+    let kind = component
+        .get("kind")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow!("MISSING_TARGET_KIND"))?;
-    if target_kind != "HookConsumerService" {
-        return Err(anyhow!("UNEXPECTED_TARGET_KIND: {target_kind}"));
+        .ok_or_else(|| anyhow!("COMPONENT_MISSING_KIND"))?;
+    if kind != "hook_consumer_service" {
+        return Err(anyhow!("UNEXPECTED_KIND: {kind}"));
     }
     let _schema_version = component
         .get("schema_version")
@@ -57,13 +55,21 @@ pub fn build_delivery_manifest(
     let required_contracts: Vec<String> = component
         .get("required_contracts")
         .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
         .ok_or_else(|| anyhow!("MISSING_REQUIRED_CONTRACTS"))?;
 
     let requested_permissions: Vec<String> = component
         .get("requested_permissions")
         .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
         .ok_or_else(|| anyhow!("MISSING_REQUESTED_PERMISSIONS"))?;
 
     let mut manifest = ServiceManifest {

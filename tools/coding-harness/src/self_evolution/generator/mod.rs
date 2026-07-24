@@ -1,4 +1,5 @@
 mod hook_consumer;
+mod invocable;
 mod model;
 
 use agent_core_kernel::domain::{DevelopmentRequest, TargetKind};
@@ -31,6 +32,7 @@ pub(super) fn generate(
     request: &DevelopmentRequest,
 ) -> Result<Value, GenerationError> {
     match request.target_kind {
+        TargetKind::InvocableCapability => invocable::generate(artifact_root, request),
         TargetKind::HookConsumerService => hook_consumer::generate(artifact_root, request),
         _ => Err(GenerationError::new("GENERATOR_NOT_CONFIGURED_FOR_PROFILE")),
     }

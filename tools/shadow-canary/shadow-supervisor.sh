@@ -60,7 +60,12 @@ set +a
 declare -a SPAWNED_PIDS=()
 
 cleanup() {
+    # Capture the original exit code BEFORE resetting traps.
     local exit_code=$?
+    # Prevent recursive trap: reset all traps immediately.
+    # The kill -- -$my_pgid below would re-trigger this handler,
+    # and exit inside a trap also risks recursion in some bash versions.
+    trap - EXIT INT TERM HUP
     echo "[supervisor] cleanup called (exit=$exit_code)"
     # Kill all spawned processes in reverse order (dependency-first)
     for pid in "${SPAWNED_PIDS[@]}"; do
@@ -77,7 +82,9 @@ cleanup() {
         fi
     done
     # Also kill entire process group of this script
-    # (catches any orphaned grandchild processes)
+    # (catches any orphaned grandchild processes).
+    # Traps are already reset, so the SIGTERM we send to ourselves
+    # via the PGID kill will not re-invoke cleanup.
     local my_pgid
     my_pgid=$(awk '{print $5}' /proc/self/stat 2>/dev/null || echo "")
     if [ -n "$my_pgid" ] && [ "$my_pgid" != "1" ]; then
@@ -103,10 +110,15 @@ start_service() {
     local pid=$!
     echo "$pid" > "$pid_file"
     SPAWNED_PIDS+=("$pid")
-    # Record process evidence for PID-scoped cleanup verification
+    # Record process evidence for PID-scoped cleanup verification.
+    # Record the process starttime from /proc/PID/stat to verify PID
+    # ownership during cleanup — prevents killing a recycled PID.
+    local proc_starttime
+    proc_starttime=$(awk '{print $22}' /proc/${pid}/stat 2>/dev/null || echo "0")
     echo "shadow_run_id=${RUN_ID}" > "${PID_DIR}/process_${name}.txt"
     echo "shadow_root=${SHADOW_ROOT}" >> "${PID_DIR}/process_${name}.txt"
     echo "pid=${pid}" >> "${PID_DIR}/process_${name}.txt"
+    echo "starttime=${proc_starttime}" >> "${PID_DIR}/process_${name}.txt"
     echo "cmdline=$*" >> "${PID_DIR}/process_${name}.txt"
     echo "[supervisor] started $name (PID $pid) log=$log_file"
 }
@@ -196,10 +208,9 @@ PORT_CONFLICT=false
 for port_spec in 4130:kernel 4131:connector 7200:coding-harness 7300:capability-host 7400:deployment-harness; do
     port="${port_spec%%:*}"
     name="${port_spec##*:}"
-    # Use /proc/net/tcp to check for listening ports (works on all Linux)
-    # Port in /proc/net/tcp is in hex, little-endian
-    port_hex=$(printf "%04X" ${port})
-    if grep -q "0${port_hex:2:2}${port_hex:0:2}" /proc/net/tcp 2>/dev/null; then
+    # Use ss to check for listening ports (more reliable than /proc/net/tcp
+    # parsing, which includes TIME_WAIT entries that don't block rebinding).
+    if ss -tlnp 2>/dev/null | grep -q ":${port} "; then
         echo "  ⚠️  Port ${port} (${name}) is already in use"
         PORT_CONFLICT=true
     fi

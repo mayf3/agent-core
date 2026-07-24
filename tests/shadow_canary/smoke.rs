@@ -19,8 +19,11 @@ fn hash_chain_survives_events() -> Result<()> {
     assert!(journal.verify_hash_chain()?);
     for i in 0..5 {
         journal.append_event(
-            JournalEventKind::RunStarted, None, None,
-            Some(&format!("corr_{i}")), json!({"idx": i}),
+            JournalEventKind::RunStarted,
+            None,
+            None,
+            Some(&format!("corr_{i}")),
+            json!({"idx": i}),
         )?;
         assert!(journal.verify_hash_chain()?);
     }
@@ -31,7 +34,9 @@ fn hash_chain_survives_events() -> Result<()> {
 fn valid_empty_event_page_marks_ready() -> Result<()> {
     let journal = JournalStore::in_memory()?;
     let resp = journal.observe_events(&EventObserveQuery {
-        after_sequence: None, limit: 100, ..Default::default()
+        after_sequence: None,
+        limit: 100,
+        ..Default::default()
     })?;
     assert!(resp.events.is_empty());
     assert!(!resp.has_more);
@@ -59,20 +64,28 @@ fn events_available_during_deployment_intent() -> Result<()> {
     let journal = JournalStore::in_memory()?;
     let run = RunId("r_conc".to_string());
     let session = SessionId("s_conc".to_string());
-    
+
     for i in 0..3 {
         journal.append_event(
-            JournalEventKind::RunStarted, Some(&run), Some(&session),
-            Some(&format!("corr_{i}")), json!({"idx": i}),
+            JournalEventKind::RunStarted,
+            Some(&run),
+            Some(&session),
+            Some(&format!("corr_{i}")),
+            json!({"idx": i}),
         )?;
     }
     journal.append_event(
-        JournalEventKind::CapabilityChangeProposed, None, None,
-        Some("corr_deploy"), json!({"status": "PendingApproval"}),
+        JournalEventKind::CapabilityChangeProposed,
+        None,
+        None,
+        Some("corr_deploy"),
+        json!({"status": "PendingApproval"}),
     )?;
-    
+
     let resp = journal.observe_events(&EventObserveQuery {
-        after_sequence: None, limit: 100, ..Default::default()
+        after_sequence: None,
+        limit: 100,
+        ..Default::default()
     })?;
     assert_eq!(resp.events.len(), 4);
     Ok(())

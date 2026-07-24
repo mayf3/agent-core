@@ -97,6 +97,9 @@ fn test_config() -> KernelConfig {
         primary_tool_name_indexed: false,
         harness_read_timeout_ms: 10_000,
         harness_artifact_root: std::env::temp_dir().join(format!("ha_root_{}", std::process::id())),
+        coding_harness_api_url: "http://127.0.0.1:7200".into(),
+        coding_harness_artifact_digest:
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
         max_tool_rounds: 12,
         feishu_coding_owner_id: None,
         capability_submit_token: None,
@@ -261,12 +264,11 @@ fn budget_at_lower_bound_allows_1_round() {
     assert_eq!(count(&events, JournalEventKind::ToolBudgetExhausted), 1);
     assert!(outcome.output.contains("工具执行上限"));
 }
-
-/// 3b. Upper bound: 64 rounds allowed (not exhaustive, just verify no crash).
+/// 3b. Upper bound: 128 rounds allowed and completes without exhaustion.
 #[test]
-fn budget_at_upper_bound_64_works() {
-    let (events, outcome, _) = run_with_budget(64, 64);
-    assert_eq!(count(&events, JournalEventKind::LlmCompleted), 64);
+fn budget_at_upper_bound_128_works() {
+    let (events, outcome, _) = run_with_budget(128, 128);
+    assert_eq!(count(&events, JournalEventKind::LlmCompleted), 128);
     assert_eq!(count(&events, JournalEventKind::ToolBudgetExhausted), 0);
     assert_eq!(outcome.output, "done");
 }

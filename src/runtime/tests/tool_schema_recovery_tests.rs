@@ -416,3 +416,67 @@ fn coding_manifest_schema_reaches_llm_tool_definition_intact() {
     assert!(ws_enum.contains(&json!("agent-dev")));
     assert!(j.verify_hash_chain().unwrap());
 }
+
+#[test]
+fn coding_submit_schema_does_not_require_model_to_compute_request_id() {
+    let submit = crate::registry::store::builtin_specs()
+        .into_iter()
+        .find(|spec| spec.name == crate::domain::operation::external::TASK_SUBMIT)
+        .unwrap();
+    let request = submit
+        .parameters
+        .pointer("/properties/development_request")
+        .unwrap();
+    let required = request["required"].as_array().unwrap();
+    assert!(!required.contains(&json!("request_id")));
+    assert!(request.pointer("/properties/request_id").is_none());
+}
+
+#[test]
+fn coding_submit_schema_does_not_expose_kernel_owned_fields() {
+    let submit = crate::registry::store::builtin_specs()
+        .into_iter()
+        .find(|spec| spec.name == crate::domain::operation::external::TASK_SUBMIT)
+        .unwrap();
+    let request = submit
+        .parameters
+        .pointer("/properties/development_request")
+        .unwrap();
+    for field in [
+        "source_subject",
+        "source_scope",
+        "source_message_id",
+        "requested_permissions",
+        "build_profile",
+        "deployment_profile",
+        "idempotency_key",
+        "contract_catalog_version",
+    ] {
+        assert!(request.pointer(&format!("/properties/{field}")).is_none());
+    }
+    assert_eq!(
+        submit.parameters["required"],
+        json!(["development_request"])
+    );
+}
+
+#[test]
+fn coding_submit_schema_requires_active_contract_ids() {
+    let submit = crate::registry::store::builtin_specs()
+        .into_iter()
+        .find(|spec| spec.name == crate::domain::operation::external::TASK_SUBMIT)
+        .unwrap();
+    let contracts = submit
+        .parameters
+        .pointer("/properties/development_request/properties/required_contracts")
+        .unwrap();
+    assert_eq!(contracts["minItems"], 1);
+    assert_eq!(contracts["uniqueItems"], true);
+    let schema_ids = contracts["items"]["enum"].as_array().unwrap();
+    let catalog_ids: Vec<Value> = crate::contract_catalog::ContractCatalog::v1()
+        .contracts
+        .into_iter()
+        .map(|contract| json!(contract.contract_id))
+        .collect();
+    assert_eq!(schema_ids, &catalog_ids);
+}

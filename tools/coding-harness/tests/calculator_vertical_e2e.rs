@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -22,6 +23,17 @@ use std::time::Duration;
 use helpers::*;
 
 const LEGACY_CALCULATOR: &str = "external.legacy_calculator";
+
+struct ChildGuard(Child);
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if matches!(self.0.try_wait(), Ok(None)) {
+            let _ = self.0.kill();
+        }
+        let _ = self.0.wait();
+    }
+}
 
 #[test]
 fn calculator_vertical_e2e() -> Result<()> {
@@ -162,12 +174,14 @@ fn calculator_vertical_e2e() -> Result<()> {
         .unwrap()
         .port();
     let calc_endpoint = format!("http://127.0.0.1:{calc_port}/execute");
-    let bp = bin.clone();
-    thread::spawn(move || {
-        let _ = std::process::Command::new(&bp)
+    let _calculator = ChildGuard(
+        Command::new(&bin)
             .env("CALC_PORT", calc_port.to_string())
-            .spawn();
-    });
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?,
+    );
     thread::sleep(Duration::from_millis(500));
 
     // Write manifest.json and evidence.json via workspace.write.

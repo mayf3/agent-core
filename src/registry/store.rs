@@ -65,45 +65,35 @@ pub fn builtin_specs() -> Vec<OperationSpec> {
         OperationSpec {
             name: crate::domain::operation::external::TASK_SUBMIT.into(),
             risk: Risk::Write,
-            description: "Submit a catalogued Generic DevelopmentRequest to the Coding Harness."
+            description: "Submit a semantic development draft to the governed Coding Harness. Use this when the authorized user asks to create an external component or capability. Kernel binds authenticated origin, idempotency, active catalog version, permissions, and profiles; supply only the requested behavior, target kind, contracts, and acceptance criteria."
                 .into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "session_id": {"type": "string"},
                     "development_request": {
                         "type": "object",
                         "properties": {
-                            "request_id": {"type": "string"},
-                            "source_subject": {"type": "string"},
-                            "source_scope": {"type": "string"},
-                            "source_message_id": {"type": "string"},
-                            "target_kind": {"type": "string", "enum": [
+                            "target_kind": {
+                                "type": "string",
+                                "description": "Select the component kind. Kernel derives the catalogued build and deployment profiles; never supply profile fields.",
+                                "enum": [
                                 "invocable_capability", "hook_consumer_service", "context_provider",
                                 "context_transformer", "scheduled_worker", "scheduler_service",
                                 "ingress_router", "multi_run_orchestrator", "connector_extension"
                             ]},
                             "name": {"type": "string"},
                             "requirements": {"type": "array", "items": {"type": "string"}},
-                            "required_contracts": {"type": "array", "items": {"type": "string"}},
-                            "requested_permissions": {"type": "array", "items": {"type": "string"}},
-                            "build_profile": {"type": "string"},
-                            "deployment_profile": {"type": "string"},
-                            "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
-                            "idempotency_key": {"type": "string"},
-                            "contract_catalog_version": {"type": "string"}
+                            "required_contracts": {"type": "array", "description": "Select active Contract Catalog IDs compatible with target_kind. invocable_capability uses component.invoke.v0; hook_consumer_service uses event.observe.v0 and optionally feishu.reply.v0. Kernel derives permissions from these contracts.", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "enum": ["event.observe.v0", "context.prepare.v0", "context.load.v0", "context.compress.v0", "route.proposal.v0", "run.create.v0", "component.invoke.v0", "deployment.effect.v0", "feishu.reply.v0"]}},
+                            "acceptance_criteria": {"type": "array", "items": {"type": "string"}}
                         },
                         "required": [
-                            "request_id", "source_subject", "source_scope", "source_message_id",
                             "target_kind", "name", "requirements", "required_contracts",
-                            "requested_permissions", "build_profile", "deployment_profile",
-                            "acceptance_criteria", "idempotency_key", "contract_catalog_version"
+                            "acceptance_criteria"
                         ],
                         "additionalProperties": false
-                    },
-                    "idempotency_key": {"type": "string"}
+                    }
                 },
-                "required": ["session_id", "development_request", "idempotency_key"],
+                "required": ["development_request"],
                 "additionalProperties": false,
             }),
             idempotent: true,
@@ -452,6 +442,41 @@ mod tests {
                 .pointer("/additionalProperties")
                 .and_then(|v| v.as_bool()),
             Some(false)
+        );
+    }
+
+    #[test]
+    fn coding_task_submit_keeps_control_plane_fields_kernel_owned() {
+        let submit = builtin_specs()
+            .into_iter()
+            .find(|spec| spec.name == crate::domain::operation::external::TASK_SUBMIT)
+            .unwrap();
+        let request = submit
+            .parameters
+            .pointer("/properties/development_request")
+            .unwrap();
+
+        let target_kind_description = request
+            .pointer("/properties/target_kind/description")
+            .and_then(|value| value.as_str())
+            .unwrap();
+        assert!(target_kind_description.contains("Kernel derives"));
+        for field in [
+            "request_id",
+            "source_subject",
+            "source_scope",
+            "source_message_id",
+            "requested_permissions",
+            "build_profile",
+            "deployment_profile",
+            "idempotency_key",
+            "contract_catalog_version",
+        ] {
+            assert!(request.pointer(&format!("/properties/{field}")).is_none());
+        }
+        assert_eq!(
+            submit.parameters["required"],
+            serde_json::json!(["development_request"])
         );
     }
 
