@@ -3,14 +3,17 @@
 
 use crate::domain::*;
 use crate::harness::manifest::HarnessManifest;
-use crate::registry::snapshot::{BindingKind, OperationSpec, Risk};
+use crate::domain::operation::ExternalOperationGrant;
+use crate::journal::grant_ops::CreateGrantParams;
+use crate::registry::snapshot::{BindingKind, OperationSpec, RegistrySnapshot, Risk};
 use crate::registry::store::builtin_specs;
 
 use anyhow::{anyhow, bail, Result};
 use chrono::Utc;
-use rusqlite::{params, Transaction};
+use rusqlite::{params, Transaction, TransactionBehavior};
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 impl super::JournalStore {
     /// Register a new harness manifest. Idempotent: same content produces the
@@ -612,6 +615,140 @@ impl super::JournalStore {
             &decision_id,
             "external_manifest_binding",
         )?;
+
         Ok(())
+    }
+
+    /// Carry forward active external operation grants from stale snapshots to
+    /// the current active snapshot, but only for operations whose binding is
+    /// identical between the two snapshots (same `binding_kind` AND
+    /// `binding_key`).  Old grant rows are never modified.
+    ///
+    /// This preserves grant coverage across restart-triggered snapshot
+    /// rotations (manifest binding, legacy-time retirement, coding-control
+    /// upgrade) without mutating history or granting access to operations
+    /// whose manifest changed.
+    ///
+    /// Uses `INSERT OR IGNORE` so repeated calls are idempotent.
+    pub fn carry_forward_external_operation_grants(&self) -> Result<usize> {
+        let current_id = self.current_registry_snapshot_id()?;
+        let current = self.load_registry_snapshot(&current_id)?;
+
+        // Build a name→spec lookup for the current snapshot.
+        let current_ops: HashMap<&str, &OperationSpec> =
+            current.operations.iter().map(|op| (op.name.as_str(), op)).collect();
+
+        // Find all active grants whose snapshot_id differs from the current one.
+        let stale: Vec<ExternalOperationGrant> = {
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|_| anyhow!("journal mutex poisoned"))?;
+            let mut stmt = conn.prepare(
+                "SELECT grant_id, operation, grantee_principal_id, channel,
+                        conversation_kind, scope, risk, snapshot_id, status
+                 FROM external_operation_grants
+                 WHERE status = 'active' AND snapshot_id != ?1",
+            )?;
+            let rows = stmt.query_map(params![current_id], |row| {
+                Ok(ExternalOperationGrant {
+                    grant_id: row.get(0)?,
+                    operation: row.get(1)?,
+                    grantee_principal_id: row.get(2)?,
+                    channel: row.get(3)?,
+                    conversation_kind: row.get(4)?,
+                    scope: row.get(5)?,
+                    risk: row.get(6)?,
+                    snapshot_id: row.get(7)?,
+                    status: row.get(8)?,
+                })
+            })?;
+            rows.filter_map(|r| r.ok()).collect()
+        };
+
+        if stale.is_empty() {
+            return Ok(0);
+        }
+
+        // Pre-load all referenced old snapshots (outside the insert transaction
+        // to avoid nested lock acquisition on self.conn).
+        let mut old_snapshots: HashMap<String, Arc<RegistrySnapshot>> = HashMap::new();
+        {
+            let mut ids: Vec<String> = stale.iter().map(|g| g.snapshot_id.clone()).collect();
+            ids.sort();
+            ids.dedup();
+            for sid in &ids {
+                if let Ok(snap) = self.load_registry_snapshot(sid) {
+                    old_snapshots.insert(sid.clone(), snap);
+                }
+            }
+        }
+
+        let mut carried = 0usize;
+
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow!("journal mutex poisoned"))?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| anyhow!("cannot begin transaction"))?;
+
+        for grant in &stale {
+            // Fetch the preloaded old snapshot.
+            let old_snapshot = match old_snapshots.get(&grant.snapshot_id) {
+                Some(snap) => snap,
+                None => continue,
+            };
+
+            // Operation must exist in both old and current snapshots.
+            let old_op = match old_snapshot.lookup(&grant.operation) {
+                Some(op) => op,
+                None => continue,
+            };
+            let current_op = match current_ops.get(grant.operation.as_str()) {
+                Some(op) => op,
+                None => continue,
+            };
+
+            // Binding must be identical — manifest change means no carry-forward.
+            if old_op.binding_kind != current_op.binding_kind
+                || old_op.binding_key != current_op.binding_key
+            {
+                continue;
+            }
+
+            // Insert a new grant row for the current snapshot.
+            // INSERT OR IGNORE makes this idempotent across restarts.
+            let params = CreateGrantParams {
+                operation: grant.operation.clone(),
+                grantee_principal_id: grant.grantee_principal_id.clone(),
+                channel: grant.channel.clone(),
+                conversation_kind: grant.conversation_kind.clone(),
+                scope: grant.scope.clone(),
+                risk: grant.risk.clone(),
+                capability_id: None,
+                snapshot_id: current_id.clone(),
+                created_by_principal_id: None,
+                decision_reference: None,
+            };
+            let (_grant_id, inserted) =
+                crate::journal::grant_ops::create_external_operation_grant_tx(&tx, &params)?;
+            if inserted {
+                carried += 1;
+            }
+        }
+
+        tx.commit()?;
+        drop(conn);
+
+        if carried > 0 {
+            eprintln!(
+                "carried forward {carried} external operation grant(s) \
+                 to current snapshot {current_id}"
+            );
+        }
+
+        Ok(carried)
     }
 }
