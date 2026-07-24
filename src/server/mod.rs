@@ -74,6 +74,11 @@ pub fn serve(config: KernelConfig) -> Result<()> {
     // using the operation's binding_key as the manifest_id.
     journal.bind_external_manifest_ids_to_snapshot(&manifest_map)?;
 
+    // Carry forward external operation grants from stale snapshots whose
+    // operations are identical (same binding_kind and binding_key) in the
+    // current snapshot.  Old grant rows are never modified.
+    journal.carry_forward_external_operation_grants()?;
+
     let recovered = journal.recover_unknown_invocations()?;
     if recovered > 0 {
         println!("agent-core recovered {recovered} unknown invocation(s)");
