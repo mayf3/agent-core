@@ -119,10 +119,15 @@ pub fn authorize_execution(
     request: &HarnessRequest,
 ) -> Result<DeploymentRecord, DeployError> {
     let record = state::load(config, &request.operation_name)?.ok_or(DeployError::NotDeployed)?;
+    // Authorize by content-addressed identity (manifest, artifact, operation),
+    // not by the deployment-time registry snapshot. When the Kernel creates a
+    // new registry snapshot during restart (e.g. manifest binding), the same
+    // capability automatically remains valid for the new snapshot because the
+    // manifest_id and artifact_digest are content-addressed and unchanged.
+    // Old deployment records are never modified.
     if request.operation_name != record.operation_name
         || request.manifest_id != record.manifest_id
         || request.artifact_digest != record.artifact_digest
-        || request.registry_snapshot_id != record.target_registry_snapshot_id
     {
         return Err(DeployError::BindingMismatch);
     }
