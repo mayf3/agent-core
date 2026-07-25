@@ -286,32 +286,6 @@ fn validate_array_detailed(
     Ok(())
 }
 
-/// Count the number of top-level keys in a JSON object.
-///
-/// # Errors
-///
-/// Returns an error message if the input is not a JSON object.
-pub fn object_key_count(value: &serde_json::Value) -> Result<usize, String> {
-    match value {
-        serde_json::Value::Object(map) => Ok(map.len()),
-        _ => Err(format!(
-            "expected JSON object, got {}",
-            json_type_name(value)
-        )),
-    }
-}
-
-fn json_type_name(value: &serde_json::Value) -> &'static str {
-    match value {
-        serde_json::Value::Null => "null",
-        serde_json::Value::Bool(_) => "boolean",
-        serde_json::Value::Number(_) => "number",
-        serde_json::Value::String(_) => "string",
-        serde_json::Value::Array(_) => "array",
-        serde_json::Value::Object(_) => "object",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -382,52 +356,5 @@ mod tests {
             "properties":{"nested":{"type":"object","properties":{"x":{"type":"string","enum":["a"]}}}}
         }));
         assert!(result.is_ok());
-    }
-
-    // ── object_key_count ──
-
-    #[test]
-    fn empty_object_returns_zero() {
-        assert_eq!(object_key_count(&json!({})).unwrap(), 0);
-    }
-
-    #[test]
-    fn three_keys_returns_three() {
-        assert_eq!(
-            object_key_count(&json!({"a": 1, "b": 2, "c": 3})).unwrap(),
-            3
-        );
-    }
-
-    #[test]
-    fn array_input_returns_error() {
-        let err = object_key_count(&json!([1, 2, 3])).unwrap_err();
-        assert!(err.contains("array"));
-    }
-
-    #[test]
-    fn null_input_returns_error() {
-        let err = object_key_count(&serde_json::Value::Null).unwrap_err();
-        assert!(err.contains("null"));
-    }
-
-    #[test]
-    fn nested_object_counts_only_top_level() {
-        assert_eq!(
-            object_key_count(&json!({"outer": {"inner": 1, "also_inner": 2}, "other": 3})).unwrap(),
-            2
-        );
-    }
-
-    #[test]
-    fn string_input_returns_error() {
-        let err = object_key_count(&json!("hello")).unwrap_err();
-        assert!(err.contains("string"));
-    }
-
-    #[test]
-    fn number_input_returns_error() {
-        let err = object_key_count(&json!(42)).unwrap_err();
-        assert!(err.contains("number"));
     }
 }
