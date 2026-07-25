@@ -81,8 +81,10 @@ fn owner_private_context_is_the_only_valid_coding_origin() {
 }
 
 #[test]
-fn coding_delivery_routes_only_feishu_p2p_events() {
-    assert!(coding_delivery::matches(&ingress(
+fn coding_delivery_no_longer_intercepts_development_requests() {
+    // Development requests now flow through the standard Agent tool loop,
+    // not through coding_delivery. matches() always returns false.
+    assert!(!coding_delivery::matches(&ingress(
         EventSource::Feishu,
         Some("p2p")
     )));

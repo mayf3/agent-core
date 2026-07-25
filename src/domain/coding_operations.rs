@@ -15,14 +15,16 @@ pub mod external {
     pub const HCR_ACCEPT: &str = "external.coding_hcr_accept";
     pub const CAPABILITY_PROPOSE: &str = "external.coding_capability_propose";
 
-    /// The exact set of seven coding-harness operations that an authorized
-    /// owner receives in a private chat. Every other access path is denied.
+    /// The set of coding operations that an authorized owner receives in a
+    /// private chat. Every other access path is denied.
+    /// NOTE: TASK_SUBMIT is intentionally excluded — the Agent uses workspace
+    /// tools (read, write, exec) directly instead of dispatching to an
+    /// external coding harness.
     pub const CODING_OPERATIONS: &[&str] = &[
         WORKSPACE_LIST,
         WORKSPACE_READ,
         WORKSPACE_WRITE,
         WORKSPACE_EXEC,
-        TASK_SUBMIT,
         TASK_STATUS,
         CAPABILITY_PROPOSE,
     ];
