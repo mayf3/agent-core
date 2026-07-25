@@ -352,6 +352,7 @@ fn upstream_contract(
 ) -> Result<(&'static str, &'static str), GenerationError> {
     match kit {
         AcceptanceKitId::FailureViewerQueryV0 => Ok(("failure-viewer", "/api/state")),
+        AcceptanceKitId::GenericInvocableCapabilityV0 => Ok(("", "")),
         _ => Err(GenerationError::new("ACCEPTANCE_KIT_SELECTION_REQUIRED")),
     }
 }

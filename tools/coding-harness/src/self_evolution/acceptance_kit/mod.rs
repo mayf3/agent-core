@@ -12,6 +12,7 @@
 
 mod failure_event_viewer;
 mod failure_viewer_query;
+mod generic_invocable;
 mod shared_verifier_engine;
 mod token_dashboard;
 
@@ -49,6 +50,10 @@ pub enum AcceptanceKitId {
     TokenDashboardV0,
     FailureEventViewerV0,
     FailureViewerQueryV0,
+    /// Generic kit for any invocable-capability-v0 component that does not
+    /// have a specialized acceptance kit. Provides basic schema and output
+    /// validation without requiring a specific upstream component.
+    GenericInvocableCapabilityV0,
 }
 
 impl AcceptanceKitId {
@@ -58,6 +63,7 @@ impl AcceptanceKitId {
             Self::TokenDashboardV0 => "token-dashboard-v0",
             Self::FailureEventViewerV0 => "failure-event-viewer-v0",
             Self::FailureViewerQueryV0 => "failure-viewer-query-v0",
+            Self::GenericInvocableCapabilityV0 => "generic-invocable-capability-v0",
         }
     }
 
@@ -66,6 +72,7 @@ impl AcceptanceKitId {
             Self::TokenDashboardV0 => "v0",
             Self::FailureEventViewerV0 => "v0",
             Self::FailureViewerQueryV0 => "v0",
+            Self::GenericInvocableCapabilityV0 => "v0",
         }
     }
 
@@ -75,6 +82,7 @@ impl AcceptanceKitId {
             Self::TokenDashboardV0 => "hook-consumer-service-v0",
             Self::FailureEventViewerV0 => "hook-consumer-service-v0",
             Self::FailureViewerQueryV0 => "invocable-capability-v0",
+            Self::GenericInvocableCapabilityV0 => "invocable-capability-v0",
         }
     }
 
@@ -84,6 +92,7 @@ impl AcceptanceKitId {
             Self::TokenDashboardV0 => token_dashboard::public_spec(),
             Self::FailureEventViewerV0 => failure_event_viewer::public_spec(),
             Self::FailureViewerQueryV0 => failure_viewer_query::public_spec(),
+            Self::GenericInvocableCapabilityV0 => generic_invocable::public_spec(),
         }
     }
 
@@ -104,6 +113,7 @@ impl AcceptanceKitId {
             // Bump this tag when failure_event_viewer verification logic changes.
             Self::FailureEventViewerV0 => "pv_failure_viewer_v0_002",
             Self::FailureViewerQueryV0 => "pv_failure_viewer_query_v0_001",
+            Self::GenericInvocableCapabilityV0 => "pv_generic_invocable_v0_001",
         }
     }
 
@@ -131,6 +141,7 @@ impl AcceptanceKitId {
             "token-dashboard-v0" => Ok(Self::TokenDashboardV0),
             "failure-event-viewer-v0" => Ok(Self::FailureEventViewerV0),
             "failure-viewer-query-v0" => Ok(Self::FailureViewerQueryV0),
+            "generic-invocable-capability-v0" => Ok(Self::GenericInvocableCapabilityV0),
             _ => Err("ACCEPTANCE_KIT_SELECTION_REQUIRED"),
         }
     }
@@ -146,6 +157,7 @@ impl AcceptanceKitId {
             Self::TokenDashboardV0 => token_dashboard::private_verification_cases(),
             Self::FailureEventViewerV0 => failure_event_viewer::private_verification_cases(),
             Self::FailureViewerQueryV0 => failure_viewer_query::private_verification_cases(),
+            Self::GenericInvocableCapabilityV0 => generic_invocable::private_verification_cases(),
         }
     }
 
@@ -171,12 +183,16 @@ impl AcceptanceKitId {
             Self::FailureViewerQueryV0 => {
                 failure_viewer_query::verify(request, source, input, stdout)
             }
+            Self::GenericInvocableCapabilityV0 => {
+                generic_invocable::verify(request, source, input, stdout)
+            }
         }
     }
 
     pub fn invocable_fixture(self) -> Option<Value> {
         match self {
             Self::FailureViewerQueryV0 => Some(failure_viewer_query::fixture()),
+            Self::GenericInvocableCapabilityV0 => Some(generic_invocable::fixture()),
             _ => None,
         }
     }
