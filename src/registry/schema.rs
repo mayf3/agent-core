@@ -55,6 +55,10 @@ pub fn validate_schema_structure(schema: &Value) -> Result<()> {
             | "items"
             | "minimum"
             | "maximum"
+            | "minItems"
+            | "minLength"
+            | "maxLength"
+            | "uniqueItems"
             | "description"
             | "enum" => {}
             _ => bail!("unknown schema keyword: {key}"),
@@ -142,6 +146,10 @@ pub fn validate_against_schema_detailed(
             | "items"
             | "minimum"
             | "maximum"
+            | "minItems"
+            | "minLength"
+            | "maxLength"
+            | "uniqueItems"
             | "description"
             | "enum" => {}
             _ => return Err(SchemaValidationIssue::TypeMismatch),
