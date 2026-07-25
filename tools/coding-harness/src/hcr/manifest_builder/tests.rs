@@ -2,14 +2,23 @@
 
 #[cfg(test)]
 mod tests {
-    use super::super::version_query::{parse_status_code, query_deployed_version};
+    use super::super::service_manifest::build_service_manifest;
     use super::super::version_allocation::{allocate_next_version, increment_patch};
-    use super::super::delivery_manifest::build_delivery_manifest;
+    use super::super::version_query::{parse_status_code, query_deployed_version};
     use std::io::{Read, Write};
-    use std::net::{TcpListener, TcpStream};
-    use std::sync::atomic::{AtomicU16, Ordering};
+    use std::net::TcpListener;
+    use std::sync::{Mutex, OnceLock};
     use std::thread;
     use std::time::Duration;
+
+    struct EnvironmentReset;
+
+    impl Drop for EnvironmentReset {
+        fn drop(&mut self) {
+            std::env::remove_var("AGENT_CORE_DEPLOYMENT_HARNESS_READ_URL");
+            std::env::remove_var("AGENT_CORE_DEPLOYMENT_HARNESS_READ_TOKEN");
+        }
+    }
 
     // ── parse_status_code tests ────────────────────────────
     #[test]
@@ -70,12 +79,13 @@ mod tests {
         assert_ne!(orig, next);
     }
 
-    // ── build_delivery_manifest tests ──
+    // ── build_service_manifest tests ──
     #[test]
-    fn build_delivery_manifest_sets_correct_version() {
+    fn build_service_manifest_sets_correct_version() {
         let component = serde_json::json!({
             "schema_version": "component-artifact-v1",
             "component_id": "test-component",
+            "kind": "hook_consumer_service",
             "target_kind": "HookConsumerService",
             "profile_id": "hook-consumer-service-v0",
             "contract_catalog_version": "1",
@@ -83,18 +93,22 @@ mod tests {
             "requested_permissions": ["journal.observe"],
             "service": { "version": "0.1.5", "healthcheck_path": "/health" }
         });
-        let manifest = build_delivery_manifest(&component,
-            "sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234").unwrap();
+        let manifest = build_service_manifest(
+            &component,
+            "sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234",
+        )
+        .unwrap();
         assert_eq!(manifest.version, "0.1.5");
         assert_eq!(manifest.component_id, "test-component");
         assert_eq!(manifest.entrypoint, "artifact");
     }
 
     #[test]
-    fn build_delivery_manifest_different_versions_different_ids() {
+    fn build_service_manifest_different_versions_different_ids() {
         let base = serde_json::json!({
             "schema_version": "component-artifact-v1",
             "component_id": "token-dashboard",
+            "kind": "hook_consumer_service",
             "target_kind": "HookConsumerService",
             "profile_id": "hook-consumer-service-v0",
             "contract_catalog_version": "1",
@@ -102,22 +116,26 @@ mod tests {
             "requested_permissions": ["journal.observe"],
             "service": { "version": "0.1.0", "healthcheck_path": "/health" }
         });
-        let m1 = build_delivery_manifest(&base,
-            "sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234").unwrap();
+        let m1 = build_service_manifest(
+            &base,
+            "sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234",
+        )
+        .unwrap();
         let mut v2 = base.clone();
         v2["service"]["version"] = serde_json::json!("0.1.1");
-        let m2 = build_delivery_manifest(&v2,
-            "sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234").unwrap();
+        let m2 = build_service_manifest(
+            &v2,
+            "sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234",
+        )
+        .unwrap();
         assert_ne!(m1.manifest_id, m2.manifest_id);
     }
 
     // ── Mock server helpers ──
     fn start_mock(response: &'static [u8]) -> u16 {
-        static NEXT_PORT: AtomicU16 = AtomicU16::new(18000);
-        let port = NEXT_PORT.fetch_add(1, Ordering::SeqCst);
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
         thread::spawn(move || {
-            let addr = format!("127.0.0.1:{port}");
-            let listener = TcpListener::bind(&addr).unwrap();
             if let Ok((mut stream, _)) = listener.accept() {
                 stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
                 let mut buf = [0u8; 4096];
@@ -130,14 +148,23 @@ mod tests {
     }
 
     fn with_server<F>(response: &'static [u8], token: &str, f: F)
-    where F: FnOnce() {
+    where
+        F: FnOnce(),
+    {
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _guard = ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _reset = EnvironmentReset;
         let port = start_mock(response);
-        std::env::set_var("AGENT_CORE_DEPLOYMENT_HARNESS_READ_URL", format!("http://127.0.0.1:{port}"));
+        std::env::set_var(
+            "AGENT_CORE_DEPLOYMENT_HARNESS_READ_URL",
+            format!("http://127.0.0.1:{port}"),
+        );
         std::env::set_var("AGENT_CORE_DEPLOYMENT_HARNESS_READ_TOKEN", token);
         thread::sleep(Duration::from_millis(50));
         f();
-        std::env::remove_var("AGENT_CORE_DEPLOYMENT_HARNESS_READ_URL");
-        std::env::remove_var("AGENT_CORE_DEPLOYMENT_HARNESS_READ_TOKEN");
     }
 
     // ── query_deployed_version fail‑closed tests ──
@@ -152,7 +179,10 @@ mod tests {
     fn version_query_200_returns_version() {
         let resp = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"ok\":true,\"version\":\"0.1.0\"}";
         with_server(resp, "test-token-32-chars-minimum-length!!", || {
-            assert_eq!(query_deployed_version("test-component").unwrap(), Some("0.1.0".into()));
+            assert_eq!(
+                query_deployed_version("test-component").unwrap(),
+                Some("0.1.0".into())
+            );
         });
     }
     #[test]
@@ -213,7 +243,10 @@ mod tests {
     fn version_allocation_returns_next_patch_when_component_exists() {
         let resp = b"HTTP/1.1 200 OK\r\n\r\n{\"ok\":true,\"version\":\"0.1.0\"}";
         with_server(resp, "test-token-32-chars-minimum-length!!", || {
-            assert_eq!(allocate_next_version("test-component").unwrap(), Some("0.1.1".into()));
+            assert_eq!(
+                allocate_next_version("test-component").unwrap(),
+                Some("0.1.1".into())
+            );
         });
     }
     #[test]

@@ -9,9 +9,11 @@ use crate::registry::snapshot::RegistrySnapshot;
 use anyhow::Result;
 use serde_json::json;
 pub(crate) mod coding_grants;
+mod coding_task_tool;
 pub(crate) mod hook_call;
 mod model_invocation;
 pub mod outbox_dispatcher;
+mod tool_dispatch;
 mod tool_execution;
 mod tool_loop;
 mod tool_rejection;
@@ -149,9 +151,6 @@ where
         Ok(())
     }
 
-    pub(crate) fn config(&self) -> &KernelConfig {
-        &self.config
-    }
     pub fn deliver(
         &self,
         journal: &JournalStore,
@@ -349,7 +348,8 @@ where
                 &reply_text,
             );
         }
-        let intent = self.reply_intent(&run, &session, &reply_text, message_id, chat_id);
+        let mut intent = self.reply_intent(&run, &session, &reply_text, message_id, chat_id);
+        apply_pending_proposal_presentation(journal, &run, &mut intent)?;
         let correlation_id = intent.invocation_id.0.clone();
         journal.append_event(
             JournalEventKind::InvocationProposed,
@@ -386,4 +386,27 @@ where
             output: reply_text,
         })
     }
+}
+
+fn apply_pending_proposal_presentation(
+    journal: &JournalStore,
+    run: &Run,
+    intent: &mut InvocationIntent,
+) -> Result<()> {
+    if intent.operation != crate::domain::operation::FEISHU_SEND_MESSAGE {
+        return Ok(());
+    }
+    if let Some(proposal_id) = journal.pending_capability_proposal_for_run(&run.id)? {
+        if let Some(arguments) = intent.arguments.as_object_mut() {
+            arguments.remove("text");
+            arguments.insert(
+                "presentation".to_string(),
+                json!({
+                    "kind": "capability_proposal_pending_v1",
+                    "proposal_id": proposal_id,
+                }),
+            );
+        }
+    }
+    Ok(())
 }

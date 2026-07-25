@@ -5,14 +5,13 @@ use crate::domain::capability_change::CapabilityChangeProposal;
 use crate::domain::*;
 use crate::gateway::Gateway;
 use crate::journal::{CodingTaskSubmissionClaim, JournalStore};
-use crate::server::{coding_harness_client, hcr_acceptance};
+use crate::server::hcr_acceptance;
 use anyhow::{bail, Result};
 use chrono::Utc;
+use serde::Serialize;
 use serde_json::{json, Value};
 
-use super::invocable::invocable_manifest;
-
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CodingTaskSubmitResult {
     pub development_request_id: String,
     pub contract_catalog_version: String,
@@ -30,6 +29,12 @@ pub struct CodingTaskSubmitResult {
     pub evidence_digest: String,
     pub settlement_id: String,
     pub proposal_id: String,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("coding harness rejected submission: {code}")]
+pub struct CodingHarnessRejection {
+    pub code: String,
 }
 
 /// Execute the real submit → candidate → HCR acceptance → Proposal chain.
@@ -162,48 +167,37 @@ pub fn handle_coding_task_submit(
     let candidate_id = required_str(&accepted, "candidate_id")?.to_string();
     let artifact_ref = required_str(&accepted, "artifact_ref")?.to_string();
     let artifact_digest = required_digest(&accepted, "artifact_digest")?;
-    let component_manifest_digest = required_digest(&accepted, "component_manifest_digest")?;
     let evidence_digest = required_digest(&accepted, "evidence_digest")?;
     let settlement_id = required_str(&accepted, "settlement_id")?.to_string();
     let claim_id = required_str(&accepted, "claim_id")?.to_string();
     let hcr_run_id = required_str(&accepted, "run_id")?.to_string();
     let harness_execution_id = required_str(&accepted, "harness_execution_id")?.to_string();
-    let acceptance_invocation_id =
-        required_str(&accepted, "acceptance_invocation_id")?.to_string();
+    let acceptance_invocation_id = required_str(&accepted, "acceptance_invocation_id")?.to_string();
 
     // 4. Artifact and evidence were stored by the Harness. Kernel re-loads
     // and hashes both, then builds (or loads) the activation manifest.
     let store = ContentStore::new(config.harness_artifact_root.clone());
     let artifact_key = Sha256Digest::parse(&artifact_digest)?;
     let evidence_key = Sha256Digest::parse(&evidence_digest)?;
-    let _component_manifest_key = Sha256Digest::parse(&component_manifest_digest)?;
     store.load(&artifact_key)?;
     store.load(&evidence_key)?;
-    let (manifest_ref, manifest_bytes) = match request.target_kind {
-        TargetKind::InvocableCapability => {
-            let component_manifest: Value =
-                serde_json::from_slice(&store.load(&_component_manifest_key)?)?;
-            let manifest =
-                invocable_manifest(request, &component_manifest, &artifact_digest)?;
-            (manifest.manifest_id.clone(), serde_json::to_vec(&manifest)?)
-        }
-        TargetKind::HookConsumerService => {
-            // Delivery manifest was constructed by the Coding Harness during
-            // acceptance, with correct version allocated externally. Kernel
-            // only verifies digest consistency — no manifest type parsing.
-            let delivery_ref =
-                required_str(&accepted, "delivery_manifest_ref")?.to_string();
-            let delivery_digest_str = required_digest(&accepted, "delivery_manifest_digest")?;
-            let delivery_digest_key = Sha256Digest::parse(&delivery_digest_str)?;
-            let bytes = store.load(&delivery_digest_key)?;
-            let computed = Sha256Digest::compute(&bytes);
-            if computed.as_str() != delivery_digest_str {
-                bail!("DELIVERY_MANIFEST_DIGEST_TAMPERED");
-            }
-            (delivery_ref, bytes.to_vec())
-        }
-        _ => bail!("DEPLOYMENT_PROFILE_NOT_IMPLEMENTED"),
-    };
+
+    // 4b. Unified delivery manifest path — Kernel never branches on
+    //     target_kind.  The Coding Harness constructs both service and
+    //     invocable delivery manifests during acceptance.  Kernel loads
+    //     the content‑addressed bytes, verifies the digest, and uses
+    //     the exact same ref/digest for the Proposal — without parsing
+    //     or understanding the manifest type.
+    let delivery_ref = required_str(&accepted, "delivery_manifest_ref")?.to_string();
+    let delivery_digest_str = required_digest(&accepted, "delivery_manifest_digest")?;
+    let delivery_digest_key = Sha256Digest::parse(&delivery_digest_str)?;
+    let bytes = store.load(&delivery_digest_key)?;
+    let computed = Sha256Digest::compute(&bytes);
+    if computed.as_str() != delivery_digest_str {
+        bail!("DELIVERY_MANIFEST_DIGEST_TAMPERED");
+    }
+    let manifest_ref = delivery_ref;
+    let manifest_bytes = bytes.to_vec();
     let manifest_digest = store.store(&manifest_bytes)?.as_str().to_string();
 
     let proposal_id = format!("proposal_{}", uuid::Uuid::new_v4().simple());
@@ -289,9 +283,6 @@ fn execute_new_submission(
     submit_key: &str,
     request: &DevelopmentRequest,
 ) -> Result<(Value, SubmittedCandidate)> {
-    use super::invocable::append_invocation_approved;
-    use super::invocable::append_invocation_proposed;
-
     let submit_intent = InvocationIntent {
         invocation_id: invocation_id.clone(),
         run_id: run.id.clone(),
@@ -303,14 +294,32 @@ fn execute_new_submission(
         }),
         idempotency_key: Some(submit_key.to_string()),
     };
-    append_invocation_proposed(journal, run, session, &submit_intent)?;
+    super::invocation_journal::append_invocation_proposed(journal, run, session, &submit_intent)?;
     let approved = gateway.approve_invocation(submit_intent, run, session, snapshot)?;
-    append_invocation_approved(journal, run, session, &approved)?;
-    let result = coding_harness_client::execute(
+    super::invocation_journal::append_invocation_approved(journal, run, session, &approved)?;
+    let spec = snapshot
+        .lookup(crate::domain::operation::external::TASK_SUBMIT)
+        .filter(|value| value.binding_kind == crate::registry::snapshot::BindingKind::External)
+        .ok_or_else(|| anyhow::anyhow!("CODING_TASK_MANIFEST_BINDING_MISSING"))?;
+    let manifest = journal
+        .load_harness_manifest(&spec.binding_key)?
+        .ok_or_else(|| anyhow::anyhow!("CODING_TASK_MANIFEST_NOT_FOUND"))?;
+    if manifest.operation_name != crate::domain::operation::external::TASK_SUBMIT {
+        bail!("CODING_TASK_MANIFEST_OPERATION_MISMATCH");
+    }
+    let transport = crate::adapters::external_harness::ExternalHarnessTransportConfig {
+        read_timeout: std::time::Duration::from_millis(config.harness_read_timeout_ms.max(900_000)),
+        max_response_bytes: 128 * 1024,
+        bearer_token: None,
+        ..Default::default()
+    };
+    let receipt = crate::adapters::external_harness::execute_external_harness_with_config(
+        &manifest,
         &approved,
-        std::time::Duration::from_millis(config.harness_read_timeout_ms.max(900_000)),
+        &transport,
+        &run.registry_snapshot_id,
     )?;
-    let submitted = validate_submit_result(&result, request)?;
+    let result = receipt.output.clone();
     journal.append_event(
         JournalEventKind::ReceiptReceived,
         Some(&run.id),
@@ -319,10 +328,22 @@ fn execute_new_submission(
         json!({
             "invocation_id": invocation_id.0,
             "operation": crate::domain::operation::external::TASK_SUBMIT,
-            "status": "Succeeded",
-            "output": result,
+            "failed_stage": (receipt.status == ReceiptStatus::Failed).then_some("external_execution"),
+            "status": format!("{:?}", receipt.status),
+            "output": result.clone(),
+            "external_ref": receipt.external_ref,
         }),
     )?;
+    if receipt.status != ReceiptStatus::Succeeded {
+        let code = result
+            .get("detail_code")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("CODING_HARNESS_EXECUTION_FAILED")
+            .to_string();
+        return Err(CodingHarnessRejection { code }.into());
+    }
+    let submitted = validate_submit_result(&result, request)?;
     Ok((result, submitted))
 }
 

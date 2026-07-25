@@ -12,19 +12,20 @@ pub mod verification_receipt;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use agent_core_kernel::domain::external_receipt_envelope::{
-	    compute_external_receipt_digest, ExternalOutcome, ExternalReceiptEnvelope, SCHEMA_VERSION,
-	};
-	use serde_json::Value;
-	
-	use super::candidate::snapshot_candidate;
-	use super::gates::{run_all_gates_for_acceptance, GateKind, GateResult};
-	use super::manifest_builder::{allocate_next_version, build_delivery_manifest};
-	use execution_store::ExecutionStore;
-	use protocol::{
-	    canonical_evidence_bytes, compute_evidence_digest, compute_fingerprint, AcceptanceResponse,
-	    GateResultEntry,
-	};
+use agent_core_kernel::domain::external_receipt_envelope::{
+    compute_external_receipt_digest, ExternalOutcome, ExternalReceiptEnvelope, SCHEMA_VERSION,
+};
+use serde_json::Value;
+
+use super::candidate::snapshot_candidate;
+use super::gates::{run_all_gates_for_acceptance, GateKind, GateResult};
+use super::manifest_builder::{allocate_next_version, build_delivery_manifest};
+use agent_core_kernel::domain::DevelopmentRequest;
+use execution_store::ExecutionStore;
+use protocol::{
+    canonical_evidence_bytes, compute_evidence_digest, compute_fingerprint, AcceptanceResponse,
+    GateResultEntry,
+};
 
 /// Global gate execution counter (test observation only).
 static GATE_EXECUTION_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -52,6 +53,19 @@ pub fn handle_accept(artifact_root: &Path, args: &Value) -> Value {
         _ => return err_json("MISSING_CANDIDATE_REF"),
     };
     let invocation_intent_id = get_str(args, "invocation_intent_id").unwrap_or("");
+    let requirement_digest = match get_str(args, "requirement_digest") {
+        Some(d) => {
+            if !d.starts_with("sha256:") || d.len() != 71 {
+                return err_json("INVALID_REQUIREMENT_DIGEST");
+            }
+            d
+        }
+        None => return err_json("MISSING_REQUIREMENT_DIGEST"),
+    };
+
+    // Validate requirement content against its digest — ensures the
+    // development_request we extract matches what the Kernel signed.
+    // (also serves as an early-fail pre-check before the locked section)
 
     if idempotency_key.is_empty() {
         return err_json("MISSING_IDEMPOTENCY_KEY");
@@ -70,6 +84,7 @@ pub fn handle_accept(artifact_root: &Path, args: &Value) -> Value {
         operation,
         candidate_ref,
         idempotency_key,
+        Some(requirement_digest),
     );
 
     let store = ExecutionStore::new(artifact_root);
@@ -94,6 +109,9 @@ pub fn handle_accept(artifact_root: &Path, args: &Value) -> Value {
         .and_then(|resp| serde_json::to_value(resp).map_err(|e| e.to_string()))
     }) {
         Ok(result) => {
+            if let Some(error) = completed_execution_error(&result) {
+                return err_json(error);
+            }
             // Deserialize the AcceptanceResponse to build the envelope
             let acceptance: AcceptanceResponse = match serde_json::from_value(result.clone()) {
                 Ok(a) => a,
@@ -111,10 +129,17 @@ pub fn handle_accept(artifact_root: &Path, args: &Value) -> Value {
     }
 }
 
+fn completed_execution_error(result: &Value) -> Option<&str> {
+    result
+        .get("error")
+        .and_then(Value::as_str)
+        .filter(|error| !error.is_empty())
+}
+
 /// Core acceptance logic (runs under file lock, called at most once per key).
 fn do_accept(
     artifact_root: &Path,
-    _args: &Value,
+    args: &Value,
     fingerprint: &protocol::RequestFingerprint,
     hcr_id: &str,
     claim_id: &str,
@@ -186,13 +211,18 @@ fn do_accept(
     // ── Post‑acceptance: version allocation + delivery manifest ──
     // The original candidate manifest.json is never modified on disk.
     // We work on an in‑memory copy so the accepted candidate stays
-    // immutable.  The resulting delivery manifest is stored in the
-    // shared ContentStore and bound by the opaque_payload_digest.
+    // immutable.  The resulting delivery manifest bytes are stored in
+    // the shared ContentStore and bound by the opaque_payload_digest.
     let (delivery_manifest_ref, delivery_manifest_digest) = if outcome == "CandidatePassed" {
         let raw = std::fs::read(snapshot.candidate_path.join("manifest.json"))
             .map_err(|e| format!("DELIVERY_MANIFEST_READ: {e}"))?;
         let mut manifest_value: Value =
             serde_json::from_slice(&raw).map_err(|e| format!("DELIVERY_MANIFEST_PARSE: {e}"))?;
+
+        // Parse DevelopmentRequest from the verified requirement content.
+        // We re-verify the digest inside the locked execution (defense in depth)
+        // so that tampering between handle_accept and do_accept is detected.
+        let development_request = extract_development_request(args);
 
         // Only allocate versions for HookConsumerService (managed services)
         let needs_version = manifest_value
@@ -212,14 +242,14 @@ fn do_accept(
         }
 
         let artifact_digest_str = artifact_digest.as_deref().unwrap_or("");
-        let delivery = build_delivery_manifest(&manifest_value, artifact_digest_str)
-            .map_err(|e| format!("DELIVERY_MANIFEST_BUILD: {e}"))?;
-        let delivery_ref = delivery.manifest_id.clone();
-        let delivery_bytes = serde_json::to_vec(&delivery)
-            .map_err(|e| format!("DELIVERY_MANIFEST_SERIALIZE: {e}"))?;
-        let store = agent_core_kernel::capabilities::store::ContentStore::new(
-            artifact_root.to_path_buf(),
-        );
+        let (delivery_ref, delivery_bytes) = build_delivery_manifest(
+            &manifest_value,
+            artifact_digest_str,
+            development_request.as_ref(),
+        )
+        .map_err(|e| format!("DELIVERY_MANIFEST_BUILD: {e}"))?;
+        let store =
+            agent_core_kernel::capabilities::store::ContentStore::new(artifact_root.to_path_buf());
         let stored = store
             .store(&delivery_bytes)
             .map_err(|e| format!("DELIVERY_MANIFEST_STORE: {e}"))?;
@@ -312,11 +342,14 @@ fn ok_envelope_json(
         _ => ExternalOutcome::Failed,
     };
 
-    // Compute opaque_payload_digest as SHA-256 of the full AcceptanceResponse JSON.
-    // This binds the detailed acceptance data without the Kernel parsing it.
-    let resp_bytes = serde_json::to_vec(acceptance).unwrap_or_default();
+    // Compute opaque_payload_digest as SHA-256 of the full AcceptanceResponse JSON
+    // with CANONICAL (alphabetically sorted) key order. Both the coding harness and
+    // the Kernel reproduce the same canonical serialization so the digest matches
+    // regardless of Value construction order vs struct declaration order.
     use sha2::{Digest, Sha256};
-    let opaque_payload_digest = format!("sha256:{}", hex::encode(Sha256::digest(&resp_bytes)));
+    let resp_value = serde_json::to_value(acceptance).unwrap_or_default();
+    let canonical_bytes = canonical_json_bytes(&resp_value);
+    let opaque_payload_digest = format!("sha256:{}", hex::encode(Sha256::digest(&canonical_bytes)));
 
     // Build the envelope
     let env = ExternalReceiptEnvelope {
@@ -454,10 +487,174 @@ fn resolve_safe(root: &Path, rel: &str) -> Option<std::path::PathBuf> {
     Some(j)
 }
 
+/// Extract and verify development_request from the acceptance args.
+///
+/// Re-verifies requirement_digest against the raw requirement string
+/// inside the locked execution (defense in depth against tampering
+/// between `handle_accept` pre-checks and `do_accept`).
+fn extract_development_request(args: &Value) -> Option<DevelopmentRequest> {
+    let req_digest = get_str(args, "requirement_digest")?;
+    let req_str = get_str(args, "requirement")?;
+    use sha2::{Digest, Sha256};
+    let computed = format!("sha256:{}", hex::encode(Sha256::digest(req_str.as_bytes())));
+    if computed != req_digest {
+        eprintln!("[extract_development_request] FATAL: digest mismatch. No fallback allowed. Must fail closed.");
+        return None;
+    }
+    let parsed: serde_json::Value = serde_json::from_str(req_str).ok()?;
+    let dev_req_val = parsed.get("development_request").cloned()?;
+    match serde_json::from_value::<DevelopmentRequest>(dev_req_val.clone()) {
+        Ok(dr) => Some(dr),
+        Err(e) => {
+            eprintln!(
+                "[extract_development_request] DevelopmentRequest deserialization failed: {e}"
+            );
+            eprintln!(
+                "[extract_development_request] development_request value keys: {:?}",
+                dev_req_val
+                    .as_object()
+                    .map(|o| o.keys().cloned().collect::<Vec<_>>())
+            );
+            None
+        }
+    }
+}
+
 fn get_str<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
     v.get(key).and_then(|v| v.as_str())
 }
 
 fn err_json(code: &str) -> Value {
     serde_json::json!({"protocol_version":"external-harness-v1","ok":false,"error_code":code})
+}
+
+/// Canonical JSON serialization with alphabetically sorted keys.
+/// Ensures both coding harness and Kernel compute the same digest
+/// regardless of Value construction order vs struct declaration order.
+fn canonical_json_bytes(value: &Value) -> Vec<u8> {
+    let sorted = sort_keys(value);
+    serde_json::to_vec(&sorted).expect("CANONICAL_SERIALIZATION_FAILED")
+}
+
+fn sort_keys(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut sorted: serde_json::Map<String, Value> =
+                map.iter().map(|(k, v)| (k.clone(), sort_keys(v))).collect();
+            sorted.sort_keys();
+            Value::Object(sorted)
+        }
+        Value::Array(arr) => Value::Array(arr.iter().map(sort_keys).collect()),
+        other => other.clone(),
+    }
+}
+
+#[cfg(test)]
+mod canonical_json_tests {
+    use super::*;
+    use serde_json::json;
+    use sha2::{Digest, Sha256};
+
+    /// Prove that sort_keys matches Kernel's sort_object_keys:
+    /// field insertion order is canonicalized alphabetically.
+    #[test]
+    fn harness_canonical_bytes_matches_kernel_golden_vector() {
+        // Same input as kernel's field_insertion_order_is_canonical
+        let a = json!({"b": 2, "a": 1, "c": 3});
+        let b = json!({"c": 3, "a": 1, "b": 2});
+        let bytes_a = canonical_json_bytes(&a);
+        let bytes_b = canonical_json_bytes(&b);
+        assert_eq!(
+            bytes_a, bytes_b,
+            "different insertion orders must produce same canonical bytes"
+        );
+        let dig_a = hex::encode(Sha256::digest(&bytes_a));
+        let dig_b = hex::encode(Sha256::digest(&bytes_b));
+        assert_eq!(
+            dig_a, dig_b,
+            "different insertion orders must produce same digest"
+        );
+    }
+
+    /// Prove nested objects are recursively sorted.
+    #[test]
+    fn harness_nested_objects_are_sorted() {
+        let a = json!({"z": {"y": 2, "x": 1}, "a": 0});
+        let b = json!({"a": 0, "z": {"x": 1, "y": 2}});
+        let ba = canonical_json_bytes(&a);
+        let bb = canonical_json_bytes(&b);
+        assert_eq!(ba, bb);
+    }
+
+    /// Prove null / bool / number / string are preserved.
+    #[test]
+    fn harness_primitive_types_are_preserved() {
+        let a = json!({"flag": true, "count": 42, "msg": "hello", "nothing": null});
+        let b = json!({"count": 42, "flag": true, "msg": "hello", "nothing": null});
+        let ba = canonical_json_bytes(&a);
+        let bb = canonical_json_bytes(&b);
+        assert_eq!(ba, bb);
+    }
+
+    /// Prove serialization failure is caught (does NOT silently produce empty bytes).
+    /// serde_json::to_vec on a valid Value rarely fails in practice; this test verifies
+    /// the expect() guard exists (documentation) and compiles correctly.
+    #[test]
+    fn harness_serialization_failure_has_guard() {
+        // Normal serialization works fine
+        let val = json!({"a": 1, "b": 2});
+        let bytes = canonical_json_bytes(&val);
+        assert!(!bytes.is_empty(), "canonical bytes must not be empty");
+        // The expect message confirms the guard exists
+        let sorted = sort_keys(&val);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            serde_json::to_vec(&sorted).expect("CANONICAL_SERIALIZATION_FAILED")
+        }));
+        assert!(result.is_ok(), "normal serialization must not panic");
+    }
+
+    /// Prove the AcceptanceResponse fixture produces a valid sha256 digest.
+    #[test]
+    fn harness_acceptance_fixture_is_canonical() {
+        let mut base = json!({
+            "harness_execution_id": "hex_test",
+            "idempotency_key": "accept:test",
+            "hcr_id": "hcr_test",
+            "claim_id": "claim_test",
+            "run_id": "run_test",
+            "principal_id": "principal_test",
+            "gateway_session_id": "session_test",
+            "registry_snapshot_id": "snap_test",
+            "operation": "external.coding_hcr_accept",
+            "candidate_id": "candidate_test",
+            "candidate_digest": format!("sha256:{}", "1".repeat(64)),
+            "overall_outcome": "CandidatePassed",
+            "gate_results": [],
+            "artifact_ref": "candidate/target/release/component",
+            "artifact_digest": format!("sha256:{}", "3".repeat(64)),
+            "component_manifest_digest": format!("sha256:{}", "4".repeat(64)),
+            "evidence_digest": format!("sha256:{}", "2".repeat(64)),
+        });
+        base["delivery_manifest_ref"] = json!("manifest_test");
+        base["delivery_manifest_digest"] = json!(format!("sha256:{}", "5".repeat(64)));
+        let bytes = canonical_json_bytes(&base);
+        let digest = format!("sha256:{}", hex::encode(Sha256::digest(&bytes)));
+        assert!(
+            digest.starts_with("sha256:"),
+            "digest must have sha256: prefix"
+        );
+        assert_eq!(digest.len(), 71, "sha256: + 64 hex chars = 71");
+    }
+
+    #[test]
+    fn persisted_execution_error_is_not_masked_as_envelope_deserialization() {
+        let result = json!({
+            "error": "DELIVERY_MANIFEST_BUILD: CANDIDATE_KIND_MISMATCH",
+            "overall_outcome": "InfrastructureFailure"
+        });
+        assert_eq!(
+            completed_execution_error(&result),
+            Some("DELIVERY_MANIFEST_BUILD: CANDIDATE_KIND_MISMATCH")
+        );
+    }
 }

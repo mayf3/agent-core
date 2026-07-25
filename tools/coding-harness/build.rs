@@ -74,6 +74,20 @@ fn main() {
         );
     }
 
+    // Failure Viewer Query invocable bundle
+    if let Some(digest) = compute_bundle_digest(
+        "failure-viewer-query-v0",
+        &src_dir,
+        &["failure_viewer_query.rs"],
+        &crate_version,
+    ) {
+        println!("cargo:rustc-env=FAILURE_VIEWER_QUERY_BUNDLE_DIGEST={digest}");
+        println!(
+            "cargo:warning=FAILURE_VIEWER_QUERY_BUNDLE_DIGEST={}",
+            &digest[..24]
+        );
+    }
+
     // Trigger rebuild when any acceptance_kit file changes
     println!(
         "cargo:rerun-if-changed={}",
@@ -86,6 +100,10 @@ fn main() {
     println!(
         "cargo:rerun-if-changed={}",
         src_dir.join("failure_event_viewer.rs").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        src_dir.join("failure_viewer_query.rs").display()
     );
 }
 

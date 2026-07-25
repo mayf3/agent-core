@@ -26,6 +26,7 @@ pub struct CapabilityDeployResult {
     pub manifest_digest: String,
     pub manifest_id: String,
     pub artifact_digest: String,
+    pub operation_name: String,
     pub target_registry_snapshot_id: String,
     pub probe_execution_id: String,
 }

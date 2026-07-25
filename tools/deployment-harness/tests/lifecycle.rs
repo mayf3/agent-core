@@ -136,9 +136,17 @@ fn deploy_replay_upgrade_rollback_and_disable() {
         std::thread::sleep(Duration::from_millis(25));
     }
     manager::reconcile(&config).unwrap();
-    let recovered = manager::status(&config, "fixture-service").unwrap();
-    assert_eq!(recovered["health_status"], "ready");
-    assert_eq!(recovered["endpoint"], first.endpoint);
+    let reconciled = manager::status(&config, "fixture-service").unwrap();
+    assert_eq!(reconciled["status"], "unhealthy");
+    assert_eq!(reconciled["health_status"], "unavailable");
+
+    let recovered = manager::deploy(&config, &serde_json::to_vec(&v1_intent).unwrap()).unwrap();
+    assert!(!recovered.replayed);
+    assert_eq!(recovered.health_status, "ready");
+    assert_eq!(
+        manager::status(&config, "fixture-service").unwrap()["health_status"],
+        "ready"
+    );
 
     let upgraded = manager::deploy(&config, &serde_json::to_vec(&v2_intent).unwrap()).unwrap();
     assert_eq!(upgraded.version, "0.2.0");

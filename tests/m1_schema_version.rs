@@ -9,8 +9,8 @@ fn fresh_database_is_stamped_with_current_schema_version() -> Result<()> {
     let journal = JournalStore::in_memory()?;
     assert_eq!(
         journal.schema_version()?,
-        14,
-        "a fresh database must be stamped with the current schema version (14)"
+        15,
+        "a fresh database must be stamped with the current schema version (15)"
     );
     Ok(())
 }
@@ -23,7 +23,7 @@ fn existing_at_version_database_reopens_cleanly() -> Result<()> {
         let _journal = JournalStore::open(&db_path)?;
     }
     let journal = JournalStore::open(&db_path)?;
-    assert_eq!(journal.schema_version()?, 14);
+    assert_eq!(journal.schema_version()?, 15);
     std::fs::remove_file(&db_path).ok();
     Ok(())
 }
@@ -63,12 +63,14 @@ fn migration_v10_to_v11_preserves_receipts_and_adds_trust_fields() -> Result<()>
              ALTER TABLE hcr_receipt_identities DROP COLUMN candidate_id;
              ALTER TABLE hcr_receipt_identities DROP COLUMN receipt_digest;
              ALTER TABLE hcr_receipt_identities DROP COLUMN opaque_payload_digest;
+             ALTER TABLE hcr_receipt_identities DROP COLUMN delivery_manifest_ref;
+             ALTER TABLE hcr_receipt_identities DROP COLUMN delivery_manifest_digest;
              PRAGMA user_version=10;",
         )?;
     }
 
     let journal = JournalStore::open(&db_path)?;
-    assert_eq!(journal.schema_version()?, 14);
+    assert_eq!(journal.schema_version()?, 15);
     let conn = Connection::open(&db_path)?;
     let link_table: i64 = conn.query_row(
         "SELECT COUNT(*) FROM sqlite_master
@@ -155,7 +157,7 @@ fn migration_v11_to_v12_preserves_and_backfills_trusted_proposal() -> Result<()>
     }
 
     let journal = JournalStore::open(&db_path)?;
-    assert_eq!(journal.schema_version()?, 14);
+    assert_eq!(journal.schema_version()?, 15);
     let approval = journal
         .load_capability_approval_by_proposal("proposal_v11")?
         .expect("trusted v11 proposal must receive an approval");
@@ -228,13 +230,13 @@ fn migration_v11_to_v12_preserves_and_backfills_trusted_proposal() -> Result<()>
 #[test]
 fn newer_schema_version_is_rejected_cleanly() -> Result<()> {
     let db_path = unique_temp_path();
-    // Pre-stamp as version 15 (newer than kernel's CURRENT_SCHEMA_VERSION of 14).
+    // Pre-stamp as version 16 (newer than kernel's CURRENT_SCHEMA_VERSION of 15).
     {
         let conn = Connection::open(&db_path)?;
         conn.execute_batch(include_str!("../migrations/0001_init.sql"))?;
-        conn.pragma_update(None, "user_version", 15)?;
+        conn.pragma_update(None, "user_version", 16)?;
     }
-    // Opening with the kernel (whose CURRENT_SCHEMA_VERSION is 14) must fail.
+    // Opening with the kernel (whose CURRENT_SCHEMA_VERSION is 15) must fail.
     let message = match JournalStore::open(&db_path) {
         Ok(_) => panic!("a newer-than-supported schema version must be rejected at startup"),
         Err(error) => error.to_string(),
@@ -272,7 +274,7 @@ fn migration_v3_to_v4_creates_proposals_table() -> Result<()> {
     // Verify version is 8 and proposals table exists.
     {
         let journal = JournalStore::open(&db_path)?;
-        assert_eq!(journal.schema_version()?, 14);
+        assert_eq!(journal.schema_version()?, 15);
         let conn = rusqlite::Connection::open(&db_path)?;
         let has_table: bool = conn.query_row(
             "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='capability_change_proposals'",
@@ -350,7 +352,7 @@ fn migration_v4_to_v5_preserves_data_and_drops_unique_constraint() -> Result<()>
     // Reopen with the kernel → drives v4→v5→v6→v7→v8→v9 migration.
     let journal = JournalStore::open(&db_path)?;
     // Schema version is current after the complete migration chain.
-    assert_eq!(journal.schema_version()?, 14);
+    assert_eq!(journal.schema_version()?, 15);
 
     let conn = Connection::open(&db_path)?;
 
@@ -426,11 +428,11 @@ fn migration_v5_is_idempotent_on_reopen() -> Result<()> {
         let _journal = JournalStore::open(&db_path)?;
         let conn = Connection::open(&db_path)?;
         let v: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        assert_eq!(v, 14);
+        assert_eq!(v, 15);
     }
     // Second open: must be a no-op.
     let journal = JournalStore::open(&db_path)?;
-    assert_eq!(journal.schema_version()?, 14);
+    assert_eq!(journal.schema_version()?, 15);
 
     let conn = Connection::open(&db_path)?;
     // The operation_name index is created with IF NOT EXISTS, so no duplicate.
@@ -454,12 +456,12 @@ fn migration_v5_to_v6_creates_grants_table() -> Result<()> {
         let _journal = JournalStore::open(&db_path)?;
         let conn = Connection::open(&db_path)?;
         let v: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        assert_eq!(v, 14);
+        assert_eq!(v, 15);
     }
     // Reopen: idempotent.
     {
         let journal = JournalStore::open(&db_path)?;
-        assert_eq!(journal.schema_version()?, 14);
+        assert_eq!(journal.schema_version()?, 15);
         let conn = Connection::open(&db_path)?;
 
         // Table exists.
@@ -517,12 +519,12 @@ fn migration_v6_to_v8_creates_hcr_tables() -> Result<()> {
         let _journal = JournalStore::open(&db_path)?;
         let conn = Connection::open(&db_path)?;
         let v: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        assert_eq!(v, 14);
+        assert_eq!(v, 15);
     }
     // Reopen: idempotent.
     {
         let journal = JournalStore::open(&db_path)?;
-        assert_eq!(journal.schema_version()?, 14);
+        assert_eq!(journal.schema_version()?, 15);
         let conn = Connection::open(&db_path)?;
 
         // Table exists.

@@ -24,18 +24,20 @@ pub(crate) fn check(candidate: &CandidateSnapshot, _ctx: &GateContext) -> GateRe
             None
         }
     };
-    if manifest
-        .as_ref()
-        .is_some_and(|value| value.test_kit == "hook-consumer-service-contract-v0")
-    {
+    if manifest.as_ref().is_some_and(|value| {
+        matches!(
+            value.test_kit.as_str(),
+            "hook-consumer-service-contract-v0" | "invocable-capability-contract-v0"
+        )
+    }) {
         if !candidate_path.join("Cargo.lock").is_file() {
-            errors.push("generated hook consumer requires Cargo.lock".into());
+            errors.push("generated component requires Cargo.lock".into());
         }
         if let Ok(cargo) = std::fs::read_to_string(&cargo_toml) {
             for forbidden in ["path =", "git =", "build =", "workspace ="] {
                 if cargo.contains(forbidden) {
                     errors.push(format!(
-                        "generated hook consumer Cargo.toml contains forbidden source: {forbidden}"
+                        "generated component Cargo.toml contains forbidden source: {forbidden}"
                     ));
                 }
             }

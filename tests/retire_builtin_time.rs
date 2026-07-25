@@ -451,16 +451,20 @@ fn retirement_cas_conflict_does_not_corrupt_active_snapshot() {
 // =========================================================================
 #[test]
 fn source_guard_no_builtin_time_dispatch() {
-    let src = include_str!("../src/runtime/tool_execution.rs");
-    // Check production code only (before #[cfg(test)]), ignoring test module.
-    let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+    let execution = include_str!("../src/runtime/tool_execution.rs");
+    let dispatch = include_str!("../src/runtime/tool_dispatch.rs");
+    // Check production code only (before #[cfg(test)]), ignoring test modules.
+    let execution_prod = execution.split("#[cfg(test)]").next().unwrap_or(execution);
+    let dispatch_prod = dispatch.split("#[cfg(test)]").next().unwrap_or(dispatch);
     assert_eq!(
-        prod.matches("builtin.time_now").count(),
+        execution_prod.matches("builtin.time_now").count()
+            + dispatch_prod.matches("builtin.time_now").count(),
         1,
         "production code must have exactly 1 'builtin.time_now' (retired error path)"
     );
-    assert!(src.contains("retired_builtin_operation"));
-    assert!(!src.contains("TimeAdapter"));
+    assert!(dispatch.contains("retired_builtin_operation"));
+    assert!(!execution.contains("TimeAdapter"));
+    assert!(!dispatch.contains("TimeAdapter"));
 }
 #[test]
 fn source_guard_no_time_adapter() {

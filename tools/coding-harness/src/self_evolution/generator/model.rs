@@ -1,10 +1,13 @@
 use super::GenerationError;
 use agent_core_kernel::domain::DevelopmentRequest;
-use serde_json::{json, Value};
+use serde_json::json;
 use std::time::Duration;
 
+mod client;
 mod retry;
-pub(super) use retry::{generate_module_with_retry, repair_module_with_retry};
+pub(super) use retry::{
+    generate_module_with_retry, repair_module_with_retry, retryable_model_output_error,
+};
 
 pub(crate) const SYSTEM_PROMPT: &str = r#"You are the code-generation backend for a governed external-component Coding Harness.
 
@@ -156,45 +159,21 @@ pub(super) fn public_spec_section(request: &DevelopmentRequest) -> String {
 }
 
 fn complete_module(config: &ModelConfig, user_prompt: String) -> Result<String, GenerationError> {
-    let body = json!({
-        "model": config.model,
-        "temperature": 0.1,
-        "max_tokens": 12_000,
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt}
-        ]
-    });
-    let agent = ureq::Agent::config_builder()
-        .timeout_global(Some(config.timeout))
-        .build()
-        .new_agent();
-    let response = agent
-        .post(&config.endpoint)
-        .header("authorization", &format!("Bearer {}", config.api_key))
-        .header("content-type", "application/json")
-        .send_json(body);
-    let mut response = match response {
-        Ok(response) => response,
-        Err(_) => return Err(GenerationError::new("GENERATOR_MODEL_UNAVAILABLE")),
-    };
-    let value: Value = response
-        .body_mut()
-        .read_json()
-        .map_err(|_| GenerationError::new("GENERATOR_MODEL_RESPONSE_INVALID"))?;
-    let content = value
-        .pointer("/choices/0/message/content")
-        .and_then(Value::as_str)
-        .ok_or_else(|| GenerationError::new("GENERATOR_MODEL_RESPONSE_INVALID"))?;
-    if value
-        .pointer("/choices/0/finish_reason")
-        .and_then(Value::as_str)
-        == Some("length")
-    {
-        return Err(GenerationError::new("GENERATOR_MODEL_OUTPUT_TRUNCATED"));
-    }
-    let source = strip_markdown_fence(content);
+    let source = client::complete(config, SYSTEM_PROMPT, &user_prompt)?;
     normalize_generated_source(&source)
+}
+
+pub(super) fn complete_raw(
+    config: &ModelConfig,
+    system_prompt: &str,
+    user_prompt: &str,
+) -> Result<String, GenerationError> {
+    client::complete(config, system_prompt, user_prompt)
+}
+
+#[cfg(test)]
+fn strip_markdown_fence(content: &str) -> String {
+    client::strip_markdown_fence(content)
 }
 
 fn bounded(value: &str, max: usize) -> &str {
@@ -223,18 +202,6 @@ fn chat_completions_url(base_url: &str) -> String {
     } else {
         format!("{base}/chat/completions")
     }
-}
-
-fn strip_markdown_fence(content: &str) -> String {
-    let trimmed = content.trim();
-    let Some(fence) = trimmed.find("```") else {
-        return trimmed.to_string();
-    };
-    let fenced = &trimmed[fence..];
-    let body_start = fenced.find('\n').map(|index| index + 1).unwrap_or(3);
-    let body = &fenced[body_start..];
-    let body_end = body.find("\n```").unwrap_or(body.len());
-    body[..body_end].trim().to_string()
 }
 
 pub(super) fn validate_generated_source(source: &str) -> Result<(), GenerationError> {

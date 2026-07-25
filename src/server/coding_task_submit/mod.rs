@@ -14,9 +14,9 @@
 //! - Persists governance facts (approval, deployment intent, registry)
 
 pub mod handler;
-pub mod invocable;
+pub mod invocation_journal;
 
 #[cfg(test)]
 pub mod tests;
 
-pub use handler::{handle_coding_task_submit, CodingTaskSubmitResult};
+pub use handler::{handle_coding_task_submit, CodingHarnessRejection, CodingTaskSubmitResult};

@@ -57,6 +57,10 @@ mod grant_ops_lifecycle_tests;
 #[path = "tests/hcr_claim.rs"]
 mod hcr_claim_tests;
 
+#[cfg(test)]
+#[path = "tests/grant_carry_forward.rs"]
+mod grant_carry_forward_tests;
+
 pub(crate) use coding_task_submissions::CodingTaskSubmissionClaim;
 pub use event_observe::{
     redact_payload, EventObserveQuery, EventObserveResponse, ObservedEvent, DEFAULT_OBSERVE_LIMIT,

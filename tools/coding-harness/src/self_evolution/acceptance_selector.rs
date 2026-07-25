@@ -34,8 +34,10 @@ impl AcceptanceSelection {
 
 /// Select an acceptance bundle for the given DevelopmentRequest.
 ///
-/// The selection is based purely on the component name extracted by the
-/// router. No heuristic, AI, or substring matching is used.
+/// The selection is based on the component name, with a fallback to the
+/// generic invocable-capability kit when the request targets the
+/// invocable-capability-v0 profile. No heuristic, AI, or substring
+/// matching is used for specific name matching.
 pub fn select(request: &DevelopmentRequest) -> Result<AcceptanceSelection, String> {
     match request.name.as_str() {
         "token-dashboard" => Ok(AcceptanceSelection::new(
@@ -46,7 +48,23 @@ pub fn select(request: &DevelopmentRequest) -> Result<AcceptanceSelection, Strin
             "failure-event-viewer-v0",
             acceptance_bundle_digest("failure-event-viewer-v0"),
         )),
-        _ => Err("ACCEPTANCE_KIT_SELECTION_REQUIRED".to_string()),
+        "external.failure_viewer_query" => Ok(AcceptanceSelection::new(
+            "failure-viewer-query-v0",
+            acceptance_bundle_digest("failure-viewer-query-v0"),
+        )),
+        _ => {
+            // Fallback: for unknown invocable-capability requests, use the
+            // generic acceptance kit. Hook-consumer-service requests without
+            // a matching name still return ACCEPTANCE_KIT_SELECTION_REQUIRED.
+            if request.build_profile == "invocable-capability-v0" {
+                Ok(AcceptanceSelection::new(
+                    "generic-invocable-capability-v0",
+                    acceptance_bundle_digest("generic-invocable-capability-v0"),
+                ))
+            } else {
+                Err("ACCEPTANCE_KIT_SELECTION_REQUIRED".to_string())
+            }
+        }
     }
 }
 
@@ -59,6 +77,8 @@ fn acceptance_bundle_digest(bundle_ref: &str) -> &'static str {
     match bundle_ref {
         "token-dashboard-v0" => env!("TOKEN_DASHBOARD_BUNDLE_DIGEST"),
         "failure-event-viewer-v0" => env!("FAILURE_VIEWER_BUNDLE_DIGEST"),
+        "failure-viewer-query-v0" => env!("FAILURE_VIEWER_QUERY_BUNDLE_DIGEST"),
+        "generic-invocable-capability-v0" => "generic-invocable-capability-v0-unversioned",
         _ => "unknown",
     }
 }
@@ -86,6 +106,24 @@ mod tests {
         .unwrap()
     }
 
+    fn invocable_request(name: &str) -> DevelopmentRequest {
+        let mut draft = DevelopmentRequestDraft::new(TargetKind::InvocableCapability, name.into());
+        draft.requirements = vec!["test requirement".into()];
+        draft.required_contracts = vec!["component.invoke.v0".into()];
+        draft.requested_permissions = vec!["capability.invoke".into()];
+        draft.acceptance_criteria = vec!["test criteria".into()];
+        draft.build_profile = "invocable-capability-v0".into();
+        DevelopmentRequest::from_draft(
+            draft,
+            "principal:test".into(),
+            "scope:test".into(),
+            "message:test".into(),
+            "development:test".into(),
+            CONTRACT_CATALOG_VERSION.into(),
+        )
+        .unwrap()
+    }
+
     #[test]
     fn select_token_dashboard() {
         let req = request("token-dashboard");
@@ -102,10 +140,24 @@ mod tests {
     }
 
     #[test]
-    fn select_unknown_returns_selection_required() {
+    fn select_unknown_hook_consumer_returns_selection_required() {
         let req = request("unknown-component");
         let err = select(&req).unwrap_err();
         assert!(err.contains("ACCEPTANCE_KIT_SELECTION_REQUIRED"));
+    }
+
+    #[test]
+    fn select_unknown_invocable_uses_generic_kit() {
+        let req = invocable_request("external.json_select");
+        let selection = select(&req).unwrap();
+        assert_eq!(selection.bundle_ref, "generic-invocable-capability-v0");
+    }
+
+    #[test]
+    fn unknown_future_operation_accepted_for_development() {
+        let req = invocable_request("external.object_key_count");
+        let selection = select(&req).unwrap();
+        assert_eq!(selection.bundle_ref, "generic-invocable-capability-v0");
     }
 
     #[test]
@@ -113,5 +165,12 @@ mod tests {
         let req = request("auth-token-manager");
         let err = select(&req).unwrap_err();
         assert!(err.contains("ACCEPTANCE_KIT_SELECTION_REQUIRED"));
+    }
+
+    #[test]
+    fn generic_kit_name_not_special_cased() {
+        let spec = "generic-invocable-capability-v0";
+        assert!(!spec.contains("json_select"));
+        assert!(!spec.contains("calculator"));
     }
 }

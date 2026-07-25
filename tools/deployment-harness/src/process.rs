@@ -1,4 +1,6 @@
 use anyhow::{bail, Context, Result};
+use chrono::Utc;
+use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -19,6 +21,27 @@ pub struct StartedProcess {
     pub endpoint: String,
     pub log_path: PathBuf,
     pub instance_id: String,
+}
+
+/// Evidence captured when a managed service process exits.
+///
+/// Written atomically by the reap thread so the health monitor can
+/// report the real exit cause — even after a DH restart.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExitEvidence {
+    pub component_id: String,
+    pub version: String,
+    pub pid: u32,
+    pub start_time: String,
+    pub exit_time: String,
+    pub exit_code: Option<i32>,
+    pub termination_signal: Option<i32>,
+    pub log_ref: String,
+}
+
+/// Path to the exit evidence file inside a component's state directory.
+pub fn exit_evidence_path(state_dir: &Path) -> PathBuf {
+    state_dir.join("exit_evidence.json")
 }
 
 // ---------------------------------------------------------------------------
@@ -251,9 +274,58 @@ pub fn start(
         std::thread::sleep(Duration::from_millis(50));
     }
 
-    // Detach – reap child in background thread
+    // Capture start time for exit evidence
+    let exit_ev_component_id = component_id.to_string();
+    let exit_ev_version = version.to_string();
+    let exit_ev_pid = pid;
+    let exit_ev_state_dir = state_dir.to_path_buf();
+    let exit_ev_log_path = log_path.clone();
+    let start_time_str = Utc::now().to_rfc3339();
+
+    // Detach – reap child and capture exit evidence
     std::thread::spawn(move || {
-        let _ = child.wait();
+        let status = child.wait();
+        let exit_time_str = Utc::now().to_rfc3339();
+        let exit_code = status.as_ref().ok().and_then(|s| s.code());
+        let termination_signal = status.as_ref().ok().and_then(|s| {
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::ExitStatusExt;
+                s.signal()
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = s;
+                None
+            }
+        });
+        let evidence = ExitEvidence {
+            component_id: exit_ev_component_id,
+            version: exit_ev_version,
+            pid: exit_ev_pid,
+            start_time: start_time_str,
+            exit_time: exit_time_str,
+            exit_code,
+            termination_signal,
+            log_ref: exit_ev_log_path.to_string_lossy().into_owned(),
+        };
+        // Atomic write to state dir
+        let evidence_path = exit_evidence_path(&exit_ev_state_dir);
+        if let Some(parent) = evidence_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let tmp = evidence_path.with_extension(format!("tmp-{}", std::process::id()));
+        if let Ok(bytes) = serde_json::to_vec(&evidence) {
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&tmp)
+            {
+                let _ = f.write_all(&bytes);
+                let _ = f.sync_all();
+                let _ = std::fs::rename(&tmp, &evidence_path);
+            }
+        }
     });
 
     Ok(StartedProcess {

@@ -68,6 +68,7 @@ pub fn validate_manifest(test_kit: &str, manifest: &Value) -> Result<(), String>
             Ok(())
         }
         "hook-consumer-service-contract-v0" => validate_hook_consumer_manifest(manifest),
+        "invocable-capability-contract-v0" => validate_invocable_manifest(manifest),
         _ => Err(format!("unknown trusted test kit: {test_kit}")),
     }
 }
@@ -101,6 +102,26 @@ pub fn smoke_case(test_kit: &str) -> Option<SmokeCase> {
             args: &["--profile-contract-test"],
             allow_additional_fields: true,
             evaluation_time_utc: Some("2026-07-15T12:00:00Z"),
+        }),
+        "invocable-capability-contract-v0" => Some(SmokeCase {
+            input: r#"{"protocol_version":"process-harness-v1","operation_name":"external.failure_viewer_query","arguments":{"__agent_core_upstream_state":{"rendered":{"component_id":"failure-viewer","component_version":"0.1.2","health":"ready","failure_count":2,"failure_events":[{"capability_name":"external.alpha","failed_stage":"external_execution","error_category":"timeout","detail_code":"UPSTREAM_TIMEOUT","run_id":"run-alpha","invocation_id":"inv-1","receipt_status":"Failed","receipt_time":"2026-07-15T10:00:00Z"},{"capability_name":"external.coding_task_submit","failed_stage":"external_execution","error_category":"external_configuration_missing","detail_code":"GENERATOR_NOT_CONFIGURED_FOR_PROFILE","run_id":"run-beta","invocation_id":"inv-2","receipt_status":"Failed","receipt_time":"2026-07-16T14:30:00Z"}]}}}}"#,
+            expected: serde_json::json!({
+                "ok": true,
+                "result": {
+                    "capability_name": "external.coding_task_submit",
+                    "failed_stage": "external_execution",
+                    "error_category": "external_configuration_missing",
+                    "detail_code": "GENERATOR_NOT_CONFIGURED_FOR_PROFILE",
+                    "run_id": "run-beta",
+                    "invocation_id": "inv-2",
+                    "receipt_status": "Failed",
+                    "receipt_time": "2026-07-16T14:30:00Z",
+                    "source_component": "failure-viewer"
+                }
+            }),
+            args: &[],
+            allow_additional_fields: false,
+            evaluation_time_utc: None,
         }),
         _ => None,
     }
@@ -157,6 +178,51 @@ fn validate_hook_consumer_manifest(manifest: &Value) -> Result<(), String> {
         || !digest[7..].bytes().all(|byte| byte.is_ascii_hexdigit())
     {
         return Err("hook consumer module digest invalid".into());
+    }
+    Ok(())
+}
+
+fn validate_invocable_manifest(manifest: &Value) -> Result<(), String> {
+    for (key, expected) in [
+        ("kind", "invocable_capability"),
+        ("profile_id", "invocable-capability-v0"),
+        ("deployment_profile", "capability-host-v0"),
+        ("runtime_profile", "process-harness-v1"),
+        ("entry", "target/release/generated-invocable-capability"),
+    ] {
+        if manifest.get(key).and_then(Value::as_str) != Some(expected) {
+            return Err(format!("invocable manifest {key} mismatch"));
+        }
+    }
+    if manifest.get("required_contracts") != Some(&serde_json::json!(["component.invoke.v0"]))
+        || manifest.get("requested_permissions") != Some(&serde_json::json!(["component.invoke"]))
+        || manifest.pointer("/capability/operation_name") != manifest.get("component_id")
+        || manifest.pointer("/capability/input_schema")
+            != Some(&serde_json::json!({
+                "type":"object","properties":{},"required":[],"additionalProperties":false
+            }))
+        || manifest
+            .pointer("/capability/idempotent")
+            .and_then(Value::as_bool)
+            != Some(true)
+        || manifest.pointer("/generation/kind").and_then(Value::as_str)
+            != Some("request-driven-model-transform-v0")
+        || manifest
+            .pointer("/generation/mutable_surface")
+            .and_then(Value::as_array)
+            != Some(&vec![Value::String("src/component.rs".into())])
+    {
+        return Err("invocable manifest contract mismatch".into());
+    }
+    let digest = manifest
+        .pointer("/generation/module_digest")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if digest.len() != 71
+        || !digest.starts_with("sha256:")
+        || !digest[7..].bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err("invocable module digest invalid".into());
     }
     Ok(())
 }

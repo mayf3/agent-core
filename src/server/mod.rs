@@ -2,14 +2,10 @@ use crate::config::KernelConfig;
 use crate::domain::{OutboxDispatchStatus, RunId};
 use crate::gateway::Gateway;
 use crate::journal::JournalStore;
-mod calculator_delivery;
-mod calculator_router;
 mod capability_decision;
 mod capability_host_client;
 mod capability_http;
 pub mod capability_routes;
-mod coding_delivery;
-mod coding_harness_client;
 pub mod coding_router;
 pub mod coding_task_submit;
 mod component_control;
@@ -55,6 +51,34 @@ pub fn serve(config: KernelConfig) -> Result<()> {
     let journal = Arc::new(JournalStore::open(&config.db_path)?);
     // Initialize the registry (creates baseline snapshot, sets current,
     journal.initialize_registry()?;
+
+    // Bootstrap harness manifests for builtin External operations.
+    // The Coding Harness API URL and artifact digest are required when
+    // external bindings (external.coding_task_submit, etc.) are active.
+    // Without them, model-initiated tool calls to these operations fail.
+    if config.coding_harness_api_url.is_empty() || config.coding_harness_artifact_digest.is_empty()
+    {
+        bail!(
+            "AGENT_CORE_CODING_HARNESS_API_URL and \
+             AGENT_CORE_CODING_HARNESS_ARTIFACT_DIGEST are required \
+             when external operation bindings are active"
+        );
+    }
+    let manifest_map = journal.bootstrap_builtin_external_manifests(
+        &config.coding_harness_api_url,
+        &config.coding_harness_artifact_digest,
+    )?;
+
+    // Bind the actual content-addressed manifest IDs into the registry
+    // snapshot so that dispatch_builtin_binding can load the manifest
+    // using the operation's binding_key as the manifest_id.
+    journal.bind_external_manifest_ids_to_snapshot(&manifest_map)?;
+
+    // Carry forward external operation grants from stale snapshots whose
+    // operations are identical (same binding_kind and binding_key) in the
+    // current snapshot.  Old grant rows are never modified.
+    journal.carry_forward_external_operation_grants()?;
+
     let recovered = journal.recover_unknown_invocations()?;
     if recovered > 0 {
         println!("agent-core recovered {recovered} unknown invocation(s)");
@@ -167,7 +191,8 @@ fn handle_connection(
         || (request.method == "GET"
             && (request.path.starts_with(GET_CAP_PREFIX)
                 || request.path.starts_with("/v1/events")
-                || request.path.starts_with("/v1/components/")));
+                || request.path.starts_with("/v1/components/")
+                || request.path.starts_with("/v1/harness-change-requests/")));
     if !method_allows || !request.path.starts_with("/v1/") {
         return write_json(stream, 404, json!({ "ok": false, "error": "not_found" }));
     }
@@ -188,8 +213,11 @@ fn handle_connection(
     // event.observe accepts either the full IPC token or its dedicated,
     // read-only observer token. The observer token is never accepted by any
     // mutation route.
+    // If the handler returns Ok(false), the path did not match /v1/events
+    // exactly — fall through to the IPC bearer check rather than returning
+    // without writing any HTTP response (which causes client "socket hang up").
     if path.starts_with("/v1/events") {
-        event_observe_http::try_handle_event_observe(
+        if event_observe_http::try_handle_event_observe(
             stream,
             path,
             &request.method,
@@ -197,8 +225,9 @@ fn handle_connection(
             &request.body,
             config,
             &journal,
-        )?;
-        return Ok(());
+        )? {
+            return Ok(());
+        }
     }
     // ---- All other /v1/ routes require the IPC bearer token ----
     if bearer != config.ipc_token.as_str() {
@@ -227,6 +256,37 @@ fn handle_connection(
             stream,
             harness_routes::handle_disable(&gateway, &journal, &body),
         )
+    } else if path.starts_with("/v1/harness-change-requests/") && request.method == "GET" {
+        // GET /v1/harness-change-requests/<hcr_id> — read an HCR
+        let hcr_id = path
+            .strip_prefix("/v1/harness-change-requests/")
+            .unwrap_or("");
+        if hcr_id.is_empty() || hcr_id.contains('/') {
+            write_json(stream, 400, json!({"ok":false,"error":"invalid_hcr_id"}))
+        } else {
+            match journal.get_harness_change_request(hcr_id) {
+                Ok(Some(hcr)) => {
+                    let result = json!({
+                        "ok": true,
+                        "request_id": hcr.request_id,
+                        "source": hcr.source,
+                        "source_message_id": hcr.source_message_id,
+                        "session_id": hcr.session_id,
+                        "principal_id": hcr.principal_id,
+                        "channel": hcr.channel,
+                        "chat_type": hcr.chat_type,
+                        "harness_id": hcr.harness_id,
+                        "requirement": hcr.requirement,
+                        "requirement_digest": crate::server::hcr_acceptance::request_binding::build_requirement_binding(&hcr.requirement).requirement_digest,
+                        "status": hcr.status,
+                        "error_code": hcr.error_code,
+                    });
+                    write_json(stream, 200, result)
+                }
+                Ok(None) => write_json(stream, 404, json!({"ok":false,"error":"hcr_not_found"})),
+                Err(e) => write_json(stream, 500, json!({"ok":false,"error":e.to_string()})),
+            }
+        }
     } else if path == "/v1/harness-change-requests" {
         let body: Value = serde_json::from_slice(&request.body)?;
         harness_change_request::handle_http(stream, &journal, &gateway, config, &body)
@@ -524,6 +584,12 @@ mod capability_routes_support;
 #[cfg(test)]
 #[path = "capability_routes_tests.rs"]
 mod capability_routes_tests;
+#[cfg(test)]
+#[path = "capability_routes_trusted_decision_tests.rs"]
+mod capability_routes_trusted_decision_tests;
+#[cfg(test)]
+#[path = "event_routing_tests.rs"]
+mod event_routing_tests;
 #[cfg(test)]
 #[path = "harness_endpoint_tests.rs"]
 mod harness_endpoint_tests;

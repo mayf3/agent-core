@@ -75,10 +75,24 @@ pub struct KernelConfig {
     /// `<data_dir>/harness-artifacts`. Configured via
     /// AGENT_CORE_HARNESS_ARTIFACT_ROOT.
     pub harness_artifact_root: PathBuf,
+    /// URL of the Coding Harness HTTP API. Required when any External
+    /// binding (e.g. external.coding_task_submit, external.coding_hcr_accept)
+    /// is enabled. Configured via AGENT_CORE_CODING_HARNESS_API_URL.
+    /// Must be a loopback http:// URL with explicit port.
+    /// Production deployments MUST set this explicitly; there is no safe
+    /// default. In test/dev environments a default may be provided by the
+    /// test harness.
+    pub coding_harness_api_url: String,
+    /// Content-addressed digest of the trusted Coding Harness artifact.
+    /// Used as the artifact identity in the harness manifest for builtin
+    /// external operations. Must be a valid sha256: digest (71 characters).
+    /// Configured via AGENT_CORE_CODING_HARNESS_ARTIFACT_DIGEST.
+    /// Like the API URL, this is required when external bindings are active.
+    pub coding_harness_artifact_digest: String,
     /// Maximum number of tool-call rounds per Run (each round is one LLM
     /// invocation that returns one or more tool calls). When the model
     /// reaches this limit without producing a final reply, the Run completes
-    /// with ToolBudgetExhausted. Range 1–64, default 12. Configured via
+    /// with ToolBudgetExhausted. Range 1–128, default 12. Configured via
     /// AGENT_CORE_MAX_TOOL_ROUNDS. A value outside the range causes a startup
     /// error (process exits with diagnostic).
     pub max_tool_rounds: usize,
@@ -176,6 +190,14 @@ impl KernelConfig {
             primary_tool_name_indexed: env_bool("AGENT_CORE_PRIMARY_TOOL_NAME_INDEXED", false),
             harness_read_timeout_ms: env_u64("AGENT_CORE_HARNESS_READ_TIMEOUT_MS", 10_000),
             harness_artifact_root,
+            coding_harness_api_url: env_string(
+                "AGENT_CORE_CODING_HARNESS_API_URL",
+                "", // No default — must be set when External bindings active
+            ),
+            coding_harness_artifact_digest: env_string(
+                "AGENT_CORE_CODING_HARNESS_ARTIFACT_DIGEST",
+                "", // No default — must be set when External bindings active
+            ),
             max_tool_rounds: env_max_tool_rounds("AGENT_CORE_MAX_TOOL_ROUNDS", 12),
             feishu_coding_owner_id: env_optional_string("AGENT_CORE_FEISHU_CODING_OWNER_ID"),
             tool_loop_timeout_ms: env_tool_loop_timeout_ms(
@@ -348,12 +370,12 @@ fn env_max_tool_rounds(key: &str, fallback: usize) -> usize {
     let parsed: usize = match raw.parse() {
         Ok(n) => n,
         Err(_) => {
-            eprintln!("invalid_config: {key} must be an integer between 1 and 64, got {raw:?}");
+            eprintln!("invalid_config: {key} must be an integer between 1 and 128, got {raw:?}");
             std::process::exit(1);
         }
     };
-    if parsed < 1 || parsed > 64 {
-        eprintln!("invalid_config: {key} must be between 1 and 64, got {parsed}");
+    if parsed < 1 || parsed > 128 {
+        eprintln!("invalid_config: {key} must be between 1 and 128, got {parsed}");
         std::process::exit(1);
     }
     parsed

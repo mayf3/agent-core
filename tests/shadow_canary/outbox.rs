@@ -26,7 +26,8 @@ fn outbox_unknown_idempotent_retry() -> Result<()> {
     let session = SessionId("s_unknown_retry".to_string());
     journal.append_event(
         JournalEventKind::RunFailed,
-        Some(&run), Some(&session),
+        Some(&run),
+        Some(&session),
         Some("corr_unknown"),
         serde_json::json!({"outcome": "Unknown"}),
     )?;

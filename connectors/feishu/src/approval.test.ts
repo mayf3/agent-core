@@ -520,4 +520,57 @@ describe("pending proposal card", () => {
     );
     assert.equal(fetchMock.mock.callCount(), 1);
   });
+
+  it("tampered_approval_digest_fails_connector_binding", async () => {
+    // The GET response returns mismatched approval/proposal digests
+    const mismatched = {
+      ...cardProposal(),
+      artifact_digest: "sha256:proposal_artifact",
+      manifest_digest: "sha256:proposal_manifest",
+      approval: { ...approvalBinding(), artifact_digest: "sha256:wrong_artifact", manifest_digest: "sha256:wrong_manifest" },
+    };
+    (globalThis as any).fetch = mock.fn(() =>
+      Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(mismatched) }),
+    );
+    const result = await handleProposalCardAction(makeConfig(), cardAction());
+    assert.match(JSON.stringify(result), /审批绑定/);
+  });
+
+  it("tampered_approval_id_fails_connector_binding", async () => {
+    // The card has a different approval_id than the proposal's current approval
+    (globalThis as any).fetch = mock.fn(() =>
+      Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(cardProposal()) }),
+    );
+    const staleCard = cardAction({ approval_id: "approval_stale" });
+    const result = await handleProposalCardAction(makeConfig(), staleCard);
+    assert.match(JSON.stringify(result), /卡片已失效|卡片 nonce|approval_id/);
+  });
+
+  it("production_handler_sends_bound_decision", async () => {
+    // Full path: get proposal → verify binding → POST decision with bound fields
+    let callCount = 0;
+    (globalThis as any).fetch = mock.fn(() => {
+      callCount++;
+      if (callCount === 1) {
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(cardProposal()) });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({
+        approval_id: "approval_abc", decision_id: "decision_abc", status: "Activated",
+        activated_snapshot_id: "snapshot_new", host_deployment_id: "deployment_abc",
+      }) });
+    });
+    const response = await handleProposalCardAction(makeConfig(), cardAction());
+    assert.equal(callCount, 2, "must call GET proposal then POST decision");
+    assert.match(JSON.stringify(response), /APPROVED/);
+    // Verify the POST body carries the authoritative binding fields from GET, not from the card
+    const postArgs = (globalThis.fetch as any).mock.calls[1].arguments[1];
+    const postBody = JSON.parse(postArgs.body);
+    assert.equal(postBody.approval_id, "approval_abc");
+    assert.equal(postBody.decision_nonce, "nonce_abc");
+    assert.equal(postBody.principal_id, `feishu:open_id:${ownerOpenId}`);
+    assert.equal(postBody.artifact_digest, "sha256:abc");
+    assert.equal(postBody.manifest_digest, "sha256:def");
+    assert.equal(postBody.candidate_digest, "sha256:candidate");
+    assert.equal(postBody.expected_source_snapshot_id, "snap_old");
+  });
 });

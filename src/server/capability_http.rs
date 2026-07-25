@@ -83,15 +83,15 @@ pub(crate) fn try_handle_capability_request(
         };
         let store = ContentStore::new(config.harness_artifact_root.clone());
         let principal = "approval_workflow";
-	        let result = crate::server::capability_routes::handle_decision(
-	            journal,
-	            gateway,
-	            &store,
-	            pid,
-	            &body,
-	            principal,
-	            &config.agent_id,
-	        );
+        let result = crate::server::capability_routes::handle_decision(
+            journal,
+            gateway,
+            &store,
+            pid,
+            &body,
+            principal,
+            &config.agent_id,
+        );
         let (status, resp_body) =
             match crate::server::capability_routes::map_capability_result(result) {
                 Ok(t) => t,

@@ -209,3 +209,55 @@ fn manifest_lookup_error_is_not_treated_as_not_found() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn builtin_bootstrap_appends_schema_upgrade_and_preserves_old_manifest() -> Result<()> {
+    let j = JournalStore::in_memory()?;
+    let operation = crate::domain::operation::external::TASK_SUBMIT;
+    let endpoint = "http://127.0.0.1:7200";
+    let artifact_digest = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+
+    let mut old = HarnessManifest {
+        manifest_id: String::new(),
+        harness_id: "coding-harness-v0".into(),
+        artifact_digest: artifact_digest.into(),
+        protocol_version: "external-harness-v1".into(),
+        endpoint: endpoint.into(),
+        operation_name: operation.into(),
+        description: "old builtin submit schema".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {"development_request": {"type": "object"}},
+            "required": ["development_request"],
+            "additionalProperties": false
+        }),
+        output_schema: json!({"type": "object"}),
+        idempotent: true,
+        created_at: Utc::now(),
+    };
+    old.manifest_id = old.compute_manifest_id()?;
+    j.register_harness_manifest(&old)?;
+
+    let first = j.bootstrap_builtin_external_manifests(endpoint, artifact_digest)?;
+    let upgraded_id = first.get(operation).unwrap();
+    assert_ne!(upgraded_id, &old.manifest_id);
+    assert!(j.load_harness_manifest(&old.manifest_id)?.is_some());
+    assert!(j.load_harness_manifest(upgraded_id)?.is_some());
+
+    let count_after_upgrade: i64 = j.conn.lock().unwrap().query_row(
+        "SELECT COUNT(*) FROM harness_manifests WHERE operation_name = ?1",
+        params![operation],
+        |row| row.get(0),
+    )?;
+    assert_eq!(count_after_upgrade, 2);
+
+    let replay = j.bootstrap_builtin_external_manifests(endpoint, artifact_digest)?;
+    assert_eq!(replay.get(operation), Some(upgraded_id));
+    let count_after_replay: i64 = j.conn.lock().unwrap().query_row(
+        "SELECT COUNT(*) FROM harness_manifests WHERE operation_name = ?1",
+        params![operation],
+        |row| row.get(0),
+    )?;
+    assert_eq!(count_after_replay, count_after_upgrade);
+    Ok(())
+}

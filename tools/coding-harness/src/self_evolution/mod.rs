@@ -30,6 +30,10 @@ pub fn handle_submit(artifact_root: &Path, args: &Value) -> Value {
         Ok(request) => request,
         Err(_) => return error("INVALID_DEVELOPMENT_REQUEST"),
     };
+    let request = match request.with_derived_request_id() {
+        Ok(request) => request,
+        Err(reason) => return error(&reason.to_string()),
+    };
     let plan = match plan(&request) {
         Ok(plan) => plan,
         Err(code) => return error(&code),
@@ -41,7 +45,7 @@ pub fn handle_submit(artifact_root: &Path, args: &Value) -> Value {
     match generated {
         Ok(mut result) => {
             result["development_plan"] = serde_json::to_value(plan).unwrap_or(Value::Null);
-            result["development_request"] = request_value.clone();
+            result["development_request"] = serde_json::to_value(&request).unwrap_or(Value::Null);
             json!({
                 "protocol_version": "external-harness-v1",
                 "ok": true,
@@ -135,5 +139,26 @@ mod tests {
                 .len(),
             7
         );
+    }
+
+    #[test]
+    fn submit_derives_request_id_when_omitted() {
+        let mut request = request(
+            TargetKind::InvocableCapability,
+            "component.invoke.v0",
+            "component.invoke",
+        );
+        request.name = "external.calculator".into();
+        request.request_id.clear();
+        let root = std::env::temp_dir().join(format!("derive-request-id-{}", std::process::id()));
+        let result = handle_submit(&root, &json!({"development_request": request}));
+        assert_eq!(result["ok"], true);
+        let derived = result["result"]["request_id"].as_str().unwrap();
+        assert!(derived.starts_with("devreq_"));
+        assert_eq!(
+            result["result"]["development_request"]["request_id"],
+            derived
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 }

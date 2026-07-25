@@ -28,7 +28,7 @@ fn non_json_stdout_is_rejected() {
         "snapshot-nj",
     );
     assert_eq!(code, 400);
-    assert_eq!(response["error_code"], "deployment_probe_failed");
+    assert_eq!(response["error_code"], "capability_descriptor_invalid");
 }
 
 #[test]
@@ -47,7 +47,7 @@ fn nonzero_exit_is_structured_failure() {
         "snapshot-nz",
     );
     assert_eq!(code, 400);
-    assert_eq!(response["error_code"], "deployment_probe_failed");
+    assert_eq!(response["error_code"], "capability_descriptor_invalid");
 }
 
 #[test]
@@ -89,7 +89,7 @@ fn artifact_timeout_kills_process_tree() {
         "snapshot-to",
     );
     assert_eq!(code, 400);
-    assert_eq!(response["error_code"], "deployment_probe_failed");
+    assert_eq!(response["error_code"], "capability_descriptor_invalid");
 }
 
 #[test]
@@ -108,7 +108,7 @@ fn large_stdout_does_not_deadlock() {
         "snapshot-lo",
     );
     assert_eq!(code, 400);
-    assert_eq!(response["error_code"], "deployment_probe_failed");
+    assert_eq!(response["error_code"], "capability_descriptor_invalid");
 }
 
 #[test]
@@ -137,7 +137,7 @@ fn request_cannot_supply_artifact_path() {
     assert_eq!(code, 200);
     let r: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(r["ok"], false);
-    assert_eq!(r["error_code"], "invalid_calculator_arguments");
+    assert_eq!(r["error_code"], "capability_input_schema_violation");
 }
 
 #[test]
