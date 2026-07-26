@@ -54,9 +54,9 @@ impl JournalStore {
     /// threads. Returns an error if this is an in-memory store.
     pub fn try_clone(&self) -> Result<Self> {
         let guard = self.db_path.lock().map_err(|_| anyhow::anyhow!("mutex"))?;
-        let path = guard.as_ref().ok_or_else(|| {
-            anyhow::anyhow!("cannot clone in-memory journal store")
-        })?;
+        let path = guard
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("cannot clone in-memory journal store"))?;
         Self::open(path)
     }
 
