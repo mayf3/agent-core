@@ -132,9 +132,27 @@ pub(crate) fn call_context_prepare(
 // context.compress.v0 hook logic
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Invoke context.compress.v0 and return ContextPlan.
+/// Outcome of calling the context.compress.v0 hook.
+#[derive(Debug)]
+pub(crate) enum ContextCompressOutcome {
+    /// Hook not configured or disabled.
+    NotConfigured,
+    /// Hook returned passthrough — use original blocks unchanged.
+    Passthrough,
+    /// Hook returned a valid compacted plan that was applied.
+    /// The blocks have been modified in place.
+    CompactedApplied,
+    /// Hook failed but original blocks fit within budget — degraded to original.
+    ProviderFailedDegraded,
+    /// Hook failed or plan invalid, AND original blocks exceed budget.
+    OverBudget,
+}
+
+/// Invoke context.compress.v0 and apply the result to `blocks`.
+/// `blocks` is modified in-place when a valid compacted plan is returned.
+/// Returns the outcome so callers can adjust behavior.
 pub(crate) fn call_context_compress(
-    blocks: &[ContextBlock],
+    blocks: &mut Vec<ContextBlock>,
     hook_client: &dyn HookClient,
     hook_cfg: &HookConfig,
     journal: &JournalStore,
@@ -143,9 +161,9 @@ pub(crate) fn call_context_compress(
     agent_id: &str,
     model_identity: &str,
     model_context_budget: usize,
-) -> Result<()> {
+) -> Result<ContextCompressOutcome> {
     if hook_cfg.kind != crate::hook::HookKind::ContextCompressV0 || !hook_cfg.enabled {
-        return Ok(());
+        return Ok(ContextCompressOutcome::NotConfigured);
     }
     let candidate: Vec<serde_json::Value> = blocks.iter().map(|b| serde_json::json!(b)).collect();
     let compress_req = crate::hook::ContextCompressRequest {
@@ -165,21 +183,61 @@ pub(crate) fn call_context_compress(
     let duration_ms = start.elapsed().as_millis() as u64;
     match hook_result {
         Ok(resp) => {
-            journal.append_event(
-                JournalEventKind::HookCallRecorded,
-                Some(run_id),
-                Some(session_id),
-                None,
-                serde_json::json!({
-                    "hook": "context.compress.v0", "status": "ok",
-                    "provider_id": resp.provider_id,
-                    "mode": resp.mode,
-                    "plan_digest": resp.plan_digest,
-                    "estimated_size": resp.estimated_size,
-                    "duration_ms": duration_ms,
-                }),
+            let candidate_snapshot = blocks.clone();
+            let plan_result = crate::runtime::context_compress::apply_context_plan(
+                &candidate_snapshot, &resp, model_context_budget,
             )?;
-            Ok(())
+            match plan_result {
+                crate::runtime::context_compress::PlanApplicationResult::Applied(final_blocks) => {
+                    *blocks = final_blocks;
+                    journal.append_event(
+                        JournalEventKind::HookCallRecorded,
+                        Some(run_id),
+                        Some(session_id),
+                        None,
+                        serde_json::json!({
+                            "hook": "context.compress.v0", "status": "ok",
+                            "provider_id": resp.provider_id,
+                            "mode": resp.mode,
+                            "plan_digest": resp.plan_digest,
+                            "estimated_size": resp.estimated_size,
+                            "duration_ms": duration_ms,
+                        }),
+                    )?;
+                    Ok(ContextCompressOutcome::CompactedApplied)
+                }
+                crate::runtime::context_compress::PlanApplicationResult::Degraded(original) => {
+                    *blocks = original;
+                    journal.append_event(
+                        JournalEventKind::HookCallRecorded,
+                        Some(run_id),
+                        Some(session_id),
+                        None,
+                        serde_json::json!({
+                            "hook": "context.compress.v0", "status": "degraded",
+                            "provider_id": resp.provider_id,
+                            "plan_digest": resp.plan_digest,
+                            "duration_ms": duration_ms,
+                        }),
+                    )?;
+                    Ok(ContextCompressOutcome::ProviderFailedDegraded)
+                }
+                crate::runtime::context_compress::PlanApplicationResult::OverBudget(original) => {
+                    *blocks = original;
+                    journal.append_event(
+                        JournalEventKind::HookCallRecorded,
+                        Some(run_id),
+                        Some(session_id),
+                        None,
+                        serde_json::json!({
+                            "hook": "context.compress.v0", "status": "failed",
+                            "error_code": "plan_over_budget",
+                            "duration_ms": duration_ms,
+                        }),
+                    )?;
+                    Ok(ContextCompressOutcome::OverBudget)
+                }
+            }
         }
         Err(e) => {
             let error_msg = e.to_string();
@@ -200,7 +258,12 @@ pub(crate) fn call_context_compress(
                     "duration_ms": duration_ms,
                 }),
             )?;
-            Ok(())
+            let original_size: usize = blocks.iter().map(|b| b.content.len()).sum();
+            if original_size <= model_context_budget {
+                Ok(ContextCompressOutcome::ProviderFailedDegraded)
+            } else {
+                Ok(ContextCompressOutcome::OverBudget)
+            }
         }
     }
 }
