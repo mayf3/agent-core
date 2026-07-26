@@ -1,6 +1,5 @@
-//! Core Hook ABI v0 types — lifecycle hook kinds, envelope structs,
-//! context fragment, resource reference, decision policy result, and
-//! invocation receipt.
+//! Core Hook ABI v0 types — lifecycle hook kinds, transport bounds,
+//! envelopes, and receipts.
 //!
 //! No product-layer concept (Memory, Dream, Task, Skill, Dashboard)
 //! appears in this file. All types are Kernel-generic.
@@ -10,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 // ---------------------------------------------------------------------------
-// HookKind — the six lifecycle points
+// HookKind — stable lifecycle points
 // ---------------------------------------------------------------------------
 
 /// Identifies a well-defined lifecycle point at which the Kernel may invoke
@@ -22,20 +21,13 @@ pub enum HookKind {
     /// resolution.
     #[serde(rename = "ingress.route.v0")]
     IngressRouteV0,
-    /// Builds dynamic context fragments before the Runtime constructs the
-    /// model's context window. Receives run, session, principal, and user
-    /// input; returns fragments and resource references.
+    /// Unified pre-model call accepting an opaque CandidateInput reference and
+    /// returning opaque ordered Context Artifact references.
     #[serde(rename = "context.prepare.v0")]
     ContextPrepareV0,
-    /// Resolves a `ResourceRef` into full content (progressive disclosure).
-    /// The Kernel does not know whether the resource is a skill, memory
-    /// item, task, note, or document.
+    /// Resolves an opaque external resource reference.
     #[serde(rename = "context.load.v0")]
     ContextLoadV0,
-    /// Compresses or summarises context to fit within a token budget.
-    /// Part of the context construction path, not the post-run learning path.
-    #[serde(rename = "context.compress.v0")]
-    ContextCompressV0,
     /// Observes recorded events or runs so the External Harness can update
     /// its own external state or derived indexes. Prefers pull-based event
     /// cursors; push is a future option.
@@ -103,9 +95,6 @@ pub struct HookLimits {
     pub max_request_bytes: u64,
     /// Maximum serialised response body size in bytes. Default 1 MiB.
     pub max_response_bytes: u64,
-    /// Maximum number of `ContextFragment` entries a hook may return.
-    /// Default 20, max 100.
-    pub max_fragments: usize,
 }
 
 impl Default for HookLimits {
@@ -114,7 +103,6 @@ impl Default for HookLimits {
             timeout_ms: 5_000,
             max_request_bytes: 1024 * 1024,  // 1 MiB
             max_response_bytes: 1024 * 1024, // 1 MiB
-            max_fragments: 20,
         }
     }
 }
@@ -143,171 +131,8 @@ impl HookLimits {
                 max: 10 * 1024 * 1024,
             });
         }
-        if self.max_fragments > 100 {
-            return Err(HookValidationError::LimitExceeded {
-                field: "max_fragments",
-                value: self.max_fragments as u64,
-                max: 100,
-            });
-        }
         Ok(())
     }
-}
-
-// ---------------------------------------------------------------------------
-// ContextFragment — structured dynamic context
-// ---------------------------------------------------------------------------
-
-/// The semantic category of a context fragment.
-///
-/// These are intentionally **not** product-layer concepts (memory, dream,
-/// task, skill) — the Kernel does not define product semantics.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ContextFragmentKind {
-    /// An instruction or directive for the model (e.g. "use tool X").
-    #[serde(rename = "instruction")]
-    Instruction,
-    /// A factual statement or data point.
-    #[serde(rename = "fact")]
-    Fact,
-    /// A reference or pointer to external material.
-    #[serde(rename = "reference")]
-    Reference,
-    /// A warning or caution (e.g. "this data may be stale").
-    #[serde(rename = "warning")]
-    Warning,
-    /// A hard constraint the model must obey (e.g. "never reveal the token").
-    #[serde(rename = "constraint")]
-    Constraint,
-}
-
-/// Where the fragment should be placed in the model's context window.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum FragmentPlacement {
-    /// Placed below the immutable Kernel system prompt. Only trusted,
-    /// allowlisted hooks may produce `SystemAppend` fragments.
-    #[serde(rename = "system_append")]
-    SystemAppend,
-    /// Injected as reference material in the user-context section. Lower
-    /// trust level than `SystemAppend`.
-    #[serde(rename = "user_context")]
-    UserContext,
-}
-
-/// Sensitivity level of a context fragment, used for filtering on sensitive
-/// channels or during audit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum FragmentSensitivity {
-    /// Suitable for all audiences.
-    #[serde(rename = "public")]
-    Public,
-    /// Safe within the organisation but not for public disclosure.
-    #[serde(rename = "internal")]
-    Internal,
-    /// May contain personal or confidential information.
-    #[serde(rename = "sensitive")]
-    Sensitive,
-    /// Must never be exposed outside a tightly controlled scope (e.g. secrets,
-    /// tokens).
-    #[serde(rename = "secret")]
-    Secret,
-}
-
-/// A structured piece of dynamic context injected into the model's context
-/// window by a hook.
-///
-/// # Security constraints
-///
-/// - **ContextFragment cannot grant permissions.** It is dynamic context,
-///   not an authorization mechanism. Tool access, approval bypass, and
-///   Gateway decisions are not influenced by fragment content.
-/// - **ContextFragment cannot override the immutable system prompt.**
-///   The Kernel's base system prompt is always prepended and cannot be
-///   shadowed or removed by fragment content.
-/// - **ContextFragment cannot bypass Gateway.** Fragments are inputs to
-///   the model, not inputs to the Gateway, Capability Host, or Decision
-///   system.
-/// - **ContextFragment is dynamic context only.** It carries knowledge,
-///   instruction, or reference material — never executable policy or
-///   permission grants.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ContextFragment {
-    /// Unique fragment identifier within the request scope.
-    pub id: String,
-    /// Which hook produced this fragment (e.g. `"context.prepare.v0"`).
-    pub hook_id: String,
-    /// Semantic category of the fragment content.
-    pub kind: ContextFragmentKind,
-    /// Where the fragment should be placed in the context window.
-    pub placement: FragmentPlacement,
-    /// Priority (higher values = included first within budget).
-    pub priority: i32,
-    /// The actual text content.
-    pub content: String,
-    /// Origin description (hook name, file path, etc.).
-    pub source: String,
-    /// Time-to-live in seconds. `None` means the fragment does not expire.
-    pub ttl_secs: Option<u64>,
-    /// Estimated token count for context budget management.
-    pub estimated_tokens: usize,
-    /// Sensitivity level for channel-aware filtering.
-    pub sensitivity: FragmentSensitivity,
-}
-
-impl ContextFragment {
-    /// Validates the fragment against the given resource limits.
-    ///
-    /// Returns an error if the content size or token estimate exceeds
-    /// the allowed bounds.
-    pub fn validate_against(&self, limits: &HookLimits) -> Result<(), HookValidationError> {
-        let content_bytes = self.content.len() as u64;
-        if content_bytes > limits.max_response_bytes {
-            return Err(HookValidationError::ContentTooLarge {
-                content_size: content_bytes,
-                max_bytes: limits.max_response_bytes,
-            });
-        }
-        Ok(())
-    }
-}
-
-// ---------------------------------------------------------------------------
-// ResourceRef — opaque progressive-disclosure reference
-// ---------------------------------------------------------------------------
-
-/// An opaque reference to an external resource that may be loaded on demand
-/// via `context.load.v0`.
-///
-/// The Kernel stores and passes `ResourceRef` values but **does not know**
-/// what they represent — they could be skills, memory items, tasks, dreams,
-/// documents, or any other product-layer concept owned by the External
-/// Harness.
-///
-/// # Opacity guarantee
-///
-/// - No field in this struct references Memory, Dream, Task, Skill, or any
-///   product-layer concept by name.
-/// - The `load_hint` field is an opaque string; the Kernel never interprets
-///   its semantics.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ResourceRef {
-    /// Unique identifier for this resource. Passed to `context.load.v0` to
-    /// fetch the full content.
-    pub id: String,
-    /// Human-readable title for display in progressive-disclosure UIs.
-    pub title: String,
-    /// One-line summary of the resource content.
-    pub summary: String,
-    /// Opaque origin label supplied by the external hook, such as
-    /// "ref:guidelines" or "doc:onboarding". The Kernel stores and forwards
-    /// this value but does not interpret product-layer semantics.
-    pub source: String,
-    /// Estimated token cost to load and include this resource. Used for
-    /// context budget planning.
-    pub estimated_token_cost: usize,
-    /// Opaque hint to the External Harness about how to load or prioritise
-    /// this resource. The Kernel never inspects its content.
-    pub load_hint: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -402,18 +227,9 @@ pub struct HookCallReceipt {
 // HookValidationError
 // ---------------------------------------------------------------------------
 
-/// Errors raised when validating hook configuration or fragment content.
+/// Errors raised when validating hook configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 pub enum HookValidationError {
-    /// Fragment content exceeds the configured `max_response_bytes`.
-    #[error("fragment content ({content_size} bytes) exceeds maximum ({max_bytes} bytes)")]
-    ContentTooLarge {
-        /// Actual content size in bytes.
-        content_size: u64,
-        /// Allowed maximum in bytes.
-        max_bytes: u64,
-    },
-
     /// A configured limit exceeds its hard-coded safety bound.
     #[error("hook limit {field} = {value} exceeds maximum allowed {max}")]
     LimitExceeded {

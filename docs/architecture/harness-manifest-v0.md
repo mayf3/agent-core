@@ -108,7 +108,7 @@ how to register it, and how to roll back.
 |-------|------|-------------|
 | `schema_version` | string | Must be `"harness-manifest-v0"` |
 | `harness_id` | string | Unique identifier within the Kernel instance. Must match directory name convention: `~/.agent-core/harnesses/<harness_id>/` |
-| `kind` | string | Must be a known `HookKind` value: `context.prepare.v0`, `ingress.route.v0`, `context.load.v0`, `context.compress.v0`, `event.observe.v0`, `decision.policy.v0` |
+| `kind` | string | Must be a known `HookKind` value: `context.prepare.v0`, `ingress.route.v0`, `context.load.v0`, `event.observe.v0`, `decision.policy.v0` |
 | `entrypoint` | object | How to start the Harness server. Contains `command` (string) and `cwd` (string, relative to harness root) |
 | `endpoint` | object | Hook endpoint configuration. Contains `url` (string) and `local_only` (boolean) |
 
@@ -171,7 +171,7 @@ manifest parser. The schema is strict.
 
 - Must be a known `HookKind` value.
 - v0 known kinds: `context.prepare.v0`, `ingress.route.v0`, `context.load.v0`,
-  `context.compress.v0`, `event.observe.v0`, `decision.policy.v0`.
+  `event.observe.v0`, `decision.policy.v0`.
 - Unknown kinds are rejected.
 
 ### `entrypoint`

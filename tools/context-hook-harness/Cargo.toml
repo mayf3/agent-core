@@ -1,0 +1,10 @@
+[package]
+name = "context-hook-harness"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+agent-core-kernel = { path = "../.." }
+anyhow = "1"
+chrono = "0.4"
+serde_json = "1"

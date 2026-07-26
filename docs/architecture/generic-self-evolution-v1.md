@@ -53,7 +53,6 @@ kits, compatibility, lifecycle, and health semantics for:
 - `event.observe.v0`
 - `context.prepare.v0`
 - `context.load.v0`
-- `context.compress.v0`
 - `route.proposal.v0`
 - `run.create.v0`
 - `component.invoke.v0`

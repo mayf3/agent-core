@@ -205,7 +205,7 @@ Effect    : perform a real side effect, gated by an Allow Decision + Receipt
 |---|---|---|---|
 | Observe | external → read Kernel | expose durable facts; enforce read scope | `event.observe.v0` hook (`src/hook/types.rs:19-49`), SQLite read paths (`src/journal/sqlite_read.rs`) |
 | Propose | external → submit to Kernel | schema-validate, authenticate, authorize, create the real Intent/Run | `/v1/ingress` gateway (`src/gateway/`); HCR claim + Run binding (`src/hcr/worker.rs:35`); capability proposal (`src/journal/capability_proposal_hcr.rs:11`) |
-| Transform | external → mutate in-flight payload | re-validate non-bypassable invariants after the transform | `context.prepare.v0` hook inserting `ContextBlockKind::HookFragment` (`src/runtime/hook_call.rs:37-49`); RFC final guard (`docs/architecture-rfc.md` §5) |
+| Transform | external → mutate in-flight payload | re-validate non-bypassable invariants after the transform | `context.prepare.v0` returns opaque artifacts; Kernel verifies bindings and the Model Adapter validates/materializes the final input |
 | Effect | external → real world | mint Intent → get Allow Decision → dispatch adapter → record Receipt | outbox dispatch (`src/journal/outbox_queue.rs`), `InvocationAdapter` trait (`src/adapters/mod.rs:11`), `ReceiptReceived` fact |
 
 The crucial invariant: **a Propose can never directly become an Effect.** Every
@@ -884,7 +884,7 @@ GENUINE_PRIMITIVE_GAP
 |---|---|---|
 | **Token Dashboard** | `EXPRESSIBLE_WITH_CURRENT_CANDIDATES` | An external Observe(§4) component reading durable facts (K6 Journal events, K4 Run status) and rendering usage. The Kernel already exposes read paths (`src/journal/sqlite_read.rs`). Missing: an external dashboard component — not a primitive. |
 | **Long-term Memory** | `EXPRESSIBLE_WITH_CURRENT_CANDIDATES` | External memory store keyed by Identity(K1)/Scope(K2); the Kernel contributes Session(K2) + ordered Events(K6). Compression summarization pointer already exists on sessions. Missing: external memory component — not a primitive. |
-| **Automatic Compression** | `EXPRESSIBLE_WITH_CURRENT_CANDIDATES` | A `context.compress.v0` hook (Transform mode, §4) already exists (`src/hook/types.rs:19-49`); ContextBlock has `Compressibility` (`src/domain/context_block.rs:36-42`). The composition is `Transform(§4) payload per Run(K4)`. Missing: a compression policy/component — not a primitive. |
+| **Automatic Compression** | `EXPRESSIBLE_WITH_CURRENT_CANDIDATES` | An external Provider may transform an opaque CandidateInput through the generic `context.prepare.v0` hook. The Kernel verifies bindings and the Model Adapter materializes the final artifact and decides hard budget. Compression policy is external, not a primitive. |
 | **Scheduled Briefing** | `EXPRESSIBLE_WITH_CURRENT_CANDIDATES` | An external Scheduler (row 22) Propose(§4) creating a Run(K4) on a schedule. The Kernel needs no cron platform (§12). Missing: external scheduler + briefing profile — not a primitive. (§13 shows Time alone does not justify a primitive.) |
 | **Replaceable Router** | `EXPRESSIBLE_WITH_CURRENT_CANDIDATES` | Router = external Propose(§4); the Kernel only validates + creates Intent(K5)/Run(K4) (row 21). Current routers are in-process by design. Externalizing is an implementation step — not a primitive. |
 | **Multi-profile Collaboration** | `EXPRESSIBLE_WITH_CURRENT_CANDIDATES` | Multiple Runs of different profiles composed via Identity(K1) + Scope(K2) + `correlation_id` on journal events (`src/domain/mod.rs:376`). `agent_id` foreign key already supports it (row 1). Missing: multi-profile runtime/profile type (row 27) — implementation, not a primitive. |
@@ -955,7 +955,7 @@ Recorded conflicts (this document records them; it does not resolve them):
 2. **Hook verbs.** This model speaks of Observe/Propose/Transform/Effect as hook
    subtypes. The *current code* names hook kinds as lifecycle points
    (`ingress.route.v0`, `context.prepare.v0`, `context.load.v0`,
-   `context.compress.v0`, `event.observe.v0`, `decision.policy.v0`,
+   `event.observe.v0`, `decision.policy.v0`,
    `src/hook/types.rs:19-49`). The mapping between the two vocabularies is many-
    to-many and is not enforced. **Suggestion only:** keep the lifecycle-point
    naming as the code authority; treat the four verbs as a conceptual lens.

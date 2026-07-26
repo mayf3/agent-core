@@ -287,8 +287,6 @@ fn coding_manifest_llm_input_receives_complete_tool_definitions() {
         fallback_openai_api_key: String::new(),
         fallback_model: String::new(),
         model_timeout_ms: 5000,
-        context_recent_messages: 10,
-        context_max_block_chars: 10000,
         outbox_dispatcher_enabled: false,
         outbox_dispatcher_poll_interval_ms: 1000,
         extra_allowed_operations: vec![
