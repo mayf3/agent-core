@@ -5,7 +5,7 @@
 
 use agent_core_kernel::domain::*;
 use agent_core_kernel::gateway::Gateway;
-use agent_core_kernel::hook::{HookClient, HookConfig, HookKind, HttpHookClient, HookEndpoint, HookFailureMode};
+use agent_core_kernel::hook::{HookConfig, HookKind, HookEndpoint, HookFailureMode};
 use agent_core_kernel::journal::JournalStore;
 use agent_core_kernel::llm::{LlmClient, LlmInput, LlmOutput, ToolCall, ToolCallResult};
 use agent_core_kernel::runtime::Runtime;
@@ -84,17 +84,16 @@ impl LlmClient for MultiToolLlm {
 #[test]
 fn context_compress_e2e_with_external_provider() -> Result<()> {
     let _provider = SimpleCompactorProcess::start();
-    let hook_cfg = HookConfig {
+    let mut config = common::test_config();
+    config.max_tool_rounds = 4;
+    // Standard config: set context_compress_hook directly (no .with_hook())
+    config.context_compress_hook = HookConfig {
         enabled: true, kind: HookKind::ContextCompressV0,
         endpoint: HookEndpoint { url: _provider.endpoint() },
         timeout_ms: 10_000, max_request_bytes: 1048576, max_response_bytes: 1048576,
         max_fragments: 20, failure_mode: HookFailureMode::FailOpen,
     };
-    let hook_client: Box<dyn HookClient> = Box::new(HttpHookClient::new());
-    let mut config = common::test_config();
-    config.max_tool_rounds = 4;
-    let runtime = Runtime::new(config.clone(), MultiToolLlm { round: Arc::new(Mutex::new(0)) })
-        .with_hook(hook_client, hook_cfg);
+    let runtime = Runtime::new(config.clone(), MultiToolLlm { round: Arc::new(Mutex::new(0)) });
     let journal = JournalStore::in_memory()?;
     let gateway = Gateway::new(config);
     let envelope = gateway.cli_ingress("check system status".to_string())?;

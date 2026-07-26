@@ -261,8 +261,8 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
         provider_tools: &[serde_json::Value],
         follow_ups: &[LlmFollowUp],
     ) -> Result<LlmOutput> {
-        // ── context.compress.v0 for follow-up invocations ─────────────
-        if let (Some(ref client), Some(ref hook_cfg)) = (&self.hook_client, &self.hook_config) {
+	        // ── context.compress.v0 for follow-up invocations ─────────────
+	        if let (Some(ref client), Some(ref hook_cfg)) = (&self.compress_hook_client, &self.compress_hook_config) {
             if hook_cfg.enabled && hook_cfg.kind == crate::hook::HookKind::ContextCompressV0 {
                 let _ = crate::runtime::hook_call::call_context_compress(
                     blocks,

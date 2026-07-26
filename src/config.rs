@@ -96,6 +96,8 @@ pub struct KernelConfig {
     pub tool_loop_timeout_ms: u64,
     /// context.prepare.v0 hook config. Default disabled. Env: AGENT_CORE_CONTEXT_PREPARE_HOOK_*.
     pub context_prepare_hook: HookConfig,
+    /// context.compress.v0 hook config. Default disabled. Env: AGENT_CORE_CONTEXT_COMPRESS_HOOK_*.
+    pub context_compress_hook: HookConfig,
 }
 
 impl KernelConfig {
@@ -190,6 +192,16 @@ impl KernelConfig {
                 },
                 failure_mode: env_hook_failure_mode("AGENT_CORE_CONTEXT_PREPARE_HOOK_FAILURE_MODE"),
                 timeout_ms: env_u64("AGENT_CORE_CONTEXT_PREPARE_HOOK_TIMEOUT_MS", 5_000),
+                ..Default::default()
+            },
+        context_compress_hook: HookConfig {
+                enabled: env_bool("AGENT_CORE_CONTEXT_COMPRESS_HOOK_ENABLED", false),
+                kind: HookKind::ContextCompressV0,
+                endpoint: HookEndpoint {
+                    url: env_string("AGENT_CORE_CONTEXT_COMPRESS_HOOK_URL", ""),
+                },
+                failure_mode: env_hook_failure_mode("AGENT_CORE_CONTEXT_COMPRESS_HOOK_FAILURE_MODE"),
+                timeout_ms: env_u64("AGENT_CORE_CONTEXT_COMPRESS_HOOK_TIMEOUT_MS", 5_000),
                 ..Default::default()
             },
         }
