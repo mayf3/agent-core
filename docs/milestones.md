@@ -4,6 +4,8 @@ This file is the施工单. It deliberately excludes long-term protocol detail; s
 [Architecture RFC](./architecture-rfc.md) for invariants and future contracts.
 For the final product shape and macro roadmap, see
 [Product Roadmap](./product-roadmap.md).
+For context bounding and external Context Hook boundary, see
+[Context Materialization Hook](./architecture/context-materialization-hook.md).
 
 ## Current Status
 
