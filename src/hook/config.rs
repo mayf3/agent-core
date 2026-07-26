@@ -15,7 +15,7 @@ use crate::hook::{HookEndpoint, HookFailureMode, HookKind, HookLimits, HookValid
 ///
 /// The default is a **disabled** hook with safe resource limits — it will
 /// never be invoked at runtime.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HookConfig {
     /// When `false`, this hook is never invoked. **Default: false.**
@@ -31,11 +31,16 @@ pub struct HookConfig {
     pub max_request_bytes: u64,
     /// Maximum serialised response body size in bytes. Default 1 MiB.
     pub max_response_bytes: u64,
-    /// Maximum number of `ContextFragment` entries the hook may return.
-    /// Default 20.
-    pub max_fragments: usize,
     /// Behaviour when the hook call fails. **Default: `disabled`.**
     pub failure_mode: HookFailureMode,
+    /// Trusted identity assigned by configuration to the endpoint binding.
+    /// Response payloads cannot override this value.
+    #[serde(default)]
+    pub provider_id: String,
+    /// Shared credential used for request authorization and response proof.
+    /// It is never serialized into Journal events.
+    #[serde(default)]
+    pub shared_secret: String,
 }
 
 impl Default for HookConfig {
@@ -47,9 +52,27 @@ impl Default for HookConfig {
             timeout_ms: 5_000,
             max_request_bytes: 1024 * 1024,
             max_response_bytes: 1024 * 1024,
-            max_fragments: 20,
             failure_mode: HookFailureMode::Disabled,
+            provider_id: String::new(),
+            shared_secret: String::new(),
         }
+    }
+}
+
+impl std::fmt::Debug for HookConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("HookConfig")
+            .field("enabled", &self.enabled)
+            .field("kind", &self.kind)
+            .field("endpoint", &self.endpoint)
+            .field("timeout_ms", &self.timeout_ms)
+            .field("max_request_bytes", &self.max_request_bytes)
+            .field("max_response_bytes", &self.max_response_bytes)
+            .field("failure_mode", &self.failure_mode)
+            .field("provider_id", &self.provider_id)
+            .field("shared_secret", &"[REDACTED]")
+            .finish()
     }
 }
 
@@ -75,11 +98,20 @@ impl HookConfig {
                 message: "enabled hook must not have failure_mode = disabled".into(),
             });
         }
+        if self.provider_id.trim().is_empty() {
+            return Err(HookValidationError::Invalid {
+                message: "enabled hook must have a bound provider_id".into(),
+            });
+        }
+        if self.shared_secret.is_empty() {
+            return Err(HookValidationError::Invalid {
+                message: "enabled hook must have a shared credential".into(),
+            });
+        }
         let limits = HookLimits {
             timeout_ms: self.timeout_ms,
             max_request_bytes: self.max_request_bytes,
             max_response_bytes: self.max_response_bytes,
-            max_fragments: self.max_fragments,
         };
         limits.validate()
     }
@@ -91,7 +123,6 @@ impl From<&HookConfig> for HookLimits {
             timeout_ms: cfg.timeout_ms,
             max_request_bytes: cfg.max_request_bytes,
             max_response_bytes: cfg.max_response_bytes,
-            max_fragments: cfg.max_fragments,
         }
     }
 }

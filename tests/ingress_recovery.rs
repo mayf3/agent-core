@@ -138,8 +138,6 @@ fn test_config() -> KernelConfig {
         fallback_openai_api_key: String::new(),
         fallback_model: String::new(),
         model_timeout_ms: 100,
-        context_recent_messages: 6,
-        context_max_block_chars: 4_000,
         outbox_dispatcher_enabled: false,
         outbox_dispatcher_poll_interval_ms: 100,
         extra_allowed_operations: vec![],
