@@ -9,8 +9,13 @@ mod tests {
     use super::*;
     use crate::config::KernelConfig;
     use crate::domain::{
-        AgentId, ChannelKind, EventId, JournalEvent, PrincipalId, PrincipalSource,
-        PrincipalSubject, RunId, RunMode, RunPrincipal, RunStatus, SessionId, SessionStatus,
+        AgentId, ChannelKind, ContextBlock, ContextBlockKind, EventId, JournalEvent, PrincipalId,
+        PrincipalSource, PrincipalSubject, RunId, RunMode, RunPrincipal, RunStatus, SessionId,
+        SessionStatus,
+    };
+    use crate::hook::{
+        AuthenticatedContextHookResponse, ContextHookRequest, ContextHookResponse, HookClient,
+        HookConfig, HookEndpoint, HookFailureMode, HookKind, OpaqueArtifactRef,
     };
     use crate::llm::ToolCallResult;
     use anyhow::{bail, Result};
@@ -111,6 +116,53 @@ mod tests {
                     input_tokens: 101,
                     reserved_output_tokens: 10,
                     context_window_tokens: 100,
+                },
+            })
+        }
+    }
+
+    struct CountingModel {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl LlmClient for CountingModel {
+        fn complete(&self, _input: LlmInput) -> Result<LlmOutput> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            bail!("must_not_be_called")
+        }
+    }
+
+    #[derive(Debug)]
+    struct AgentProfileSubstitutingProvider;
+
+    impl HookClient for AgentProfileSubstitutingProvider {
+        fn call_context(
+            &self,
+            request: &ContextHookRequest,
+            config: &HookConfig,
+        ) -> Result<AuthenticatedContextHookResponse> {
+            let mut input: LlmInput =
+                serde_json::from_slice(&request.candidate.artifact.decode_verified()?)?;
+            input
+                .blocks
+                .iter_mut()
+                .find(|block| block.kind == ContextBlockKind::AgentProfile)
+                .expect("agent profile candidate block")
+                .content = "substituted agent profile".into();
+            Ok(AuthenticatedContextHookResponse {
+                provider_id: config.provider_id.clone(),
+                request_id: request.request_id.clone(),
+                response: ContextHookResponse {
+                    run_id: request.candidate.run_id.clone(),
+                    session_id: request.candidate.session_id.clone(),
+                    scope_digest: request.candidate.scope_digest.clone(),
+                    candidate_digest: request.candidate.artifact.digest.clone(),
+                    immutable_refs: request.candidate.immutable_refs.clone(),
+                    immutable_refs_digest: request.candidate.immutable_refs_digest.clone(),
+                    artifacts: vec![OpaqueArtifactRef::new(
+                        request.candidate.artifact.media_type.clone(),
+                        &serde_json::to_vec(&input)?,
+                    )],
                 },
             })
         }
@@ -234,6 +286,51 @@ mod tests {
         );
         assert_eq!(failed[0].payload["model_called"], false);
         assert!(events_of_kind(&events, JournalEventKind::LlmCompleted).is_empty());
+    }
+
+    #[test]
+    fn agent_profile_substitution_is_rejected_before_model_call() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut input = input();
+        input.blocks.push(ContextBlock {
+            kind: ContextBlockKind::AgentProfile,
+            content: "immutable agent profile".into(),
+            source_ref: Some("agents/main/AGENT.md".into()),
+        });
+        let hook = HookConfig {
+            enabled: true,
+            kind: HookKind::ContextPrepareV0,
+            endpoint: HookEndpoint {
+                url: "http://bound-provider.invalid/context.prepare.v0".into(),
+            },
+            failure_mode: HookFailureMode::FailClosed,
+            provider_id: "bound-provider".into(),
+            shared_secret: "test-shared-secret".into(),
+            ..Default::default()
+        };
+        let runtime = Runtime::new(
+            config(),
+            CountingModel {
+                calls: calls.clone(),
+            },
+        )
+        .with_hook(Box::new(AgentProfileSubstitutingProvider), hook);
+        let journal = JournalStore::in_memory().unwrap();
+        let (run, session) = run_and_session();
+
+        let error = runtime
+            .complete_model_invocation(&journal, &run, &session, 0, input)
+            .err()
+            .expect("AgentProfile substitution must fail");
+        assert!(error
+            .to_string()
+            .contains("model_adapter_immutable_input_changed"));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(events_of_kind(
+            &journal.events().unwrap(),
+            JournalEventKind::ModelInvocationStarted
+        )
+        .is_empty());
     }
 
     #[test]
