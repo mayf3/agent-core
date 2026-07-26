@@ -113,33 +113,65 @@ fn context_compress_e2e_with_external_provider() -> Result<()> {
         && e.payload.get("status").and_then(|v| v.as_str()) == Some("Succeeded")
     }).collect();
 
-    eprintln!("MODEL_COMPLETIONS={model_completions} COMPRESS_CALLS={} TOOL_RECEIPTS={}", compress_calls.len(), tool_receipts.len());
+    // Analyze compress call modes
+    let passthrough_count = compress_calls.iter()
+        .filter(|e| e.payload.get("mode").and_then(|v| v.as_str()) == Some("passthrough")).count();
+    let compacted_count = compress_calls.iter()
+        .filter(|e| e.payload.get("mode").and_then(|v| v.as_str()) == Some("compacted")).count();
+
+    // Capture digests from compacted calls
+    let compacted_digests: Vec<&str> = compress_calls.iter()
+        .filter(|e| e.payload.get("mode").and_then(|v| v.as_str()) == Some("compacted"))
+        .filter_map(|e| e.payload.get("plan_digest").and_then(|v| v.as_str()))
+        .collect();
+
+    eprintln!("MODEL_COMPLETIONS={} COMPRESS_CALLS={} PASSTHROUGH={} COMPACTED={}",
+        model_completions, compress_calls.len(), passthrough_count, compacted_count);
+    for e in &compress_calls {
+        eprintln!("  COMPRESS payload={:?}", e.payload);
+    }
 
     // Every tool call succeeded
     for r in &tool_receipts {
         assert_eq!(r.payload.get("status").and_then(|v| v.as_str()), Some("Succeeded"));
     }
-    assert!(tool_receipts.len() >= 2, ">=2 tool receipts");
+    assert!(tool_receipts.len() >= 2, ">=2 tool receipts, got {}", tool_receipts.len());
     assert!(compress_calls.len() >= model_completions,
         "at least as many compress calls ({}) as model completions ({})",
         compress_calls.len(), model_completions);
-    for r in &tool_receipts {
-        let st = r.payload.get("status").and_then(|v| v.as_str()).unwrap_or("?");
-        eprintln!("  TOOL seq={} status={}", r.sequence, st);
+    // Must have at least one compacted round
+    assert!(compacted_count >= 1, "at least 1 compacted compress call, got {compacted_count}");
+
+    // Print compacted evidence
+    for e in &compress_calls {
+        if e.payload.get("mode").and_then(|v| v.as_str()) == Some("compacted") {
+            eprintln!("  COMPACTED_CALL seq={} plan_digest={} estimated_size={:?}",
+                e.sequence,
+                e.payload.get("plan_digest").and_then(|v| v.as_str()).unwrap_or("?"),
+                e.payload.get("estimated_size").and_then(|v| v.as_u64()));
+        }
     }
 
     println!("=== E2E Evidence ===");
     println!("RUN_ID={}", outcome.run_id.0);
-    eprintln!("EVENT_COUNT={}", re.len());
     for e in &re {
-        println!("  seq={} kind={:?} hook={} op={} status={}",
-            e.sequence, e.kind,
-            e.payload.get("hook").and_then(|v| v.as_str()).unwrap_or(""),
+        let hook_val = e.payload.get("hook").and_then(|v| v.as_str()).unwrap_or("");
+        let mode_val = e.payload.get("mode").and_then(|v| v.as_str()).unwrap_or("");
+        println!("  seq={} kind={:?} hook={} mode={} op={} status={}",
+            e.sequence, e.kind, hook_val, mode_val,
             e.payload.get("operation").and_then(|v| v.as_str()).unwrap_or(""),
             e.payload.get("status").and_then(|v| v.as_str()).unwrap_or(""));
     }
     println!("MODEL_COMPLETIONS={model_completions}");
     println!("COMPRESS_CALLS={}", compress_calls.len());
+    println!("PASSTHROUGH_COUNT={passthrough_count}");
+    println!("COMPACTED_COUNT={compacted_count}");
+    if !compacted_digests.is_empty() {
+        println!("COMPACTED_PLAN_DIGEST={}", compacted_digests[0]);
+        if compacted_digests.len() > 1 {
+            println!("POST_COMPACTED_PLAN_DIGEST={}", compacted_digests[1]);
+        }
+    }
     println!("TOOL_RECEIPTS={}", tool_receipts.len());
     Ok(())
 }
