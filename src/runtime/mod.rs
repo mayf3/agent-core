@@ -4,7 +4,7 @@ use crate::domain::*;
 use crate::gateway::Gateway;
 use crate::hook::{HookClient, HookConfig};
 use crate::journal::JournalStore;
-use crate::llm::{LlmClient, LlmInput};
+use crate::llm::{LlmClient, LlmFollowUp, LlmInput};
 use crate::registry::snapshot::RegistrySnapshot;
 use anyhow::Result;
 use serde_json::json;
@@ -122,6 +122,44 @@ where
         self.hook_client = Some(client);
         self.hook_config = Some(config);
         self
+    }
+
+    /// Unified input preparation: clone persistent context, apply
+    /// context.compress.v0 if configured, validate, and return final LlmInput.
+    /// Never takes ownership of persistent state — always clones.
+    pub(crate) fn prepare_llm_input(
+        &self,
+        journal: &JournalStore,
+        run: &Run,
+        session: &Session,
+        blocks: &[ContextBlock],
+        user_text: &str,
+        provider_tools: &[serde_json::Value],
+        follow_ups: &[LlmFollowUp],
+    ) -> LlmInput {
+        let mut final_blocks = blocks.to_vec();
+        if let (Some(ref client), Some(ref hook_cfg)) = (&self.compress_hook_client, &self.compress_hook_config) {
+            if hook_cfg.enabled && hook_cfg.kind == crate::hook::HookKind::ContextCompressV0 {
+                let _ = crate::runtime::hook_call::call_context_compress(
+                    &mut final_blocks,
+                    client.as_ref(),
+                    hook_cfg,
+                    journal,
+                    &run.id,
+                    &session.id,
+                    &self.config.agent_id.0,
+                    &self.config.model,
+                    self.config.context_max_block_chars,
+                );
+            }
+        }
+        LlmInput {
+            blocks: final_blocks,
+            user_text: user_text.to_string(),
+            granted_operations: run.principal.grants.iter().map(|g| g.operation.clone()).collect(),
+            provider_tools: provider_tools.to_vec(),
+            follow_ups: follow_ups.to_vec(),
+        }
     }
     /// Phase 2 M2d: decide whether an approved invocation is dispatched now or
     /// paused for human approval. ReadOnly ops queue immediately; Write ops
@@ -296,39 +334,10 @@ where
             }
         }
 
-        // ── context.compress.v0 hook ─────────────────────────────────────
-        if let (Some(ref client), Some(ref hook_cfg)) = (&self.compress_hook_client, &self.compress_hook_config) {
-            if hook_cfg.enabled && hook_cfg.kind == crate::hook::HookKind::ContextCompressV0 {
-                match crate::runtime::hook_call::call_context_compress(
-                    &mut blocks,
-                    client.as_ref(),
-                    hook_cfg,
-                    journal,
-                    &run.id,
-                    &session.id,
-                    &self.config.agent_id.0,
-                    &self.config.model,
-                    self.config.context_max_block_chars,
-                )? {
-                    crate::runtime::hook_call::ContextCompressOutcome::OverBudget => {
-                        journal.fail_run(&run.id)?;
-                        journal.append_event(
-                            JournalEventKind::RunFailed,
-                            Some(&run.id),
-                            Some(&session.id),
-                            None,
-                            json!({ "run_id": run.id.0, "error_category": "context_compaction_failed" }),
-                        )?;
-                        return self.reply_with_failure(
-                            journal, gateway, &snapshot, &run, &session,
-                            message_id, chat_id,
-                            "当前上下文超过模型预算且压缩失败，本轮已结束。请重试。",
-                        );
-                    }
-                    _ => { /* Applied, Passthrough, Degraded — all continue */ }
-                }
-            }
-        }
+        // ── context.compress.v0 + prepare LlmInput ────────────────────
+        let llm_input = self.prepare_llm_input(
+            journal, &run, &session, &blocks, &text, &provider_tools, &[],
+        );
 
         // Phase 1: initial LLM call. On failure, record RunFailed and deliver
         // a static notification (never a silent Err).
@@ -337,13 +346,7 @@ where
             &run,
             &session,
             0,
-            LlmInput {
-                blocks: blocks.clone(),
-                user_text: text.clone(),
-                granted_operations: granted_operations.clone(),
-                provider_tools: provider_tools.clone(),
-                follow_ups: vec![],
-            },
+            llm_input,
         ) {
             Ok(llm) => llm,
             Err(_) => {
