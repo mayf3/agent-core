@@ -4,7 +4,9 @@
 //! without requiring live services.
 
 use agent_core_kernel::domain::JournalEventKind;
-use agent_core_kernel::journal::{event_observe::EventObserveQuery, JournalStore};
+use agent_core_kernel::journal::{
+    event_observe::EventObserveQuery, JournalStore,
+};
 use serde_json::json;
 
 fn make_journal() -> JournalStore {
@@ -46,11 +48,7 @@ fn activation_failed_does_not_block_new_proposal() {
         .iter()
         .filter(|e| e.event_kind == "CapabilityChangeActivationFailed")
         .collect();
-    assert_eq!(
-        failed.len(),
-        1,
-        "should have one CapabilityChangeActivationFailed"
-    );
+    assert_eq!(failed.len(), 1, "should have one CapabilityChangeActivationFailed");
 
     // Record a new proposal event after the failure
     journal
@@ -87,10 +85,7 @@ fn activation_failed_does_not_block_new_proposal() {
         1,
         "should have one CapabilityChangeProposed even after failure"
     );
-    assert_eq!(
-        failed[0].event_kind, "CapabilityChangeActivationFailed",
-        "event kind should be ActivationFailed"
-    );
+    assert_eq!(failed[0].event_kind, "CapabilityChangeActivationFailed", "event kind should be ActivationFailed");
     assert_eq!(
         proposals[0].payload["proposal_id"], "prop_new",
         "proposal payload should be intact"
