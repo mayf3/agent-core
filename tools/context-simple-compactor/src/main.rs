@@ -6,7 +6,7 @@ fn main() {
     let listener = std::net::TcpListener::bind("127.0.0.1:7202").expect("bind");
     for stream in listener.incoming() {
         match stream {
-            Ok(s) => std::thread::spawn(|| handle(s)),
+            Ok(s) => { std::thread::spawn(|| handle(s)); },
             Err(e) => eprintln!("accept error: {e}"),
         }
     }
@@ -77,7 +77,7 @@ fn handle(mut stream: std::net::TcpStream) {
         if is_tool_result && text.len() > max_preview {
             let original_bytes = text.len();
             let digest = {
-                let mut h = sha2::Sha256::new();
+                let mut h = sha2::Sha256::default();
                 h.update(text.as_bytes());
                 hex::encode(h.finalize())
             };
@@ -98,7 +98,7 @@ fn handle(mut stream: std::net::TcpStream) {
         } else {
             let original_bytes = text.len();
             let digest = {
-                let mut h = sha2::Sha256::new();
+                let mut h = sha2::Sha256::default();
                 h.update(text.as_bytes());
                 hex::encode(h.finalize())
             };
@@ -112,7 +112,7 @@ fn handle(mut stream: std::net::TcpStream) {
     }
 
     let plan_digest = {
-        let mut h = sha2::Sha256::new();
+        let mut h = sha2::Sha256::default();
         for pi in &plan_items {
             h.update(serde_json::to_string(pi).unwrap_or_default().as_bytes());
         }
@@ -156,3 +156,4 @@ fn respond(stream: &mut std::net::TcpStream, status: u16, body: &str) -> std::io
 
 use std::io::Write;
 use std::io::Read;
+use sha2::Digest;
