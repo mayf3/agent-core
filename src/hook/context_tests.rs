@@ -379,7 +379,9 @@ fn context_prepare_resource_refs_allowed_but_not_loaded() -> Result<()> {
         fragments: vec![],
         resource_refs: vec![resource],
         inject_error: None,
-    };
+    compress_response: None,
+            compress_inject_error: None,
+        };
     let cfg = HookConfig {
         enabled: true,
         kind: HookKind::ContextPrepareV0,

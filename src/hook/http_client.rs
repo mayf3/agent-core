@@ -104,4 +104,77 @@ impl HookClient for HttpHookClient {
             }
         }
     }
+
+    fn call_context_compress(
+        &self,
+        request: &crate::hook::ContextCompressRequest,
+        config: &HookConfig,
+    ) -> Result<crate::hook::ContextCompressResponse> {
+        let url = config.endpoint.url.trim();
+        if url.is_empty() {
+            bail!("endpoint_missing");
+        }
+
+        let limits: crate::hook::HookLimits = config.into();
+
+        let envelope = serde_json::json!({
+            "hook": "context.compress.v0",
+            "request_id": format!("ctx_{}", uuid::Uuid::new_v4().simple()),
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+            "payload": request,
+        });
+
+        let agent = ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_millis(limits.timeout_ms)))
+            .build()
+            .new_agent();
+
+        let response = agent
+            .post(url)
+            .header("content-type", "application/json")
+            .send_json(envelope);
+
+        match response {
+            Ok(resp) => {
+                let max_bytes = limits.max_response_bytes as usize;
+                let body_str = resp.into_body().read_to_string()?;
+                if body_str.len() > max_bytes {
+                    bail!("response_too_large");
+                }
+
+                let resp_envelope: crate::hook::HookResponseEnvelope =
+                    serde_json::from_str(&body_str).map_err(|_| anyhow::anyhow!("invalid_json"))?;
+
+                if resp_envelope.hook != crate::hook::HookKind::ContextCompressV0 {
+                    bail!("unsupported_hook_response");
+                }
+
+                let compress_resp: crate::hook::ContextCompressResponse =
+                    serde_json::from_value(resp_envelope.payload)
+                        .map_err(|_| anyhow::anyhow!("invalid_json"))?;
+
+                Ok(compress_resp)
+            }
+            Err(ureq::Error::StatusCode(code)) => {
+                let label = if (400..=499).contains(&code) {
+                    "http_status_4xx"
+                } else if (500..=599).contains(&code) {
+                    "http_status_5xx"
+                } else {
+                    "http_status_unknown"
+                };
+                bail!("{label}:{code}");
+            }
+            Err(ureq::Error::Timeout(_)) => {
+                bail!("http_timeout");
+            }
+            Err(e) => {
+                let msg = e.to_string().to_lowercase();
+                if msg.contains("connection refused") || msg.contains("dns") {
+                    bail!("http_connect_error");
+                }
+                bail!("http_transport_error");
+            }
+        }
+    }
 }

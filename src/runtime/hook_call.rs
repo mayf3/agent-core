@@ -129,6 +129,83 @@ pub(crate) fn call_context_prepare(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// context.compress.v0 hook logic
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Invoke context.compress.v0 and return ContextPlan.
+pub(crate) fn call_context_compress(
+    blocks: &[ContextBlock],
+    hook_client: &dyn HookClient,
+    hook_cfg: &HookConfig,
+    journal: &JournalStore,
+    run_id: &RunId,
+    session_id: &SessionId,
+    agent_id: &str,
+    model_identity: &str,
+    model_context_budget: usize,
+) -> Result<()> {
+    if hook_cfg.kind != crate::hook::HookKind::ContextCompressV0 || !hook_cfg.enabled {
+        return Ok(());
+    }
+    let candidate: Vec<serde_json::Value> = blocks.iter().map(|b| serde_json::json!(b)).collect();
+    let compress_req = crate::hook::ContextCompressRequest {
+        hook: crate::hook::HookKind::ContextCompressV0,
+        run_id: run_id.0.clone(),
+        session_id: session_id.0.clone(),
+        agent_id: agent_id.to_string(),
+        through_event_id: format!("event:{}", run_id.0),
+        model_identity: model_identity.to_string(),
+        model_context_budget,
+        reserved_output_budget: model_context_budget / 4,
+        candidate_context_items: candidate,
+        context_scope_refs: vec![],
+    };
+    let start = std::time::Instant::now();
+    let hook_result = hook_client.call_context_compress(&compress_req, hook_cfg);
+    let duration_ms = start.elapsed().as_millis() as u64;
+    match hook_result {
+        Ok(resp) => {
+            journal.append_event(
+                JournalEventKind::HookCallRecorded,
+                Some(run_id),
+                Some(session_id),
+                None,
+                serde_json::json!({
+                    "hook": "context.compress.v0", "status": "ok",
+                    "provider_id": resp.provider_id,
+                    "mode": resp.mode,
+                    "plan_digest": resp.plan_digest,
+                    "estimated_size": resp.estimated_size,
+                    "duration_ms": duration_ms,
+                }),
+            )?;
+            Ok(())
+        }
+        Err(e) => {
+            let error_msg = e.to_string();
+            let (status, fmode) = match hook_cfg.failure_mode {
+                crate::hook::HookFailureMode::FailClosed => ("failed", "fail_closed"),
+                crate::hook::HookFailureMode::FailOpen => ("skipped", "fail_open"),
+                crate::hook::HookFailureMode::Degrade => ("degraded", "degrade"),
+                crate::hook::HookFailureMode::Disabled => ("disabled", "disabled"),
+            };
+            journal.append_event(
+                JournalEventKind::HookCallRecorded,
+                Some(run_id),
+                Some(session_id),
+                None,
+                serde_json::json!({
+                    "hook": "context.compress.v0", "status": status,
+                    "failure_mode": fmode, "error_code": error_msg,
+                    "duration_ms": duration_ms,
+                }),
+            )?;
+            Ok(())
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Runtime delivery helpers (echo, create_run, reply_intent)
 // ═══════════════════════════════════════════════════════════════════════════
 

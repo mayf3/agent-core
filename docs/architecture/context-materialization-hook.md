@@ -92,27 +92,28 @@ Kernel **只负责**以下上下文生命周期原语：
 
 | # | 职责 | 说明 |
 |---|------|------|
-| 1 | **检测和执行模型上下文预算** | 在组装最终模型请求前计算总 token 估计值，如果超出配置上限则执行降级 |
-| 2 | **完整保存原始内容** | Journal / Tool Receipt / ContentStore 中的原始数据必须完整持久化，不能因裁剪而丢失 |
-| 3 | **保证 tool_call 与 tool_result 成对** | 发送给模型的消息序列中，任何 `tool_call` 必须有对应的 `tool_result`（或明确的替代标记），不允许出现孤立的 tool message |
-| 4 | **保留不可变上下文** | 必要 system prompt、当前用户请求、治理上下文（权限、安全规则等）不受裁剪影响 |
-| 5 | **提供通用 Context Hook 调用点** | 在模型请求材料化（materialize）前提供同步调用点，让外部 Provider 有机会参与上下文决策 |
-| 6 | **验证 Hook 返回结果** | 验证返回引用的 session/run 边界、digest 一致性、预算合规性 |
-| 7 | **Hook 失败时机械降级** | 外部 Hook 超时、失败或返回非法结果时，使用确定性的内置策略确保模型调用仍可进行 |
-| 8 | **记录 Context Materialization 来源和结果** | 每次模型请求的上下文组装过程必须可审计：哪些内容来自 Hook、哪些是 fallback、预算占用多少 |
+| 1 | **在模型请求构造完成、正式发送前调用 `context.compress.v0`** | 同步调用点，Kernel 不判断"是否到了压缩阈值" |
+| 2 | **提供 Session、Run、Journal 上界、候选上下文和模型预算** | 传递给 Provider 的输入包含 session_id、run_id、through_event_id、candidate_context_items、model_context_budget |
+| 3 | **验证 Provider 返回的 ContextPlan** | 引用归属正确、不引用未来事件、必需上下文仍存在、tool_call/tool_result 配对合法、最终请求不超过当前模型配置的硬预算 |
+| 4 | **完整保存原始内容** | Journal / Tool Receipt / ContentStore 中的原始数据必须完整持久化，不能因裁剪而丢失 |
+| 5 | **提供通用 Context Hook 调用点** | 在模型请求材料化（materialize）前提供同步调用点，让外部 Provider 有机会参与上下文决策；复用现有 `context.prepare.v0` 调用点扩展 |
+| 6 | **记录使用的 Provider、ContextPlan digest 和失败原因** | 每次模型请求的上下文组装过程必须可审计：哪些内容来自 Hook、哪些是 fallback、预算占用多少 |
 
-### 2.2 Kernel 不得理解
+### 2.2 Kernel 不负责
 
-Kernel **不得理解**以下任何语义性策略：
+Kernel **不负责**以下任何策略性决策：
 
-| 禁止理解的内容 | 原因 |
+| 不负责的内容 | 原因 |
 |---------------|------|
+| 保留多少完整 tool-call/tool-result 对 | Provider 策略，由外部决定 |
+| 单条工具结果截断多少字节 | Provider 策略，由外部决定 |
+| 何时开始压缩（触发条件） | Provider 策略，由外部决定 |
+| 如何生成摘要 | 摘要是外部 Provider 的策略职责 |
+| 哪些信息重要 | Provider 策略，由外部决定 |
+| Repo Map、任务状态或代码语义 | 产品层概念，不属于 Kernel |
+| 内置第二套机械压缩算法 | Kernel 不做语义决策；由 Provider 通过 Hook 提供 |
 | 哪段代码重要 | 这是 Harness/Provider 的任务语义判断 |
 | 哪个错误应保留 | 摘要策略由外部决定 |
-| 测试做到哪一步 | 开发任务状态是产品层概念 |
-| 开发任务当前阶段 | 同左 |
-| 应使用什么摘要 Prompt | 摘要内容是外部策略的实现细节 |
-| 应选择摘要、检索、Repo Map 还是其他策略 | 策略选择是 Provider 的职责 |
 
 ---
 
@@ -320,71 +321,39 @@ ContextPlan        — Provider 返回的结构化上下文编排计划
 
 ---
 
-## 7. Kernel 的机械 fallback [Normative]
+## 7. Hook 失败行为 [Normative]
 
 ### 7.1 原则
 
-外部 Hook 不可用时（超时、崩溃、配置禁用、返回非法结果），Kernel **仍必须运行**。
+外部 Hook 不可用时（超时、崩溃、配置禁用、返回非法结果），Kernel 的行为取决于原始上下文是否超过模型配置硬预算。
 
-Fallback 是 Kernel 的保底行为，不是主要策略。fallback 的存在是为了保证系统在外部依赖异常时仍然可用，不是为了替代外部 Provider。
-
-### 7.2 Fallback 策略（第一版）
-
-第一版机械降级策略是可配置的：
+### 7.2 行为
 
 ```text
-1. 最近 N 组完整 tool-call / tool-result
-   - 保留最近的完整工具调用和结果
-   - N 是可配置运行参数（如 5 组）
+context.compress.v0 成功
+→ Kernel 验证 ContextPlan
+→ 验证通过则使用 Provider 的 ContextPlan
+→ 调用模型
 
-2. 单条大工具结果只向模型提供有限 preview
-   - 超过 M bytes 的工具结果只保留前 M bytes 作为 preview
-   - 完整结果继续保存在 Journal / ContentStore 中
-   - 模型可通过 ResourceRef 按需获取完整内容（当 context.load.v0 可用时）
+Hook 未配置或失败，但原始上下文仍在模型配置硬预算内
+→ 记录 degraded
+→ 使用原始上下文继续
+→ 调用模型
 
-3. 更早结果只提供 operation、status、digest、result_ref
-   - 超出最近 N 组的早期结果缩减为元数据条目
-   - 不丢失内容（Journal 中完整保留），只影响发送给模型的内容
-
-4. 不允许产生孤立的 tool message
-   - tool_call 和 tool_result 必须成对出现
-   - 如果一对必须被整体丢弃，则都丢弃
-   - 不允许只保留 tool_call 而丢弃对应的 tool_result
+Hook 失败且原始上下文超过模型配置硬预算
+→ 不调用模型
+→ 记录 context_compaction_failed
+→ 保留全部 Run/Journal 事实
+→ 明确结束本轮（Run 不标记为成功）
 ```
 
-### 7.3 Fallback 参数
+### 7.3 Kernel 不得执行
 
 ```text
-N              — 保留的完整 tool-call/tool-result 组数（默认 5）
-M              — 单条工具结果的 preview 字节上限（默认 4096）
-budget_chars   — 模型调用的总字符预算（运行配置，非硬编码）
-```
-
-**文档明确**：
-
-> `N`、`M` 和 `budget_chars` 是**运行配置**，不是长期语义策略。
-> 它们的存在是为了在外部 Hook 不可用时保证系统可用性；
-> 当外部 Provider 接入后，具体值由 Provider 的 ContextPlan 决定。
-
-### 7.4 Fallback 优先级顺序
-
-```text
-1. 检查 Hook 是否已启用且可用
-   ├─ 是 → 调用 Hook，验证返回
-   │   ├─ 返回合法 → 使用 Hook 的 ContextPlan
-   │   └─ 返回非法/超时 → 记录失败，进入 fallback
-   └─ 否（禁用/未配置） → 进入 fallback
-
-2. Fallback: 机械缩减
-   ├─ 保留 N 组完整 tool-call/tool-result
-   ├─ 单条结果超过 M bytes → preview + ref
-   ├─ 更早结果 → metadata + ref
-   └─ 保证 tool-call/tool-result 成对
-
-3. 组装最终模型上下文
-   ├─ 计算总预计 Token
-   ├─ 超出 budget_chars → 进一步裁减（从最早开始）
-   └─ 发送模型请求
+- Kernel 不得自行执行"最近 N 轮"或"单条 M 字节"的隐藏 fallback
+- Kernel 不得内置第二套机械压缩算法
+- Kernel 不得判断"是否到了压缩阈值"
+- 所有压缩策略决策属于外部 Provider
 ```
 
 ---
