@@ -185,22 +185,22 @@ pub fn handle(
         bail!("EVIDENCE_DIGEST_FORMAT: invalid evidence_digest");
     }
 
-	// 6f. Validate subject_digest matches the candidate_digest from the
-	//     validated response (the response's candidate_digest IS the subject_digest)
-	//     This is validated implicitly below when we parse the detailed response.
+    // 6f. Validate subject_digest matches the candidate_digest from the
+    //     validated response (the response's candidate_digest IS the subject_digest)
+    //     This is validated implicitly below when we parse the detailed response.
 
-		// 6g. Verify opaque_payload_digest — this binds the full detailed
-		//     acceptance response (including delivery_manifest_digest) to the
-		//     receipt.  We strip envelope-only keys to reconstruct the original
-		//     AcceptanceResponse bytes that were hashed by the Harness.
-		if let Some(ref expected_opaque) = envelope.opaque_payload_digest {
-		    let computed = verify_opaque_payload_digest(result_value)?;
-		    if *expected_opaque != computed {
-		        bail!("OPAQUE_PAYLOAD_MISMATCH");
-		    }
-		}
-	
-	// ── 7. Parse detailed response fields for persistence ────────────────
+    // 6g. Verify opaque_payload_digest — this binds the full detailed
+    //     acceptance response (including delivery_manifest_digest) to the
+    //     receipt.  We strip envelope-only keys to reconstruct the original
+    //     AcceptanceResponse bytes that were hashed by the Harness.
+    if let Some(ref expected_opaque) = envelope.opaque_payload_digest {
+        let computed = verify_opaque_payload_digest(result_value)?;
+        if *expected_opaque != computed {
+            bail!("OPAQUE_PAYLOAD_MISMATCH");
+        }
+    }
+
+    // ── 7. Parse detailed response fields for persistence ────────────────
     //
     // The envelope's opaque_payload binds the internal evidence. The Kernel
     // also extracts structural fields (gate_results, candidate_id, etc.)
@@ -335,9 +335,7 @@ pub fn handle(
 /// response.  Envelope-only keys are stripped to reconstruct the
 /// original `AcceptanceResponse` bytes that were hashed by the
 /// Harness.
-pub(crate) fn verify_opaque_payload_digest(
-    merged: &Value,
-) -> Result<String> {
+pub(crate) fn verify_opaque_payload_digest(merged: &Value) -> Result<String> {
     let mut detailed_only = merged.clone();
     // Envelope-only keys that are NOT part of AcceptanceResponse
     const ENVELOPE_ONLY: &[&str] = &[
@@ -355,8 +353,7 @@ pub(crate) fn verify_opaque_payload_digest(
         }
     }
     let detailed_bytes =
-        serde_json::to_vec(&detailed_only)
-            .map_err(|e| anyhow!("OPAQUE_SERIALIZATION: {e}"))?;
+        serde_json::to_vec(&detailed_only).map_err(|e| anyhow!("OPAQUE_SERIALIZATION: {e}"))?;
     Ok(format!(
         "sha256:{}",
         hex::encode(Sha256::digest(&detailed_bytes))
@@ -465,7 +462,8 @@ mod tests {
 
     #[test]
     fn delivery_manifest_digest_is_opaque_payload_bound() {
-        let dm_ref = "service_manifest_abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234";
+        let dm_ref =
+            "service_manifest_abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234";
         let dm_dig = format!("sha256:{}", "6".repeat(64));
         let merged = merged_response(Some(dm_ref), Some(&dm_dig));
         // Verification should pass — digest was computed from the correct content
@@ -502,7 +500,8 @@ mod tests {
 
     #[test]
     fn tampered_delivery_manifest_digest_is_rejected() {
-        let dm_ref = "service_manifest_abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234";
+        let dm_ref =
+            "service_manifest_abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234";
         let dm_dig = format!("sha256:{}", "6".repeat(64));
         let mut merged = merged_response(Some(dm_ref), Some(&dm_dig));
         // Tamper with delivery_manifest_digest

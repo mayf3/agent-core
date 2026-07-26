@@ -4,10 +4,10 @@ mod private_origin_tests;
 
 #[cfg(test)]
 mod component_manifest_tests {
+    use super::super::invocable::invocable_manifest;
     use crate::contract_catalog::CONTRACT_CATALOG_VERSION;
     use crate::domain::*;
     use serde_json::{json, Value};
-    use super::super::invocable::invocable_manifest;
 
     fn request() -> DevelopmentRequest {
         let mut draft = DevelopmentRequestDraft::new(

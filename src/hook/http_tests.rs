@@ -54,7 +54,7 @@ fn spawn_fake_hook(body: &str, status: u16) -> FakeHookServer {
             loop {
                 match stream.read(&mut discard) {
                     Ok(0) | Err(_) => break, // EOF or timeout → done
-                    Ok(_) => continue,        // more data to drain
+                    Ok(_) => continue,       // more data to drain
                 }
             }
         }
