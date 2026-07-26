@@ -161,6 +161,7 @@ pub(crate) fn call_context_compress(
     agent_id: &str,
     model_identity: &str,
     model_context_budget: usize,
+    full_input_estimate_bytes: usize,
 ) -> Result<ContextCompressOutcome> {
     if hook_cfg.kind != crate::hook::HookKind::ContextCompressV0 || !hook_cfg.enabled {
         return Ok(ContextCompressOutcome::NotConfigured);
@@ -185,7 +186,7 @@ pub(crate) fn call_context_compress(
         Ok(resp) => {
             let candidate_snapshot = blocks.clone();
             let plan_result = crate::runtime::context_compress::apply_context_plan(
-                &candidate_snapshot, &resp, model_context_budget,
+                &candidate_snapshot, &resp, model_context_budget, full_input_estimate_bytes,
             )?;
             match plan_result {
                 crate::runtime::context_compress::PlanApplicationResult::Applied(final_blocks) => {

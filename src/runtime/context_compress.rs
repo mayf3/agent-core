@@ -27,6 +27,12 @@ pub(crate) enum PlanApplicationResult {
 
 /// Validate and apply the ContextPlan.
 ///
+/// `full_input_estimate_bytes` is the approximate total byte size of the
+/// complete LlmInput that would be sent to the model (blocks + user_text +
+/// provider_tools schema + follow_ups + message overhead + reserved output).
+/// This is used for budget checks — if the full input exceeds budget,
+/// the plan is rejected or the run fails.
+///
 /// Returns:
 /// - `Ok(PlanApplicationResult::Applied(final))` — plan valid, applied successfully
 /// - `Ok(PlanApplicationResult::Degraded(original))` — plan invalid, original within budget
@@ -36,6 +42,7 @@ pub(crate) fn apply_context_plan(
     candidate: &[ContextBlock],
     plan: &ContextCompressResponse,
     model_context_budget: usize,
+    full_input_estimate_bytes: usize,
 ) -> Result<PlanApplicationResult> {
     // --- Step 1: Validate plan structure ---
     validate_plan(plan, candidate.len())?;
@@ -61,7 +68,7 @@ pub(crate) fn apply_context_plan(
         match item {
             None => {
                 // Required item not in plan at all — degrade.
-                return Ok(if has_room(candidate, model_context_budget) {
+                return Ok(if full_room(full_input_estimate_bytes, model_context_budget) {
                     PlanApplicationResult::Degraded(candidate.to_vec())
                 } else {
                     PlanApplicationResult::OverBudget(candidate.to_vec())
@@ -70,7 +77,7 @@ pub(crate) fn apply_context_plan(
             Some(item) => {
                 // Required items must be kept unmodified — no drop, truncate, or replace.
                 if item.action != "keep" || item.content.is_some() {
-                    return Ok(if has_room(candidate, model_context_budget) {
+                    return Ok(if full_room(full_input_estimate_bytes, model_context_budget) {
                         PlanApplicationResult::Degraded(candidate.to_vec())
                     } else {
                         PlanApplicationResult::OverBudget(candidate.to_vec())
@@ -82,7 +89,7 @@ pub(crate) fn apply_context_plan(
 
     // --- Step 3: Validate tool_call / tool_result pairing ---
     if let Err(_) = validate_pairing(candidate, plan) {
-        return Ok(if has_room(candidate, model_context_budget) {
+        return Ok(if full_room(full_input_estimate_bytes, model_context_budget) {
             PlanApplicationResult::Degraded(candidate.to_vec())
         } else {
             PlanApplicationResult::OverBudget(candidate.to_vec())
@@ -100,7 +107,7 @@ pub(crate) fn apply_context_plan(
                     hex::encode(hasher.finalize())
                 };
                 if computed != *claimed_digest {
-                    return Ok(if has_room(candidate, model_context_budget) {
+                    return Ok(if full_room(full_input_estimate_bytes, model_context_budget) {
                         PlanApplicationResult::Degraded(candidate.to_vec())
                     } else {
                         PlanApplicationResult::OverBudget(candidate.to_vec())
@@ -110,32 +117,22 @@ pub(crate) fn apply_context_plan(
         }
     }
 
-    // --- Step 5: Verify plan_digest ---
-    {
-        let recomputed = {
-            let mut hasher = Sha256::new();
-            for item in &plan.context_items {
-                let serialized = serde_json::to_string(item).unwrap_or_default();
-                hasher.update(serialized.as_bytes());
-            }
-            hex::encode(hasher.finalize())
-        };
-        // Note: plan.plan_digest is computed by Provider over its view;
-        // our recomputation is over the Kernel-side item representation.
-        // This is best-effort — format differences may cause mismatch.
-        // We record the recomputed digest in the journal for audit but
-        // don't reject solely on plan_digest mismatch since serde
-        // format differences can cause false positives.
-    }
+    // --- Step 5: Verify plan_digest — NOT compared at Kernel level.
+    // The Kernel serializes ContextPlanItem via serde_json::to_string which
+    // may differ from the Provider's serialization (field order, whitespace).
+    // Comparing would cause false rejections. The plan_digest is recorded
+    // in the journal for operator audit. Item-level content digests ARE
+    // verified (Step 4).
 
     // --- Step 4: Apply the plan ---
     let final_blocks = apply_items(candidate, plan);
 
-    // --- Step 5: Verify final budget ---
+    // --- Step 6: Verify final budget (full LlmInput) ---
     let final_size: usize = final_blocks.iter().map(|b| b.content.len()).sum();
-    if final_size > model_context_budget {
-        // Plan promised to fit but didn't — degrade.
-        return Ok(if has_room(candidate, model_context_budget) {
+    if final_size > model_context_budget
+        || full_input_estimate_bytes > model_context_budget
+    {
+        return Ok(if full_room(full_input_estimate_bytes, model_context_budget) {
             PlanApplicationResult::Degraded(candidate.to_vec())
         } else {
             PlanApplicationResult::OverBudget(candidate.to_vec())
@@ -176,9 +173,15 @@ fn validate_plan(plan: &ContextCompressResponse, candidate_len: usize) -> Result
 }
 
 /// Check if candidate fits within budget (rough estimate by content length).
-fn has_room(candidate: &[ContextBlock], budget: usize) -> bool {
-    let total: usize = candidate.iter().map(|b| b.content.len()).sum();
-    total <= budget
+fn has_room(_candidate: &[ContextBlock], _budget: usize) -> bool {
+    // DEPRECATED: use full_input_estimate_bytes directly.
+    // Kept for callers that pass both.
+    false
+}
+
+/// Check if full input fits within budget.
+fn full_room(full_estimate: usize, budget: usize) -> bool {
+    full_estimate <= budget
 }
 
 /// Validate tool_call / tool_result pairing — no orphan messages.
@@ -271,7 +274,7 @@ mod tests {
             make_block(ContextBlockKind::UserMessage, "hello"),
         ];
         let plan = make_passthrough_plan(2);
-        let result = apply_context_plan(&blocks, &plan, 9999).unwrap();
+        let result = apply_context_plan(&blocks, &plan, 9999, 9999).unwrap();
         match result {
             PlanApplicationResult::Applied(final_blocks) => {
                 assert_eq!(final_blocks.len(), 2);
@@ -303,7 +306,7 @@ mod tests {
             plan_digest: "digest_abc".into(),
             source_refs: vec![],
         };
-        let result = apply_context_plan(&blocks, &plan, 9999).unwrap();
+        let result = apply_context_plan(&blocks, &plan, 9999, 9999).unwrap();
         match result {
             PlanApplicationResult::Applied(final_blocks) => {
                 assert_eq!(final_blocks.len(), 2, "dropped the tool result");
@@ -333,7 +336,7 @@ mod tests {
             plan_digest: "digest".into(),
             source_refs: vec![],
         };
-        let result = apply_context_plan(&blocks, &plan, 9999).unwrap();
+        let result = apply_context_plan(&blocks, &plan, 9999, 9999).unwrap();
         assert!(matches!(result, PlanApplicationResult::Degraded(_)),
             "required context drop should degrade, not apply");
     }
@@ -361,7 +364,7 @@ mod tests {
         };
         // In the context block model, ToolResult blocks are independent.
         // Pairing validation is a no-op — the plan can drop individual results.
-        let result = apply_context_plan(&blocks, &plan, 9999).unwrap();
+        let result = apply_context_plan(&blocks, &plan, 9999, 9999).unwrap();
         assert!(matches!(result, PlanApplicationResult::Applied(_)),
             "context blocks can be dropped independently");
     }
@@ -374,9 +377,9 @@ mod tests {
         ];
         let plan = make_passthrough_plan(2);
         // Budget too small for the candidate
-        let result = apply_context_plan(&blocks, &plan, 5).unwrap();
+        let result = apply_context_plan(&blocks, &plan, 5, 200).unwrap();
         assert!(matches!(result, PlanApplicationResult::OverBudget(_)),
-            "over-budget passthrough should be overbudget");
+            "over-budget full input estimate should fail");
     }
 
     #[test]
@@ -390,7 +393,7 @@ mod tests {
         let total: usize = blocks.iter().map(|b| b.content.len()).sum();
         let tight_budget = total - 1;
         let plan = make_passthrough_plan(2);
-        let result = apply_context_plan(&blocks, &plan, tight_budget).unwrap();
+        let result = apply_context_plan(&blocks, &plan, tight_budget, tight_budget + 200).unwrap();
         assert!(matches!(result, PlanApplicationResult::OverBudget(_)));
     }
 
@@ -415,7 +418,7 @@ mod tests {
             source_refs: vec![],
         };
         // Original fits within budget → degraded
-        let result = apply_context_plan(&blocks, &plan, 9999).unwrap();
+        let result = apply_context_plan(&blocks, &plan, 9999, 9999).unwrap();
         assert!(matches!(result, PlanApplicationResult::Degraded(ref b) if b.len() == 2));
     }
 
@@ -441,7 +444,7 @@ mod tests {
             plan_digest: "digest".into(),
             source_refs: vec![],
         };
-        let result = apply_context_plan(&blocks, &plan, 9999).unwrap();
+        let result = apply_context_plan(&blocks, &plan, 9999, 9999).unwrap();
         match result {
             PlanApplicationResult::Applied(final_blocks) => {
                 assert_eq!(final_blocks.len(), 3);
@@ -474,7 +477,7 @@ mod tests {
             plan_digest: "digest".into(),
             source_refs: vec![],
         };
-        let result = apply_context_plan(&blocks, &plan, 9999).unwrap();
+        let result = apply_context_plan(&blocks, &plan, 9999, 9999).unwrap();
         match result {
             PlanApplicationResult::Applied(final_blocks) => {
                 assert_eq!(final_blocks.len(), 2, "compact: tool result dropped");
@@ -499,8 +502,8 @@ mod tests {
         let plan2 = make_passthrough_plan(2);
         assert_eq!(plan1.plan_digest, plan2.plan_digest,
             "same context items should produce same plan digest");
-        let result1 = apply_context_plan(&blocks1, &plan1, 9999).unwrap();
-        let result2 = apply_context_plan(&blocks2, &plan2, 9999).unwrap();
+        let result1 = apply_context_plan(&blocks1, &plan1, 9999, 9999).unwrap();
+        let result2 = apply_context_plan(&blocks2, &plan2, 9999, 9999).unwrap();
         match (result1, result2) {
             (PlanApplicationResult::Applied(a), PlanApplicationResult::Applied(b)) => {
                 assert_eq!(a.len(), b.len());
@@ -526,7 +529,7 @@ mod tests {
             mode: "compacted".into(), context_items: items,
             estimated_size: 20, plan_digest: "digest".into(), source_refs: vec![],
         };
-        let result = apply_context_plan(&blocks, &plan, 9999).unwrap();
+        let result = apply_context_plan(&blocks, &plan, 9999, 9999).unwrap();
         assert!(matches!(result, PlanApplicationResult::Degraded(_)),
             "required context truncation must degrade");
     }
@@ -547,7 +550,7 @@ mod tests {
             mode: "compacted".into(), context_items: items,
             estimated_size: 20, plan_digest: "digest".into(), source_refs: vec![],
         };
-        let result = apply_context_plan(&blocks, &plan, 9999).unwrap();
+        let result = apply_context_plan(&blocks, &plan, 9999, 9999).unwrap();
         assert!(matches!(result, PlanApplicationResult::Degraded(_)),
             "required context replacement must degrade");
     }
@@ -570,7 +573,7 @@ mod tests {
             mode: "compacted".into(), context_items: items,
             estimated_size: 30, plan_digest: "digest".into(), source_refs: vec![],
         };
-        let result = apply_context_plan(&blocks, &plan, 9999).unwrap();
+        let result = apply_context_plan(&blocks, &plan, 9999, 9999).unwrap();
         assert!(matches!(result, PlanApplicationResult::Degraded(_)),
             "invalid item digest must degrade");
     }
