@@ -368,4 +368,95 @@ mod tests {
         let result = apply_context_plan(&blocks, &plan, 9999).unwrap();
         assert!(matches!(result, PlanApplicationResult::Degraded(ref b) if b.len() == 2));
     }
+
+    #[test]
+    fn provider_replacement_content_is_used() {
+        let blocks = vec![
+            make_block(ContextBlockKind::RootSystem, "system prompt"),
+            make_block(ContextBlockKind::ToolResult, "original long result that should be replaced"),
+            make_block(ContextBlockKind::UserMessage, "continue"),
+        ];
+        let replacement = "[Provider replacement content]".to_string();
+        let items = vec![
+            ContextPlanItem { index: 0, action: "keep".into(), content: None, original_bytes: None, digest: None },
+            ContextPlanItem { index: 1, action: "truncate".into(), content: Some(replacement.clone()), original_bytes: Some(47), digest: Some("abc".into()) },
+            ContextPlanItem { index: 2, action: "keep".into(), content: None, original_bytes: None, digest: None },
+        ];
+        let plan = ContextCompressResponse {
+            provider_id: "test".into(),
+            through_event_id: "evt_1".into(),
+            mode: "compacted".into(),
+            context_items: items,
+            estimated_size: 100,
+            plan_digest: "digest".into(),
+            source_refs: vec![],
+        };
+        let result = apply_context_plan(&blocks, &plan, 9999).unwrap();
+        match result {
+            PlanApplicationResult::Applied(final_blocks) => {
+                assert_eq!(final_blocks.len(), 3);
+                assert_eq!(final_blocks[1].content, replacement,
+                    "Kernel must use Provider's replacement content, not generate its own");
+            }
+            other => panic!("expected Applied, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compacted_after_tool_still_allows_more_calls() {
+        let blocks = vec![
+            make_block(ContextBlockKind::RootSystem, "system"),
+            make_block(ContextBlockKind::ToolResult, "some tool output"),
+            make_block(ContextBlockKind::UserMessage, "continue"),
+        ];
+        // Compacted plan: drop the tool result, keep everything else
+        let items = vec![
+            ContextPlanItem { index: 0, action: "keep".into(), content: None, original_bytes: None, digest: None },
+            ContextPlanItem { index: 1, action: "drop".into(), content: None, original_bytes: Some(16), digest: Some("abc".into()) },
+            ContextPlanItem { index: 2, action: "keep".into(), content: None, original_bytes: None, digest: None },
+        ];
+        let plan = ContextCompressResponse {
+            provider_id: "test".into(),
+            through_event_id: "evt_1".into(),
+            mode: "compacted".into(),
+            context_items: items,
+            estimated_size: 25,
+            plan_digest: "digest".into(),
+            source_refs: vec![],
+        };
+        let result = apply_context_plan(&blocks, &plan, 9999).unwrap();
+        match result {
+            PlanApplicationResult::Applied(final_blocks) => {
+                assert_eq!(final_blocks.len(), 2, "compact: tool result dropped");
+                // UserMessage is still there so model can continue
+                assert!(final_blocks.iter().any(|b| b.kind == ContextBlockKind::UserMessage));
+            }
+            other => panic!("expected Applied, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_digest_stable_for_same_context() {
+        let blocks1 = vec![
+            make_block(ContextBlockKind::RootSystem, "same prompt"),
+            make_block(ContextBlockKind::UserMessage, "hello"),
+        ];
+        let blocks2 = vec![
+            make_block(ContextBlockKind::RootSystem, "same prompt"),
+            make_block(ContextBlockKind::UserMessage, "hello"),
+        ];
+        let plan1 = make_passthrough_plan(2);
+        let plan2 = make_passthrough_plan(2);
+        assert_eq!(plan1.plan_digest, plan2.plan_digest,
+            "same context items should produce same plan digest");
+        let result1 = apply_context_plan(&blocks1, &plan1, 9999).unwrap();
+        let result2 = apply_context_plan(&blocks2, &plan2, 9999).unwrap();
+        match (result1, result2) {
+            (PlanApplicationResult::Applied(a), PlanApplicationResult::Applied(b)) => {
+                assert_eq!(a.len(), b.len());
+                assert_eq!(a[0].content, b[0].content);
+            }
+            _ => panic!("both should be Applied"),
+        }
+    }
 }
