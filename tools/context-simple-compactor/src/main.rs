@@ -1,9 +1,10 @@
 fn main() {
     // context-simple-compactor v0 — external Context Provider
     // Listens for context.compress.v0 requests, returns ContextPlan.
-    // This is a minimal viable Provider: deterministic, no LLM calls.
-    eprintln!("simple-compactor starting on 127.0.0.1:7202");
-    let listener = std::net::TcpListener::bind("127.0.0.1:7202").expect("bind");
+    let port: u16 = std::env::var("SIMPLECOMPACTOR_PORT")
+        .ok().and_then(|v| v.parse().ok()).unwrap_or(7202);
+    eprintln!("simple-compactor starting on 127.0.0.1:{port}");
+    let listener = std::net::TcpListener::bind(format!("127.0.0.1:{port}")).expect("bind");
     for stream in listener.incoming() {
         match stream {
             Ok(s) => { std::thread::spawn(|| handle(s)); },
