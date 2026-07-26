@@ -80,6 +80,8 @@ pub struct Runtime<L> {
     llm: L,
     hook_client: Option<Box<dyn HookClient>>,
     hook_config: Option<HookConfig>,
+    compress_hook_client: Option<Box<dyn HookClient>>,
+    compress_hook_config: Option<HookConfig>,
 }
 pub struct RuntimeOutcome {
     pub run_id: RunId,
@@ -93,11 +95,24 @@ where
     L: LlmClient + 'static,
 {
     pub fn new(config: KernelConfig, llm: L) -> Self {
+        let compress_hook_client: Option<Box<dyn HookClient>> = if config.context_compress_hook.enabled {
+            let client: Box<dyn HookClient> = Box::new(crate::hook::HttpHookClient::new());
+            Some(client)
+        } else {
+            None
+        };
+        let compress_hook_config = if config.context_compress_hook.enabled {
+            Some(config.context_compress_hook.clone())
+        } else {
+            None
+        };
         Self {
             config,
             llm,
             hook_client: None,
             hook_config: None,
+            compress_hook_client,
+            compress_hook_config,
         }
     }
 
@@ -282,7 +297,7 @@ where
         }
 
         // ── context.compress.v0 hook ─────────────────────────────────────
-        if let (Some(ref client), Some(ref hook_cfg)) = (&self.hook_client, &self.hook_config) {
+        if let (Some(ref client), Some(ref hook_cfg)) = (&self.compress_hook_client, &self.compress_hook_config) {
             if hook_cfg.enabled && hook_cfg.kind == crate::hook::HookKind::ContextCompressV0 {
                 match crate::runtime::hook_call::call_context_compress(
                     &mut blocks,
