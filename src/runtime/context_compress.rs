@@ -117,12 +117,13 @@ pub(crate) fn apply_context_plan(
         }
     }
 
-    // --- Step 5: Verify plan_digest — NOT compared at Kernel level.
-    // The Kernel serializes ContextPlanItem via serde_json::to_string which
-    // may differ from the Provider's serialization (field order, whitespace).
-    // Comparing would cause false rejections. The plan_digest is recorded
-    // in the journal for operator audit. Item-level content digests ARE
-    // verified (Step 4).
+    // --- Step 5: plan_digest — audit metadata only.
+    // The Kernel records the plan_digest returned by the Provider in the
+    // journal for operator audit and traceability. Cross-verification is
+    // not performed because the Kernel and Provider use different
+    // serialization for ContextPlanItem (field order, whitespace), which
+    // would cause false rejections. Item-level content digests ARE verified
+    // in Step 4 above.
 
     // --- Step 4: Apply the plan ---
     let final_blocks = apply_items(candidate, plan);

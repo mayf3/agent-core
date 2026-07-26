@@ -19,6 +19,7 @@ pub trait LlmClient {
     }
 }
 
+#[derive(Clone)]
 pub struct LlmInput {
     pub blocks: Vec<ContextBlock>,
     pub user_text: String,
