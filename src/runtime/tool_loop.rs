@@ -256,46 +256,21 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
         journal: &JournalStore,
         run: &Run,
         session: &Session,
-        blocks: &mut Vec<ContextBlock>,
+        blocks: &[ContextBlock],
         user_text: &str,
         provider_tools: &[serde_json::Value],
         follow_ups: &[LlmFollowUp],
     ) -> Result<LlmOutput> {
-	        // ── context.compress.v0 for follow-up invocations ─────────────
-	        if let (Some(ref client), Some(ref hook_cfg)) = (&self.compress_hook_client, &self.compress_hook_config) {
-            if hook_cfg.enabled && hook_cfg.kind == crate::hook::HookKind::ContextCompressV0 {
-                let _ = crate::runtime::hook_call::call_context_compress(
-                    blocks,
-                    client.as_ref(),
-                    hook_cfg,
-                    journal,
-                    &run.id,
-                    &session.id,
-                    &self.config.agent_id.0,
-                    &self.config.model,
-                    self.config.context_max_block_chars,
-                );
-            }
-        }
-        let final_blocks = std::mem::take(blocks);
+        let final_llm_input = self.prepare_llm_input(
+            journal, run, session, blocks, user_text, provider_tools, follow_ups,
+        );
 
         let next = match self.complete_model_invocation(
             journal,
             run,
             session,
             follow_ups.len(),
-            LlmInput {
-                blocks: final_blocks,
-                user_text: user_text.to_string(),
-                granted_operations: run
-                    .principal
-                    .grants
-                    .iter()
-                    .map(|g| g.operation.clone())
-                    .collect(),
-                provider_tools: provider_tools.to_vec(),
-                follow_ups: follow_ups.to_vec(),
-            },
+            final_llm_input,
         ) {
             Ok(next) => next,
             Err(_) => {
