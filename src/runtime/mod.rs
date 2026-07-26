@@ -12,6 +12,7 @@ pub(crate) mod coding_grants;
 pub(crate) mod hook_call;
 mod model_invocation;
 pub mod outbox_dispatcher;
+mod context_compress;
 mod tool_execution;
 mod tool_loop;
 mod tool_rejection;
@@ -277,6 +278,27 @@ where
                         // Run continues without hook fragments.
                     }
                 }
+            }
+        }
+
+        // ── context.compress.v0 hook ─────────────────────────────────────
+        let compress_block_count = blocks.len();
+        if let (Some(ref client), Some(ref hook_cfg)) = (&self.hook_client, &self.hook_config) {
+            if hook_cfg.enabled && hook_cfg.kind == crate::hook::HookKind::ContextCompressV0 {
+                let _ = crate::runtime::hook_call::call_context_compress(
+                    &blocks,
+                    client.as_ref(),
+                    hook_cfg,
+                    journal,
+                    &run.id,
+                    &session.id,
+                    &self.config.agent_id.0,
+                    &self.config.model,
+                    self.config.context_max_block_chars,
+                );
+                // Phase 2: plan application integration.
+                // For now, the hook is called and the event is recorded.
+                // The returned ContextPlan will be applied in a follow-up.
             }
         }
 

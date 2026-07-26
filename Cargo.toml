@@ -1,3 +1,7 @@
+[workspace]
+members = ["tools/context-simple-compactor", "tools/context-test-compactor"]
+resolver = "2"
+
 [package]
 name = "agent-core-kernel"
 version = "0.1.0"
