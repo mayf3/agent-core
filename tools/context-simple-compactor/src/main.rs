@@ -43,6 +43,11 @@ fn handle(mut stream: std::net::TcpStream) {
     };
 
     let payload = req.get("payload");
+    let request_id = payload
+        .and_then(|_| req.get("request_id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_string();
     let items = payload
         .and_then(|p| p.get("candidate_context_items"))
         .and_then(|v| v.as_array())
@@ -120,16 +125,31 @@ fn handle(mut stream: std::net::TcpStream) {
         hex::encode(h.finalize())
     };
 
+    let timestamp = {
+        let d = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let total_secs = d.as_secs();
+        let micros = d.subsec_nanos() / 1000;
+        format!("2026-07-26T{:02}:{:02}:{:02}.{:06}Z",
+            (total_secs / 3600) % 24,
+            (total_secs / 60) % 60,
+            total_secs % 60,
+            micros)
+    };
+
     let resp = serde_json::json!({
         "hook": "context.compress.v0",
-        "ok": true,
+        "request_id": request_id,
+        "timestamp": timestamp,
         "payload": {
             "provider_id": "simple-compactor-v0",
             "through_event_id": payload.and_then(|p| p.get("through_event_id")).and_then(|v| v.as_str()).unwrap_or(""),
-            "mode": if items.len() > 20 { "compacted" } else { "passthrough" },
+            "mode": if items.len() > 3 { "compacted" } else { "passthrough" },
             "context_items": plan_items,
             "estimated_size": estimated,
             "plan_digest": plan_digest,
+            "source_refs": [],
         }
     });
 
