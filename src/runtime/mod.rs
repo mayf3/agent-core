@@ -140,6 +140,16 @@ where
         let mut final_blocks = blocks.to_vec();
         if let (Some(ref client), Some(ref hook_cfg)) = (&self.compress_hook_client, &self.compress_hook_config) {
             if hook_cfg.enabled && hook_cfg.kind == crate::hook::HookKind::ContextCompressV0 {
+                // Estimate full input size: blocks + user_text + tools schema + follow_ups + overhead
+                let blocks_size: usize = blocks.iter().map(|b| b.content.len()).sum();
+                let tools_size: usize = provider_tools.iter()
+                    .map(|t| serde_json::to_string(t).unwrap_or_default().len()).sum();
+                let follow_ups_size: usize = follow_ups.iter()
+                    .map(|fu| fu.result_content.len()).sum();
+                let overhead = user_text.len() + 1024; // message structure overhead estimate
+                let reserved_output = self.config.context_max_block_chars / 4;
+                let full_input_estimate = blocks_size + tools_size + follow_ups_size + overhead + reserved_output;
+
                 let _ = crate::runtime::hook_call::call_context_compress(
                     &mut final_blocks,
                     client.as_ref(),
@@ -150,6 +160,7 @@ where
                     &self.config.agent_id.0,
                     &self.config.model,
                     self.config.context_max_block_chars,
+                    full_input_estimate,
                 );
             }
         }

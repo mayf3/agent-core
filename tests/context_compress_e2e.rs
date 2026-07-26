@@ -86,6 +86,7 @@ fn context_compress_e2e_with_external_provider() -> Result<()> {
     let _provider = SimpleCompactorProcess::start();
     let mut config = common::test_config();
     config.max_tool_rounds = 4;
+    config.context_max_block_chars = 40000;
     // Standard config: set context_compress_hook directly (no .with_hook())
     config.context_compress_hook = HookConfig {
         enabled: true, kind: HookKind::ContextCompressV0,
