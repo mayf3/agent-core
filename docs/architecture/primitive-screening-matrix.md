@@ -346,13 +346,13 @@ is **not** claimed to be proven minimal and irreducible.
 | Field | Content |
 |---|---|
 | Current concept | Stateless Kernel→external-harness call bindings at fixed lifecycle points |
-| Code evidence | `HookKind` enum (`IngressRouteV0`/`ContextPrepareV0`/`ContextLoadV0`/`ContextCompressV0`/`EventObserveV0`/`DecisionPolicyV0`) `src/hook/types.rs:19-49`; `HookConfig` `src/hook/config.rs:20-39`; `HookRegistryConfig` `:108-115`; `HookClient` trait `src/hook/client.rs:57-64` + `FakeHookClient`/`HttpHookClient`; consumed `src/runtime/hook_call.rs:37-49` (inserts `ContextBlockKind::HookFragment`); audited via `JournalEventKind::HookCallRecorded` (`src/domain/mod.rs:466`) |
+| Code evidence | `HookKind` enum in `src/hook/types.rs`; authenticated `HookConfig` binding in `src/hook/config.rs`; `HookClient` and `HttpHookClient`; the single pre-model call in `src/runtime/hook_call.rs`; audited via `JournalEventKind::HookCallRecorded` |
 | Current owner | Kernel (protocol) + Harness (implementation) |
 | Durable state | **No hook table.** Config from env (`KernelConfig.context_prepare_hook`, `src/config.rs:98,185-194`); only `HookCallRecorded` journal facts |
 | Security invariant | Hook is a Transform(§4) that must be re-validated by the final system guard (`docs/architecture-rfc.md` §5); HTTP client restricted to localhost |
 | Classification | **D** — `Trigger × {Observe|Propose|Transform|Effect}(§4) × Contract × Component Binding` |
 | Candidate derivation | `Hook ≈ Trigger × Mode(§4) × Contract × Binding` |
-| External contracts | The 6 `*.v0` hook kind strings, request/response envelopes |
+| External contracts | Generic hook request/response envelopes and configured provider binding |
 | Migration risk | Medium — hook ABI rename is forbidden this round; kind names are a contract |
 | Current decision | **Keep** (conceptual lens only; do not rename HookKind) |
 | Trigger to revisit | A 7th lifecycle point is proven necessary |
@@ -394,13 +394,13 @@ is **not** claimed to be proven minimal and irreducible.
 | Field | Content |
 |---|---|
 | Current concept | A transient, per-run LLM-context-window section assembled at runtime |
-| Code evidence | `struct ContextBlock` `src/domain/context_block.rs:10-16`; `ContextBlockKind` (RootSystem/RuntimeContract/AgentProfile/SkillCatalog/ToolCatalog/ToolResult/ActiveSkill/RecentMessages/HookFragment/HarnessChangeRequest/UserMessage) `:18-34`; `Compressibility` `:36-42`; `ContextAssembler::build` `src/context.rs:24`; assembly from prompt files + journal turns + hook fragments (`src/context.rs:35-164`); `ContextBuilt` journal fact (`src/domain/mod.rs:409`) |
+| Code evidence | `struct ContextBlock` and `ContextBlockKind` in `src/domain/context_block.rs`; `ContextAssembler::build` in `src/context.rs` assembles complete source material without selection or truncation policy; `ContextBuilt` remains a journal fact |
 | Current owner | Kernel (assembler) + Harness (contributors) |
 | Durable state | None — blocks are transient; only `ContextBuilt` fact recorded |
 | Security invariant | Root System never overwritten/compressed by normal contributors (`docs/architecture-rfc.md` §7) |
 | Classification | **D** — Transform-mode(§4) payload assembled per Run(K4) |
 | Candidate derivation | `ContextBlock ≈ Transform(§4) payload per Run(K4)` |
-| External contracts | `ContextBlockKind` variant names, compressibility levels |
+| External contracts | Opaque CandidateInput and ordered Context Artifact references |
 | Migration risk | Medium — context pipeline invariants |
 | Current decision | **Document** |
 | Trigger to revisit | Token budget / compression becomes a real, repeated demand |

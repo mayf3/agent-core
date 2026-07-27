@@ -1,12 +1,31 @@
 use crate::domain::ContextBlock;
+use crate::hook::OpaqueArtifactRef;
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::time::Duration;
 
+mod context_adapter;
+pub use context_adapter::{
+    AdapterCandidate, HardBudgetReceipt, ModelMaterialization, LLM_INPUT_ARTIFACT_MEDIA_TYPE,
+};
+
 pub trait LlmClient {
     fn complete(&self, input: LlmInput) -> Result<LlmOutput>;
+
+    fn stage_candidate(&self, input: LlmInput) -> Result<AdapterCandidate> {
+        context_adapter::stage_candidate(input)
+    }
+
+    fn materialize_context(
+        &self,
+        candidate: &AdapterCandidate,
+        artifacts: &[OpaqueArtifactRef],
+    ) -> Result<ModelMaterialization> {
+        context_adapter::default_materialize(candidate, artifacts)
+    }
 
     /// Bounded metadata available before the request starts. Implementations
     /// that do not represent a network model may keep the safe defaults.
@@ -19,6 +38,7 @@ pub trait LlmClient {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmInput {
     pub blocks: Vec<ContextBlock>,
     pub user_text: String,
@@ -79,7 +99,8 @@ pub struct ToolCall {
 
 /// Which endpoint returned the tool call. Determined at the actual HTTP request
 /// site — never inferred from turn_index, model name, or URL substring.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum EndpointChoice {
     Primary,
     Fallback,
@@ -88,7 +109,7 @@ pub enum EndpointChoice {
 /// Provider-side metadata for a single tool-call round. The raw provider id is
 /// preserved verbatim (bounded) so the follow-up `role: tool` message can match
 /// the provider's own `tool_call_id`. This never enters the Journal.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderToolTurn {
     pub endpoint: EndpointChoice,
     pub provider_tool_call_id: String,
@@ -104,7 +125,7 @@ pub struct ProviderToolTurn {
 
 /// A structured follow-up carried Run-locally through LlmInput: the provider
 /// transcript of the first round + the bounded result content.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmFollowUp {
     pub provider_turn: ProviderToolTurn,
     pub result_content: String,
@@ -129,6 +150,18 @@ impl<T: LlmClient + ?Sized> LlmClient for Box<T> {
 
     fn model_hint(&self) -> &str {
         (**self).model_hint()
+    }
+
+    fn stage_candidate(&self, input: LlmInput) -> Result<AdapterCandidate> {
+        (**self).stage_candidate(input)
+    }
+
+    fn materialize_context(
+        &self,
+        candidate: &AdapterCandidate,
+        artifacts: &[OpaqueArtifactRef],
+    ) -> Result<ModelMaterialization> {
+        (**self).materialize_context(candidate, artifacts)
     }
 }
 
@@ -163,6 +196,8 @@ pub struct OpenAiCompatibleLlm {
     pub(crate) primary: ModelEndpoint,
     pub(crate) fallback: Option<ModelEndpoint>,
     timeout: Duration,
+    context_window_tokens: usize,
+    reserved_output_tokens: usize,
 }
 
 impl OpenAiCompatibleLlm {
@@ -171,7 +206,18 @@ impl OpenAiCompatibleLlm {
             primary: ModelEndpoint::new(base_url, api_key, model),
             fallback: None,
             timeout: Duration::from_millis(timeout_ms),
+            context_window_tokens: context_adapter::DEFAULT_CONTEXT_WINDOW_TOKENS,
+            reserved_output_tokens: context_adapter::DEFAULT_RESERVED_OUTPUT_TOKENS,
         }
+    }
+    pub fn with_hard_budget(
+        mut self,
+        context_window_tokens: usize,
+        reserved_output_tokens: usize,
+    ) -> Self {
+        self.context_window_tokens = context_window_tokens;
+        self.reserved_output_tokens = reserved_output_tokens;
+        self
     }
     pub fn with_fallback(mut self, base_url: String, api_key: String, model: String) -> Self {
         let endpoint = ModelEndpoint::new(base_url, api_key, model);
@@ -244,6 +290,24 @@ impl LlmClient for OpenAiCompatibleLlm {
     fn model_hint(&self) -> &str {
         &self.primary.model
     }
+
+    fn materialize_context(
+        &self,
+        candidate: &AdapterCandidate,
+        artifacts: &[OpaqueArtifactRef],
+    ) -> Result<ModelMaterialization> {
+        let input = context_adapter::decode_artifacts(candidate, artifacts)?;
+        let mut wires = vec![materialized_request_body(&self.primary, &input).0];
+        if let Some(fallback) = &self.fallback {
+            wires.push(materialized_request_body(fallback, &input).0);
+        }
+        context_adapter::assess_budget(
+            input,
+            &wires,
+            self.context_window_tokens,
+            self.reserved_output_tokens,
+        )
+    }
 }
 
 impl OpenAiCompatibleLlm {
@@ -267,63 +331,7 @@ impl OpenAiCompatibleLlm {
         choice: EndpointChoice,
         input: &LlmInput,
     ) -> std::result::Result<LlmOutput, String> {
-        // Provider tools are derived from the Run's pinned registry snapshot
-        // at Runtime::deliver() time and passed in LlmInput.provider_tools.
-        // Empty tools means no ReadOnly operations are granted.
-        let mut tools: Vec<Value> = input.provider_tools.clone();
-        let tool_name_mode = match &endpoint.tool_name_mode {
-            ToolNameMode::Passthrough => ToolNameMode::Passthrough,
-            ToolNameMode::IndexedMapping(_) => {
-                let mut map = ToolNameMap::new();
-                for (idx, tool) in tools.iter_mut().enumerate() {
-                    if let Some(name) = tool.pointer("/function/name").and_then(Value::as_str) {
-                        let safe = format!("fn_{idx}");
-                        map.insert(safe.clone(), name.to_string());
-                        tool["function"]["name"] = json!(safe);
-                    }
-                }
-                ToolNameMode::IndexedMapping(map)
-            }
-        };
-        let mut messages: Vec<Value> = vec![
-            json!({"role": "system", "content": serialize_system_context(&input.blocks)}),
-            json!({"role": "user", "content": input.user_text}),
-        ];
-        // Accumulated tool transcript: all prior rounds appended in order.
-        for fu in &input.follow_ups {
-            let turn = &fu.provider_turn;
-            // Build assistant message with tool_calls and optional reasoning_content.
-            let mut assistant = serde_json::Map::new();
-            assistant.insert("role".to_string(), json!("assistant"));
-            // DeepSeek thinking-mode: echo back reasoning_content if present.
-            if let Some(ref rc) = turn.reasoning_content {
-                assistant.insert("reasoning_content".to_string(), json!(rc));
-            }
-            assistant.insert(
-                "tool_calls".to_string(),
-                json!([{
-                    "id": turn.provider_tool_call_id,
-                    "type": "function",
-                    "function": {
-                        "name": turn.wire_name,
-                        "arguments": turn.arguments_json,
-                    }
-                }]),
-            );
-            messages.push(serde_json::Value::Object(assistant));
-            messages.push(json!({
-                "role": "tool",
-                "tool_call_id": turn.provider_tool_call_id,
-                "content": fu.result_content,
-            }));
-        }
-        let body = json!({
-            "model": endpoint.model,
-            "messages": messages,
-            "temperature": 0.2,
-            "tools": tools,
-            "tool_choice": "auto",
-        });
+        let (body, tool_name_mode) = materialized_request_body(endpoint, input);
         let agent = ureq::Agent::config_builder()
             .timeout_global(Some(self.timeout))
             .build()
@@ -346,6 +354,63 @@ impl OpenAiCompatibleLlm {
         let output = success_output(&endpoint.model, input.blocks.len(), value, &mode, choice);
         Ok(output)
     }
+}
+
+fn materialized_request_body(endpoint: &ModelEndpoint, input: &LlmInput) -> (Value, ToolNameMode) {
+    let mut tools: Vec<Value> = input.provider_tools.clone();
+    let tool_name_mode = match &endpoint.tool_name_mode {
+        ToolNameMode::Passthrough => ToolNameMode::Passthrough,
+        ToolNameMode::IndexedMapping(_) => {
+            let mut map = ToolNameMap::new();
+            for (idx, tool) in tools.iter_mut().enumerate() {
+                if let Some(name) = tool.pointer("/function/name").and_then(Value::as_str) {
+                    let safe = format!("fn_{idx}");
+                    map.insert(safe.clone(), name.to_string());
+                    tool["function"]["name"] = json!(safe);
+                }
+            }
+            ToolNameMode::IndexedMapping(map)
+        }
+    };
+    let mut messages: Vec<Value> = vec![
+        json!({"role": "system", "content": serialize_system_context(&input.blocks)}),
+        json!({"role": "user", "content": input.user_text}),
+    ];
+    for follow_up in &input.follow_ups {
+        let turn = &follow_up.provider_turn;
+        let mut assistant = serde_json::Map::new();
+        assistant.insert("role".to_string(), json!("assistant"));
+        if let Some(ref reasoning) = turn.reasoning_content {
+            assistant.insert("reasoning_content".to_string(), json!(reasoning));
+        }
+        assistant.insert(
+            "tool_calls".to_string(),
+            json!([{
+                "id": turn.provider_tool_call_id,
+                "type": "function",
+                "function": {
+                    "name": turn.wire_name,
+                    "arguments": turn.arguments_json,
+                }
+            }]),
+        );
+        messages.push(Value::Object(assistant));
+        messages.push(json!({
+            "role": "tool",
+            "tool_call_id": turn.provider_tool_call_id,
+            "content": follow_up.result_content,
+        }));
+    }
+    (
+        json!({
+            "model": endpoint.model,
+            "messages": messages,
+            "temperature": 0.2,
+            "tools": tools,
+            "tool_choice": "auto",
+        }),
+        tool_name_mode,
+    )
 }
 
 pub(crate) struct ModelEndpoint {

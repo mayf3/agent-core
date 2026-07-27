@@ -336,25 +336,22 @@ fn connector_unknown_fields_are_not_persisted_in_journal() -> Result<()> {
         &granted_ops,
         &snap,
     )?;
-    let recent = blocks
+    let history = blocks
         .iter()
-        .find(|b| matches!(b.kind, ContextBlockKind::RecentMessages))
-        .expect("must have RecentMessages ContextBlock");
-    assert!(
-        recent.content.contains("User: 安全测试用户消息"),
-        "user text in RecentMessages"
-    );
-    assert!(
-        recent.content.contains("Assistant: hello"),
-        "assistant text in RecentMessages"
-    );
+        .find(|block| block.kind == ContextBlockKind::RecentMessages)
+        .expect("complete delivered history remains in candidate input");
+    assert!(history.content.contains("安全测试用户消息"));
+    assert!(history.content.contains("Assistant: hello"));
     for m in &[
         "SECRET_TOKEN_MARKER",
         "/private/internal/path",
         "NESTED_SECRET_MARKER",
         "LARGE_UNKNOWN_MARKER",
     ] {
-        assert!(!recent.content.contains(m), "leaked {m} in ContextBlock");
+        assert!(
+            blocks.iter().all(|block| !block.content.contains(m)),
+            "leaked {m} in ContextBlock"
+        );
     }
     Ok(())
 }

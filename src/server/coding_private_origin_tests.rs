@@ -1,5 +1,4 @@
 use crate::domain::*;
-use crate::server::coding_delivery;
 use chrono::Utc;
 
 use super::super::handler::validate_private_owner_context;
@@ -78,20 +77,4 @@ fn owner_private_context_is_the_only_valid_coding_origin() {
     stranger.principal.subject = PrincipalSubject::FeishuOpenId("stranger".into());
     assert!(validate_private_owner_context(Some("owner"), &stranger, &private).is_err());
     assert!(validate_private_owner_context(None, &owner, &private).is_err());
-}
-
-#[test]
-fn coding_delivery_routes_only_feishu_p2p_events() {
-    assert!(coding_delivery::matches(&ingress(
-        EventSource::Feishu,
-        Some("p2p")
-    )));
-    assert!(!coding_delivery::matches(&ingress(
-        EventSource::Feishu,
-        Some("group")
-    )));
-    assert!(!coding_delivery::matches(&ingress(
-        EventSource::Cli,
-        None
-    )));
 }

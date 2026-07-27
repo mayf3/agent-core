@@ -74,7 +74,6 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
                             blocks.push(ContextBlock {
                                 kind: ContextBlockKind::ToolResult,
                                 content: text.clone(),
-                                compressibility: Compressibility::Summarizable,
                                 source_ref: Some("tool:malformed".to_string()),
                             });
                             let fu = pending_turn.take().map(|pt| LlmFollowUp {
@@ -158,7 +157,6 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
                             blocks.push(ContextBlock {
                                 kind: ContextBlockKind::ToolResult,
                                 content: format!("tool: {op_for_ref}\nresult: {text}"),
-                                compressibility: Compressibility::Summarizable,
                                 source_ref: Some(format!("tool:{op_for_ref}")),
                             });
                             // Build the Run-local follow-up from the provider

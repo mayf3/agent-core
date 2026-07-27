@@ -11,6 +11,17 @@ use serde_json::Value;
 use std::collections::HashMap;
 
 impl super::JournalStore {
+    /// Collect every complete conversation turn for a session, in journal
+    /// order. Context selection belongs to an external provider, so candidate
+    /// construction must not apply a Kernel-owned turn limit.
+    pub fn conversation_turns(
+        &self,
+        session_id: &SessionId,
+        skip_event_id: Option<&str>,
+    ) -> Result<Vec<(String, String)>> {
+        self.recent_conversation_turns(session_id, usize::MAX, skip_event_id)
+    }
+
     /// Collect recent complete conversation turns for a session.
     /// A complete turn = user message + AssistantReplyDelivered (same run_id).
     /// Returns at most `limit` complete turns, ordered by run creation.

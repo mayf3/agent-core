@@ -23,7 +23,7 @@ fn count_kind(journal: &JournalStore, run_id: &RunId, kind: JournalEventKind) ->
 }
 
 #[test]
-fn context_assembler_loads_files_catalog_recent_and_truncates() -> Result<()> {
+fn context_assembler_preserves_source_content_without_selection_policy() -> Result<()> {
     let root = temp_root()?;
     fs::create_dir_all(root.join("system"))?;
     fs::create_dir_all(root.join("agents/main"))?;
@@ -41,9 +41,7 @@ fn context_assembler_loads_files_catalog_recent_and_truncates() -> Result<()> {
     )?;
     fs::write(root.join("skills/code/SKILL.md"), "# Code\nwrite code")?;
 
-    let mut config = test_config(root.clone());
-    config.context_max_block_chars = 50;
-    config.context_recent_messages = 4;
+    let config = test_config(root.clone());
     let journal = JournalStore::in_memory()?;
     let session = session();
     link_user_message(&journal, &session.id, "event_prior", "previous message")?;
@@ -77,13 +75,14 @@ fn context_assembler_loads_files_catalog_recent_and_truncates() -> Result<()> {
         .contains("code: write code"));
     assert!(block(&blocks, ContextBlockKind::ActiveSkill)
         .content
-        .contains("[truncated]"));
-    let recent = block(&blocks, ContextBlockKind::RecentMessages);
-    assert!(recent.content.contains("previous message"));
-    assert!(!recent.content.contains("current should be excluded"));
+        .contains(&"c".repeat(80)));
+    let history = block(&blocks, ContextBlockKind::RecentMessages);
+    assert!(history.content.contains("previous message"));
+    assert!(history.content.contains("ack: previous message"));
+    assert!(!history.content.contains("current should be excluded"));
     assert!(block(&blocks, ContextBlockKind::UserMessage)
         .content
-        .contains("[truncated]"));
+        .contains("intentionally longer"));
     fs::remove_dir_all(root)?;
     Ok(())
 }
@@ -209,8 +208,6 @@ fn test_config(root_dir: PathBuf) -> KernelConfig {
         fallback_openai_api_key: String::new(),
         fallback_model: String::new(),
         model_timeout_ms: 100,
-        context_recent_messages: 6,
-        context_max_block_chars: 4_000,
         outbox_dispatcher_enabled: false,
         outbox_dispatcher_poll_interval_ms: 100,
         extra_allowed_operations: vec![],

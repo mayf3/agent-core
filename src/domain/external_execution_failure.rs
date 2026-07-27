@@ -95,7 +95,7 @@ impl ExternalExecutionFailureClass {
     }
 
     /// Parse a failure class from a string found in error messages.
-    /// This is used by the coding_delivery layer for backwards compatibility.
+    /// This is used by the legacy coding delivery for backwards compatibility.
     pub fn from_message(message: &str) -> Self {
         if message.contains("ACCEPTANCE_KIT_SELECTION_REQUIRED") {
             Self::ExternalInputRequired

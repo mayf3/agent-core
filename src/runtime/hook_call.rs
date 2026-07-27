@@ -4,14 +4,17 @@
 use crate::domain::*;
 use crate::gateway::Gateway;
 use crate::hook::{
-    ContextPrepareRequest, HookClient, HookConfig, HookFailureMode, HookKind, HookLimits,
+    digest_immutable_refs, CandidateInputRef, ContextHookRequest, HookClient, HookConfig,
+    HookFailureMode, HookKind, OpaqueArtifactRef,
 };
 use crate::journal::JournalStore;
+use crate::llm::AdapterCandidate;
 use crate::registry::snapshot::RegistrySnapshot;
 use crate::runtime::RuntimeOutcome;
 use anyhow::{bail, Result};
 use chrono::Utc;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 
 /// Stub: session spawn is not yet enabled.
 pub fn session_spawn() -> Result<()> {
@@ -23,109 +26,206 @@ pub fn run_yield() -> Result<()> {
     bail!("not_enabled:run.yield")
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// context.prepare.v0 hook logic
-// ═══════════════════════════════════════════════════════════════════════════
-
-pub(crate) enum HookCallOutcome {
-    Injected,
-    FailClosed { error: String },
-    Skipped,
+pub(crate) enum ContextArtifactOutcome {
+    Provider {
+        artifacts: Vec<OpaqueArtifactRef>,
+        provider_id: String,
+        request_id: String,
+        candidate_digest: String,
+    },
+    Candidate {
+        artifact: OpaqueArtifactRef,
+        status: &'static str,
+    },
+    Terminate {
+        error_code: String,
+    },
 }
 
-/// Invoke context.prepare.v0 and inject fragments into the blocks vector.
-pub(crate) fn call_context_prepare(
-    blocks: &mut Vec<ContextBlock>,
-    hook_client: &dyn HookClient,
-    hook_cfg: &HookConfig,
+pub(crate) fn call_context_artifact_hook(
+    candidate: &AdapterCandidate,
+    hook_client: Option<&dyn HookClient>,
+    hook_config: Option<&HookConfig>,
     journal: &JournalStore,
-    run_id: &RunId,
-    session_id: &SessionId,
-    agent_id: &str,
-    principal_id: &str,
-    channel: &str,
-    user_text: &str,
-    context_budget_chars: usize,
-) -> Result<HookCallOutcome> {
-    let start = std::time::Instant::now();
-    let prepare_req = ContextPrepareRequest {
-        hook: HookKind::ContextPrepareV0,
-        run_id: run_id.0.clone(),
-        session_id: session_id.0.clone(),
-        agent_id: agent_id.to_string(),
-        principal: principal_id.to_string(),
-        channel: channel.to_string(),
-        user_text: user_text.to_string(),
-        context_budget_chars,
+    run: &Run,
+    session: &Session,
+    round_index: usize,
+) -> Result<ContextArtifactOutcome> {
+    let candidate_artifact = OpaqueArtifactRef::new(&candidate.media_type, &candidate.bytes);
+    let scope_digest = model_scope_digest(run, session, round_index);
+    let candidate_ref = CandidateInputRef {
+        run_id: run.id.0.clone(),
+        session_id: session.id.0.clone(),
+        scope_digest,
+        artifact: candidate_artifact.clone(),
+        immutable_refs: candidate.immutable_refs.clone(),
+        immutable_refs_digest: digest_immutable_refs(&candidate.immutable_refs),
     };
-    let hook_result = hook_client.call_context_prepare(&prepare_req, hook_cfg);
-    let duration_ms = start.elapsed().as_millis() as u64;
-    match hook_result {
-        Ok(resp) => {
-            let limits: HookLimits = hook_cfg.into();
-            let fragment_count = resp.fragments.len().min(hook_cfg.max_fragments);
-            let resource_ref_count = resp.resource_refs.len();
-            if let Some(pos) = blocks
+    candidate_ref.validate()?;
+
+    let (Some(client), Some(config)) = (hook_client, hook_config) else {
+        return Ok(ContextArtifactOutcome::Candidate {
+            artifact: candidate_artifact,
+            status: "not_configured",
+        });
+    };
+    if !config.enabled {
+        return Ok(ContextArtifactOutcome::Candidate {
+            artifact: candidate_artifact,
+            status: "disabled",
+        });
+    }
+    let request_id = format!(
+        "context:{}:{}:{}",
+        run.id.0,
+        round_index,
+        uuid::Uuid::new_v4().simple()
+    );
+    let request = ContextHookRequest {
+        request_id: request_id.clone(),
+        candidate: candidate_ref,
+    };
+    let started = std::time::Instant::now();
+    let result = (|| {
+        if config.kind != HookKind::ContextPrepareV0 {
+            bail!("context_hook_kind_mismatch");
+        }
+        let authenticated = client.call_context(&request, config)?;
+        if authenticated.provider_id != config.provider_id {
+            bail!("context_provider_binding_mismatch");
+        }
+        if authenticated.request_id != request_id {
+            bail!("context_request_correlation_mismatch");
+        }
+        authenticated.response.validate_against(&request)?;
+        Ok(authenticated)
+    })();
+    let duration_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+    match result {
+        Ok(authenticated) => {
+            let response = authenticated.response;
+            let artifact_digests = response
+                .artifacts
                 .iter()
-                .position(|b| b.kind == ContextBlockKind::UserMessage)
-            {
-                for frag in resp.fragments.iter().take(hook_cfg.max_fragments) {
-                    if frag.validate_against(&limits).is_ok() {
-                        let content = format!("[hook:{}] {}", frag.hook_id, frag.content);
-                        blocks.insert(
-                            pos,
-                            ContextBlock {
-                                kind: ContextBlockKind::HookFragment,
-                                content,
-                                compressibility: Compressibility::DropWhole,
-                                source_ref: Some(frag.source.clone()),
-                            },
-                        );
-                    }
-                }
-            }
+                .map(|artifact| artifact.digest.clone())
+                .collect::<Vec<_>>();
             journal.append_event(
                 JournalEventKind::HookCallRecorded,
-                Some(run_id),
-                Some(session_id),
-                None,
+                Some(&run.id),
+                Some(&session.id),
+                Some(&request_id),
                 json!({
-                    "hook": "context.prepare.v0", "status": "ok",
-                    "failure_mode": format!("{:?}", hook_cfg.failure_mode),
-                    "fragment_count": fragment_count, "resource_ref_count": resource_ref_count,
-                    "response_bytes": 0, "duration_ms": duration_ms,
+                    "hook": "context.prepare.v0",
+                    "status": "ok",
+                    "provider_id": authenticated.provider_id,
+                    "request_id": request_id,
+                    "round_index": round_index,
+                    "scope_digest": response.scope_digest,
+                    "candidate_digest": response.candidate_digest,
+                    "immutable_refs_digest": response.immutable_refs_digest,
+                    "artifact_digests": artifact_digests,
+                    "duration_ms": duration_ms,
                 }),
             )?;
-            Ok(HookCallOutcome::Injected)
+            Ok(ContextArtifactOutcome::Provider {
+                artifacts: response.artifacts,
+                provider_id: authenticated.provider_id,
+                request_id,
+                candidate_digest: response.candidate_digest,
+            })
         }
-        Err(e) => {
-            let error_msg = e.to_string();
-            let (status, fmode) = match hook_cfg.failure_mode {
-                HookFailureMode::FailClosed => ("failed", "fail_closed"),
-                HookFailureMode::FailOpen => ("skipped", "fail_open"),
-                HookFailureMode::Degrade => ("degraded", "degrade"),
-                HookFailureMode::Disabled => ("disabled", "disabled"),
+        Err(error) => {
+            let error_code = hook_error_code(&error);
+            let (status, action, failure_mode) = match config.failure_mode {
+                HookFailureMode::FailClosed => ("failed", "terminate", "fail_closed"),
+                HookFailureMode::FailOpen => ("degraded", "candidate", "fail_open"),
+                HookFailureMode::Degrade => ("degraded", "candidate", "degrade"),
+                HookFailureMode::Disabled => ("failed", "terminate", "disabled"),
             };
             journal.append_event(
                 JournalEventKind::HookCallRecorded,
-                Some(run_id),
-                Some(session_id),
-                None,
+                Some(&run.id),
+                Some(&session.id),
+                Some(&request_id),
                 json!({
-                    "hook": "context.prepare.v0", "status": status,
-                    "failure_mode": fmode, "error_code": error_msg,
-                    "fragment_count": 0, "resource_ref_count": 0,
-                    "response_bytes": 0, "duration_ms": duration_ms,
+                    "hook": "context.prepare.v0",
+                    "status": status,
+                    "provider_id": config.provider_id,
+                    "request_id": request_id,
+                    "round_index": round_index,
+                    "scope_digest": request.candidate.scope_digest,
+                    "candidate_digest": candidate_artifact.digest,
+                    "immutable_refs_digest": request.candidate.immutable_refs_digest,
+                    "failure_mode": failure_mode,
+                    "failure_action": action,
+                    "error_code": error_code,
+                    "duration_ms": duration_ms,
                 }),
             )?;
-            match hook_cfg.failure_mode {
-                HookFailureMode::FailClosed => Ok(HookCallOutcome::FailClosed { error: error_msg }),
-                HookFailureMode::FailOpen
-                | HookFailureMode::Degrade
-                | HookFailureMode::Disabled => Ok(HookCallOutcome::Skipped),
+            if config.failure_mode == HookFailureMode::FailClosed
+                || config.failure_mode == HookFailureMode::Disabled
+            {
+                Ok(ContextArtifactOutcome::Terminate { error_code })
+            } else {
+                Ok(ContextArtifactOutcome::Candidate {
+                    artifact: candidate_artifact,
+                    status: "provider_failed_degraded",
+                })
             }
         }
     }
+}
+
+fn model_scope_digest(run: &Run, session: &Session, round_index: usize) -> String {
+    let mut hasher = Sha256::new();
+    for value in [
+        run.id.0.as_str(),
+        session.id.0.as_str(),
+        run.principal.principal_id.0.as_str(),
+        run.registry_snapshot_id.as_str(),
+        &round_index.to_string(),
+    ] {
+        hasher.update((value.len() as u64).to_be_bytes());
+        hasher.update(value.as_bytes());
+    }
+    for grant in &run.principal.grants {
+        for value in [grant.operation.as_str(), grant.scope.as_str()] {
+            hasher.update((value.len() as u64).to_be_bytes());
+            hasher.update(value.as_bytes());
+        }
+    }
+    format!("sha256:{}", hex::encode(hasher.finalize()))
+}
+
+fn hook_error_code(error: &anyhow::Error) -> String {
+    let message = error.to_string();
+    if message.contains("non-empty endpoint") {
+        return "endpoint_missing".into();
+    }
+    for code in [
+        "http_timeout",
+        "http_connect_error",
+        "http_transport_error",
+        "response_too_large",
+        "request_too_large",
+        "invalid_json",
+        "provider_proof_missing",
+        "provider_authentication_failed",
+        "context_hook_kind_mismatch",
+        "context_provider_binding_mismatch",
+        "context_request_correlation_mismatch",
+        "hook_request_id_mismatch",
+        "context_response_run_session_mismatch",
+        "context_response_scope_mismatch",
+        "context_response_candidate_mismatch",
+        "context_response_immutable_refs_mismatch",
+        "artifact_digest_mismatch",
+    ] {
+        if message.contains(code) {
+            return code.into();
+        }
+    }
+    "context_provider_failed".into()
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

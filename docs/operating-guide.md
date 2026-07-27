@@ -57,7 +57,6 @@ Secrets are **never** committed. Load them from the environment at runtime.
 `AGENT_CORE_FEISHU_ALLOWED_OPEN_IDS` / `_CHAT_IDS`,
 `AGENT_CORE_FEISHU_REQUIRE_GROUP_MENTION`,
 `AGENT_CORE_OUTBOX_DISPATCHER_ENABLED` / `_POLL_MS`,
-`AGENT_CORE_CONTEXT_RECENT_MESSAGES` / `_MAX_BLOCK_CHARS`,
 `AGENT_CORE_MODEL_TIMEOUT_MS`.
 Optional fallback model: `AGENT_CORE_FALLBACK_*`.
 
@@ -181,7 +180,7 @@ state and its available actions:
 | `SkillCatalog` | installed skills (`skills/`), so the model knows what it can do conversationally. |
 | `ToolCatalog` | the operation catalog (Phase 2): every catalogued operation and its risk class (`ReadOnly`/`Write`). Generated from the single source of truth in `src/domain/operation.rs`. This is how the model learns which read-only tools are available (e.g. external.time_now via harness). |
 | `ActiveSkill` | the active skill instructions. |
-| `RecentMessages` | recent user turns (configurable via `AGENT_CORE_CONTEXT_RECENT_MESSAGES`). |
+| `RecentMessages` | complete delivered session turns offered to the external context Provider; selection policy is not applied by Kernel. |
 | `UserMessage` | the current user message. |
 
 Surfacing is additive: seeing an operation in `ToolCatalog` does not let the

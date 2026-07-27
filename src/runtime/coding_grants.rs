@@ -193,7 +193,11 @@ mod tests {
             .iter()
             .map(|g| g.operation.as_str())
             .collect();
-        assert_eq!(granted_ops.len(), 7, "all 7 coding ops granted");
+        assert_eq!(
+            granted_ops.len(),
+            6,
+            "all 6 coding ops granted (TASK_SUBMIT excluded)"
+        );
         for op in external::CODING_OPERATIONS {
             assert!(granted_ops.contains(op), "{op} not granted");
         }

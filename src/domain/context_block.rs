@@ -1,9 +1,7 @@
 //! Domain types for the context-block abstraction used during LLM interaction.
 //!
-//! A `ContextBlock` is a single section of the LLM context window, tagged
-//! with a `ContextBlockKind` that controls placement, and a `Compressibility`
-//! policy that governs how the runtime can shrink the block when the context
-//! window is full.
+//! A `ContextBlock` is a source item offered to the Model Adapter. The Kernel
+//! does not attach selection, truncation, or summarization policy.
 
 use serde::{Deserialize, Serialize};
 
@@ -11,7 +9,6 @@ use serde::{Deserialize, Serialize};
 pub struct ContextBlock {
     pub kind: ContextBlockKind,
     pub content: String,
-    pub compressibility: Compressibility,
     pub source_ref: Option<String>,
 }
 
@@ -25,18 +22,7 @@ pub enum ContextBlockKind {
     ToolResult,
     ActiveSkill,
     RecentMessages,
-    /// Context fragment injected by external hooks (context.prepare.v0).
-    /// Placed before UserMessage — never enters the immutable system prompt.
-    HookFragment,
     /// HCR instructions for external harness creation.
     HarnessChangeRequest,
     UserMessage,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum Compressibility {
-    Never,
-    DropWhole,
-    Summarizable,
-    Truncate,
 }

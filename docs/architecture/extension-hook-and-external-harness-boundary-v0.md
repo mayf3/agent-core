@@ -43,7 +43,7 @@ product-layer semantics without modifying the Kernel.
 1. [Core Principles](#1-core-principles)
 2. [Root Layout Contract](#2-root-layout-contract)
 3. [Hook ABI Design](#3-hook-abi-design)
-4. [ContextFragment Design](#4-contextfragment-design)
+4. [Context Artifact Design](#4-context-artifact-design)
 5. [ResourceRef / Skill Boundary](#5-resourceref--skill-boundary)
 6. [Auto Approval Boundary](#6-auto-approval-boundary)
 7. [Hook Hot Update Rules](#7-hook-hot-update-rules)
@@ -189,20 +189,13 @@ where the message belongs; the context hook builds dynamic context afterward.
 
 ### 3.2 `context.prepare.v0`
 
-**Called before Runtime builds dynamic context, after routing is resolved.**
+**Called at the single pre-model boundary for initial and follow-up calls.**
 
 | Aspect | Detail |
 |--------|--------|
-| Receives | `run_id`, `session_id`, `workspace_id`, `agent_id`, `session_key`, `channel`, `principal`, current user input, context budget |
-| Returns | `system_append_fragments`, `user_context_fragments`, `resource_refs` |
-| Constraints | Must not override immutable Kernel system prompt. All returned fragments must include `source`, `priority`, `estimated_token_cost`, `ttl`, `sensitivity`, and `hook_id`. |
-
-**Regarding user input:**
-
-> By default, `context.prepare` may receive the current user input because retrieval usually needs
-> the query. Kernel must not send immutable system prompt, secrets, hidden chain-of-thought, or
-> private tool state to context hooks. Connectors or policy may redact user input for sensitive
-> channels.
+| Receives | An opaque CandidateInput reference bound to Run, Session, scope, and immutable refs |
+| Returns | A final opaque Context Artifact or ordered artifact references |
+| Constraints | Provider identity comes from the configured authenticated binding; Kernel validates correlation and every binding/digest but does not interpret context policy |
 
 ### 3.3 `context.load.v0`
 
@@ -214,16 +207,16 @@ where the message belongs; the context hook builds dynamic context afterward.
 | Returns | The resource detail from the External Harness. |
 | Kernel knowledge | Kernel does not know whether the resource is a skill, memory item, task, dream, note, or document. |
 
-### 3.4 `context.compress.v0`
+### 3.4 Context transformation through `context.prepare.v0`
 
 **Used for context compression/summarization.**
 
 | Aspect | Detail |
 |--------|--------|
-| Role | Part of the context construction path, **not** the post-run learning path. |
-| Receives | Budget, event/context range, compression purpose. |
-| Returns | Compressed fragments with: source event ids, lossiness metadata, compressor id/version, token estimate. |
-| Constraint | Kernel does **not** implement product-layer memory compression. |
+| Role | External Provider policy behind the single pre-model Context Hook. |
+| Receives | An opaque, content-addressed CandidateInput reference and immutable bindings. |
+| Returns | A final opaque Context Artifact or ordered artifact references. |
+| Constraint | Kernel does not expose or interpret a compression-specific plan, vocabulary, or policy. |
 
 ### 3.5 `event.observe.v0`
 
@@ -245,38 +238,14 @@ where the message belongs; the context hook builds dynamic context afterward.
 | Returns | `auto_approve`, `deny`, `manual_required`, or `defer`. |
 | Constraints | Auto approval must still produce a formal **Decision** event and go through normal digest validation and snapshot activation. Policy hook must **not** bypass `artifact_digest` / `manifest_digest` checks. |
 
-## 4. ContextFragment Design
+## 4. Context Artifact Design
 
-A `ContextFragment` is a structured piece of dynamic context injected into the model's context window.
-
-### Fields
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `id` | string | Unique fragment identifier |
-| `hook_id` | string | Which hook produced this fragment |
-| `kind` | enum | `instruction` \| `fact` \| `reference` \| `warning` \| `constraint` |
-| `placement` | enum | `system_append` \| `user_context` |
-| `priority` | integer | Higher priority fragments are included first within budget |
-| `content` | string | The actual text content |
-| `source` | string | Origin of the content (e.g., hook name, file path) |
-| `ttl` | duration | Time-to-live; fragment expires after this duration |
-| `estimated_tokens` | integer | Estimated token count for budget management |
-| `sensitivity` | enum | `public` \| `internal` \| `sensitive` \| `secret` |
-
-### Placement Rules
-
-| Rule | Detail |
-|------|--------|
-| `system_append` | Placed below the immutable Kernel system prompt. Can **only** come from trusted allowlisted hooks. |
-| `user_context` | Reference material, **not** policy. Lower trust level. |
-
-### Restrictions
-
-- Fragments are **dynamic context** and **cannot grant permissions**.
-- Fragments **cannot modify** tool permissions, approval state, or Gateway decisions.
-- Sensitivity affects filtering: `secret`-level fragments may be excluded for certain channels or
-  audit levels.
+CandidateInput and Context Artifact bytes are opaque to Kernel. Kernel retains
+only authenticated Provider identity, request correlation, Run/Session/scope
+bindings, immutable references, ordered artifact references, and their digests.
+The selected Model Adapter owns the artifact media format, complete `LlmInput`
+materialization, wire validation, tokenizer, protocol overhead, reserved output,
+and the final hard-budget decision.
 
 ## 5. ResourceRef / Skill Boundary
 
@@ -297,7 +266,7 @@ Skill-compatible support is required through progressive disclosure (`context.lo
 
 | If a skill only... | It is... | Mechanism |
 |-------------------|----------|-----------|
-| Provides instructions, examples, references, or workflow guidance | **Context** | Included via `context.prepare.v0` fragments |
+| Provides instructions, examples, references, or workflow guidance | **Context** | Materialized through the external Provider's Context Artifact |
 | Runs code, changes state, accesses files, uses network, or mutates external systems | **Must use Capability/Gateway** | Executable capability governed by Kernel |
 
 > **Skill scripts are not executable by default.** Only capabilities registered through
@@ -489,7 +458,7 @@ All of the above remain future work or External Harness concerns.
 | Skill                         | External Harness                          | `ResourceRef` + `context.load.v0`               |
 | Dashboard                     | External Harness                          | Kernel read-only API + Harness API              |
 | Auto approval                 | Kernel Decision + External Harness policy | `decision.policy.v0`                            |
-| Compression / summarization   | External Harness                          | `context.compress.v0`                           |
+| Compression / summarization   | External Harness                          | policy behind `context.prepare.v0`               |
 | Multi-agent task queue        | External Harness                          | route / context / event hooks                   |
 | Capability execution          | Kernel governed                           | Gateway / Decision / Capability Host            |
 
