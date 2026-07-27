@@ -1,6 +1,7 @@
 .DS_Store
 node_modules/
 target/
+tools/context-hook-harness/Cargo.lock
 dist/
 build/
 coverage/

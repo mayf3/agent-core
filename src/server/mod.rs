@@ -8,7 +8,6 @@ mod capability_decision;
 mod capability_host_client;
 mod capability_http;
 pub mod capability_routes;
-mod coding_delivery;
 mod coding_harness_client;
 pub mod coding_router;
 pub mod coding_task_submit;

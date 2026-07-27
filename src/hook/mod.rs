@@ -21,6 +21,7 @@
 
 mod client;
 mod config;
+mod context_artifact;
 mod http_client;
 mod types;
 
@@ -28,12 +29,10 @@ mod types;
 mod tests;
 
 #[cfg(test)]
-mod context_tests;
-
-#[cfg(test)]
 mod http_tests;
 
 pub use client::*;
 pub use config::*;
+pub use context_artifact::*;
 pub use http_client::*;
 pub use types::*;

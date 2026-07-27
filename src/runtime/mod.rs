@@ -72,7 +72,7 @@ mod registry_snapshot_recovery_failure;
 #[path = "tests/tool_execution_dispatch.rs"]
 mod tool_execution_dispatch;
 #[cfg(test)]
-#[path = "tests/tool_round_budget.rs"]
+#[path = "tests/tool_round_budget/mod.rs"]
 mod tool_round_budget;
 pub struct Runtime<L> {
     config: KernelConfig,
@@ -101,7 +101,7 @@ where
     }
 
     /// Attach a hook client and config. When set, `context.prepare.v0` is
-    /// called before each initial LLM completion.
+    /// called before every initial and follow-up LLM completion.
     pub fn with_hook(mut self, client: Box<dyn HookClient>, config: HookConfig) -> Self {
         self.hook_client = Some(client);
         self.hook_config = Some(config);
@@ -233,52 +233,6 @@ where
         // Provider tools are derived from the Run's pinned registry snapshot
         // once here. All LLM rounds for this Run reuse the same tools list.
         let provider_tools = snapshot.provider_tools_for_grants(&granted_operations);
-
-        // ── context.prepare.v0 hook ──────────────────────────────────────
-        if let (Some(ref client), Some(ref hook_cfg)) = (&self.hook_client, &self.hook_config) {
-            if hook_cfg.enabled {
-                match crate::runtime::hook_call::call_context_prepare(
-                    &mut blocks,
-                    client.as_ref(),
-                    hook_cfg,
-                    journal,
-                    &run.id,
-                    &session.id,
-                    &self.config.agent_id.0,
-                    &run.principal.principal_id.0,
-                    &format!("{:?}", event.source),
-                    &text,
-                    self.config.context_max_block_chars,
-                )? {
-                    crate::runtime::hook_call::HookCallOutcome::Injected { .. } => {
-                        // Fragments injected successfully, Run continues.
-                    }
-                    crate::runtime::hook_call::HookCallOutcome::FailClosed { error } => {
-                        journal.fail_run(&run.id)?;
-                        journal.append_event(
-                            JournalEventKind::RunFailed,
-                            Some(&run.id),
-                            Some(&session.id),
-                            None,
-                            json!({ "run_id": run.id.0, "error_category": "hook_fail_closed" }),
-                        )?;
-                        return self.reply_with_failure(
-                            journal,
-                            gateway,
-                            &snapshot,
-                            &run,
-                            &session,
-                            message_id,
-                            chat_id,
-                            &format!("Hook context preparation failed: {error}"),
-                        );
-                    }
-                    crate::runtime::hook_call::HookCallOutcome::Skipped { .. } => {
-                        // Run continues without hook fragments.
-                    }
-                }
-            }
-        }
 
         // Phase 1: initial LLM call. On failure, record RunFailed and deliver
         // a static notification (never a silent Err).

@@ -33,8 +33,6 @@ pub struct KernelConfig {
     pub fallback_openai_api_key: String,
     pub fallback_model: String,
     pub model_timeout_ms: u64,
-    pub context_recent_messages: usize,
-    pub context_max_block_chars: usize,
     pub outbox_dispatcher_enabled: bool,
     pub outbox_dispatcher_poll_interval_ms: u64,
     /// Extra operation names a run principal is granted in addition to its
@@ -151,8 +149,6 @@ impl KernelConfig {
             fallback_openai_api_key: env_string("AGENT_CORE_FALLBACK_OPENAI_API_KEY", ""),
             fallback_model: env_string("AGENT_CORE_FALLBACK_MODEL", ""),
             model_timeout_ms: env_u64("AGENT_CORE_MODEL_TIMEOUT_MS", 30_000),
-            context_recent_messages: env_usize("AGENT_CORE_CONTEXT_RECENT_MESSAGES", 6),
-            context_max_block_chars: env_usize("AGENT_CORE_CONTEXT_MAX_BLOCK_CHARS", 4_000),
             outbox_dispatcher_enabled: env_bool("AGENT_CORE_OUTBOX_DISPATCHER_ENABLED", true),
             outbox_dispatcher_poll_interval_ms: env_u64(
                 "AGENT_CORE_OUTBOX_DISPATCHER_POLL_MS",
@@ -190,6 +186,8 @@ impl KernelConfig {
                 },
                 failure_mode: env_hook_failure_mode("AGENT_CORE_CONTEXT_PREPARE_HOOK_FAILURE_MODE"),
                 timeout_ms: env_u64("AGENT_CORE_CONTEXT_PREPARE_HOOK_TIMEOUT_MS", 5_000),
+                provider_id: env_string("AGENT_CORE_CONTEXT_PREPARE_HOOK_PROVIDER_ID", ""),
+                shared_secret: env_string("AGENT_CORE_CONTEXT_PREPARE_HOOK_SHARED_SECRET", ""),
                 ..Default::default()
             },
         }
@@ -286,13 +284,6 @@ fn env_u16(key: &str, fallback: u16) -> u16 {
 }
 
 fn env_u64(key: &str, fallback: u64) -> u64 {
-    std::env::var(key)
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(fallback)
-}
-
-fn env_usize(key: &str, fallback: usize) -> usize {
     std::env::var(key)
         .ok()
         .and_then(|value| value.parse().ok())

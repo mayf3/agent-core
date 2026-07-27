@@ -5,6 +5,8 @@
 //! verifies the exact number of tool rounds executed, the Run outcome, and the
 //! budget-exhaustion journal event when applicable.
 
+mod model_invocation;
+
 use crate::config::KernelConfig;
 use crate::domain::*;
 use crate::gateway::Gateway;
@@ -86,8 +88,6 @@ fn test_config() -> KernelConfig {
         fallback_openai_api_key: String::new(),
         fallback_model: String::new(),
         model_timeout_ms: 100,
-        context_recent_messages: 6,
-        context_max_block_chars: 4_000,
         outbox_dispatcher_enabled: false,
         outbox_dispatcher_poll_interval_ms: 10,
         extra_allowed_operations: vec![],
@@ -184,7 +184,6 @@ fn run_with_budget(
     let mut blocks = vec![ContextBlock {
         kind: ContextBlockKind::UserMessage,
         content: "test".to_string(),
-        compressibility: Compressibility::Summarizable,
         source_ref: None,
     }];
     let first = runtime

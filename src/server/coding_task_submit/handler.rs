@@ -168,8 +168,7 @@ pub fn handle_coding_task_submit(
     let claim_id = required_str(&accepted, "claim_id")?.to_string();
     let hcr_run_id = required_str(&accepted, "run_id")?.to_string();
     let harness_execution_id = required_str(&accepted, "harness_execution_id")?.to_string();
-    let acceptance_invocation_id =
-        required_str(&accepted, "acceptance_invocation_id")?.to_string();
+    let acceptance_invocation_id = required_str(&accepted, "acceptance_invocation_id")?.to_string();
 
     // 4. Artifact and evidence were stored by the Harness. Kernel re-loads
     // and hashes both, then builds (or loads) the activation manifest.
@@ -183,16 +182,14 @@ pub fn handle_coding_task_submit(
         TargetKind::InvocableCapability => {
             let component_manifest: Value =
                 serde_json::from_slice(&store.load(&_component_manifest_key)?)?;
-            let manifest =
-                invocable_manifest(request, &component_manifest, &artifact_digest)?;
+            let manifest = invocable_manifest(request, &component_manifest, &artifact_digest)?;
             (manifest.manifest_id.clone(), serde_json::to_vec(&manifest)?)
         }
         TargetKind::HookConsumerService => {
             // Delivery manifest was constructed by the Coding Harness during
             // acceptance, with correct version allocated externally. Kernel
             // only verifies digest consistency — no manifest type parsing.
-            let delivery_ref =
-                required_str(&accepted, "delivery_manifest_ref")?.to_string();
+            let delivery_ref = required_str(&accepted, "delivery_manifest_ref")?.to_string();
             let delivery_digest_str = required_digest(&accepted, "delivery_manifest_digest")?;
             let delivery_digest_key = Sha256Digest::parse(&delivery_digest_str)?;
             let bytes = store.load(&delivery_digest_key)?;

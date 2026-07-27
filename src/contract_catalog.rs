@@ -68,15 +68,6 @@ impl ContractCatalog {
                     "unavailable sources are explicit and never silently fabricated",
                 ),
                 contract(
-                    "context.compress.v0",
-                    ContractMode::Transform,
-                    json!({"request":{"blocks":"array","budget":"integer"},"response":{"blocks":"array","provenance":"array"}}),
-                    &["context.transform"],
-                    json!({"blocks":[],"budget":4096}),
-                    "context-compress-v0-kit",
-                    "compressed blocks retain provenance and budget accounting",
-                ),
-                contract(
                     "route.proposal.v0",
                     ContractMode::Propose,
                     json!({"request":{"source_event":"object"},"response":{"route":"string","confidence":"number","evidence":"array"}}),
@@ -207,7 +198,6 @@ mod tests {
             "event.observe.v0",
             "context.prepare.v0",
             "context.load.v0",
-            "context.compress.v0",
             "route.proposal.v0",
             "run.create.v0",
             "component.invoke.v0",

@@ -64,7 +64,7 @@ impl ComponentProfileCatalog {
                     &[TargetKind::ContextTransformer],
                     "stateless external context transform service",
                     &["frozen dependency install", "build", "contract test", "package"],
-                    &["context.prepare.v0", "context.compress.v0"],
+                    &["context.prepare.v0"],
                     &["context.transform"],
                     "managed external service",
                     "transform contract and provenance checks",

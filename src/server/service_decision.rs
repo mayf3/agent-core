@@ -30,9 +30,9 @@ use crate::journal::trusted_service_activation::intent_exists_without_receipt;
 use crate::journal::JournalStore;
 use anyhow::Result;
 use serde_json::{json, Value};
+use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::sync::OnceLock;
 
 const DEPLOYMENT_FAILURE: &str = "SERVICE_DEPLOYMENT_FAILED";
 
@@ -187,9 +187,9 @@ pub(crate) fn handle(
         intent: intent.clone(),
         manifest: manifest.clone(),
         expected_agent: expected_agent.clone(),
-        journal: journal.try_clone().map_err(|e| {
-            CapabilityRouteError::Internal(format!("failed to clone journal: {e}"))
-        })?,
+        journal: journal
+            .try_clone()
+            .map_err(|e| CapabilityRouteError::Internal(format!("failed to clone journal: {e}")))?,
     };
 
     log_worker_stage(WorkerStage::Spawned, &job, None);
@@ -210,7 +210,9 @@ fn run_background_service_deployment(job: DeploymentJob) {
         let err = "failed to create deployment client";
         log_worker_stage(WorkerStage::ClientReady, &job, Some(err));
         let _ = job.journal.fail_trusted_activation_atomic(
-            &job.identity, DEPLOYMENT_FAILURE, &job.expected_agent,
+            &job.identity,
+            DEPLOYMENT_FAILURE,
+            &job.expected_agent,
         );
         cleanup_active_worker(&job.identity.decision_id);
         return;
@@ -253,7 +255,9 @@ fn deployer_deploy_and_record(
             );
             job.journal
                 .fail_trusted_activation_atomic(
-                    &job.identity, DEPLOYMENT_FAILURE, &job.expected_agent,
+                    &job.identity,
+                    DEPLOYMENT_FAILURE,
+                    &job.expected_agent,
                 )
                 .map_err(|e| anyhow::anyhow!("failed to record deployment failure: {e}"))?;
             return Ok(());
@@ -268,9 +272,7 @@ fn deployer_deploy_and_record(
             Some(&format!("receipt_validation_failed: {validation_error}")),
         );
         job.journal
-            .fail_trusted_activation_atomic(
-                &job.identity, DEPLOYMENT_FAILURE, &job.expected_agent,
-            )
+            .fail_trusted_activation_atomic(&job.identity, DEPLOYMENT_FAILURE, &job.expected_agent)
             .map_err(|e| anyhow::anyhow!("failed to record deployment failure: {e}"))?;
         return Ok(());
     }
@@ -279,7 +281,11 @@ fn deployer_deploy_and_record(
     log_worker_stage(WorkerStage::ActivationCommitted, job, None);
     job.journal
         .activate_trusted_service_atomic(
-            &job.identity, &job.intent, &job.manifest, &receipt, &job.expected_agent,
+            &job.identity,
+            &job.intent,
+            &job.manifest,
+            &receipt,
+            &job.expected_agent,
         )
         .map_err(|e| anyhow::anyhow!("activation commit failed: {e}"))?;
 
@@ -439,9 +445,12 @@ mod tests {
             WorkerStage::ActivationCommitted,
             WorkerStage::Completed,
         ];
-        let labels: std::collections::HashSet<&str> =
-            stages.iter().map(|s| s.label()).collect();
-        assert_eq!(labels.len(), stages.len(), "all stage labels must be unique");
+        let labels: std::collections::HashSet<&str> = stages.iter().map(|s| s.label()).collect();
+        assert_eq!(
+            labels.len(),
+            stages.len(),
+            "all stage labels must be unique"
+        );
     }
 
     #[test]

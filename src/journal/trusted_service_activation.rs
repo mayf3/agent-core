@@ -54,11 +54,11 @@ impl super::JournalStore {
         // serves as the authoritative audit trail of the decision and
         // is committed in the same SQLite transaction.
         super::activation_core::append_approval_event(&tx, &binding, identity)?;
-	        let active_component_snapshot: String = tx.query_row(
-	            "SELECT active_snapshot_id FROM component_registry_state WHERE singleton_id=1",
-	            [],
-	            |row| row.get(0),
-	        )?;
+        let active_component_snapshot: String = tx.query_row(
+            "SELECT active_snapshot_id FROM component_registry_state WHERE singleton_id=1",
+            [],
+            |row| row.get(0),
+        )?;
         let components = super::component_registry::load_snapshot(&tx, &active_component_snapshot)?;
         if let Some(current) = components.lookup(&manifest.component_id) {
             if compare_version(&manifest.version, &current.version) != std::cmp::Ordering::Greater {
@@ -81,16 +81,16 @@ impl super::JournalStore {
             tx.commit()?;
             return Ok(());
         }
-	        let in_flight: i64 = tx.query_row(
-	            "SELECT COUNT(*) FROM component_deployment_intents i
+        let in_flight: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM component_deployment_intents i
 	             LEFT JOIN component_deployment_receipts r
 	               ON r.proposal_id = i.proposal_id AND r.component_id = i.component_id
 	             JOIN capability_change_proposals p ON p.proposal_id = i.proposal_id
 	             WHERE i.component_id=?1 AND r.receipt_id IS NULL AND i.intent_id != ?2
 	               AND p.status = 'Approved'",
-	            params![manifest.component_id, intent.intent_id],
-	            |row| row.get(0),
-	        )?;
+            params![manifest.component_id, intent.intent_id],
+            |row| row.get(0),
+        )?;
         let pending_control: i64 = tx.query_row(
             "SELECT COUNT(*) FROM component_control_intents
              WHERE component_id=?1 AND status='pending'",
@@ -405,4 +405,3 @@ pub fn intent_exists_without_receipt(
 #[cfg(test)]
 #[path = "tests/trusted_service_activation.rs"]
 mod tests;
-

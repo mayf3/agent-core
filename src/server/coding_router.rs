@@ -104,7 +104,7 @@ fn infer_target_kind(text: &str, contracts: &[String]) -> Result<TargetKind> {
     if has("event.observe.v0") {
         return Ok(TargetKind::HookConsumerService);
     }
-    if has("context.compress.v0") || has("context.prepare.v0") {
+    if has("context.prepare.v0") {
         return Ok(TargetKind::ContextTransformer);
     }
     if has("context.load.v0") {

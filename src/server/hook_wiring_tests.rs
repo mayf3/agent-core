@@ -38,8 +38,6 @@ fn test_config() -> KernelConfig {
         fallback_openai_api_key: String::new(),
         fallback_model: String::new(),
         model_timeout_ms: 100,
-        context_recent_messages: 6,
-        context_max_block_chars: 4_000,
         outbox_dispatcher_enabled: false,
         outbox_dispatcher_poll_interval_ms: 100,
         extra_allowed_operations: vec!["system.status".to_string()],
@@ -163,10 +161,10 @@ fn hook_default_disabled_no_call() -> Result<()> {
     Ok(())
 }
 
-// ── Test 2: Enabled + fake HTTP server ──────────────────────────────────
+// ── Test 2: Unauthenticated legacy response is rejected ─────────────────
 
 #[test]
-fn hook_enabled_fake_server_injects_fragment() -> Result<()> {
+fn hook_rejects_unauthenticated_legacy_fragment_response() -> Result<()> {
     let fragment_text = "EXTERNAL_CONTEXT_SMOKE_WORD: papaya";
     let response_body = response_body_with_fragment(fragment_text);
     let (port, request_count) = spawn_fake_hook(&response_body, 200);
@@ -182,7 +180,8 @@ fn hook_enabled_fake_server_injects_fragment() -> Result<()> {
         timeout_ms: 5_000,
         max_request_bytes: 1024 * 1024,
         max_response_bytes: 1024 * 1024,
-        max_fragments: 10,
+        provider_id: "test-provider".into(),
+        shared_secret: "test-secret".into(),
     };
 
     let journal = run_delivery(config)?;
@@ -194,7 +193,7 @@ fn hook_enabled_fake_server_injects_fragment() -> Result<()> {
         "fake server must receive exactly one POST"
     );
 
-    // Journal has HookCallRecorded with status=ok.
+    // The old fragment response has no binding proof and is degraded.
     let events = journal.events()?;
     let rec = events
         .iter()
@@ -208,14 +207,14 @@ fn hook_enabled_fake_server_injects_fragment() -> Result<()> {
         .unwrap_or("(none)");
     assert_eq!(
         status,
-        Some("ok"),
-        "expected status=ok, got {status:?}, error_code={error_code:?}"
+        Some("degraded"),
+        "expected status=degraded, got {status:?}, error_code={error_code:?}"
     );
     assert_eq!(
         rec.payload.get("hook").and_then(|v| v.as_str()),
         Some("context.prepare.v0")
     );
-    assert!(rec.payload.get("fragment_count").is_some());
+    assert_eq!(error_code, "provider_proof_missing");
     assert!(rec.payload.get("duration_ms").is_some());
 
     // Verify hash chain integrity.
@@ -246,7 +245,7 @@ fn hook_enabled_empty_url_endpoint_missing() -> Result<()> {
         .expect("HookCallRecorded must exist");
     assert_eq!(
         rec.payload.get("status").and_then(|v| v.as_str()),
-        Some("skipped")
+        Some("degraded")
     );
     let error_code = rec
         .payload
@@ -279,7 +278,8 @@ fn hook_fail_open_on_http_500() -> Result<()> {
         timeout_ms: 5_000,
         max_request_bytes: 1024 * 1024,
         max_response_bytes: 1024 * 1024,
-        max_fragments: 10,
+        provider_id: "test-provider".into(),
+        shared_secret: "test-secret".into(),
     };
 
     let journal = run_delivery(config)?;
@@ -295,8 +295,8 @@ fn hook_fail_open_on_http_500() -> Result<()> {
         .expect("HookCallRecorded must exist");
     assert_eq!(
         rec.payload.get("status").and_then(|v| v.as_str()),
-        Some("skipped"),
-        "fail_open should record status=skipped"
+        Some("degraded"),
+        "fail_open should record status=degraded"
     );
     assert_eq!(
         rec.payload.get("failure_mode").and_then(|v| v.as_str()),
@@ -330,7 +330,8 @@ fn hook_fail_closed_on_http_500() -> Result<()> {
         timeout_ms: 5_000,
         max_request_bytes: 1024 * 1024,
         max_response_bytes: 1024 * 1024,
-        max_fragments: 10,
+        provider_id: "test-provider".into(),
+        shared_secret: "test-secret".into(),
     };
 
     let journal = run_delivery(config)?;
