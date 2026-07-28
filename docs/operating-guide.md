@@ -29,12 +29,19 @@ Feishu / CLI
 ### Kernel
 
 ```bash
-cargo run -- <db_path>
+set -a
+. "$HOME/.agent-core/config/runtime.env"
+set +a
+"$HOME/.agent-core/runtime/kernel/agent-core-kernel" serve \
+  --db "$HOME/.agent-core/data/agent-core.db" \
+  >>"$HOME/.agent-core/logs/kernel.log" 2>&1 &
+echo "$!" >"$HOME/.agent-core/run/kernel.pid"
 ```
 
 Defaults: kernel listens on `127.0.0.1:$AGENT_CORE_KERNEL_PORT` (default
-`4130`). Runtime data lives under `$AGENT_CORE_DATA_DIR` (default
-`~/.agent-core`).
+`4130`). The command above is the canonical production start: the executable,
+database, environment, log, and PID file all use their frozen paths inside the
+Linux VM runtime user's home.
 
 ### Feishu Connector
 
@@ -297,10 +304,85 @@ database schema version N is newer than supported version 1; upgrade the kernel
 This is intentional — it prevents an older kernel from corrupting a newer
 schema. Upgrade the kernel binary.
 
+## Frozen deployment paths and Kernel start
+
+Every `~` in this section is the runtime user's home **inside the Linux VM**,
+not the macOS host home.
+
+| Purpose | Frozen path |
+|---|---|
+| Runtime root | `~/.agent-core/` |
+| Kernel database | `~/.agent-core/data/agent-core.db` |
+| Kernel executable | `~/.agent-core/runtime/kernel/agent-core-kernel` |
+| Kernel provenance | `~/.agent-core/runtime/kernel/provenance.json` |
+| Runtime environment | `~/.agent-core/config/runtime.env` |
+| Kernel log | `~/.agent-core/logs/kernel.log` |
+| Kernel PID | `~/.agent-core/run/kernel.pid` |
+| Deployment artifacts | `~/.agent-core/deployment/artifacts/` |
+| Deployment Harness state | `~/.agent-core/deployment/state/` |
+
+The Kernel must always start from the fixed executable against the fixed
+database, using the command in [Starting the services](#starting-the-services).
+Build in a clean source worktree or temporary build directory outside the
+runtime root. Install by verifying `agent-core-kernel.new`, atomically
+replacing the fixed executable, and writing `provenance.json` whose source
+commit, tree, build command, timestamp, target platform, and SHA-256 match the
+installed bytes. Do not create a `releases/kernel/<head>/<digest>` hierarchy.
+
+The Deployment Harness artifact and state roots are frozen separately from
+Kernel state. If an existing Provider, Harness, Capability Host, Connector, or
+deployed component still references a legacy root, keep that compatibility
+configuration until a separate external-component migration is completed. Do
+not mix that cutover with a Kernel database/binary relocation.
+
+The Feishu Connector remains a separate edge-adapter process and is not
+restarted as part of a Kernel-only relocation.
+
+### Ephemeral vs. long-term directories
+
+| Directory | Class | Notes |
+|---|---|---|
+| `~/.agent-core/data/agent-core.db` | **Long-term** | The only authoritative Kernel Journal/Registry database. |
+| `~/.agent-core/runtime/kernel/agent-core-kernel` | **Long-term** | The only authoritative Kernel executable entry point. |
+| `~/.agent-core/config/runtime.env`, `logs/kernel.log`, `run/kernel.pid` | **Long-term** | Fixed Kernel configuration, log, and PID paths. |
+| `~/.agent-core/deployment/{artifacts,state}/` | **Long-term** | Deployment Harness outputs, isolated from Kernel state. |
+| `ops/hcr-linux-vm/`, `ops/canary-runtime/` | **Ephemeral (verification)** | Lima VM + canary scripts; cleanable verification environment, not the run root. |
+| `~/.agent-core/hcr-linux/...` | **Ephemeral (verification)** | HCR Linux VM mount + canary/shadow run trees; removal requires zero process/config/Registry references, a healthy fixed-path Kernel, and a passing real Feishu smoke. |
+| `release/<git-sha>/` (repo or VM) | **Ephemeral (build artifact)** | Per-commit release staging; reproducible from a tagged build, not long-term state. |
+| `target/{release,debug}/` | **Ephemeral (build output)** | Cargo build products; reproducible from source. |
+| Backups under `~/.agent-core/backups/` | **Ephemeral (recovery artifact)** | Retain until the next known-good state is confirmed, then review for removal. |
+
+Git repositories, Cargo `target/`, HCR, Canary, SSHFS mounts, shadow trees,
+workspaces, and per-release staging are never long-term Kernel start paths.
+
+### Recovery and relocation verification
+
+Before stopping the current Kernel, record `/health`, the active Registry
+snapshot id, the context manifest id, and its artifact digest. Stop the Kernel
+gracefully, confirm the process and database writer are gone, take a cold
+backup, and copy the database without modifying its contents.
+
+Before declaring recovery or relocation complete, verify:
+
+- `/health.status=ok`;
+- `hash_chain_ok=true`;
+- `outbox_unknown_count=0`;
+- `outbox_projection_drift_count=0`;
+- no pending or undelivered work;
+- the Registry snapshot, context manifest, and artifact digest exactly match
+  the recorded values; and
+- a real Feishu tool round trip passes.
+
+Do not manufacture a Feishu ingress for this check. Until the user completes
+the real Feishu smoke, retain all old HCR/Canary objects and do not report the
+migration as closed.
+
 ## What the operator should never do
 
 - Edit `journal_events`, `worker_jobs`, or `outbox_dispatches` rows directly
   (the Journal is hash-chained; projections are reconciled automatically).
+- Let an ordinary Agent, Connector, Provider, or Harness write the Kernel
+  SQLite database or Registry tables directly.
 - Manually retry an `unknown` dispatch without first determining the true
   outcome from the Journal.
 - Commit or log `.env`, API keys, tokens, or `~/.agent-core` / `~/.openduck` /
