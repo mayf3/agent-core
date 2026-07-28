@@ -135,6 +135,84 @@ agent_id = "assistant-alpha"
 agent_id = "assistant-alpha"
 ```
 
+## Final runtime state and deployment freeze
+
+In this section, every `~` is the home directory of the runtime user **inside
+the Linux VM**, not the macOS host home. `~/.agent-core/` is the only
+long-term runtime root.
+
+The following paths are frozen:
+
+```text
+~/.agent-core/
+  data/
+    agent-core.db
+  runtime/
+    kernel/
+      agent-core-kernel
+      provenance.json
+  config/
+    runtime.env
+  logs/
+    kernel.log
+  run/
+    kernel.pid
+  deployment/
+    artifacts/
+    state/
+```
+
+1. **Kernel state has one permanent authority.** The Kernel database is
+   `~/.agent-core/data/agent-core.db`. Names such as `kernel.sqlite` and
+   `v2-canary.db` are not long-term authority. The database contains Journal,
+   outbox, approval, run, and Registry state; there is no second local
+   authority.
+
+2. **Kernel has one fixed executable entry point.** Start the Kernel only
+   from `~/.agent-core/runtime/kernel/agent-core-kernel`. An upgrade writes and
+   verifies a temporary `agent-core-kernel.new`, atomically replaces the fixed
+   entry point, and updates
+   `~/.agent-core/runtime/kernel/provenance.json` to match the installed bytes.
+   At most one temporary `agent-core-kernel.prev` may be retained for rollback.
+   Per-HEAD or per-digest Kernel release directories, including
+   `releases/kernel/<head>/<digest>`, are not part of the runtime contract.
+
+3. **Kernel operational files are fixed.** Runtime configuration is
+   `~/.agent-core/config/runtime.env`, the Kernel log is
+   `~/.agent-core/logs/kernel.log`, and the PID file is
+   `~/.agent-core/run/kernel.pid`.
+
+4. **Deployment Harness roots are separate from Kernel state.** Deployed
+   artifacts live under `~/.agent-core/deployment/artifacts/`; Deployment
+   Harness state lives under `~/.agent-core/deployment/state/`. Neither root
+   may overlap the Kernel database. Harness source and build trees remain
+   outside `~/.agent-core/`.
+
+5. **Repositories and verification trees are never runtime entry points.**
+   Git worktrees, Cargo `target/`, HCR, Canary, SSHFS mounts, temporary build
+   trees, shadow trees, and per-release staging directories are not
+   authoritative runtime locations. HCR and Canary objects may be considered
+   for cleanup only after every process and configuration reference has moved
+   to the frozen paths and the final real Feishu smoke has passed.
+
+6. **Ordinary Agents never write the Journal / Registry SQLite.** Only the
+   Kernel process may append or mutate Kernel-owned SQLite state. Agents,
+   Connectors, Providers, and Harnesses must use governed Kernel interfaces;
+   direct writes to `journal_events`, Registry tables, or projections are
+   prohibited.
+
+7. **Recovery / upgrade / rollback stop conditions.** Completion requires all
+   of the following:
+   - Kernel `/health.status=ok`;
+   - `hash_chain_ok=true`, `outbox_unknown_count=0`,
+     `outbox_projection_drift_count=0`, and no pending or undelivered work;
+   - active Registry snapshot id, context manifest id, and context artifact
+     digest are byte-identical to their pre-operation values; and
+   - a real Feishu tool round trip succeeds.
+
+   If any condition cannot be satisfied, stop and report a Blocker. Never edit
+   Journal or Registry rows to force the condition.
+
 ## Deferred items (explicitly not implemented)
 
 - Multi-Agent runtime loading and lifecycle management
