@@ -297,6 +297,51 @@ database schema version N is newer than supported version 1; upgrade the kernel
 This is intentional — it prevents an older kernel from corrupting a newer
 schema. Upgrade the kernel binary.
 
+## Current deployment paths and Kernel start (canonical)
+
+This section names the **current** standard deployment paths so operators and
+external Harnesses converge on one layout. The long-term directory structure
+is frozen by `docs/decisions/agent-home-directory-isolation.md`; what follows
+is the current, reproducible operating reality, not a new design.
+
+- **Runtime root:** `~/.agent-core/` is the only runtime root.
+- **Kernel data directory (current):** the Kernel-managed SQLite file
+  holding the Journal, registry snapshots, and component manifests. The
+  exact final location of the Kernel data directory is **not yet frozen**;
+  for the current deployment, follow the start command below. Do not migrate
+  the database to a new path without an explicit user decision (this is
+  listed as an unresolved directory decision in the operating report).
+- **Kernel standard start entry point:** build from the repository, then
+  run the release binary against the Kernel data directory:
+
+  ```bash
+  cargo build --release            # produces target/release/agent-core-kernel
+  ./target/release/agent-core-kernel serve --db <kernel_data_dir>
+  ```
+
+  The Kernel listens on `127.0.0.1:$AGENT_CORE_KERNEL_PORT` (default
+  `4130`). A binary copied into a scratch, canary, or backup tree is never
+  an authoritative start source — always start from a clean repository
+  build of the pinned commit.
+- **Feishu Connector:** separate process (edge adapter); see
+  [Starting the services](#starting-the-services).
+- **External Harness artifacts / runtime config:** owned by the external
+  Harness, not the Kernel; see `docs/ops/deployment-harness.md`.
+
+### Ephemeral vs. long-term directories
+
+| Directory | Class | Notes |
+|---|---|---|
+| `~/.agent-core/` (Kernel data dir) | **Long-term** | The runtime root; Journal/registry live here. |
+| `ops/hcr-linux-vm/`, `ops/canary-runtime/` | **Ephemeral (verification)** | Lima VM + canary scripts; cleanable verification environment, not the run root. |
+| `~/.agent-core/hcr-linux/...` | **Ephemeral (verification)** | HCR Linux VM mount + canary/shadow run trees; may be removed once a deployment is retired. |
+| `release/<git-sha>/` (repo or VM) | **Ephemeral (build artifact)** | Per-commit release staging; reproducible from a tagged build, not long-term state. |
+| `target/{release,debug}/` | **Ephemeral (build output)** | Cargo build products; reproducible from source. |
+| Backups under `~/.agent-core/backups/` | **Ephemeral (recovery artifact)** | Retain until the next known-good state is confirmed, then review for removal. |
+
+No `releases/kernel/<head>/<digest>` directory convention is frozen; treat
+such paths as unconfirmed experiments, not authoritative layout.
+
 ## What the operator should never do
 
 - Edit `journal_events`, `worker_jobs`, or `outbox_dispatches` rows directly

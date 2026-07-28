@@ -135,6 +135,68 @@ agent_id = "assistant-alpha"
 agent_id = "assistant-alpha"
 ```
 
+## Runtime state and deployment freeze (operator clarification)
+
+The rules above freeze the *structure* of `~/.agent-core/`. The following
+clarifies how that structure maps to the **current** deployment, so operators
+and external Harnesses do not invent parallel directory hierarchies. This
+section describes what exists today; it does not add a second long-term root.
+
+1. **Single runtime root remains `~/.agent-core/`.** All Kernel data,
+   Connector operational state, and registry snapshots live under this one
+   root. There is no second long-term root, and no `releases/kernel/<head>/<digest>`
+   directory convention has been frozen — such paths are treated as
+   unconfirmed deployment experiments, not an authoritative layout.
+
+2. **Kernel data directory today.** The live Journal / registry database in
+   the current deployment is the Kernel-managed SQLite file under the active
+   run root. Because the **final on-disk location of the Kernel data
+   directory has not yet been frozen** (the proposed `data/agent-core.db`
+   tree below is aspirational and unimplemented), the operator must follow
+   whichever path the authoritative Operating Guide names as the current
+   standard start path. Inventing or migrating to a new long-term path is a
+   **user decision**, not an operator or Harness decision.
+
+3. **Kernel start entry point.** The Kernel is started from the repository
+   build of `agent-core-kernel` (a `cargo build --release` product), invoked
+   as `agent-core-kernel serve --db <kernel_data_dir>`. Binaries copied into
+   scratch, canary, or backup trees are not authoritative sources. See the
+   Operating Guide for the canonical command and port.
+
+4. **External Harness ownership boundary.** External Harness source, build
+   artifacts, and per-process runtime configuration are owned by the
+   external Harness itself (Rule 10), **not** by the Kernel and **not** by
+   this decision document. Their concrete directories are an external Harness
+   concern and are recorded in `docs/ops/deployment-harness.md`. The Kernel
+   holds only endpoint/manifest references to them.
+
+5. **HCR / Canary are verification environments, not the run root.** The
+   `ops/hcr-linux-vm/` Lima VM, the `ops/canary-runtime/` scripts, and any
+   `~/.agent-core/hcr-linux/...` tree are a **cleanable verification /
+   canary environment**. They are not the long-term run root, and any data
+   under them may be removed once a deployment is retired. (Note: the string
+   "HCR" is overloaded — in `docs/architecture/` it means *Harness Change
+   Request*, a Kernel domain concept; in `ops/` it means the *HCR Linux VM*.
+   This document uses it only in the Kernel-domain sense elsewhere.)
+
+6. **Ordinary Agents never write the Journal / registry directly.** Only the
+   Kernel process appends to `journal_events`, `registry_state`,
+   `registry_snapshots`, `component_registry_*`, and `harness_manifests`.
+   Any direct write to the Kernel SQLite database by an ordinary Agent or
+   Harness is a Rule-4 / Rule-8 violation.
+
+7. **Stop conditions for recovery / upgrade / rollback.**
+   - Recovery is complete when Kernel `/health.status` returns `ok` with
+     `hash_chain_ok=true`, `outbox_unknown_count=0`,
+     `projection_drift_count=0`, no pending/undelivered ingress, and the
+     active registry snapshot id, context manifest id, and context artifact
+     digest are byte-identical to the pre-recovery values.
+   - An upgrade or rollback is complete when the same `/health` invariants
+     hold **and** the deployment receipt in the Journal matches the rolled
+     component.
+   - If any of these cannot be satisfied, stop and report a Blocker rather
+     than editing Journal rows.
+
 ## Deferred items (explicitly not implemented)
 
 - Multi-Agent runtime loading and lifecycle management
