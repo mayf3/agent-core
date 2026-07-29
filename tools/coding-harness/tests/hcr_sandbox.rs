@@ -10,6 +10,14 @@ use coding_harness::hcr::executor::{self, HcrStatus};
 use coding_harness::hcr::profile::{ArgTemplate, HcrCommandEntry, HcrProfile, NetworkPolicy};
 use coding_harness::hcr::sandbox::SandboxBackend;
 
+fn unique_test_dir(parent: &std::path::Path, name: &str) -> PathBuf {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    parent.join(format!("{name}-{}-{nonce}", std::process::id()))
+}
+
 /// Helper: detect if sandbox is available for filesystem tests.
 fn sandbox_available() -> bool {
     SandboxBackend::detect() != SandboxBackend::Unavailable
@@ -77,6 +85,67 @@ fn child_can_read_write_target_workspace() {
     }
 
     let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[test]
+fn workspace_under_home_remains_visible() {
+    if !sandbox_available() {
+        eprintln!("SKIP: sandbox not available for workspace-under-home test");
+        return;
+    }
+
+    let real_home =
+        PathBuf::from(std::env::var("HOME").expect("HOME must be configured for this test"));
+    let ws = unique_test_dir(&real_home, ".hcr-workspace-under-home");
+    std::fs::create_dir_all(&ws).unwrap();
+    let input = ws.join("input.txt");
+    std::fs::write(&input, b"workspace under home is visible").unwrap();
+
+    let mut params = HashMap::new();
+    params.insert("path".into(), input.to_string_lossy().to_string());
+    let result = executor::execute(&sandbox_test_profile(), "read_file", &params, &ws);
+
+    assert_eq!(result.status, HcrStatus::Succeeded, "{result:?}");
+    assert_eq!(result.stdout, "workspace under home is visible");
+    std::fs::remove_dir_all(&ws).unwrap();
+}
+
+#[test]
+fn private_home_exists_and_does_not_shadow_workspace() {
+    if !sandbox_available() {
+        eprintln!("SKIP: sandbox not available for private-home test");
+        return;
+    }
+
+    let real_home =
+        PathBuf::from(std::env::var("HOME").expect("HOME must be configured for this test"));
+    let ws = unique_test_dir(&real_home, ".hcr-private-home");
+    std::fs::create_dir_all(&ws).unwrap();
+
+    let mut profile = sandbox_test_profile();
+    profile.allowed_commands.push(HcrCommandEntry {
+        name: "print_home".into(),
+        program: PathBuf::from("/usr/bin/printenv"),
+        args: vec![ArgTemplate::Fixed("HOME".into())],
+        network: Some(NetworkPolicy::Deny),
+        timeout_ms_default: Some(5_000),
+    });
+    profile.allowed_commands.push(HcrCommandEntry {
+        name: "list_home".into(),
+        program: PathBuf::from("/bin/ls"),
+        args: vec![ArgTemplate::Fixed("/run/agent-core-hcr/home".into())],
+        network: Some(NetworkPolicy::Deny),
+        timeout_ms_default: Some(5_000),
+    });
+
+    let home = executor::execute(&profile, "print_home", &HashMap::new(), &ws);
+    let list = executor::execute(&profile, "list_home", &HashMap::new(), &ws);
+
+    assert_eq!(home.status, HcrStatus::Succeeded, "{home:?}");
+    assert_eq!(home.stdout.trim(), "/run/agent-core-hcr/home");
+    assert!(!PathBuf::from(home.stdout.trim()).starts_with(&ws));
+    assert_eq!(list.status, HcrStatus::Succeeded, "{list:?}");
+    std::fs::remove_dir_all(&ws).unwrap();
 }
 
 // ── Test 15: Child cannot read agent-core repo ──
@@ -196,6 +265,33 @@ fn child_cannot_read_fake_ssh_key() {
     let _ = std::fs::remove_dir_all(&ws);
 }
 
+#[test]
+fn read_only_workspace_permissions_remain_enforced() {
+    if !sandbox_available() {
+        eprintln!("SKIP: sandbox not available for read-only workspace test");
+        return;
+    }
+
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
+    let real_home =
+        PathBuf::from(std::env::var("HOME").expect("HOME must be configured for this test"));
+    let ws = unique_test_dir(&real_home, ".hcr-read-only-workspace");
+    std::fs::create_dir_all(&ws).unwrap();
+    std::fs::set_permissions(&ws, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+    let output = ws.join("must-not-exist");
+    let mut params = HashMap::new();
+    params.insert("path".into(), output.to_string_lossy().to_string());
+    let result = executor::execute(&sandbox_test_profile(), "write_file", &params, &ws);
+
+    assert_ne!(result.status, HcrStatus::Succeeded, "{result:?}");
+    assert!(!output.exists());
+    std::fs::set_permissions(&ws, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::remove_dir_all(&ws).unwrap();
+}
+
 // ── Test 18: Child cannot write outside workspace ──
 
 #[test]
@@ -245,13 +341,28 @@ fn symlink_escape_remains_rejected() {
     let mut params = HashMap::new();
     params.insert("path".into(), symlink_path.to_string_lossy().to_string());
 
-    let _result = executor::execute(&profile, "read_file", &params, &ws);
+    let result = executor::execute(&profile, "read_file", &params, &ws);
 
-    // The execution uses cat which follows symlinks. With sandbox active,
-    // the sandbox should block access. Without sandbox, the cat would read
-    // through the symlink - but the workspace resolver in the Coding Harness
-    // should catch this at a higher level.
-    // This test documents the expected behavior.
+    if sandbox_available() {
+        assert_ne!(result.status, HcrStatus::Succeeded, "{result:?}");
+        assert!(!result.stdout.contains("sensitive data"));
+    }
 
     let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[test]
+fn path_traversal_is_rejected_before_spawn() {
+    let mut params = HashMap::new();
+    params.insert("path".into(), "../outside.txt".into());
+
+    let result = executor::execute(
+        &sandbox_test_profile(),
+        "read_file",
+        &params,
+        &std::env::temp_dir(),
+    );
+
+    assert_eq!(result.status, HcrStatus::Denied);
+    assert_eq!(result.error_code.as_deref(), Some("HCR_INVALID_PARAMETER"));
 }
