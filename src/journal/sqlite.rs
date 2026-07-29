@@ -24,7 +24,7 @@ pub struct JournalStore {
 /// The schema `PRAGMA user_version` this kernel writes and understands. Bumped
 /// only when `migrations/` gains a new applied migration. The startup
 /// `migrate()` refuses to run against a DB whose version is newer than this.
-const CURRENT_SCHEMA_VERSION: i64 = 15;
+const CURRENT_SCHEMA_VERSION: i64 = 16;
 
 impl JournalStore {
     pub fn open(path: &Path) -> Result<Self> {
@@ -393,6 +393,9 @@ impl JournalStore {
             conn.execute_batch(include_str!(
                 "../../migrations/0015_delivery_manifest_columns.sql"
             ))?;
+            conn.execute_batch(include_str!(
+                "../../migrations/0016_hcr_failure_reconciliation.sql"
+            ))?;
             super::queue::migrate(&conn)?;
             backfill_feishu_message_dedup(&conn)?;
             conn.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
@@ -472,19 +475,25 @@ impl JournalStore {
                     ))?;
                     conn.pragma_update(None, "user_version", 13)?;
                 }
-	                13 => {
-	                    conn.execute_batch(include_str!(
-	                        "../../migrations/0014_external_receipt_envelope_digests.sql"
-	                    ))?;
-	                    conn.pragma_update(None, "user_version", 14)?;
-	                }
-	                14 => {
-	                    conn.execute_batch(include_str!(
-	                        "../../migrations/0015_delivery_manifest_columns.sql"
-	                    ))?;
-	                    conn.pragma_update(None, "user_version", 15)?;
-	                }
-	                _ => break,
+                13 => {
+                    conn.execute_batch(include_str!(
+                        "../../migrations/0014_external_receipt_envelope_digests.sql"
+                    ))?;
+                    conn.pragma_update(None, "user_version", 14)?;
+                }
+                14 => {
+                    conn.execute_batch(include_str!(
+                        "../../migrations/0015_delivery_manifest_columns.sql"
+                    ))?;
+                    conn.pragma_update(None, "user_version", 15)?;
+                }
+                15 => {
+                    conn.execute_batch(include_str!(
+                        "../../migrations/0016_hcr_failure_reconciliation.sql"
+                    ))?;
+                    conn.pragma_update(None, "user_version", 16)?;
+                }
+                _ => break,
             }
         }
         if applied >= 1 {

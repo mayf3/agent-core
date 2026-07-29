@@ -194,6 +194,7 @@ pub struct HcrSettlement {
     pub result: String,
     pub error_code: Option<String>,
     pub evidence_set_digest: String,
+    pub failure_evidence_event_id: Option<String>,
     pub created_at: String,
 }
 
