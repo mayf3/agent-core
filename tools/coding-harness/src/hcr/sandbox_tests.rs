@@ -10,18 +10,22 @@ fn detect_backend_never_panics() {
 }
 
 #[cfg(target_os = "linux")]
-fn bwrap_argv_for(policy: NetworkPolicy) -> Vec<String> {
+fn bwrap_command_for(policy: NetworkPolicy, workspace: &str) -> StdCommand {
     let config = SandboxConfig {
-        workspace_root: PathBuf::from("/tmp/test-ws"),
-        home_dir: PathBuf::from("/tmp/test-ws/.hcr-home"),
+        workspace_root: PathBuf::from(workspace),
+        home_dir: PathBuf::from(format!("{workspace}/.hcr-home")),
         real_home: PathBuf::from("/home/someuser"),
         agent_core_repo: None,
         network_policy: policy,
     };
     let backend = SandboxBackend::LinuxBubblewrap;
     let mut command = StdCommand::new("/bin/true");
-    let wrapped = wrap_with_sandbox(&mut command, &config, &backend).expect("wrap succeeds");
-    wrapped
+    wrap_with_sandbox(&mut command, &config, &backend).expect("wrap succeeds")
+}
+
+#[cfg(target_os = "linux")]
+fn bwrap_argv_for(policy: NetworkPolicy) -> Vec<String> {
+    bwrap_command_for(policy, "/tmp/test-ws")
         .get_args()
         .map(|arg| arg.to_string_lossy().into_owned())
         .collect()
@@ -57,6 +61,66 @@ fn temporary_directory_is_private() {
     assert!(!argv
         .windows(3)
         .any(|args| args == ["--bind", "/tmp", "/tmp"]));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn workspace_under_home_is_not_shadowed() {
+    let workspace = "/home/someuser/workspace";
+    let argv: Vec<_> = bwrap_command_for(NetworkPolicy::Deny, workspace)
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+
+    assert!(argv
+        .windows(3)
+        .any(|args| { args == ["--bind", workspace, workspace] }));
+    assert!(argv.windows(2).any(|args| args == ["--dir", "/home"]));
+    assert!(argv
+        .windows(2)
+        .any(|args| args == ["--dir", "/home/someuser"]));
+    assert!(!argv.windows(2).any(|args| args == ["--tmpfs", "/home"]));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn private_home_is_independent_tmpfs_and_home_env_points_to_it() {
+    let command = bwrap_command_for(NetworkPolicy::Deny, "/home/someuser/workspace");
+    let argv: Vec<_> = command
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    let home = command
+        .get_envs()
+        .find(|(key, _)| *key == std::ffi::OsStr::new("HOME"))
+        .and_then(|(_, value)| value)
+        .map(|value| value.to_string_lossy().into_owned());
+
+    assert!(argv
+        .windows(2)
+        .any(|args| args == ["--tmpfs", LINUX_PRIVATE_HOME]));
+    assert!(!argv
+        .windows(3)
+        .any(|args| args[0] == "--bind" && args[1].ends_with(".hcr-home")));
+    assert_eq!(home.as_deref(), Some(LINUX_PRIVATE_HOME));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn workspace_and_private_home_overlap_fails_closed() {
+    let config = SandboxConfig {
+        workspace_root: PathBuf::from("/run/agent-core-hcr"),
+        home_dir: PathBuf::from("/tmp/unused-home"),
+        real_home: PathBuf::from("/home/someuser"),
+        agent_core_repo: None,
+        network_policy: NetworkPolicy::Deny,
+    };
+    let backend = SandboxBackend::LinuxBubblewrap;
+    let mut command = StdCommand::new("/bin/true");
+    let error = wrap_with_sandbox(&mut command, &config, &backend).unwrap_err();
+
+    assert_eq!(error.error_code(), "HCR_INTERNAL_ERROR");
+    assert!(error.to_string().contains("overlaps private HOME"));
 }
 
 #[cfg(target_os = "linux")]
