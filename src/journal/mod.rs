@@ -14,6 +14,7 @@ pub mod harness_activation_ops;
 mod harness_change_requests;
 pub mod harness_ops;
 pub(crate) mod hash_chain;
+mod hcr_failure_reconciliation;
 mod hcr_settlement;
 mod model_invocation;
 mod outbox;
@@ -57,9 +58,14 @@ mod grant_ops_lifecycle_tests;
 #[path = "tests/hcr_claim.rs"]
 mod hcr_claim_tests;
 
+#[cfg(test)]
+#[path = "tests/hcr_failure_reconciliation.rs"]
+mod hcr_failure_reconciliation_tests;
+
 pub(crate) use coding_task_submissions::CodingTaskSubmissionClaim;
 pub use event_observe::{
     redact_payload, EventObserveQuery, EventObserveResponse, ObservedEvent, DEFAULT_OBSERVE_LIMIT,
     MAX_OBSERVE_LIMIT, OBSERVE_SCHEMA_VERSION,
 };
+pub use hcr_failure_reconciliation::FailureReconciliation;
 pub use sqlite::JournalStore;
