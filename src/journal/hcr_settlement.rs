@@ -703,7 +703,7 @@ impl JournalStore {
         let conn = self.conn.lock().map_err(|_| anyhow!("mutex"))?;
         conn.query_row(
             "SELECT settlement_id, hcr_id, claim_id, run_id, result, error_code,
-                    evidence_set_digest, created_at
+                    evidence_set_digest, failure_evidence_event_id, created_at
              FROM hcr_settlements WHERE hcr_id = ?1",
             params![hcr_id],
             |row| {
@@ -715,7 +715,8 @@ impl JournalStore {
                     result: row.get(4)?,
                     error_code: row.get(5)?,
                     evidence_set_digest: row.get(6)?,
-                    created_at: row.get(7)?,
+                    failure_evidence_event_id: row.get(7)?,
+                    created_at: row.get(8)?,
                 })
             },
         )
