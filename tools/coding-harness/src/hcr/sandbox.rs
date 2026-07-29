@@ -20,6 +20,9 @@ use std::process::Command as StdCommand;
 use super::errors::HcrError;
 use super::profile::NetworkPolicy;
 
+#[cfg(target_os = "linux")]
+const LINUX_PRIVATE_HOME: &str = "/run/agent-core-hcr/home";
+
 /// Detected sandbox backends.
 ///
 /// HCR v0 only supports Linux bubblewrap.  macOS and other platforms
@@ -150,7 +153,19 @@ fn wrap_linux_bubblewrap(
     config: &SandboxConfig,
 ) -> Result<StdCommand, HcrError> {
     let ws = config.workspace_root.to_string_lossy().to_string();
-    let home = config.home_dir.to_string_lossy().to_string();
+    let workspace_path = config.workspace_root.as_path();
+    let private_home = std::path::Path::new(LINUX_PRIVATE_HOME);
+
+    if !workspace_path.is_absolute() {
+        return Err(HcrError::Internal(
+            "sandbox workspace root must be absolute".into(),
+        ));
+    }
+    if paths_overlap(workspace_path, private_home) {
+        return Err(HcrError::Internal(
+            "sandbox workspace overlaps private HOME".into(),
+        ));
+    }
 
     let original_program = cmd.get_program().to_string_lossy().to_string();
     let original_args: Vec<String> = cmd
@@ -199,19 +214,27 @@ fn wrap_linux_bubblewrap(
     bwrap.arg("--tmpfs");
     bwrap.arg("/tmp");
 
+    // Bubblewrap starts from an empty mount namespace. Create only the
+    // workspace target's parents instead of mounting or masking a broad
+    // host directory such as /home. This keeps an allowed workspace at its
+    // configured absolute path without exposing sibling host paths.
+    append_parent_dirs(&mut bwrap, workspace_path);
+
     // Workspace read-write
     bwrap.arg("--bind");
     bwrap.arg(&ws);
     bwrap.arg(&ws);
 
-    // Private sandbox home (tmpfs — NOT host /home).
-    // The candidate sees an empty, writable /home that disappears
-    // when the sandbox exits.  Host home, SSH keys, gitconfig, and
-    // config directories are NOT accessible.
-    bwrap.arg("--tmpfs");
-    bwrap.arg("/home");
+    // Private sandbox home. It is an isolated tmpfs at a dedicated path,
+    // never a mount over /home and never a bind of the host's real HOME.
+    // This prevents mount shadow when the workspace itself lives below
+    // /home while keeping HOME writable and ephemeral.
     bwrap.arg("--dir");
-    bwrap.arg("/home/sandbox");
+    bwrap.arg("/run");
+    bwrap.arg("--dir");
+    bwrap.arg("/run/agent-core-hcr");
+    bwrap.arg("--tmpfs");
+    bwrap.arg(LINUX_PRIVATE_HOME);
 
     // Rust toolchain: read-only bind of specific host paths to
     // custom sandbox locations.  Resolve RUSTUP_HOME and CARGO_HOME
@@ -265,11 +288,6 @@ fn wrap_linux_bubblewrap(
         }
     }
 
-    // Sandbox home (writable, per-gate)
-    bwrap.arg("--bind");
-    bwrap.arg(&home);
-    bwrap.arg(&home);
-
     // Network policy.
     //
     // N-1 ruling (sandbox-internal loopback only):
@@ -318,10 +336,10 @@ fn wrap_linux_bubblewrap(
     }
 
     // Override HOME, RUSTUP_HOME, CARGO_HOME to sandbox paths.
-    // HOME → private /home/sandbox (tmpfs, not host home)
+    // HOME → dedicated private tmpfs (not host home)
     // RUSTUP_HOME → /opt/rustup (ro-bind from host)
     // CARGO_HOME → /opt/cargo (ro-bind from host)
-    bwrap.env("HOME", "/home/sandbox");
+    bwrap.env("HOME", LINUX_PRIVATE_HOME);
     if let Some(rustup) = &sandbox_rustup {
         bwrap.env("RUSTUP_HOME", rustup);
     }
@@ -335,6 +353,26 @@ fn wrap_linux_bubblewrap(
     }
 
     Ok(bwrap)
+}
+
+#[cfg(target_os = "linux")]
+fn paths_overlap(left: &std::path::Path, right: &std::path::Path) -> bool {
+    left == right || left.starts_with(right) || right.starts_with(left)
+}
+
+#[cfg(target_os = "linux")]
+fn append_parent_dirs(command: &mut StdCommand, path: &std::path::Path) {
+    let mut parents: Vec<_> = path
+        .parent()
+        .into_iter()
+        .flat_map(std::path::Path::ancestors)
+        .filter(|parent| *parent != std::path::Path::new("/"))
+        .collect();
+    parents.reverse();
+    for parent in parents {
+        command.arg("--dir");
+        command.arg(parent);
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
