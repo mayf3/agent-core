@@ -380,7 +380,23 @@ impl JournalStore {
         })?;
         for row in rows {
             let (seq, kind_text, payload_json, stored_prev, stored_hash) = row?;
-            let expected = event_hash(previous_hash.as_deref(), seq, &kind_text, &payload_json);
+            // Journal hashes are defined over serde_json's canonical
+            // serialization of the payload Value, not over incidental JSON
+            // object-key ordering or whitespace in the SQLite TEXT column.
+            // Keep the stored kind text so future kinds remain observable,
+            // while matching the canonical payload semantics used by the
+            // authoritative verifier.
+            let payload: Value = match serde_json::from_str(&payload_json) {
+                Ok(payload) => payload,
+                Err(_) => return Ok(false),
+            };
+            let canonical_payload = serde_json::to_string(&payload)?;
+            let expected = event_hash(
+                previous_hash.as_deref(),
+                seq,
+                &kind_text,
+                &canonical_payload,
+            );
             if stored_prev != previous_hash || stored_hash != expected {
                 return Ok(false);
             }
@@ -554,6 +570,36 @@ mod tests {
             "stored-kind hash chain must be valid after future-kind insert"
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn observe_verifies_canonical_payload_not_stored_key_order() -> anyhow::Result<()> {
+        let j = JournalStore::in_memory()?;
+        let sequence = 1;
+        let kind = "HarnessManifestRegistered";
+        let stored_payload = r#"{"manifest_id":"manifest_test","harness_id":"context-harness-v0","artifact_digest":"sha256:test"}"#;
+        let payload: Value = serde_json::from_str(stored_payload)?;
+        let canonical_payload = serde_json::to_string(&payload)?;
+        assert_ne!(stored_payload, canonical_payload);
+        let hash = crate::journal::hash_chain::event_hash(None, sequence, kind, &canonical_payload);
+
+        j.execute_sql_for_test(&format!(
+            "INSERT INTO journal_events \
+             (sequence, event_id, kind, payload_json, previous_hash, hash, created_at) \
+             VALUES ({sequence}, 'event_noncanonical_payload', '{kind}', \
+                     '{stored_payload}', NULL, '{hash}', '{}')",
+            Utc::now().to_rfc3339(),
+        ))?;
+
+        let response = j.observe_events(&EventObserveQuery {
+            limit: 1,
+            ..Default::default()
+        })?;
+        assert_eq!(response.events.len(), 1);
+        assert_eq!(response.events[0].event_id, "event_noncanonical_payload");
+        assert_eq!(response.events[0].payload, payload);
+        assert!(j.verify_hash_chain_stored_kind()?);
         Ok(())
     }
 }
