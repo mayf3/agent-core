@@ -25,6 +25,9 @@ const LEGACY_TRUSTED_TEST_KITS: &[&str] = &["calculator-fixture-v0"];
 
 /// Run the trusted test gate.
 pub(crate) fn check(candidate: &CandidateSnapshot, ctx: &GateContext) -> GateResult {
+    if ctx.test_kit == "invocable-capability-contract-v0" {
+        return super::invocable_contract::check_tests(candidate, ctx);
+    }
     if LEGACY_TRUSTED_TEST_KITS.contains(&ctx.test_kit.as_str()) {
         run_legacy_trusted_test(candidate, ctx)
     } else {
