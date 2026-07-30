@@ -10,7 +10,7 @@ use crate::registry::snapshot::RegistrySnapshot;
 
 /// Check whether the run principal is the configured Feishu coding owner
 /// in a private-chat context (source=Feishu, subject matches the configured
-/// open_id, chat_type is "p2p"). Only this combination receives the seven
+/// open_id, chat_type is "p2p"). Only this combination receives the active
 /// `external.coding_*` capability grants.
 pub(crate) fn is_coding_owner(
     config: &KernelConfig,
@@ -32,7 +32,7 @@ pub(crate) fn is_coding_owner(
 
 /// Add external (harness) grants from the pinned snapshot to the principal.
 /// Only the configured Feishu coding owner in a private chat receives
-/// the exact seven `external.coding_*` grants. Non-coding external operations
+/// the exact active development grants. Non-coding external operations
 /// are never auto-granted — they require explicit grant configuration.
 /// Unknown external operations are never auto-granted either.
 pub(crate) fn augment_grants(
@@ -50,7 +50,9 @@ pub(crate) fn augment_grants(
         }
         // Only grant known coding operations — non-coding external ops
         // (e.g. hotload_probe, deploy_anything) are NOT auto-granted.
-        if !crate::domain::operation::external::CODING_OPERATIONS.contains(&op.name.as_str()) {
+        if !crate::domain::operation::external::OWNER_DEVELOPMENT_OPERATIONS
+            .contains(&op.name.as_str())
+        {
             continue;
         }
         if !principal.grants.iter().any(|g| g.operation == op.name) {
@@ -60,25 +62,6 @@ pub(crate) fn augment_grants(
             });
         }
     }
-}
-
-/// The subset of coding operations allowed in HCR mode.
-///
-/// Only workspace operations required for Route A harness creation are permitted.
-/// Task submission, capability proposals, and other operations are excluded
-/// from HCR mode and will be denied by the policy pipeline.
-pub fn hcr_allowed_operations() -> &'static [&'static str] {
-    &[
-        crate::domain::operation::external::WORKSPACE_LIST,
-        crate::domain::operation::external::WORKSPACE_READ,
-        crate::domain::operation::external::WORKSPACE_WRITE,
-        crate::domain::operation::external::WORKSPACE_EXEC,
-    ]
-}
-
-/// Check whether an operation is allowed in HCR mode.
-pub fn is_hcr_allowed_operation(operation: &str) -> bool {
-    hcr_allowed_operations().contains(&operation)
 }
 
 #[cfg(test)]
@@ -193,14 +176,11 @@ mod tests {
             .iter()
             .map(|g| g.operation.as_str())
             .collect();
-        assert_eq!(
-            granted_ops.len(),
-            6,
-            "all 6 coding ops granted (TASK_SUBMIT excluded)"
-        );
-        for op in external::CODING_OPERATIONS {
+        assert_eq!(granted_ops.len(), 6, "all active development ops granted");
+        for op in external::OWNER_DEVELOPMENT_OPERATIONS {
             assert!(granted_ops.contains(op), "{op} not granted");
         }
+        assert!(!granted_ops.contains(&external::CAPABILITY_PROPOSE));
     }
 
     /// P0-A1: non-owner / group chat does NOT receive coding operation grants.

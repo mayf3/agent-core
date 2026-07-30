@@ -138,7 +138,6 @@ fn immutable_refs_for(input: &LlmInput) -> Result<Vec<ImmutableArtifactRef>> {
             ContextBlockKind::RootSystem
                 | ContextBlockKind::RuntimeContract
                 | ContextBlockKind::AgentProfile
-                | ContextBlockKind::HarnessChangeRequest
         ) {
             refs.push(ImmutableArtifactRef::new(
                 format!("model:required-block:{index}"),

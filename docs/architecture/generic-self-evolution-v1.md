@@ -17,7 +17,7 @@ The governed flow is:
 
 ```text
 message -> DevelopmentRequest -> DevelopmentPlan -> candidate
-        -> five profile gates -> immutable manifest digest
+        -> external profile gates -> evidence-bound Acceptance Receipt
         -> Proposal -> Approval -> activation or deployment
 ```
 
@@ -70,10 +70,13 @@ build entry and test kit from the manifest and selected profile. Gate code does
 not choose a calculator command or calculator source directly.
 
 On a passing result, the Coding Harness stores the canonical, post-gate component
-manifest in content-addressed storage. Its digest is included in signed acceptance
-evidence and returned to the Kernel. The Kernel validates that digest, loads that
-exact manifest from content-addressed storage, and derives the proposal from it.
-It never activates a pre-gate manifest supplied by the submit response.
+manifest in content-addressed storage. Its generic Receipt binds the authenticated
+Invocation, DevelopmentRequest digest, candidate digest, artifact and manifest
+digests, outcome, evidence digest, issuer principal, Contract Catalog version,
+and Component Profile version. The Kernel authenticates the loopback control
+channel, recomputes these boundary digests, loads and re-hashes the referenced
+content, and derives the Proposal. It does not project or reinterpret the
+Harness's gate attempts.
 
 The existing calculator is retained as the first ordinary fixture for the
 `invocable-capability-v0` profile. It supplies its own trusted test and smoke
@@ -102,9 +105,21 @@ candidate failure and never relaxes isolation.
 Only after the isolated compile and profile contract pass does the Harness
 atomically materialize a request-bound candidate. Its manifest records the
 DevelopmentRequest id, model name, module digest, test kit, and mutable surface.
-The ordinary five HCR gates still run afterward and bind the accepted artifact;
-the generation probe is not a substitute for Proposal, Approval, deployment,
-or receipt validation.
+The external Component Profile gates still run afterward and bind the accepted
+artifact. They are owned and recorded by Coding Harness, not projected as Kernel
+HCR rows. The generation probe is not a substitute for Proposal, Approval,
+deployment, or receipt validation.
+
+## HCR compatibility boundary
+
+The active Kernel HCR workflow is retired. New development requests create no
+`harness_change_requests`, `hcr_claims`, `hcr_gate_attempts`, or
+`hcr_settlements` rows. The former HCR write routes return `410 Gone`.
+
+Historical HCR tables, Journal events, receipts, and legacy Proposal bindings
+remain immutable and readable. Authenticated operators may inspect a retained
+record at `GET /v1/legacy/hcr/{hcr_id}`. There is no corresponding legacy write,
+resume, reconcile, claim, gate, or settlement route.
 
 ## Lifecycle, primitive gaps, and repair
 

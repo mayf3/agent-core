@@ -22,7 +22,5 @@ pub enum ContextBlockKind {
     ToolResult,
     ActiveSkill,
     RecentMessages,
-    /// HCR instructions for external harness creation.
-    HarnessChangeRequest,
     UserMessage,
 }

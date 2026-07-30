@@ -15,15 +15,26 @@ pub fn execute(approved: &ApprovedInvocation, timeout: Duration) -> Result<Value
     if intent.operation != crate::domain::operation::external::TASK_SUBMIT {
         bail!("CODING_HARNESS_OPERATION_MISMATCH");
     }
+    let mut arguments = intent.arguments.clone();
+    if let Some(object) = arguments.as_object_mut() {
+        object.insert(
+            "invocation_intent_id".into(),
+            Value::String(intent.invocation_id.0.clone()),
+        );
+    }
     let body = json!({
         "protocol_version": "external-harness-v1",
         "invocation_id": intent.invocation_id.0,
         "operation": intent.operation,
-        "arguments": intent.arguments,
+        "arguments": arguments,
     });
     let bytes = serde_json::to_vec(&body)?;
+    let control_token = std::env::var("AGENT_CORE_CODING_HARNESS_CONTROL_TOKEN")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("CODING_HARNESS_CONTROL_NOT_CONFIGURED"))?;
     let request = format!(
-        "POST /execute HTTP/1.1\r\nHost: {CODING_HARNESS_ADDR}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "POST /execute HTTP/1.1\r\nHost: {CODING_HARNESS_ADDR}\r\nAuthorization: Bearer {control_token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         bytes.len(),
         String::from_utf8_lossy(&bytes),
     );

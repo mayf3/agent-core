@@ -2,14 +2,17 @@
 
 #[cfg(test)]
 mod tests {
-    use super::super::version_query::{parse_status_code, query_deployed_version};
-    use super::super::version_allocation::{allocate_next_version, increment_patch};
     use super::super::delivery_manifest::build_delivery_manifest;
+    use super::super::version_allocation::{allocate_next_version, increment_patch};
+    use super::super::version_query::{parse_status_code, query_deployed_version};
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::sync::atomic::{AtomicU16, Ordering};
+    use std::sync::Mutex;
     use std::thread;
     use std::time::Duration;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     // ── parse_status_code tests ────────────────────────────
     #[test]
@@ -83,8 +86,11 @@ mod tests {
             "requested_permissions": ["journal.observe"],
             "service": { "version": "0.1.5", "healthcheck_path": "/health" }
         });
-        let manifest = build_delivery_manifest(&component,
-            "sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234").unwrap();
+        let manifest = build_delivery_manifest(
+            &component,
+            "sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234",
+        )
+        .unwrap();
         assert_eq!(manifest.version, "0.1.5");
         assert_eq!(manifest.component_id, "test-component");
         assert_eq!(manifest.entrypoint, "artifact");
@@ -102,12 +108,18 @@ mod tests {
             "requested_permissions": ["journal.observe"],
             "service": { "version": "0.1.0", "healthcheck_path": "/health" }
         });
-        let m1 = build_delivery_manifest(&base,
-            "sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234").unwrap();
+        let m1 = build_delivery_manifest(
+            &base,
+            "sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234",
+        )
+        .unwrap();
         let mut v2 = base.clone();
         v2["service"]["version"] = serde_json::json!("0.1.1");
-        let m2 = build_delivery_manifest(&v2,
-            "sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234").unwrap();
+        let m2 = build_delivery_manifest(
+            &v2,
+            "sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234",
+        )
+        .unwrap();
         assert_ne!(m1.manifest_id, m2.manifest_id);
     }
 
@@ -130,9 +142,15 @@ mod tests {
     }
 
     fn with_server<F>(response: &'static [u8], token: &str, f: F)
-    where F: FnOnce() {
+    where
+        F: FnOnce(),
+    {
+        let _guard = ENV_LOCK.lock().expect("manifest builder env lock");
         let port = start_mock(response);
-        std::env::set_var("AGENT_CORE_DEPLOYMENT_HARNESS_READ_URL", format!("http://127.0.0.1:{port}"));
+        std::env::set_var(
+            "AGENT_CORE_DEPLOYMENT_HARNESS_READ_URL",
+            format!("http://127.0.0.1:{port}"),
+        );
         std::env::set_var("AGENT_CORE_DEPLOYMENT_HARNESS_READ_TOKEN", token);
         thread::sleep(Duration::from_millis(50));
         f();
@@ -152,7 +170,10 @@ mod tests {
     fn version_query_200_returns_version() {
         let resp = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"ok\":true,\"version\":\"0.1.0\"}";
         with_server(resp, "test-token-32-chars-minimum-length!!", || {
-            assert_eq!(query_deployed_version("test-component").unwrap(), Some("0.1.0".into()));
+            assert_eq!(
+                query_deployed_version("test-component").unwrap(),
+                Some("0.1.0".into())
+            );
         });
     }
     #[test]
@@ -213,7 +234,10 @@ mod tests {
     fn version_allocation_returns_next_patch_when_component_exists() {
         let resp = b"HTTP/1.1 200 OK\r\n\r\n{\"ok\":true,\"version\":\"0.1.0\"}";
         with_server(resp, "test-token-32-chars-minimum-length!!", || {
-            assert_eq!(allocate_next_version("test-component").unwrap(), Some("0.1.1".into()));
+            assert_eq!(
+                allocate_next_version("test-component").unwrap(),
+                Some("0.1.1".into())
+            );
         });
     }
     #[test]

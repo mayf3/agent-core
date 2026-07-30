@@ -173,9 +173,12 @@ fn stale_retirement_cas_refreshes_cache() {
         "no time.now after re-init"
     );
     assert!(
-        snap.lookup("external.coding_task_submit").is_some()
-            && snap.lookup("external.coding_hcr_accept").is_some(),
-        "restart upgrade must preserve/seed the controlled coding operations"
+        snap.lookup("external.coding_task_submit").is_some(),
+        "restart upgrade must preserve/seed the active coding operation"
+    );
+    assert!(
+        snap.lookup("external.coding_hcr_accept").is_none(),
+        "restart upgrade must retire the legacy HCR acceptance operation"
     );
 
     drop(store_c);
