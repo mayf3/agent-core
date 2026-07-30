@@ -1,6 +1,5 @@
 use super::*;
 use crate::domain::*;
-use rusqlite::params;
 
 #[test]
 fn managed_service_versions_are_monotonic() {
@@ -20,6 +19,7 @@ fn healthy_receipt_atomically_activates_component_snapshot() -> Result<()> {
     const EVIDENCE: &str =
         "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
     const PAYLOAD: &str = "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    const REQUEST: &str = "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
     let journal = super::super::JournalStore::in_memory()?;
     let agent = AgentId("main".into());
     let principal_id = "feishu:open_id:owner";
@@ -50,79 +50,6 @@ fn healthy_receipt_atomically_activates_component_snapshot() -> Result<()> {
         mode: RunMode::Default,
     };
     journal.insert_run(&run)?;
-    let (hcr_id, _) = journal.create_harness_change_request(
-        "CodingRouter",
-        "message_service_activation",
-        &session.id.0,
-        principal_id,
-        "Feishu",
-        "p2p",
-        "coding-harness-v0",
-        "managed service",
-    )?;
-    let claim = journal.claim_hcr_for_execution(&hcr_id, "coding-harness-v0", "worker")?;
-    for (index, gate) in [
-        "scaffold",
-        "build",
-        "trusted_test",
-        "trusted_smoke",
-        "artifact",
-    ]
-    .iter()
-    .enumerate()
-    {
-        let attempt = format!("attempt_{index}");
-        journal.insert_gate_attempt(
-            &attempt,
-            &hcr_id,
-            &claim.0,
-            &run.id.0,
-            "coding-harness-v0",
-            "generated",
-            gate,
-            "external.coding_hcr_accept",
-            "coding-hcr-v1",
-            &format!("intent_{index}"),
-            &Utc::now().to_rfc3339(),
-        )?;
-        journal.insert_evidence_atomically(
-            &format!("evidence_{index}"),
-            &attempt,
-            &format!("receipt_event_{index}"),
-            PAYLOAD,
-            &Utc::now().to_rfc3339(),
-        )?;
-    }
-    let settlement_id = "settlement_service_activation";
-    {
-        let conn = journal.conn.lock().map_err(|_| anyhow::anyhow!("mutex"))?;
-        conn.execute(
-            "UPDATE harness_change_requests SET status='succeeded',run_id=?1 WHERE request_id=?2",
-            params![run.id.0, hcr_id],
-        )?;
-        conn.execute(
-            "INSERT INTO hcr_settlements
-             (settlement_id,hcr_id,claim_id,run_id,result,error_code,evidence_set_digest,created_at)
-             VALUES (?1,?2,?3,?4,'succeeded',NULL,?5,?6)",
-            params![
-                settlement_id,
-                hcr_id,
-                claim.0,
-                run.id.0,
-                EVIDENCE,
-                Utc::now().to_rfc3339()
-            ],
-        )?;
-        conn.execute(
-            "INSERT INTO hcr_receipt_identities
-             (hcr_id,claim_id,run_id,idempotency_key,payload_digest,receipt_event_id,
-              harness_execution_id,overall_outcome,candidate_digest,artifact_ref,
-              artifact_digest,evidence_digest,candidate_id,invocation_id)
-             VALUES (?1,?2,?3,'accept',?4,'receipt','execution','CandidatePassed',
-                     ?5,?6,?6,?7,'candidate','acceptance_invocation')",
-            params![hcr_id, claim.0, run.id.0, PAYLOAD, CANDIDATE, ARTIFACT, EVIDENCE],
-        )?;
-    }
 
     let mut service = ServiceManifest {
         schema_version: crate::domain::SERVICE_MANIFEST_SCHEMA.into(),
@@ -173,22 +100,50 @@ fn healthy_receipt_atomically_activates_component_snapshot() -> Result<()> {
         "managed service gates passed".into(),
         source_registry.clone(),
     );
-    let link = CapabilityProposalHcrLink {
+    let acceptance_binding = compute_acceptance_binding_digest(
+        REQUEST,
+        CANDIDATE,
+        ARTIFACT,
+        MANIFEST,
+        ExternalOutcome::Passed,
+        "1",
+        "hook-consumer-service-v0",
+        "component-profile-catalog-v1",
+    );
+    let receipt_digest = compute_external_receipt_digest(
+        SCHEMA_VERSION,
+        "acceptance_invocation",
+        "harness:coding-harness-v0",
+        ARTIFACT,
+        ExternalOutcome::Passed,
+        EVIDENCE,
+        Some(&acceptance_binding),
+    );
+    let link = CapabilityProposalReceiptLink {
         proposal_id: proposal_id.into(),
-        hcr_id: hcr_id.clone(),
-        claim_id: claim.0.clone(),
-        run_id: run.id.0.clone(),
+        request_id: "request_service_activation".into(),
+        request_digest: REQUEST.into(),
+        acceptance_invocation_id: "acceptance_invocation".into(),
+        issuer_principal_id: "harness:coding-harness-v0".into(),
         operation: service.component_id.clone(),
         candidate_id: "candidate".into(),
         candidate_digest: CANDIDATE.into(),
         artifact_ref: ARTIFACT.into(),
         artifact_digest: ARTIFACT.into(),
+        manifest_ref: service.manifest_id.clone(),
+        manifest_digest: MANIFEST.into(),
         evidence_digest: EVIDENCE.into(),
+        receipt_digest,
+        acceptance_outcome: "passed".into(),
+        contract_catalog_version: "1".into(),
+        profile_id: "hook-consumer-service-v0".into(),
+        profile_catalog_version: "component-profile-catalog-v1".into(),
         source_registry_snapshot_id: source_registry.clone(),
-        settlement_id: settlement_id.into(),
+        origin_run_id: run.id.0.clone(),
+        origin_session_id: session.id.0.clone(),
         created_at: Utc::now().to_rfc3339(),
     };
-    journal.create_proposal_with_hcr_link(&proposal, &link)?;
+    journal.create_proposal_with_receipt(&proposal, &link)?;
     let approval = journal
         .load_capability_approval_by_proposal(proposal_id)?
         .expect("approval");

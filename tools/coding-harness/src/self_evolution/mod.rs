@@ -3,6 +3,7 @@ pub mod acceptance_selector;
 pub mod artifact_manifest;
 mod component_profile;
 mod generator;
+mod profile_acceptance;
 
 use agent_core_kernel::contract_catalog::ContractCatalog;
 use agent_core_kernel::domain::{ComponentLifecycleState, DevelopmentRequest, TargetKind};
@@ -42,10 +43,15 @@ pub fn handle_submit(artifact_root: &Path, args: &Value) -> Value {
         Ok(mut result) => {
             result["development_plan"] = serde_json::to_value(plan).unwrap_or(Value::Null);
             result["development_request"] = request_value.clone();
+            let accepted = match profile_acceptance::accept(artifact_root, args, &request, &result)
+            {
+                Ok(accepted) => accepted,
+                Err(code) => return error(&code),
+            };
             json!({
                 "protocol_version": "external-harness-v1",
                 "ok": true,
-                "result": result,
+                "result": accepted,
             })
         }
         Err(code) => error(code),

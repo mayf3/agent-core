@@ -111,34 +111,6 @@ impl ContextAssembler {
         let content = snapshot.catalog_for_context_grants(granted_operations);
         block(ContextBlockKind::ToolCatalog, &content, "operation/catalog")
     }
-
-    /// Inject a HarnessChangeRequest system block before the UserMessage.
-    /// (Deferred to PR4A2.)
-    #[allow(dead_code)]
-    pub fn inject_hcr_block(blocks: &mut Vec<ContextBlock>, workspace_id: &str) {
-        let hcr_text = format!(
-            "您正在处理 Harness 创建请求（HarnessChangeRequest）。\n\
-             只能使用 workspace_id = \"{workspace_id}\"。\n\
-             只能创建新的 <harness_id>，目标目录已存在时停止，不覆盖。\n\
-             禁止修改 Agent Core 仓库。\n\
-             禁止修改 Kernel 环境变量。\n\
-             禁止注册、启用、部署或重启服务。\n\
-             最终必须明确输出 NOT_REGISTERED / NOT_ENABLED。"
-        );
-        let pos = blocks
-            .iter()
-            .position(|b| b.kind == ContextBlockKind::UserMessage);
-        if let Some(idx) = pos {
-            blocks.insert(
-                idx,
-                ContextBlock {
-                    kind: ContextBlockKind::HarnessChangeRequest,
-                    content: hcr_text,
-                    source_ref: Some("harness-change-request".into()),
-                },
-            );
-        }
-    }
 }
 
 fn block(kind: ContextBlockKind, content: &str, source_ref: &str) -> ContextBlock {

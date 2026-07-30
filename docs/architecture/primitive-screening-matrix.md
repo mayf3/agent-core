@@ -9,6 +9,12 @@
 > `Current decision` column says what to do *now*; the `Classification` column
 > says what the concept *would be* in the candidate model. **No row in this
 > matrix authorizes a deletion, migration, or API change in this round.**
+>
+> **Superseding implementation note (Kernel HCR retirement V1):** the HCR and
+> Settlement rows below describe retained historical schema and test fixtures.
+> They are no longer an active Kernel workflow. New development uses a generic
+> external Acceptance Receipt; production HCR write modules are not compiled,
+> write routes return `410`, and history remains read-only.
 
 ## How to read this matrix
 
@@ -675,10 +681,11 @@ Yes (row 10). Both the run-level and capability-change approval mechanisms are
 Decision(K5) over an Intent(K5). **The Approval API is kept as the stable domain
 facade; no Approval→Decision table migration occurs.**
 
-### Is HCR a safe domain facade for Development Run (not to be deleted now)?
-Yes (row 14). HCR is derivable as `Propose(dev Run) + 5×Receipt + Settlement
-Decision`, but it is kept as the safe facade. **HCR is not generalized or
-deleted this round.**
+### Is HCR a safe domain facade for Development Run (historical screening answer)?
+This screening round answered yes (row 14). Kernel HCR retirement V1 later
+superseded that operational decision: retained rows remain historical evidence,
+while new development uses external profile Acceptance Receipts and creates no
+new HCR workflow facts.
 
 ### Is Registry a Versioned Component Binding Snapshot (kept as-is)?
 Yes (rows 11, 12). Registry ≈ Snapshot catalogue + Allow Boundary; Registry

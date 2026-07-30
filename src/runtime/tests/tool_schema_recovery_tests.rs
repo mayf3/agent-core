@@ -60,11 +60,11 @@ impl LlmClient for AutoRecoveryLlm {
             0 => Ok(LlmOutput {
                 provider: "t".into(),
                 model: "t".into(),
-                content: "call propose".into(),
+                content: "call workspace read".into(),
                 journal_payload: json!({"r":0}),
                 tool_call: ToolCallResult::Valid(ToolCall {
                     id: "call_0".into(),
-                    operation: "external.coding_capability_propose".into(),
+                    operation: "external.coding_workspace_read".into(),
                     arguments: json!({"artifact_path":"artifact.bin","manifest_path":"manifest.json","evidence_path":"evidence.json"}),
                 }),
                 provider_turn: None,
@@ -106,7 +106,7 @@ impl LlmClient for AutoRecoveryLlm {
                         journal_payload: json!({"r":1}),
                         tool_call: ToolCallResult::Valid(ToolCall {
                             id: "call_1".into(),
-                            operation: "external.coding_capability_propose".into(),
+                            operation: "external.coding_workspace_read".into(),
                             arguments: json!({"workspace_id":"agent-dev","artifact_path":"artifact.bin","manifest_path":"manifest.json","evidence_path":"evidence.json"}),
                         }),
                         provider_turn: None,
@@ -180,7 +180,7 @@ fn missing_workspace_id_is_repaired_within_same_run() {
     register_external_op_with_endpoint(
         &j,
         &g,
-        "external.coding_capability_propose",
+        "external.coding_workspace_read",
         cp_schema,
         json!({"type":"object"}),
         &harness_endpoint,
@@ -346,8 +346,8 @@ fn coding_manifest_schema_reaches_llm_tool_definition_intact() {
             .into(),
         protocol_version: "external-harness-v1".into(),
         endpoint: "http://127.0.0.1:1/execute".into(),
-        operation_name: "external.coding_capability_propose".into(),
-        description: "Capability Proposal".into(),
+        operation_name: "external.coding_workspace_read".into(),
+        description: "Workspace Read".into(),
         input_schema: json!({"type":"object","properties":{"workspace_id":ws_prop,"artifact_path":{"type":"string","description":"artifact path"},"manifest_path":{"type":"string","description":"manifest path"},"evidence_path":{"type":"string","description":"evidence path"}},"required":["workspace_id","artifact_path","manifest_path","evidence_path"],"additionalProperties":false}),
         output_schema: json!({"type":"object"}),
         idempotent: true,
@@ -382,9 +382,9 @@ fn coding_manifest_schema_reaches_llm_tool_definition_intact() {
             t.get("function")
                 .and_then(|f| f.get("name"))
                 .and_then(Value::as_str)
-                == Some("external.coding_capability_propose")
+                == Some("external.coding_workspace_read")
         })
-        .expect("capability.propose in provider tools");
+        .expect("workspace.read in provider tools");
     let func = cp_tool.get("function").expect("function");
     assert!(!func
         .get("description")

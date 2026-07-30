@@ -140,7 +140,7 @@ pub fn compute_external_receipt_digest(
 }
 
 /// Serialize outcome as a stable string for digest computation.
-fn outcome_str(outcome: ExternalOutcome) -> &'static str {
+pub(super) fn outcome_str(outcome: ExternalOutcome) -> &'static str {
     match outcome {
         ExternalOutcome::Passed => "Passed",
         ExternalOutcome::Failed => "Failed",
@@ -148,7 +148,7 @@ fn outcome_str(outcome: ExternalOutcome) -> &'static str {
 }
 
 /// Write a field followed by a newline into the hasher.
-fn write_field(hasher: &mut Sha256, value: &str) {
+pub(super) fn write_field(hasher: &mut Sha256, value: &str) {
     hasher.update(value.as_bytes());
     hasher.update(b"\n");
 }

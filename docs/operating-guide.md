@@ -377,6 +377,16 @@ Do not manufacture a Feishu ingress for this check. Until the user completes
 the real Feishu smoke, retain all old HCR/Canary objects and do not report the
 migration as closed.
 
+### Historical HCR compatibility
+
+The active HCR workflow is retired. `POST /v1/harness-change-requests`,
+`POST /v1/hcr/{id}/accept`, and `POST /v1/hcr/{id}/reconcile-failure` return
+`410 Gone`. Do not attempt to recover them by editing their retained tables.
+Historical records remain available through authenticated
+`GET /v1/legacy/hcr/{id}` and ordinary `/v1/events` observation. HCR tables,
+events, receipts, and proposal links remain recovery evidence and are not
+rewritten or dropped by this retirement.
+
 ## What the operator should never do
 
 - Edit `journal_events`, `worker_jobs`, or `outbox_dispatches` rows directly
