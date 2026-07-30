@@ -68,6 +68,7 @@ pub fn validate_manifest(test_kit: &str, manifest: &Value) -> Result<(), String>
             Ok(())
         }
         "hook-consumer-service-contract-v0" => validate_hook_consumer_manifest(manifest),
+        "invocable-capability-contract-v0" => validate_invocable_manifest(manifest),
         _ => Err(format!("unknown trusted test kit: {test_kit}")),
     }
 }
@@ -157,6 +158,56 @@ fn validate_hook_consumer_manifest(manifest: &Value) -> Result<(), String> {
         || !digest[7..].bytes().all(|byte| byte.is_ascii_hexdigit())
     {
         return Err("hook consumer module digest invalid".into());
+    }
+    Ok(())
+}
+
+fn validate_invocable_manifest(manifest: &Value) -> Result<(), String> {
+    for (key, expected) in [
+        ("kind", "invocable_capability"),
+        ("profile_id", "invocable-capability-v0"),
+        ("deployment_profile", "capability-host-v0"),
+        ("runtime_profile", "process-harness-v1"),
+        ("entry", "target/release/generated-invocable-capability"),
+    ] {
+        if manifest.get(key).and_then(Value::as_str) != Some(expected) {
+            return Err(format!("invocable manifest {key} mismatch"));
+        }
+    }
+    if manifest.get("required_contracts") != Some(&serde_json::json!(["component.invoke.v0"]))
+        || manifest.get("requested_permissions") != Some(&serde_json::json!(["component.invoke"]))
+        || manifest.pointer("/capability/operation_name") != manifest.get("component_id")
+        || manifest
+            .pointer("/capability/idempotent")
+            .and_then(Value::as_bool)
+            != Some(true)
+        || manifest.pointer("/generation/kind").and_then(Value::as_str)
+            != Some("request-driven-pure-compute-module-v0")
+        || manifest
+            .pointer("/generation/mutable_surface")
+            .and_then(Value::as_array)
+            != Some(&vec![Value::String("src/component.rs".into())])
+    {
+        return Err("invocable manifest contract mismatch".into());
+    }
+    for pointer in ["/capability/input_schema", "/capability/output_schema"] {
+        let schema = manifest
+            .pointer(pointer)
+            .ok_or_else(|| format!("invocable manifest missing {pointer}"))?;
+        agent_core_kernel::registry::schema::validate_schema_structure(schema)
+            .map_err(|_| format!("invocable manifest invalid {pointer}"))?;
+    }
+    for pointer in ["/profile_contract_digest", "/generation/module_digest"] {
+        let digest = manifest
+            .pointer(pointer)
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if digest.len() != 71
+            || !digest.starts_with("sha256:")
+            || !digest[7..].bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(format!("invocable manifest digest invalid: {pointer}"));
+        }
     }
     Ok(())
 }

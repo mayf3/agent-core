@@ -5,6 +5,9 @@ mod component_profile;
 mod generator;
 mod profile_acceptance;
 
+pub(crate) use generator::invocable::contract::CapabilityContract as InvocableCapabilityContract;
+pub(crate) use generator::invocable::process_input as invocable_process_input;
+
 use agent_core_kernel::contract_catalog::ContractCatalog;
 use agent_core_kernel::domain::{ComponentLifecycleState, DevelopmentRequest, TargetKind};
 use serde::{Deserialize, Serialize};

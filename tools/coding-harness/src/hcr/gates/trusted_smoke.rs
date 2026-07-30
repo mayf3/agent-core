@@ -6,6 +6,9 @@ use super::{CandidateSnapshot, GateContext, GateKind, GateResult};
 use crate::hcr::executor::CleanupStatus;
 
 pub(crate) fn check(candidate: &CandidateSnapshot, ctx: &GateContext) -> GateResult {
+    if ctx.test_kit == "invocable-capability-contract-v0" {
+        return super::invocable_contract::check_smoke(candidate, ctx);
+    }
     let smoke = match crate::fixtures::smoke_case(&ctx.test_kit) {
         Some(smoke) => smoke,
         None => {
