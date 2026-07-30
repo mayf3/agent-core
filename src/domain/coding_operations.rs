@@ -12,14 +12,9 @@ pub mod external {
     pub const WORKSPACE_EXEC: &str = "external.coding_workspace_exec";
     pub const TASK_SUBMIT: &str = "external.coding_task_submit";
     pub const TASK_STATUS: &str = "external.coding_task_status";
-    pub const HCR_ACCEPT: &str = "external.coding_hcr_accept";
     pub const CAPABILITY_PROPOSE: &str = "external.coding_capability_propose";
 
-    /// The set of coding operations that an authorized owner receives in a
-    /// private chat. Every other access path is denied.
-    /// NOTE: TASK_SUBMIT is intentionally excluded — the Agent uses workspace
-    /// tools (read, write, exec) directly instead of dispatching to an
-    /// external coding harness.
+    /// Coding Harness operations registered from its manifest.
     pub const CODING_OPERATIONS: &[&str] = &[
         WORKSPACE_LIST,
         WORKSPACE_READ,
@@ -27,6 +22,18 @@ pub mod external {
         WORKSPACE_EXEC,
         TASK_STATUS,
         CAPABILITY_PROPOSE,
+    ];
+
+    /// The active development surface granted to the authorized owner in a
+    /// private chat. Proposal construction is receipt-driven through
+    /// TASK_SUBMIT; the historical direct proposal tool is not granted.
+    pub const OWNER_DEVELOPMENT_OPERATIONS: &[&str] = &[
+        WORKSPACE_LIST,
+        WORKSPACE_READ,
+        WORKSPACE_WRITE,
+        WORKSPACE_EXEC,
+        TASK_SUBMIT,
+        TASK_STATUS,
     ];
 }
 

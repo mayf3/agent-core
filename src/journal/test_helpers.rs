@@ -16,6 +16,25 @@ use rusqlite::OptionalExtension;
 use serde_json::json;
 
 impl JournalStore {
+    /// Counts retained HCR workflow rows so new-flow tests can prove that the
+    /// production path does not create any active-workflow facts.
+    pub fn hcr_fact_counts_for_test(&self) -> Result<(i64, i64, i64, i64)> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow!("journal mutex poisoned"))?;
+        Ok((
+            conn.query_row("SELECT COUNT(*) FROM harness_change_requests", [], |row| {
+                row.get(0)
+            })?,
+            conn.query_row("SELECT COUNT(*) FROM hcr_claims", [], |row| row.get(0))?,
+            conn.query_row("SELECT COUNT(*) FROM hcr_gate_attempts", [], |row| {
+                row.get(0)
+            })?,
+            conn.query_row("SELECT COUNT(*) FROM hcr_settlements", [], |row| row.get(0))?,
+        ))
+    }
+
     pub fn tamper_first_event_for_test(&self) -> Result<()> {
         let conn = self
             .conn

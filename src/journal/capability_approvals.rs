@@ -36,7 +36,7 @@ impl super::JournalStore {
                     decision_payload_digest,decision_result_json,decided_at,decided_by,
                     activated_snapshot_id,host_deployment_id,activation_error,
                     created_at,expires_at
-             FROM capability_change_approvals WHERE {column}=?1"
+             FROM capability_governance_approvals WHERE {column}=?1"
         );
         conn.query_row(&sql, params![value], row_to_approval)
             .optional()
@@ -55,7 +55,7 @@ impl super::JournalStore {
             "SELECT approval_id,proposal_id,decision_nonce,status,decision_id,
                     decision_payload_digest,decision_result_json,decided_at,decided_by,
                     activated_snapshot_id,host_deployment_id,activation_error
-             FROM capability_change_approvals WHERE approval_id=?1",
+             FROM capability_governance_approvals WHERE approval_id=?1",
             params![approval_id],
             row_to_replay_identity,
         )

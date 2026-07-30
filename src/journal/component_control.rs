@@ -58,7 +58,7 @@ impl super::JournalStore {
         )?;
         let pending_deployment: i64 = tx.query_row(
             "SELECT COUNT(*) FROM component_deployment_intents i
-             JOIN capability_change_approvals a ON a.proposal_id=i.proposal_id
+             JOIN capability_governance_approvals a ON a.proposal_id=i.proposal_id
              WHERE i.component_id=?1 AND a.status='Pending'",
             params![intent.component_id],
             |row| row.get(0),

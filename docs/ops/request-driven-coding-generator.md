@@ -52,12 +52,14 @@ cargo test --manifest-path tools/coding-harness/Cargo.toml \
   --test generic_generator_live -- --ignored --nocapture
 ```
 
-On Linux, candidate compile and contract probes require the normal HCR sandbox.
+On Linux, candidate compile and contract probes require the Coding Harness
+private-home/workspace sandbox used by the selected Component Profile.
 Sandbox absence or cleanup uncertainty fails closed as infrastructure failure.
 The macOS host-compile escape hatch exists only in debug builds for the local
 real-model smoke; release builds cannot enable it and it is not a production
 configuration.
 
-Successful generation is still only a candidate. The five profile gates,
-Proposal, owner Approval, Deployment Intent, Deployment Harness receipt,
-healthcheck, and Component Registry publication remain mandatory.
+Successful generation is still only a candidate. The external profile gates,
+request-bound Acceptance Receipt, Proposal, owner Approval, Deployment Intent,
+Deployment Harness receipt, healthcheck, and Component Registry publication
+remain mandatory. New submissions do not create Kernel HCR rows.
