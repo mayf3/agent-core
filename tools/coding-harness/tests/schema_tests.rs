@@ -1,4 +1,9 @@
 use coding_harness::operation_specs;
+
+fn string_array(values: &[serde_json::Value]) -> Vec<&str> {
+    values.iter().filter_map(|item| item.as_str()).collect()
+}
+
 #[test]
 fn coding_manifest_registration_chain_preserves_schema() {
     use agent_core_kernel::harness::control::{
@@ -15,14 +20,7 @@ fn coding_manifest_registration_chain_preserves_schema() {
             .is_some_and(|p| !p.is_empty()));
         assert!(obj.get("additionalProperties").and_then(|v| v.as_bool()) == Some(false));
         assert!(!spec.description.is_empty());
-        let req: Vec<&str> = obj
-            .get("required")
-            .unwrap()
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|v| v.as_str())
-            .collect();
+        let req = string_array(obj.get("required").unwrap().as_array().unwrap());
         assert!(!req.is_empty());
         if spec.operation_name == "external.coding_task_status" {
             assert!(req.contains(&"task_id") && !req.contains(&"workspace_id"));
@@ -51,13 +49,7 @@ fn coding_manifest_registration_chain_preserves_schema() {
         .unwrap()
         .as_array()
         .unwrap();
-    assert_eq!(
-        mode_ev
-            .iter()
-            .filter_map(|v| v.as_str())
-            .collect::<Vec<_>>(),
-        vec!["replace", "append"]
-    );
+    assert_eq!(string_array(mode_ev), vec!["replace", "append"]);
     let submit = specs
         .iter()
         .find(|s| s.operation_name == "external.coding_task_submit")
@@ -70,10 +62,7 @@ fn coding_manifest_registration_chain_preserves_schema() {
         .unwrap()
         .as_array()
         .unwrap();
-    assert_eq!(
-        be_ev.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>(),
-        vec!["opencode"]
-    );
+    assert_eq!(string_array(be_ev), vec!["opencode"]);
     let j = JournalStore::in_memory().unwrap();
     for mut m in operation_specs::build_manifests(
         &vec!["agent-dev".to_string(), "prod".to_string()],
@@ -388,12 +377,18 @@ fn coding_manifest_llm_input_receives_complete_tool_definitions() {
             })
             .unwrap()
     };
-    let cp_params = fn_tool("external.coding_capability_propose")
+    assert!(captured.iter().all(|tool| {
+        tool.get("function")
+            .and_then(|function| function.get("name"))
+            .and_then(|value| value.as_str())
+            != Some("external.coding_capability_propose")
+    }));
+    let cp_params = fn_tool("external.coding_task_submit")
         .get("function")
         .unwrap()
         .get("parameters")
         .unwrap();
-    assert!(!fn_tool("external.coding_capability_propose")
+    assert!(!fn_tool("external.coding_task_submit")
         .get("function")
         .unwrap()
         .get("description")
@@ -418,20 +413,10 @@ fn coding_manifest_llm_input_receives_complete_tool_definitions() {
         .iter()
         .filter_map(|v| v.as_str())
         .collect();
-    assert!(
-        cp_req.contains(&"workspace_id")
-            && cp_req.contains(&"artifact_path")
-            && cp_req.contains(&"manifest_path")
-            && cp_req.contains(&"evidence_path")
+    assert_eq!(
+        cp_req,
+        ["session_id", "development_request", "idempotency_key"]
     );
-    let cp_ev = cp_params
-        .pointer("/properties/workspace_id")
-        .unwrap()
-        .get("enum")
-        .unwrap()
-        .as_array()
-        .unwrap();
-    assert!(cp_ev.contains(&serde_json::json!("agent-dev")));
     let write_params = fn_tool("external.coding_workspace_write")
         .get("function")
         .unwrap()

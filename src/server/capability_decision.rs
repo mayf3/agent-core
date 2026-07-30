@@ -1,4 +1,4 @@
-//! Trusted human decision path for the fixed North Star calculator capability.
+//! Trusted human decision path for governed invocable capabilities.
 
 use super::capability_host_client::{
     is_definitive_rejection, CapabilityDeployRequest, CapabilityDeployResult,
@@ -16,7 +16,6 @@ use anyhow::Result;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-const CALCULATOR: &str = "external.calculator";
 const HOST_FAILURE: &str = "CAPABILITY_HOST_DEPLOY_FAILED";
 
 #[derive(Clone, Debug, Deserialize)]
@@ -82,7 +81,7 @@ pub(crate) fn handle(
 
     let manifest = verify_candidate(journal, store, proposal_id, &identity)?;
     let target_snapshot = journal
-        .trusted_calculator_prospective_snapshot(&identity, &manifest, expected_agent)
+        .trusted_capability_prospective_snapshot(&identity, &manifest, expected_agent)
         .map_err(map_trusted_error)?;
     let request = CapabilityDeployRequest {
         protocol_version: "capability-deploy-v1".into(),
@@ -129,7 +128,7 @@ fn handle_deployment(
         Ok(_) | Err(_) => return Err(retryable_host_error()),
     };
     let result = journal
-        .activate_trusted_calculator_atomic(
+        .activate_trusted_capability_atomic(
             identity,
             manifest,
             &TrustedHostDeployment {
@@ -228,15 +227,24 @@ fn verify_candidate(
         .load_proposal(proposal_id)
         .map_err(internal)?
         .ok_or_else(|| CapabilityRouteError::NotFound("proposal_not_found".into()))?;
-    let link = journal
-        .load_proposal_hcr_link(proposal_id)
+    let operation = if let Some(link) = journal
+        .load_proposal_receipt_link(proposal_id)
         .map_err(internal)?
-        .ok_or_else(|| CapabilityRouteError::Forbidden("trusted_hcr_link_required".into()))?;
-    if proposal.requested_operations != [CALCULATOR]
-        || link.operation != CALCULATOR
+    {
+        if link.candidate_digest != identity.candidate_digest {
+            return Err(CapabilityRouteError::Forbidden("trusted_binding_mismatch".into()).into());
+        }
+        link.operation
+    } else {
+        journal
+            .load_proposal_hcr_link(proposal_id)
+            .map_err(internal)?
+            .ok_or_else(|| CapabilityRouteError::Forbidden("trusted_receipt_required".into()))?
+            .operation
+    };
+    if proposal.requested_operations != [operation.as_str()]
         || proposal.manifest_digest != identity.manifest_digest
         || proposal.artifact_digest != identity.artifact_digest
-        || link.candidate_digest != identity.candidate_digest
     {
         return Err(CapabilityRouteError::Forbidden("trusted_binding_mismatch".into()).into());
     }
@@ -251,7 +259,7 @@ fn verify_candidate(
         .map_err(|_| CapabilityRouteError::InvalidRequest("manifest_verification_failed".into()))?;
     let manifest: HarnessManifest = serde_json::from_slice(&bytes)
         .map_err(|_| CapabilityRouteError::InvalidRequest("manifest_invalid".into()))?;
-    if proposal.manifest_ref != manifest.manifest_id {
+    if proposal.manifest_ref != manifest.manifest_id || manifest.operation_name != operation {
         return Err(CapabilityRouteError::Forbidden("manifest_identity_mismatch".into()).into());
     }
     Ok(manifest)
@@ -270,7 +278,12 @@ fn deployment_matches(
         && result.artifact_digest == identity.artifact_digest
         && result.target_registry_snapshot_id == target_snapshot
         && result.deployment_id
-            == expected_deployment_id(identity, &manifest.manifest_id, target_snapshot)
+            == expected_deployment_id(
+                identity,
+                &manifest.manifest_id,
+                &manifest.operation_name,
+                target_snapshot,
+            )
         && valid_host_id(&result.deployment_id)
         && valid_host_id(&result.probe_execution_id)
 }
@@ -278,6 +291,7 @@ fn deployment_matches(
 fn expected_deployment_id(
     identity: &TrustedDecisionIdentity,
     manifest_id: &str,
+    operation_name: &str,
     target_snapshot: &str,
 ) -> String {
     let canonical = json!({
@@ -286,7 +300,7 @@ fn expected_deployment_id(
         "manifest_digest": identity.manifest_digest,
         "manifest_id": manifest_id,
         "artifact_digest": identity.artifact_digest,
-        "operation_name": CALCULATOR,
+        "operation_name": operation_name,
         "target_registry_snapshot_id": target_snapshot,
     });
     let digest = Sha256Digest::compute(&serde_json::to_vec(&canonical).unwrap_or_default());
@@ -412,7 +426,12 @@ mod tests {
             created_at: chrono::Utc::now(),
         };
         let mut result = CapabilityDeployResult {
-            deployment_id: expected_deployment_id(&identity, &manifest.manifest_id, "snap_1"),
+            deployment_id: expected_deployment_id(
+                &identity,
+                &manifest.manifest_id,
+                &manifest.operation_name,
+                "snap_1",
+            ),
             proposal_id: identity.proposal_id.clone(),
             decision_id: identity.decision_id.clone(),
             manifest_digest: identity.manifest_digest.clone(),

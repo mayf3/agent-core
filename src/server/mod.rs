@@ -16,10 +16,8 @@ mod delivery;
 mod deployment_harness_client;
 mod dispatcher_metrics;
 mod event_observe_http;
-mod harness_change_request;
 pub mod harness_routes;
-mod hcr_acceptance;
-mod hcr_failure_reconciliation;
+mod legacy_hcr_read;
 mod service_decision;
 use anyhow::{bail, Result};
 #[cfg(test)]
@@ -161,13 +159,15 @@ fn handle_connection(
             )?,
         );
     }
-    // Non-health routes require POST /v1/ or GET /v1/capability-change-proposals/ or GET /v1/events
+    // Non-health routes require POST /v1/ or one of the explicitly supported
+    // read-only query surfaces.
     const GET_CAP_PREFIX: &str = "/v1/capability-change-proposals/";
     let method_allows = request.method == "POST"
         || (request.method == "GET"
             && (request.path.starts_with(GET_CAP_PREFIX)
                 || request.path.starts_with("/v1/events")
-                || request.path.starts_with("/v1/components/")));
+                || request.path.starts_with("/v1/components/")
+                || request.path.starts_with("/v1/legacy/hcr/")));
     if !method_allows || !request.path.starts_with("/v1/") {
         return write_json(stream, 404, json!({ "ok": false, "error": "not_found" }));
     }
@@ -228,35 +228,29 @@ fn handle_connection(
             harness_routes::handle_disable(&gateway, &journal, &body),
         )
     } else if path == "/v1/harness-change-requests" {
-        let body: Value = serde_json::from_slice(&request.body)?;
-        harness_change_request::handle_http(stream, &journal, &gateway, config, &body)
+        write_json(
+            stream,
+            410,
+            json!({
+                "ok": false,
+                "error": "hcr_active_workflow_retired",
+                "legacy_read_path": "/v1/legacy/hcr/<hcr_id>"
+            }),
+        )
     } else if path.starts_with("/v1/hcr/") && path.ends_with("/reconcile-failure") {
-        let body: Value = serde_json::from_slice(&request.body)?;
-        let hcr_id = path
-            .strip_prefix("/v1/hcr/")
-            .and_then(|value| value.strip_suffix("/reconcile-failure"))
-            .unwrap_or("");
-        if hcr_id.is_empty() {
-            return write_json(stream, 400, json!({"ok":false,"error":"invalid_hcr_path"}));
-        }
-        match hcr_failure_reconciliation::handle(&journal, hcr_id, &body) {
-            Ok(result) => write_json(stream, 200, result),
-            Err(error) => write_json(stream, 400, json!({"ok":false,"error":error.to_string()})),
-        }
+        write_json(
+            stream,
+            410,
+            json!({"ok":false,"error":"hcr_active_workflow_retired"}),
+        )
     } else if path.starts_with("/v1/hcr/") && path.ends_with("/accept") {
-        let body: Value = serde_json::from_slice(&request.body)?;
-        // Extract hcr_id from /v1/hcr/<hcr_id>/accept
-        let hcr_id = path
-            .strip_prefix("/v1/hcr/")
-            .and_then(|s| s.strip_suffix("/accept"))
-            .unwrap_or("");
-        if hcr_id.is_empty() {
-            return write_json(stream, 400, json!({"ok":false,"error":"invalid_hcr_path"}));
-        }
-        match hcr_acceptance::handle(&journal, &gateway, config, hcr_id, &body) {
-            Ok(result) => write_json(stream, 200, result),
-            Err(e) => write_json(stream, 400, json!({"ok":false,"error":e.to_string()})),
-        }
+        write_json(
+            stream,
+            410,
+            json!({"ok":false,"error":"hcr_active_workflow_retired"}),
+        )
+    } else if request.method == "GET" && path.starts_with("/v1/legacy/hcr/") {
+        legacy_hcr_read::handle(stream, &journal, path)
     } else {
         write_json(stream, 404, json!({ "ok": false, "error": "not_found" }))
     }
@@ -469,6 +463,7 @@ pub(crate) fn write_json(stream: &mut TcpStream, status: u16, body: Value) -> Re
         200 => "OK",
         401 => "Unauthorized",
         404 => "Not Found",
+        410 => "Gone",
         _ => "Error",
     };
     let payload = serde_json::to_string(&body)?;

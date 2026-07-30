@@ -4,6 +4,7 @@ use serde_json::Value;
 use std::path::PathBuf;
 use uuid::Uuid;
 
+pub mod acceptance_receipt;
 pub mod capability_approval;
 pub mod capability_change;
 pub mod capability_proposal_link;
@@ -13,6 +14,7 @@ pub mod context_block;
 pub mod deployment;
 pub mod external_execution_failure;
 pub mod external_receipt_envelope;
+pub use acceptance_receipt::*;
 pub use external_receipt_envelope::*;
 pub mod harness_change_request;
 pub mod operation;

@@ -7,13 +7,14 @@ candidate, or passes Kernel/Feishu secrets to one.
 ## Trust and effect sequence
 
 1. A catalogued `DevelopmentRequest` selects `hook-consumer-service-v0`.
-2. Coding Harness materializes a candidate and the five acceptance gates bind
-   its candidate, artifact, component manifest, and evidence digests.
-3. Kernel derives a strict, content-addressed `deployment.service-manifest.v0`
-   and creates an HCR-linked Proposal plus owner Approval.
-4. An identity-bound owner decision revalidates Proposal, Approval, HCR,
-   settlement, five gate attempts, receipt identity, origin Run, and all CAS
-   objects.
+2. Coding Harness materializes a candidate and its external profile gates bind
+   the candidate, artifact, component manifest, and evidence digests in a
+   trusted, request-bound Acceptance Receipt.
+3. Kernel verifies the Receipt and content-addressed objects, then creates a
+   generic Receipt-linked Proposal plus owner Approval.
+4. An identity-bound owner decision revalidates Proposal, Approval, the trusted
+   Receipt binding, origin Run, artifact and manifest digests, and all CAS
+   objects. It does not join or create HCR workflow rows.
 5. Before any host effect, Kernel durably appends `deployment.intent.v0` and
    stores the exact `deployment.effect.v0` intent.
 6. The loopback-only Deployment Harness loads the manifest and executable from

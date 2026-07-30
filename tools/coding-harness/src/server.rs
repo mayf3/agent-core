@@ -45,6 +45,7 @@ fn handle(mut stream: TcpStream, config: &CodingConfig) {
     };
 
     let headers = String::from_utf8_lossy(&buf[..header_end]);
+    let bearer = parse_bearer(&headers);
     let content_length = match parse_cl(&headers) {
         Ok(Some(n)) => n,
         Ok(None) => {
@@ -112,6 +113,15 @@ fn handle(mut stream: TcpStream, config: &CodingConfig) {
         .get("operation")
         .and_then(|v| v.as_str())
         .unwrap_or("");
+    let control_token = std::env::var("CODING_HARNESS_CONTROL_TOKEN")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    if op == "external.coding_task_submit"
+        && (control_token.is_none() || control_token.as_deref() != bearer.as_deref())
+    {
+        let _ = respond_error(&mut stream, 401, "unauthorized");
+        return;
+    }
     let args = parsed.get("arguments").cloned().unwrap_or(json!({}));
 
     // Dispatch to handler, get structured response (already has ok/error_code).
@@ -154,11 +164,8 @@ fn dispatch(config: &CodingConfig, operation: &str, args: &Value) -> Value {
             "result": crate::self_evolution::discovery(),
         });
     }
-    // HCR acceptance is another narrow control operation. It resolves the
-    // candidate only below artifact_root and must not be forced through the
-    // generic caller-selected workspace path.
-    if operation == "external.coding_hcr_accept" {
-        return crate::hcr::acceptance::handle_accept(&config.artifact_root, args);
+    if operation == "external.coding_hcr_accept" || operation == "external.coding_hcr_exec" {
+        return err_value("hcr_active_workflow_retired");
     }
 
     let is_task_op = operation == "external.coding_task_status";
@@ -182,8 +189,7 @@ fn dispatch(config: &CodingConfig, operation: &str, args: &Value) -> Value {
             Some(r) => {
                 let perm = config.perm_for(id).unwrap();
                 let needs_exec = operation == "external.coding_workspace_exec"
-                    || operation == "external.coding_task_submit"
-                    || operation == "external.coding_hcr_exec";
+                    || operation == "external.coding_task_submit";
                 let needs_write = operation == "external.coding_workspace_write";
                 if needs_exec && !perm.exec {
                     return err_value("exec_not_permitted");
@@ -212,34 +218,6 @@ fn dispatch(config: &CodingConfig, operation: &str, args: &Value) -> Value {
             None => return structured_err("unknown_workspace_id", &available_ids, &[]),
         }
     };
-
-    // ── HCR execution dispatch ──
-    // Uses profile-based security model, not workspace permission booleans.
-    if operation == "external.coding_hcr_exec" {
-        let ws_id = ws_id.as_ref().unwrap();
-        let profile_id = args
-            .get("hcr_profile_id")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        let request_token = args.get("hcr_token").and_then(Value::as_str).unwrap_or("");
-
-        // Token validation: HCR profile requires matching token
-        if config.hcr_token.is_empty() || request_token != config.hcr_token {
-            return err_value("hcr_token_required");
-        }
-
-        let profile = match config.hcr_profiles.get(profile_id) {
-            Some(p) => p,
-            None => return err_value("hcr_profile_not_found"),
-        };
-
-        // Verify workspace_id matches profile binding
-        if profile.workspace_id != *ws_id {
-            return err_value("hcr_workspace_mismatch");
-        }
-
-        return workspace::handle_hcr_exec(root.as_ref().unwrap(), args, profile);
-    }
 
     match operation {
         "external.coding_workspace_list" => workspace::handle_list(root.as_ref().unwrap(), args),
@@ -302,6 +280,20 @@ fn has_chunked(headers: &str) -> bool {
         .any(|(n, v)| {
             n.eq_ignore_ascii_case("transfer-encoding") && v.trim().eq_ignore_ascii_case("chunked")
         })
+}
+
+fn parse_bearer(headers: &str) -> Option<String> {
+    headers.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        if !name.eq_ignore_ascii_case("authorization") {
+            return None;
+        }
+        value
+            .trim()
+            .strip_prefix("Bearer ")
+            .filter(|token| !token.is_empty())
+            .map(str::to_string)
+    })
 }
 
 fn err_value(code: &str) -> Value {

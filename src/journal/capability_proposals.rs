@@ -32,6 +32,19 @@ fn parse_ops(s: &str) -> Result<Vec<String>> {
 }
 
 impl super::JournalStore {
+    pub fn pending_capability_proposal_for_run(&self, run_id: &RunId) -> Result<Option<String>> {
+        let conn = self.conn.lock().map_err(|_| anyhow!("mutex poisoned"))?;
+        conn.query_row(
+            "SELECT proposal_id FROM capability_change_proposals
+             WHERE origin_run_id=?1 AND status='PendingApproval'
+             ORDER BY created_at DESC LIMIT 1",
+            params![run_id.0],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
     /// Return the authoritative channel and conversation kind of the Run that
     /// created a Proposal. Private Feishu sessions use an open_id key; group
     /// sessions use a chat_id key.

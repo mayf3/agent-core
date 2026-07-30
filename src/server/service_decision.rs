@@ -10,18 +10,14 @@
 //! connection — it does NOT depend on OVERRIDE_DB_PATH or any shadow-specific
 //! environment variable. Every failure path records a terminal state.
 
-use super::capability_decision::{
-    decision_identity, map_trusted_error, parse_input, response, retryable_host_error,
-    TrustedDecisionBody,
-};
+use super::capability_decision::{decision_identity, map_trusted_error, parse_input, response};
 use super::capability_routes::CapabilityRouteError;
 use super::deployment_harness_client::{
     is_definitive_rejection, DeploymentHarnessDeployer, HttpDeploymentHarnessClient,
 };
 use crate::capabilities::store::{ContentStore, Sha256Digest};
 use crate::domain::{
-    AgentId, CapabilityApprovalStatus, DeploymentIntent, DeploymentReceipt, ServiceManifest,
-    DEPLOYMENT_PROTOCOL,
+    AgentId, CapabilityApprovalStatus, DeploymentIntent, ServiceManifest, DEPLOYMENT_PROTOCOL,
 };
 use crate::journal::trusted_capability_activation::{
     TrustedDecisionIdentity, TrustedDecisionResult,
@@ -30,8 +26,8 @@ use crate::journal::trusted_service_activation::intent_exists_without_receipt;
 use crate::journal::JournalStore;
 use anyhow::Result;
 use serde_json::{json, Value};
+use std::sync::Mutex;
 use std::sync::OnceLock;
-use std::sync::{Arc, Mutex};
 use std::thread;
 
 const DEPLOYMENT_FAILURE: &str = "SERVICE_DEPLOYMENT_FAILED";
@@ -346,14 +342,22 @@ fn verify_service_candidate(
         .load_proposal(proposal_id)
         .map_err(internal)?
         .ok_or_else(|| CapabilityRouteError::NotFound("proposal_not_found".into()))?;
-    let link = journal
-        .load_proposal_hcr_link(proposal_id)
+    let (operation, candidate_digest) = if let Some(link) = journal
+        .load_proposal_receipt_link(proposal_id)
         .map_err(internal)?
-        .ok_or_else(|| CapabilityRouteError::Forbidden("trusted_hcr_link_required".into()))?;
-    if proposal.requested_operations != [link.operation.clone()]
+    {
+        (link.operation, link.candidate_digest)
+    } else {
+        let link = journal
+            .load_proposal_hcr_link(proposal_id)
+            .map_err(internal)?
+            .ok_or_else(|| CapabilityRouteError::Forbidden("trusted_receipt_required".into()))?;
+        (link.operation, link.candidate_digest)
+    };
+    if proposal.requested_operations != [operation.clone()]
         || proposal.manifest_digest != identity.manifest_digest
         || proposal.artifact_digest != identity.artifact_digest
-        || link.candidate_digest != identity.candidate_digest
+        || candidate_digest != identity.candidate_digest
     {
         return Err(CapabilityRouteError::Forbidden("trusted_binding_mismatch".into()).into());
     }
@@ -372,7 +376,7 @@ fn verify_service_candidate(
         .validate()
         .map_err(|_| CapabilityRouteError::InvalidRequest("service_manifest_invalid".into()))?;
     if proposal.manifest_ref != manifest.manifest_id
-        || manifest.component_id != link.operation
+        || manifest.component_id != operation
         || manifest.artifact_digest != identity.artifact_digest
         || Sha256Digest::compute(&bytes).as_str() != identity.manifest_digest
     {

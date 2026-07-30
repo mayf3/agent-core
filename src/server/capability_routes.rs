@@ -210,19 +210,22 @@ pub fn handle_decision(
     let proposal = journal
         .load_proposal(proposal_id)?
         .ok_or_else(|| CapabilityRouteError::NotFound("proposal_not_found".into()))?;
-    // HCR-derived proposals are never allowed through the legacy digest-only
-    // path. Their Approval/HCR identities must be revalidated at decision
-    // time and effects must go through their dedicated external harness.
-    if proposal.requested_operations == ["external.calculator"] {
-        return super::capability_decision::handle(
-            journal,
-            store,
-            proposal_id,
-            body,
-            config_agent_id,
-        );
-    }
-    if journal.load_proposal_hcr_link(proposal_id)?.is_some() {
+    // Receipt-bound (and historical HCR-bound) proposals always use the
+    // trusted decision path. The generic delivery manifest shape selects the
+    // external effect adapter; operation names are never special-cased.
+    if journal.load_proposal_receipt_link(proposal_id)?.is_some()
+        || journal.load_proposal_hcr_link(proposal_id)?.is_some()
+    {
+        let bytes = store.load(&Sha256Digest::parse(&proposal.manifest_digest)?)?;
+        if serde_json::from_slice::<crate::harness::manifest::HarnessManifest>(&bytes).is_ok() {
+            return super::capability_decision::handle(
+                journal,
+                store,
+                proposal_id,
+                body,
+                config_agent_id,
+            );
+        }
         return super::service_decision::handle(journal, store, proposal_id, body, config_agent_id);
     }
     let input: DecisionBody = serde_json::from_value(body.clone())

@@ -10,10 +10,8 @@ impl super::JournalStore {
         &self,
         current: &Arc<RegistrySnapshot>,
     ) -> Result<bool> {
-        let required = [
-            crate::domain::operation::external::TASK_SUBMIT,
-            crate::domain::operation::external::HCR_ACCEPT,
-        ];
+        let required = [crate::domain::operation::external::TASK_SUBMIT];
+        const RETIRED_HCR_ACCEPT: &str = "external.coding_hcr_accept";
         let baseline = builtin_specs();
         let expected: Vec<_> = required
             .iter()
@@ -25,9 +23,13 @@ impl super::JournalStore {
                     .ok_or_else(|| anyhow::anyhow!("coding_control_spec_missing"))
             })
             .collect::<Result<_>>()?;
-        if expected
+        if !current
+            .operations
             .iter()
-            .all(|spec| current.lookup(&spec.name) == Some(spec))
+            .any(|spec| spec.name == RETIRED_HCR_ACCEPT)
+            && expected
+                .iter()
+                .all(|spec| current.lookup(&spec.name) == Some(spec))
         {
             return Ok(false);
         }
@@ -38,7 +40,9 @@ impl super::JournalStore {
         let mut specs: Vec<_> = current
             .operations
             .iter()
-            .filter(|spec| !required.contains(&spec.name.as_str()))
+            .filter(|spec| {
+                !required.contains(&spec.name.as_str()) && spec.name != RETIRED_HCR_ACCEPT
+            })
             .cloned()
             .collect();
         specs.extend(expected);

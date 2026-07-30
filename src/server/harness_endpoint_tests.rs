@@ -239,3 +239,39 @@ fn harness_route_nonexistent_manifest_returns_404() {
     let (status, _body) = handle_one(&cfg, &j, &g, &m, req);
     assert_eq!(status, 404);
 }
+
+#[test]
+fn retired_hcr_write_routes_return_gone() {
+    let (cfg, j, g, m) = setup();
+    for path in [
+        "/v1/harness-change-requests",
+        "/v1/hcr/hcr_old/accept",
+        "/v1/hcr/hcr_old/reconcile-failure",
+    ] {
+        let request = make_request("POST", path, "{}", Some("test-token"));
+        let (status, body) = handle_one(&cfg, &j, &g, &m, request);
+        assert_eq!(status, 410, "{path}: {body}");
+        assert!(body.contains("hcr_active_workflow_retired"));
+    }
+}
+
+#[test]
+fn historical_hcr_is_available_only_through_read_only_legacy_route() {
+    let (cfg, j, g, m) = setup();
+    j.execute_sql_for_test(
+        "INSERT INTO harness_change_requests
+         (request_id,source,source_message_id,session_id,principal_id,channel,
+          chat_type,harness_id,requirement,status,created_at,updated_at,run_id,error_code)
+         VALUES
+         ('hcr_history','feishu','message_history','session_history','principal_history',
+          'Feishu','p2p','coding-harness-v0','historical only','failed',
+          '2026-07-01T00:00:00Z','2026-07-01T00:01:00Z',NULL,'failed');",
+    )
+    .unwrap();
+    let request = make_request("GET", "/v1/legacy/hcr/hcr_history", "", Some("test-token"));
+    let (status, body) = handle_one(&cfg, &j, &g, &m, request);
+    assert_eq!(status, 200, "{body}");
+    let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(value["hcr"]["request"]["request_id"], "hcr_history");
+    assert_eq!(value["hcr"]["read_only"], true);
+}

@@ -135,7 +135,7 @@ fn cleanup(path: &Path) {
 fn baseline_specs_no_time_now() {
     let specs = builtin_specs();
     assert!(!specs.iter().any(|op| op.name == "time.now"));
-    assert_eq!(specs.len(), 6);
+    assert_eq!(specs.len(), 5);
 }
 #[test]
 fn catalog_no_time_now() {
@@ -441,7 +441,7 @@ fn retirement_cas_conflict_does_not_corrupt_active_snapshot() {
         "must keep S_other"
     );
     assert!(active.lookup("external.coding_task_submit").is_some());
-    assert!(active.lookup("external.coding_hcr_accept").is_some());
+    assert!(active.lookup("external.coding_hcr_accept").is_none());
     assert_eq!(count_retirement_events(&journal, "retire_builtin_time"), 0);
     drop(journal);
     cleanup(&db_path);

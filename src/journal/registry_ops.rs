@@ -128,11 +128,10 @@ impl super::JournalStore {
         // retirement. Fold both deterministic upgrades into one activation so
         // boot never exposes an intermediate snapshot or increments the CAS
         // version twice.
-        let controls = [
-            crate::domain::operation::external::TASK_SUBMIT,
-            crate::domain::operation::external::HCR_ACCEPT,
-        ];
-        new_specs.retain(|spec| !controls.contains(&spec.name.as_str()));
+        let controls = [crate::domain::operation::external::TASK_SUBMIT];
+        new_specs.retain(|spec| {
+            !controls.contains(&spec.name.as_str()) && spec.name != "external.coding_hcr_accept"
+        });
         let baseline = builtin_specs();
         for name in controls {
             let control = baseline
@@ -140,11 +139,6 @@ impl super::JournalStore {
                 .find(|spec| spec.name == name)
                 .ok_or_else(|| anyhow!("coding_control_spec_missing"))?;
             new_specs.push(control.clone());
-        }
-        // Verify the new snapshot is different.
-        if new_specs.len() == current_snap.operations.len() {
-            // Should not happen since we checked has_legacy above, but guard.
-            return Ok(false);
         }
         let new_snapshot = self.create_registry_snapshot(new_specs)?;
         let new_snapshot_id = new_snapshot.snapshot_id.clone();
