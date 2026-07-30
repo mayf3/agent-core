@@ -23,6 +23,7 @@
 
 pub mod artifact;
 pub mod build;
+mod invocable_contract;
 mod runner;
 pub mod scaffold;
 pub mod trusted_smoke;
