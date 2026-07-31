@@ -65,8 +65,9 @@ pub fn builtin_specs() -> Vec<OperationSpec> {
         OperationSpec {
             name: crate::domain::operation::external::TASK_SUBMIT.into(),
             risk: Risk::Write,
-            description: "Submit a catalogued Generic DevelopmentRequest to the Coding Harness."
-                .into(),
+            description:
+                "Submit a draft DevelopmentRequest to the Coding Harness. The Kernel binds governance fields from the trusted runtime context."
+                    .into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -74,10 +75,6 @@ pub fn builtin_specs() -> Vec<OperationSpec> {
                     "development_request": {
                         "type": "object",
                         "properties": {
-                            "request_id": {"type": "string"},
-                            "source_subject": {"type": "string"},
-                            "source_scope": {"type": "string"},
-                            "source_message_id": {"type": "string"},
                             "target_kind": {"type": "string", "enum": [
                                 "invocable_capability", "hook_consumer_service", "context_provider",
                                 "context_transformer", "scheduled_worker", "scheduler_service",
@@ -86,18 +83,11 @@ pub fn builtin_specs() -> Vec<OperationSpec> {
                             "name": {"type": "string"},
                             "requirements": {"type": "array", "items": {"type": "string"}},
                             "required_contracts": {"type": "array", "items": {"type": "string"}},
-                            "requested_permissions": {"type": "array", "items": {"type": "string"}},
-                            "build_profile": {"type": "string"},
-                            "deployment_profile": {"type": "string"},
-                            "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
-                            "idempotency_key": {"type": "string"},
-                            "contract_catalog_version": {"type": "string"}
+                            "acceptance_criteria": {"type": "array", "items": {"type": "string"}}
                         },
                         "required": [
-                            "request_id", "source_subject", "source_scope", "source_message_id",
                             "target_kind", "name", "requirements", "required_contracts",
-                            "requested_permissions", "build_profile", "deployment_profile",
-                            "acceptance_criteria", "idempotency_key", "contract_catalog_version"
+                            "acceptance_criteria"
                         ],
                         "additionalProperties": false
                     },
@@ -403,6 +393,59 @@ mod tests {
         specs.pop(); // Remove one operation → different snapshot.
         let snap2 = reg.create_snapshot(specs).unwrap();
         assert_ne!(snap2.snapshot_id, id1);
+    }
+
+    #[test]
+    fn task_submit_draft_schema_rejects_governance_fields() {
+        let reg = in_memory();
+        let id = reg.current_snapshot_id().unwrap();
+        let snap = reg.load_snapshot(&id).unwrap();
+        let task_submit = snap
+            .lookup(crate::domain::operation::external::TASK_SUBMIT)
+            .expect("task_submit op must exist");
+        let dev_req = task_submit
+            .parameters
+            .pointer("/properties/development_request")
+            .expect("development_request property must exist");
+
+        // 1. Required must be only the five draft fields.
+        let required = dev_req
+            .pointer("/required")
+            .and_then(|v| v.as_array())
+            .expect("required must be an array");
+        let required_strs: Vec<&str> = required
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(
+            required_strs,
+            ["target_kind", "name", "requirements", "required_contracts", "acceptance_criteria"],
+            "development_request must only require the five draft fields"
+        );
+
+        // 2. Governance fields must NOT be present in properties.
+        let governance_fields = [
+            "request_id", "source_subject", "source_scope", "source_message_id",
+            "requested_permissions", "build_profile", "deployment_profile",
+            "idempotency_key", "contract_catalog_version",
+        ];
+        for field in &governance_fields {
+            let pointer = format!("/properties/{}", field);
+            assert!(
+                dev_req.pointer(&pointer).is_none(),
+                "governance field '{}' must NOT be in development_request properties",
+                field
+            );
+        }
+
+        // 3. additionalProperties must be false.
+        assert_eq!(
+            dev_req
+                .pointer("/additionalProperties")
+                .and_then(|v| v.as_bool()),
+            Some(false),
+            "development_request must have additionalProperties: false"
+        );
     }
 
     #[test]
