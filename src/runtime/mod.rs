@@ -330,6 +330,19 @@ where
             first,
             &snapshot,
         )?;
+        // High 3: when the Run ended with a budget yield, record ONLY the
+        // structured yield fact — never fabricate a "请发送继续" user reply,
+        // never create a reply Invocation, never enter the outbox. The
+        // external Agent Loop Harness observes the yield fact and decides
+        // whether to continue.
+        if journal.run_yielded(&run.id)? {
+            journal.complete_run(&run.id)?;
+            return Ok(RuntimeOutcome {
+                run_id: run.id,
+                session_id: session.id,
+                output: String::new(),
+            });
+        }
         // error), enqueue the reply without changing status. Otherwise use the
         // normal enqueue_or_pause path.
         let reply_text = ensure_nonblank_reply(&llm.content);
@@ -387,6 +400,221 @@ where
             output: reply_text,
         })
     }
+    /// Same-session continuation scheduling (Bootstrap V0, High 2).
+    ///
+    /// Called by the worker for a `schedule_continuation` job after an
+    /// authorized external Agent Loop Harness requested the next Run in the
+    /// SAME session based on a trigger Run. This is NOT a user message:
+    /// no `IngressAccepted`, no `RuntimeEventPayload::UserMessage`, no fake
+    /// "user: 继续" — the model continues from the session's accumulated
+    /// context (prior turns, tool results, compaction).
+    ///
+    /// Identity/routing/session facts are recovered from the Kernel's OWN
+    /// records (the trigger Run + its session), never from the Harness.
+    pub(crate) fn schedule_run_for_existing_session(
+        &self,
+        journal: &JournalStore,
+        gateway: &Gateway,
+        trigger: &Run,
+        session: &Session,
+        trigger_run_id: &RunId,
+    ) -> Result<RuntimeOutcome> {
+        let snapshot_id = journal
+            .current_registry_snapshot_id()
+            .map_err(|e| anyhow::anyhow!("registry_snapshot_unavailable: {e}"))?;
+        if snapshot_id.is_empty() {
+            anyhow::bail!("registry_snapshot_invalid: snapshot ID is empty");
+        }
+        let snapshot = journal
+            .load_registry_snapshot(&snapshot_id)
+            .map_err(|e| anyhow::anyhow!("registry_snapshot_unavailable: {e}"))?;
+        // The continuation is a NEW governance event: it is NOT the trigger
+        // Run's event and NOT a user message. It only carries the fact that an
+        // authorized caller asked for the next Run in the same session.
+        let continuation_event_id = EventId::new();
+        let run = self.create_run_with_principal(
+            journal,
+            session,
+            &continuation_event_id,
+            &trigger.principal,
+            trigger_chat_type(session),
+            &snapshot_id,
+            &snapshot,
+        );
+        let budget = match self.resolve_run_budget(journal, &run, session, &snapshot) {
+            Ok(b) => b,
+            Err(e) => {
+                // Budget hook failed closed — the Run cannot start.
+                return Err(e);
+            }
+        };
+        let run = Run {
+            budget_hook_id: Some(budget.hook_id.clone()),
+            budget_hook_version: Some(budget.hook_version.clone()),
+            budget_decision_digest: Some(budget.decision.digest()),
+            budget_max_tool_rounds: Some(budget.decision.max_tool_rounds),
+            budget_max_wall_time_ms: Some(budget.decision.max_wall_time_ms),
+            budget_exhaustion_action: Some(budget.decision.exhaustion_action),
+            ..run
+        };
+        journal.insert_run(&run)?;
+        journal.append_event(
+            JournalEventKind::RunStarted,
+            Some(&run.id),
+            Some(&session.id),
+            Some(&continuation_event_id.0),
+            json!({
+                "run_id": run.id.0,
+                "trigger_event_id": run.trigger_event_id.0,
+                "principal_id": run.principal.principal_id.0,
+                "continuation_of": trigger_run_id.0,
+            }),
+        )?;
+        // Backfill the continuation ledger: the duplicate-request response
+        // must be able to report the SAME next_run_id for this trigger.
+        journal.record_continuation_next_run(trigger_run_id, &run.id)?;
+
+        let granted_operations: Vec<String> = run
+            .principal
+            .grants
+            .iter()
+            .map(|g| g.operation.clone())
+            .collect();
+        let mut blocks = ContextAssembler::from_config(&self.config).build_continuation(
+            journal,
+            session,
+            &continuation_event_id.0,
+            &granted_operations,
+            &snapshot,
+        )?;
+        journal.append_event(
+            JournalEventKind::ContextBuilt,
+            Some(&run.id),
+            Some(&session.id),
+            None,
+            json!({
+                "block_count": blocks.len(),
+                "kinds": blocks.iter().map(|block| format!("{:?}", block.kind)).collect::<Vec<_>>(),
+            }),
+        )?;
+        let provider_tools = snapshot.provider_tools_for_grants(&granted_operations);
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_millis(
+                run.budget_max_wall_time_ms
+                    .unwrap_or(self.config.tool_loop_timeout_ms),
+            );
+        let first = match self.complete_model_invocation(
+            journal,
+            &run,
+            session,
+            0,
+            LlmInput {
+                timeout_override_ms: None,
+                blocks: blocks.clone(),
+                user_text: String::new(),
+                granted_operations: granted_operations.clone(),
+                provider_tools: provider_tools.clone(),
+                follow_ups: vec![],
+            },
+            Some(deadline),
+        ) {
+            Ok(llm) => llm,
+            Err(_) => {
+                journal.fail_run(&run.id)?;
+                journal.append_event(
+                    JournalEventKind::RunFailed,
+                    Some(&run.id),
+                    Some(&session.id),
+                    None,
+                    json!({ "run_id": run.id.0, "error_category": "initial_llm_failed" }),
+                )?;
+                return self.reply_with_failure(
+                    journal,
+                    gateway,
+                    &snapshot,
+                    &run,
+                    session,
+                    None,
+                    None,
+                    crate::runtime::tool_loop::INITIAL_LLM_FAILED_MSG,
+                );
+            }
+        };
+        let llm = self.run_tool_recall_loop(
+            journal,
+            gateway,
+            &run,
+            session,
+            &mut blocks,
+            "",
+            first,
+            &snapshot,
+        )?;
+        // Yield: record the structured fact only, never fabricate a user
+        // reply, never create a reply Invocation, never enter the outbox.
+        if journal.run_yielded(&run.id)? {
+            journal.complete_run(&run.id)?;
+            return Ok(RuntimeOutcome {
+                run_id: run.id,
+                session_id: session.id.clone(),
+                output: String::new(),
+            });
+        }
+        let reply_text = ensure_nonblank_reply(&llm.content);
+        let is_failed = matches!(
+            journal.run_status(&run.id),
+            Ok(Some(s)) if s == "Failed"
+        );
+        if is_failed {
+            return self.reply_with_failure(
+                journal,
+                gateway,
+                &snapshot,
+                &run,
+                session,
+                None,
+                None,
+                &reply_text,
+            );
+        }
+        let mut intent = self.reply_intent(&run, session, &reply_text, None, None);
+        apply_pending_proposal_presentation(journal, &run, &mut intent)?;
+        let correlation_id = intent.invocation_id.0.clone();
+        journal.append_event(
+            JournalEventKind::InvocationProposed,
+            Some(&run.id),
+            Some(&session.id),
+            Some(&correlation_id),
+            json!({
+                "operation": intent.operation,
+                "idempotency_key": intent.idempotency_key,
+            }),
+        )?;
+        let approved = gateway.approve_invocation(intent, &run, session, &snapshot)?;
+        journal.append_event(
+            JournalEventKind::InvocationApproved,
+            Some(&run.id),
+            Some(&session.id),
+            Some(&correlation_id),
+            json!({
+                "decision_id": approved.decision_id,
+                "operation": approved.intent().operation,
+            }),
+        )?;
+        self.enqueue_or_pause(
+            journal,
+            &approved,
+            &run,
+            session,
+            &correlation_id,
+            &snapshot,
+        )?;
+        Ok(RuntimeOutcome {
+            run_id: run.id,
+            session_id: session.id.clone(),
+            output: reply_text,
+        })
+    }
 }
 
 fn apply_pending_proposal_presentation(
@@ -407,4 +635,21 @@ fn apply_pending_proposal_presentation(
         }
     }
     Ok(())
+}
+
+/// Recover the chat_type of the session's channel for grant derivation. The
+/// session's conversation_key encodes the Feishu shape deterministically
+/// (`feishu:open_id:` = p2p, `feishu:chat_id:` = group). A continuation reuses
+/// the trigger Run's session — never Harness-supplied identity.
+fn trigger_chat_type(session: &Session) -> Option<&'static str> {
+    match session.channel {
+        ChannelKind::Cli => None,
+        ChannelKind::Feishu => {
+            if session.conversation_key.starts_with("feishu:open_id:") {
+                Some("p2p")
+            } else {
+                Some("group")
+            }
+        }
+    }
 }

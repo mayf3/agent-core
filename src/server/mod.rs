@@ -343,22 +343,24 @@ fn handle_ingress(
 /// Same-session continuation seam (Bootstrap V0). An authorized external Agent
 /// Loop Harness requests the next Run in the SAME session after a yield.
 ///
-/// Body:
+/// Body (narrow contract — the Harness identifies ONLY the trigger Run):
 /// ```json
 /// {
-///   "session_id": "<observed session>",
-///   "trigger_run_id": "<observed run that yielded>",
-///   "principal_id": "<observed principal, optional>",
-///   "continuation_text": "继续",
-///   "idempotency_key": "<harness-generated uuid>",
-///   "feishu_replay": { "sender_open_id": "...", "chat_id": "...", "chat_type": "p2p" }  // feishu only
+///   "trigger_run_id": "run_xxx",
+///   "expected_session_id": "session_xxx",   // optional consistency check
+///   "idempotency_key": "continuation:run_xxx"
 /// }
 /// ```
 ///
-/// The Kernel verifies the trigger Run belongs to the session, enforces
-/// idempotency atomically, and enqueues the continuation via the normal
-/// ingress path. A duplicate `idempotency_key` returns the same acceptance
-/// without creating a second next Run.
+/// All identity / routing / session facts are recovered by the Kernel from
+/// its OWN records (the trigger Run + its session). The Kernel records a
+/// generic `SessionContinuationRequested` governance event (NOT a user
+/// message) and enqueues a `schedule_continuation` worker job.
+///
+/// UNIQUE(trigger_run_id) guarantees the SAME trigger Run is continued at
+/// most once — a duplicate request (same or different idempotency_key,
+/// concurrent, or after Harness state loss) returns the already-scheduled
+/// next_run_id instead of creating a second next Run.
 fn handle_session_continuation(
     stream: &mut TcpStream,
     gateway: &Gateway,
@@ -377,29 +379,49 @@ fn handle_session_continuation(
             )
         }
     };
-    let session_id = continuation.session_id.clone();
+    let trigger_run_id = continuation.trigger_run_id.clone();
     match gateway.request_session_continuation(journal, &continuation) {
-        Ok(Some(validated)) => write_json(
+        Ok(Some(request_id)) => write_json(
             stream,
             200,
             json!({
                 "ok": true,
                 "status": "accepted",
-                "kernel_event_id": validated.event_id.0,
-                "session_id": session_id,
+                "request_id": request_id,
+                "trigger_run_id": trigger_run_id,
                 "duplicate": false,
             }),
         ),
-        Ok(None) => write_json(
-            stream,
-            200,
-            json!({
-                "ok": true,
-                "status": "duplicate",
-                "session_id": session_id,
-                "duplicate": true,
-            }),
-        ),
+        Ok(None) => {
+            // Duplicate trigger: report the already-scheduled continuation and
+            // its next_run_id (when the worker has already created it) so the
+            // caller can converge on the SAME result.
+            let existing = journal.continuation_by_trigger_run(&RunId(trigger_run_id.clone()))?;
+            match existing {
+                Some((event_id, next_run_id)) => write_json(
+                    stream,
+                    200,
+                    json!({
+                        "ok": true,
+                        "status": "duplicate",
+                        "trigger_run_id": trigger_run_id,
+                        "event_id": event_id,
+                        "next_run_id": next_run_id,
+                        "duplicate": true,
+                    }),
+                ),
+                None => write_json(
+                    stream,
+                    200,
+                    json!({
+                        "ok": true,
+                        "status": "duplicate",
+                        "trigger_run_id": trigger_run_id,
+                        "duplicate": true,
+                    }),
+                ),
+            }
+        }
         Err(error) => write_json(
             stream,
             400,

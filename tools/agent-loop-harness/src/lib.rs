@@ -52,17 +52,6 @@ pub struct HarnessConfig {
     pub max_consecutive_failures: u64,
     /// Poll interval between `/v1/events` reads.
     pub poll_interval_ms: u64,
-    /// The neutral continuation text sent as the next Run's input.
-    pub continuation_text: String,
-    /// Feishu replay fields, required only when the session channel is Feishu.
-    pub feishu_replay: Option<FeishuReplay>,
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct FeishuReplay {
-    pub sender_open_id: String,
-    pub chat_id: String,
-    pub chat_type: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -263,31 +252,24 @@ impl KernelClient {
         Ok(parsed)
     }
 
-    /// Request the next Run in the same session. Returns `true` on first
-    /// acceptance, `false` when the Kernel reports a duplicate idempotency_key.
+    /// Request the next Run in the same session (narrow contract). The Kernel
+    /// recovers ALL session/principal facts from the trigger Run itself — the
+    /// Harness only identifies the trigger. The idempotency_key is DETERMINISTIC
+    /// (`continuation:<trigger_run_id>`) so the same trigger Run can never be
+    /// continued twice even across Harness restarts or state loss.
+    ///
+    /// Returns `Ok(true)` on first acceptance, `Ok(false)` when the Kernel
+    /// reports a duplicate trigger (already continued).
     pub fn request_continuation(
         &self,
-        session_id: &str,
         trigger_run_id: &str,
-        principal_id: Option<&str>,
-        continuation_text: &str,
-        idempotency_key: &str,
-        feishu_replay: Option<&FeishuReplay>,
+        expected_session_id: Option<&str>,
     ) -> Result<bool> {
-        let mut body = json!({
-            "session_id": session_id,
+        let body = json!({
             "trigger_run_id": trigger_run_id,
-            "principal_id": principal_id.unwrap_or(""),
-            "continuation_text": continuation_text,
-            "idempotency_key": idempotency_key,
+            "expected_session_id": expected_session_id.unwrap_or(""),
+            "idempotency_key": deterministic_key(trigger_run_id),
         });
-        if let Some(replay) = feishu_replay {
-            body["feishu_replay"] = json!({
-                "sender_open_id": replay.sender_open_id,
-                "chat_id": replay.chat_id,
-                "chat_type": replay.chat_type,
-            });
-        }
         let url = format!("{}/v1/session-continuation", self.base_url);
         let response = Self::agent()
             .post(&url)
@@ -308,6 +290,13 @@ impl KernelClient {
         }
         Ok(parsed["duplicate"] != json!(true))
     }
+}
+
+/// Deterministic continuation key: one trigger Run maps to exactly one key, so
+/// retries, restarts, and concurrent requests all converge on the same
+/// continuation instead of creating duplicates.
+pub fn deterministic_key(trigger_run_id: &str) -> String {
+    format!("continuation:{trigger_run_id}")
 }
 
 // ---------------------------------------------------------------------------
@@ -368,7 +357,6 @@ pub fn run_once(
         if !obs.saw_terminal && !obs.saw_yield_signal {
             continue;
         }
-        let Some(session_id) = obs.session_id.clone() else { continue };
         let outcome = obs.outcome();
         let action = resolve_policy(&PolicyContext {
             outcome,
@@ -377,19 +365,11 @@ pub fn run_once(
         });
         match action {
             PolicyAction::ContinueSameSession => {
-                let idempotency_key = format!(
-                    "cont:{}:{}",
-                    run_id,
-                    uuid::Uuid::new_v4().simple()
-                );
-                let accepted = client.request_continuation(
-                    &session_id,
-                    &run_id,
-                    obs.principal_id.as_deref(),
-                    &config.continuation_text,
-                    &idempotency_key,
-                    config.feishu_replay.as_ref(),
-                )?;
+                // Deterministic key: the Kernel's UNIQUE(trigger_run_id)
+                // guarantees one continuation per trigger Run regardless of
+                // retries, restarts, or concurrent requests.
+                let accepted =
+                    client.request_continuation(&run_id, obs.session_id.as_deref())?;
                 if accepted {
                     state.automatic_run_count += 1;
                     state.total_wall_time_ms += 1;
@@ -445,16 +425,6 @@ pub fn config_from_env() -> Result<HarnessConfig> {
     let max_total_wall_time_ms = parse_env_u64("AGENT_LOOP_MAX_TOTAL_WALL_TIME_MS", 600_000)?;
     let max_consecutive_failures = parse_env_u64("AGENT_LOOP_MAX_CONSECUTIVE_FAILURES", 3)?;
     let poll_interval_ms = parse_env_u64("AGENT_LOOP_POLL_INTERVAL_MS", 500)?;
-    let continuation_text =
-        std::env::var("AGENT_LOOP_CONTINUATION_TEXT").unwrap_or_else(|_| "继续".to_string());
-    let feishu_replay = match std::env::var("AGENT_LOOP_FEISHU_SENDER_OPEN_ID") {
-        Ok(sender_open_id) => Some(FeishuReplay {
-            sender_open_id,
-            chat_id: std::env::var("AGENT_LOOP_FEISHU_CHAT_ID")?,
-            chat_type: std::env::var("AGENT_LOOP_FEISHU_CHAT_TYPE").ok(),
-        }),
-        Err(_) => None,
-    };
     Ok(HarnessConfig {
         kernel_url,
         ipc_token,
@@ -463,8 +433,6 @@ pub fn config_from_env() -> Result<HarnessConfig> {
         max_total_wall_time_ms,
         max_consecutive_failures,
         poll_interval_ms,
-        continuation_text,
-        feishu_replay,
     })
 }
 

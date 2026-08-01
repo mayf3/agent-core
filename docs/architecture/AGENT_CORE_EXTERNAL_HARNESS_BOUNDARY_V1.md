@@ -321,7 +321,37 @@ Router 特判
 Memory 特判
 ```
 
-### 7.6 Bootstrap 停止条件
+### 7.6 续跑窄契约（审查修复后冻结）
+
+`POST /v1/session-continuation` 请求体只允许：
+
+```json
+{
+  "trigger_run_id": "run_xxx",
+  "expected_session_id": "session_xxx",
+  "idempotency_key": "continuation:run_xxx"
+}
+```
+
+* `expected_session_id` 可选，只用于一致性校验；
+* 外部 Harness **不是身份、路由和会话事实的来源** —— Kernel 根据
+  `trigger_run_id` 从自身记录加载 prior Run → session_id → agent_id →
+  principal → channel → conversation target → Registry Snapshot；
+* 续跑**不伪造用户消息**：不创建 `IngressAccepted` /
+  `RuntimeEventPayload::UserMessage` / "继续" 文本。Kernel 只记录通用治理事件
+  `SessionContinuationRequested`（request_id / trigger_run_id / session_id /
+  requesting_principal / idempotency_key），并调度下一 Run 复用同一 Session
+  上下文（前文、compaction、工具结果）自行继续；
+* **同一个 trigger Run 只能续跑一次**：`UNIQUE(trigger_run_id)` 由数据库保证，
+  Harness 使用确定性 key `continuation:<trigger_run_id>`；相同 key、不同 key、
+  并发、Harness state 丢失、重启后重新观察，都收敛到同一个 next_run_id；
+  重复请求返回 `{duplicate: true, trigger_run_id, next_run_id}`；
+* **yield 不向用户发送"请发送继续"**：预算耗尽只记录结构化 yield 事实
+  （`ToolBudgetExhausted` / `ToolLoopWallClockExceeded` 带 `exhaustion_action=yield`），
+  不生成用户回复、不创建回复 Invocation、不进 outbox。只有正常完成、明确等待
+  用户、达到外部上限、最终失败才向用户发送消息。
+
+### 7.7 Bootstrap 停止条件
 
 ```text
 用户只发送一次请求

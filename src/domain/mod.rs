@@ -596,6 +596,15 @@ pub enum JournalEventKind {
     /// `terminate` exhaustion action. payload: `run_id`, `reason` ("rounds" |
     /// "wall_clock"), `max_tool_rounds` | `max_wall_time_ms`, `used`
     RunBudgetTerminated,
+    /// An authorized external Agent Loop Harness requested a continuation Run
+    /// in the SAME session based on a trigger Run. This is a generic
+    /// governance fact — it only states that an authorized caller asked the
+    /// Kernel to schedule the next Run; it carries NO product semantics
+    /// (no task, progress, checkpoint, plan, or "what to do next").
+    /// payload: `request_id`, `trigger_run_id`, `session_id`,
+    ///          `requesting_principal`, `idempotency_key`
+    /// correlation_id: request_id
+    SessionContinuationRequested,
 }
 
 impl JournalEventKind {

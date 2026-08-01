@@ -16,28 +16,21 @@ pub struct Gateway {
     config: KernelConfig,
 }
 
-/// Replay fields the external Agent Loop Harness returns so a Feishu
-/// continuation resolves to the SAME session/principal as the trigger Run.
-/// These are the same fields a Feishu ingress event carries — the Kernel
-/// derives identity deterministically from them and understands nothing more.
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct FeishuReplayFields {
-    pub sender_open_id: String,
-    pub chat_id: String,
-    pub chat_type: Option<String>,
-}
-
-/// Generic same-session continuation request (Bootstrap V0). Carries only
-/// universal run facts observed by the external Agent Loop Harness — no
-/// task/progress/product state.
+/// Generic same-session continuation request (Bootstrap V0). Narrow contract:
+/// the external Agent Loop Harness identifies ONLY the trigger Run. All
+/// identity / routing / session facts (session_id, agent_id, principal,
+/// channel, conversation target, registry snapshot) are recovered by the
+/// Kernel from its OWN records — the Harness is never the source of those
+/// facts.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct SessionContinuationRequest {
-    pub session_id: String,
+    /// The Run that yielded and is the basis for the next Run.
     pub trigger_run_id: String,
-    pub principal_id: Option<String>,
-    pub continuation_text: String,
+    /// Optional consistency check: when present, the Kernel verifies the
+    /// trigger Run actually belongs to this session.
+    pub expected_session_id: Option<String>,
+    /// Deterministic key supplied by the Harness (`continuation:<trigger_run_id>`).
     pub idempotency_key: String,
-    pub feishu_replay: Option<FeishuReplayFields>,
 }
 impl Gateway {
     pub fn new(config: KernelConfig) -> Self {
@@ -81,154 +74,54 @@ impl Gateway {
     /// An authorized external Agent Loop Harness requests the next Run in the
     /// SAME session after the previous Run yielded. The Kernel does NOT decide
     /// whether to continue — it only:
-    ///   1. verifies the trigger Run exists and belongs to the session;
-    ///   2. verifies the requesting principal matches the session channel;
-    ///   3. atomically enforces idempotency and enqueues the continuation
-    ///      event via the normal ingress path (so the existing worker loop
-    ///      delivers it as an ordinary Run with the same session context).
+    ///   1. verifies the trigger Run exists;
+    ///   2. verifies `expected_session_id` (when supplied) matches the trigger
+    ///      Run's session;
+    ///   3. atomically enforces UNIQUE(trigger_run_id) idempotency and records
+    ///      a generic `SessionContinuationRequested` governance event plus a
+    ///      `schedule_continuation` worker job.
     ///
-    /// No task/progress/checkpoint/product state is created or understood.
+    /// All session/principal/channel facts are recovered from the trigger Run
+    /// by the worker — the Harness is never the source of identity facts.
     ///
-    /// Returns `Ok(Some(validated_event))` on first acceptance, `Ok(None)`
-    /// when the `idempotency_key` was already accepted (duplicate request).
+    /// Returns `Ok(Some(request_id))` on first acceptance, `Ok(None)` when the
+    /// trigger Run was already continued (duplicate — nothing new is created).
     pub fn request_session_continuation(
         &self,
         journal: &JournalStore,
         request: &SessionContinuationRequest,
-    ) -> Result<Option<ValidatedEvent>> {
-        let session_id = request.session_id.as_str();
-        let session = journal
-            .session_by_id(&SessionId(session_id.to_string()))?
-            .ok_or_else(|| anyhow::anyhow!("session_not_found"))?;
+    ) -> Result<Option<String>> {
         let trigger = journal
             .run_by_id(&RunId(request.trigger_run_id.clone()))?
             .ok_or_else(|| anyhow::anyhow!("trigger_run_not_found"))?;
-        if trigger.session_id.0 != session_id {
-            bail!("trigger_run_session_mismatch");
-        }
-        let continuation_text = request.continuation_text.trim();
-        if continuation_text.is_empty() {
-            bail!("continuation_text_empty");
+        if let Some(expected_session_id) = &request.expected_session_id {
+            if trigger.session_id.0 != *expected_session_id {
+                bail!("trigger_run_session_mismatch");
+            }
         }
         if request.idempotency_key.is_empty() {
             bail!("idempotency_key_empty");
         }
-        let principal_id = request.principal_id.as_deref();
-        let feishu_replay = request.feishu_replay.as_ref();
+        // Verify the trigger Run's session still exists (a generic governance
+        // fact check — the continuation resolves to this exact session).
+        let session = journal
+            .session_by_id(&trigger.session_id)?
+            .ok_or_else(|| anyhow::anyhow!("session_not_found"))?;
 
-        // Recover the continuation event in the same shape as a normal ingress
-        // event so the existing worker loop (`recover_validated_event`) can
-        // deliver it without any new Kernel code.
-        let (event, payload, source) = match session.channel {
-            ChannelKind::Cli => {
-                if let Some(expected) = principal_id {
-                    if expected != "cli:local" {
-                        bail!("principal_mismatch");
-                    }
-                }
-                let event_id = EventId::new();
-                let event = ValidatedEvent {
-                    event_id: event_id.clone(),
-                    source: EventSource::Cli,
-                    principal: self.cli_principal(),
-                    session_target: SessionTarget {
-                        agent_id: self.config.agent_id.clone(),
-                        channel: ChannelKind::Cli,
-                        conversation_key: "local".to_string(),
-                    },
-                    payload: RuntimeEventPayload::UserMessage {
-                        text: continuation_text.to_string(),
-                        message_id: None,
-                        chat_id: None,
-                    },
-                    dedupe_key: format!("continuation:{}", request.idempotency_key),
-                    occurred_at: Utc::now(),
-                    chat_type: None,
-                };
-                let payload = json!({
-                    "source": "cli",
-                    "dedupe_key": event.dedupe_key,
-                    "event_id": event_id.0,
-                    "text": continuation_text,
-                });
-                (event, payload, "cli")
-            }
-            ChannelKind::Feishu => {
-                let replay = feishu_replay
-                    .ok_or_else(|| anyhow::anyhow!("feishu_replay_required"))?;
-                let expected_principal = format!("feishu:open_id:{}", replay.sender_open_id);
-                if let Some(expected) = principal_id {
-                    if expected != expected_principal {
-                        bail!("principal_mismatch");
-                    }
-                }
-                let chat_type = replay.chat_type.clone().unwrap_or_else(|| "p2p".into());
-                let conversation_key = if chat_type == "p2p" {
-                    format!("feishu:open_id:{}", replay.sender_open_id)
-                } else {
-                    format!("feishu:chat_id:{}", replay.chat_id)
-                };
-                let event_id = EventId::new();
-                let event = ValidatedEvent {
-                    event_id: event_id.clone(),
-                    source: EventSource::Feishu,
-                    principal: RunPrincipal {
-                        principal_id: PrincipalId(expected_principal),
-                        subject: PrincipalSubject::FeishuOpenId(replay.sender_open_id.clone()),
-                        source: PrincipalSource::Feishu,
-                        grants: crate::domain::operation::ExecutionProfile::for_channel(
-                            ChannelKind::Feishu,
-                        )
-                        .with_extra(&self.config.extra_allowed_operations)
-                        .grants,
-                        requester_id: Some(format!(
-                            "feishu:open_id:{}",
-                            replay.sender_open_id
-                        )),
-                    },
-                    session_target: SessionTarget {
-                        agent_id: self.config.agent_id.clone(),
-                        channel: ChannelKind::Feishu,
-                        conversation_key: conversation_key.clone(),
-                    },
-                    payload: RuntimeEventPayload::UserMessage {
-                        text: continuation_text.to_string(),
-                        message_id: Some(format!(
-                            "continuation:{}",
-                            uuid::Uuid::new_v4().simple()
-                        )),
-                        chat_id: Some(replay.chat_id.clone()),
-                    },
-                    dedupe_key: format!("continuation:{}", request.idempotency_key),
-                    occurred_at: Utc::now(),
-                    chat_type: Some(chat_type.clone()),
-                };
-                let payload = json!({
-                    "source": "feishu",
-                    "dedupe_key": event.dedupe_key,
-                    "event_id": event_id.0,
-                    "sender_open_id": replay.sender_open_id,
-                    "chat_id": replay.chat_id,
-                    "chat_type": chat_type,
-                    "conversation_key": conversation_key,
-                    "message_id": format!("continuation:{}", uuid::Uuid::new_v4().simple()),
-                    "message_type": "text",
-                    "text": continuation_text,
-                });
-                (event, payload, "feishu")
-            }
-        };
-
+        // The requesting principal is the authorized external caller (the
+        // Agent Loop Harness itself), identified by the IPC bearer that this
+        // route already authenticated. It is recorded as a governance fact,
+        // never used to fabricate a user identity.
+        let request_id = format!("cont:{}", uuid::Uuid::new_v4().simple());
         let accepted = journal.accept_session_continuation(
-            &event,
-            payload,
-            &request.idempotency_key,
+            &request_id,
             &session.id,
             &trigger.id,
-            source,
+            "ipc:agent-loop-harness",
+            &request.idempotency_key,
         )?;
         match accepted {
-            Some(_event_id) => Ok(Some(event)),
+            Some(_event_id) => Ok(Some(request_id)),
             None => Ok(None),
         }
     }
