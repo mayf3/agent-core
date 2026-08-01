@@ -432,16 +432,23 @@ fn build_prompt(job: &Job, checkpoint: Option<&Checkpoint>) -> String {
          - You may ONLY modify files within the current workspace directory.\n\
          - You MUST NOT access files outside the workspace.\n\
          - You MUST NOT read .env, tokens, keys, or production secrets.\n\
-         - You MUST NOT push, merge, or deploy code.\n\n\
+         - You MUST NOT push, merge, or deploy code.\n\
+         - You MUST NOT run destructive git commands: git reset --hard, \
+         git clean -fd, git checkout . / git restore ., or git branch -D. \
+         Your in-flight work is committed by the Harness at each segment \
+         boundary; discarding it loses progress and violates task discipline.\n\n\
          Testing requirements\n\
          - After making changes, run the project's test suite.\n\
          - All existing tests must continue to pass.\n\n\
          Checkpoint reporting\n\
-         - At the very end of your output, emit a single JSON block (no markdown \
-         fences) with exactly these keys:\n\
+         - After EVERY major step (reading a file, editing, running a test), \
+         emit a checkpoint JSON block (no markdown fences) with exactly these \
+         keys:\n\
          {{\"findings\": \"...\", \"completed_steps\": [...], \
          \"remaining_steps\": [...], \"last_test_result\": \"...\", \
          \"blocker\": \"...\", \"next_action\": \"...\"}}\n\
+         - Emit the checkpoint repeatedly as you work — the LAST block in \
+         your output wins. The final block must reflect the full state.\n\
          - When all work is done, set remaining_steps to [].\n\
          - The Harness automatically commits your in-flight changes at the end \
          of each segment as a checkpoint commit; do not commit or push yourself.\n\

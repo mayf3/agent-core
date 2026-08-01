@@ -437,6 +437,49 @@ fn checkpoint_commit_lands_model_work() {
     );
 }
 
+/// A segment killed mid-work may return NO structured checkpoint; the
+/// Harness must still refresh the workspace facts after the checkpoint
+/// commit so the next segment's drift check passes and the job continues.
+#[test]
+fn missing_model_checkpoint_still_continues() {
+    let hs = HarnessServer::start();
+    for args in [
+        vec!["init", "-q", "-b", "main"],
+        vec!["config", "user.email", "t@t"],
+        vec!["config", "user.name", "t"],
+        vec!["commit", "-q", "--allow-empty", "-m", "init"],
+    ] {
+        let out = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(&hs.ws_root)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?} failed");
+    }
+
+    // fake_no_checkpoint:true + fake_dirty:true — model killed mid-work with
+    // in-flight changes and no structured checkpoint.
+    let job_id = hs.submit(
+        "test",
+        "fake_work_units:9 fake_dirty:true fake_no_checkpoint:true",
+        None,
+    );
+    let after_first = wait_segment_count(&hs, &job_id, 1);
+    assert_eq!(after_first["status"], "accepted");
+
+    let done = hs.poll(
+        &job_id,
+        |r| r["status"] == "completed" || r["status"] == "failed",
+        Duration::from_secs(30),
+    );
+    assert_eq!(
+        done["status"], "completed",
+        "missing model checkpoint must not drift-fail: {}",
+        done["last_error"]
+    );
+    assert!(done["segment_count"].as_u64().unwrap() >= 3);
+}
+
 /// Cancel stops a pending job; approval → resume continues it.
 #[test]
 fn cancel_and_resume() {

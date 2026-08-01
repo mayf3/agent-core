@@ -687,8 +687,12 @@ fn tick(config: &CodingConfig) {
             return;
         }
     };
-    let job_id = match store.next_accepted() {
-        Some(job) => job.job_id,
+    // Atomically claim the next accepted job (file lock + status transition
+    // to Running) so concurrent schedulers (e.g. after a restart while the
+    // old process lingers, or test servers sharing one store) never run the
+    // same segment twice.
+    let job_id = match claim_next(&store) {
+        Some(job_id) => job_id,
         None => {
             SEGMENT_IN_FLIGHT.store(false, Ordering::SeqCst);
             return;
@@ -703,11 +707,57 @@ fn tick(config: &CodingConfig) {
         }));
         if result.is_err() {
             eprintln!("coding_harness: segment thread panicked for job {job_id}");
+            // Never leave the job stuck in Running: release it back to
+            // Accepted so the scheduler can retry.
+            if let Ok(store) = Store::open(&store_root(&cfg)) {
+                if let Some(mut j) = store.load(&job_id) {
+                    if j.status == JobStatus::Running {
+                        j.status = JobStatus::Accepted;
+                        j.last_error = "segment_panicked_recovered".into();
+                        j.updated_at = now_rfc3339();
+                        let _ = store.save(&j);
+                    }
+                }
+            }
         }
         SEGMENT_IN_FLIGHT.store(false, Ordering::SeqCst);
     });
 }
 
+/// Claim the next accepted job under the store file lock: transition it to
+/// Running (attempt += 1, phase = segment N) and return its id. Returns
+/// None when no accepted job exists. `claim_next` is the only place a job
+/// leaves the Accepted state for execution.
+fn claim_next(store: &Store) -> Option<String> {
+    use fs2::FileExt;
+    let lock_path = store.root.join(".lock");
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(&lock_path)
+        .ok()?;
+    lock_file.lock_exclusive().ok()?;
+
+    let job = store.next_accepted()?;
+    let mut claimed = store.load(&job.job_id)?;
+    if claimed.status != JobStatus::Accepted {
+        let _ = lock_file.unlock();
+        return None;
+    }
+    claimed.status = JobStatus::Running;
+    claimed.attempt += 1;
+    claimed.current_phase = format!("segment_{}", claimed.next_segment_no());
+    claimed.updated_at = now_rfc3339();
+    if store.save(&claimed).is_err() {
+        let _ = lock_file.unlock();
+        return None;
+    }
+    let _ = lock_file.unlock();
+    Some(claimed.job_id)
+}
+
+/// Run a claimed (Running) job's segment. Panic-safe: a panic here must not
+/// leave the job stuck in Running — the caller resets it to Accepted.
 fn run_next_segment(config: &CodingConfig, job_id: &str) {
     let store = match Store::open(&store_root(config)) {
         Ok(s) => s,
@@ -716,7 +766,7 @@ fn run_next_segment(config: &CodingConfig, job_id: &str) {
     let Some(mut job) = store.load(job_id) else {
         return;
     };
-    if job.status != JobStatus::Accepted {
+    if job.status != JobStatus::Running {
         return;
     }
     if job.checkpoint.is_none() {
@@ -760,14 +810,6 @@ fn run_next_segment(config: &CodingConfig, job_id: &str) {
     }
 
     let started = now_rfc3339();
-    job.status = JobStatus::Running;
-    job.attempt += 1;
-    job.current_phase = format!("segment_{}", job.next_segment_no());
-    job.updated_at = started.clone();
-    if store.save(&job).is_err() {
-        return;
-    }
-
     let cancel_flag = register_cancel(&job.job_id);
     let outcome = match job.backend.as_str() {
         "opencode" => opencode_backend::run_segment(
@@ -802,10 +844,7 @@ fn run_next_segment(config: &CodingConfig, job_id: &str) {
             // Land the model's final in-flight changes as a commit (git
             // commits are a Harness responsibility).
             checkpoint_commit(&job);
-            if let Some(mut cp) = outcome.checkpoint {
-                cp.workspace = workspace_state(&job.workspace_root);
-                job.checkpoint = Some(cp);
-            }
+            refresh_checkpoint_workspace(&mut job, outcome.checkpoint);
             job.result = result.clone();
             job.result_summary = result
                 .get("summary")
@@ -823,10 +862,11 @@ fn run_next_segment(config: &CodingConfig, job_id: &str) {
             // commit them as a checkpoint commit so the next segment starts
             // from a clean, drift-verifiable tree.
             checkpoint_commit(&job);
-            if let Some(mut cp) = outcome.checkpoint {
-                cp.workspace = workspace_state(&job.workspace_root);
-                job.checkpoint = Some(cp);
-            }
+            // Always refresh the recorded workspace facts to the post-commit
+            // state. The model's structured checkpoint may be absent when
+            // the segment was killed mid-work; the drift check of the next
+            // segment must still verify against the real committed state.
+            refresh_checkpoint_workspace(&mut job, outcome.checkpoint);
             if job.segments.len() + 1 >= MAX_SEGMENTS_PER_JOB as usize {
                 job.status = JobStatus::Failed;
                 job.current_phase = "failed".into();
@@ -899,6 +939,25 @@ fn cleanup_cancel(job_id: &str) {
 // ---------------------------------------------------------------------------
 // Job setup and finalize
 // ---------------------------------------------------------------------------
+
+/// Refresh the checkpoint's workspace facts to the current committed state.
+/// The model's structured checkpoint may be absent when a segment was
+/// killed mid-work; the workspace facts must still track the checkpoint
+/// commit so the next segment's drift check verifies against reality.
+fn refresh_checkpoint_workspace(job: &mut Job, model_checkpoint: Option<Checkpoint>) {
+    let current = workspace_state(&job.workspace_root);
+    match model_checkpoint {
+        Some(mut cp) => {
+            cp.workspace = current;
+            job.checkpoint = Some(cp);
+        }
+        None => {
+            if let Some(cp) = job.checkpoint.as_mut() {
+                cp.workspace = current;
+            }
+        }
+    }
+}
 
 /// Commit the model's in-flight workspace changes as a checkpoint commit.
 /// Git commits are a Harness responsibility (the model must not push); this
@@ -1210,10 +1269,11 @@ fn collect_tree(root: &Path, dir: &Path, entries: &mut Vec<(String, String)>, sk
 // ---------------------------------------------------------------------------
 
 /// Simulated segmented backend. The objective may contain
-/// `fake_work_units:N` (default 3) and `fake_dirty:true` (the segment leaves
+/// `fake_work_units:N` (default 3), `fake_dirty:true` (the segment leaves
 /// an uncommitted workspace file behind, like a real model that was killed
-/// mid-work). Each unit consumes one model round and one tool call. The
-/// checkpoint is scripted so continuation is deterministic.
+/// mid-work) and `fake_no_checkpoint:true` (the segment returns NO
+/// structured checkpoint, like a model killed before reporting). Each unit
+/// consumes one model round and one tool call.
 fn run_fake_segment(
     job: &Job,
     budget: &ExecutionSegmentBudget,
@@ -1228,9 +1288,19 @@ fn run_fake_segment(
         .and_then(|s| s.parse().ok())
         .unwrap_or(3);
     let fake_dirty = job.objective.contains("fake_dirty:true");
-    let units_done = checkpoint
-        .map(|cp| cp.completed_steps.len() as u64)
-        .unwrap_or(0);
+    let fake_no_checkpoint = job.objective.contains("fake_no_checkpoint:true");
+    // In the no-checkpoint mode the progress must live somewhere the next
+    // segment can see it — like a real model's code changes in git. Use the
+    // workspace file as the fake "code" carrier.
+    let units_done = if fake_no_checkpoint {
+        read_fake_progress(&job.workspace_root)
+            .or_else(|| checkpoint.map(|cp| cp.completed_steps.len() as u64))
+            .unwrap_or(0)
+    } else {
+        checkpoint
+            .map(|cp| cp.completed_steps.len() as u64)
+            .unwrap_or(0)
+    };
     let mut rounds = 0u64;
     let mut tools = 0u64;
     let started = SystemTime::now();
@@ -1278,12 +1348,25 @@ fn run_fake_segment(
                     format!("segment {} of {}", job.segments.len() + 1, units_total),
                 );
             }
+            if fake_no_checkpoint {
+                write_fake_progress(&job.workspace_root, units_done + rounds);
+            }
             return SegmentOutcome {
                 end: SegmentEnd::Exhausted(reason.into()),
                 model_rounds_used: rounds,
                 tool_calls_used: tools,
                 wall_time_ms: wall,
-                checkpoint: Some(fake_checkpoint(job, completed_steps, units_total, findings, "continue fake work")),
+                checkpoint: if fake_no_checkpoint {
+                    None
+                } else {
+                    Some(fake_checkpoint(
+                        job,
+                        completed_steps,
+                        units_total,
+                        findings,
+                        "continue fake work",
+                    ))
+                },
             };
         }
         if units_done + rounds >= units_total {
@@ -1306,14 +1389,28 @@ fn run_fake_segment(
     }
 }
 
+/// Persist the fake backend's progress in the workspace file (used by the
+/// no-checkpoint mode as the simulated "code" carrier).
+fn write_fake_progress(root: &str, units_done: u64) {
+    let _ = std::fs::write(
+        Path::new(root).join("model-work.txt"),
+        format!("units_done:{units_done}\n"),
+    );
+}
+
+fn read_fake_progress(root: &str) -> Option<u64> {
+    let content = std::fs::read_to_string(Path::new(root).join("model-work.txt")).ok()?;
+    let value = content.strip_prefix("units_done:")?.trim();
+    value.parse().ok()
+}
+
 fn fake_checkpoint(
     job: &Job,
     completed_steps: Vec<String>,
     units_total: u64,
     findings: String,
     next_action: &str,
-) -> Checkpoint {
-    let done = completed_steps.len() as u64;
+) -> Checkpoint {    let done = completed_steps.len() as u64;
     let remaining: Vec<String> = ((done + 1)..=units_total)
         .map(|u| format!("fake unit {u}"))
         .collect();
