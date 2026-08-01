@@ -178,6 +178,23 @@ pub struct Run {
     /// External creation paths always produce Default.
     #[serde(default)]
     pub mode: RunMode,
+    /// Frozen budget decision fields (Run Budget Hook V0). These are resolved
+    /// once at Run creation (via the default hook or an external
+    /// `run.budget.resolve.v0` hook) and never change mid-Run. `None` for Runs
+    /// created before this feature or in code paths that don't use the budget
+    /// hook. The tool recall loop reads these instead of the global config.
+    #[serde(default)]
+    pub budget_hook_id: Option<String>,
+    #[serde(default)]
+    pub budget_hook_version: Option<String>,
+    #[serde(default)]
+    pub budget_decision_digest: Option<String>,
+    #[serde(default)]
+    pub budget_max_tool_rounds: Option<u32>,
+    #[serde(default)]
+    pub budget_max_wall_time_ms: Option<u64>,
+    #[serde(default)]
+    pub budget_exhaustion_action: Option<crate::hook::ExhaustionAction>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -569,6 +586,16 @@ pub enum JournalEventKind {
     /// arguments) consecutively, indicating a loop. Only applies to the coding
     /// harness mutating set. payload: `run_id`, `operation`, `turn_index`
     ToolLoopDetected,
+    /// The Run's budget was resolved at creation via the default hook or an
+    /// external `run.budget.resolve.v0` hook. The decision is frozen and never
+    /// changes mid-Run. payload: `run_id`, `hook_id`, `hook_version`,
+    /// `decision_digest`, `max_tool_rounds`, `max_wall_time_ms`,
+    /// `exhaustion_action`, `source` ("default" | "hook")
+    RunBudgetResolved,
+    /// The Run was terminated because its budget was exhausted with the
+    /// `terminate` exhaustion action. payload: `run_id`, `reason` ("rounds" |
+    /// "wall_clock"), `max_tool_rounds` | `max_wall_time_ms`, `used`
+    RunBudgetTerminated,
 }
 
 impl JournalEventKind {

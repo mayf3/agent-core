@@ -84,6 +84,12 @@ fn gateway_rejects_stdout_target_mismatch() -> Result<()> {
         updated_at: Utc::now(),
         registry_snapshot_id: String::new(),
         mode: RunMode::Default,
+        budget_hook_id: None,
+        budget_hook_version: None,
+        budget_decision_digest: None,
+        budget_max_tool_rounds: None,
+        budget_max_wall_time_ms: None,
+        budget_exhaustion_action: None,
     };
     let intent = InvocationIntent {
         invocation_id: InvocationId::new(),
@@ -151,6 +157,12 @@ fn journal_recovery_marks_unknown_invocations() -> Result<()> {
         updated_at: Utc::now(),
         registry_snapshot_id: String::new(),
         mode: RunMode::Default,
+        budget_hook_id: None,
+        budget_hook_version: None,
+        budget_decision_digest: None,
+        budget_max_tool_rounds: None,
+        budget_max_wall_time_ms: None,
+        budget_exhaustion_action: None,
     };
     journal.insert_run(&run)?;
     journal.append_event(
@@ -441,6 +453,7 @@ fn test_config() -> KernelConfig {
         capability_decision_token: None,
         tool_loop_timeout_ms: 300_000,
         context_prepare_hook: agent_core_kernel::hook::HookConfig::default(),
+        budget_hook: agent_core_kernel::hook::HookConfig::default(),
     }
 }
 fn cli_principal() -> RunPrincipal {

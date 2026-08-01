@@ -65,6 +65,12 @@ fn approved_for_run(
             updated_at: Utc::now(),
             registry_snapshot_id: String::new(),
             mode: RunMode::Default,
+            budget_hook_id: None,
+            budget_hook_version: None,
+            budget_decision_digest: None,
+            budget_max_tool_rounds: None,
+            budget_max_wall_time_ms: None,
+            budget_exhaustion_action: None,
         },
         &Session {
             id: session_id.clone(),
@@ -100,6 +106,12 @@ fn seed_pending_outbox(
         updated_at: Utc::now(),
         registry_snapshot_id: String::new(),
         mode: RunMode::Default,
+        budget_hook_id: None,
+        budget_hook_version: None,
+        budget_decision_digest: None,
+        budget_max_tool_rounds: None,
+        budget_max_wall_time_ms: None,
+        budget_exhaustion_action: None,
     };
     journal.insert_run(&run)?;
 
@@ -260,6 +272,12 @@ fn terminal_states_are_not_leased_by_dispatcher() -> Result<()> {
                 updated_at: Utc::now(),
                 registry_snapshot_id: String::new(),
                 mode: RunMode::Default,
+                budget_hook_id: None,
+                budget_hook_version: None,
+                budget_decision_digest: None,
+                budget_max_tool_rounds: None,
+                budget_max_wall_time_ms: None,
+                budget_exhaustion_action: None,
             };
             journal.insert_run(&run)?;
             let config = common::test_config();
@@ -344,6 +362,12 @@ fn terminal_transition_guard_rejects_non_dispatching_state() -> Result<()> {
         updated_at: Utc::now(),
         registry_snapshot_id: String::new(),
         mode: RunMode::Default,
+        budget_hook_id: None,
+        budget_hook_version: None,
+        budget_decision_digest: None,
+        budget_max_tool_rounds: None,
+        budget_max_wall_time_ms: None,
+        budget_exhaustion_action: None,
     };
     journal.insert_run(&run)?;
     let config = common::test_config();

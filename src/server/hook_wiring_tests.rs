@@ -53,6 +53,7 @@ fn test_config() -> KernelConfig {
         capability_decision_token: None,
         tool_loop_timeout_ms: 300_000,
         context_prepare_hook: HookConfig::default(),
+        budget_hook: HookConfig::default(),
     }
 }
 

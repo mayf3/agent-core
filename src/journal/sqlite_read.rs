@@ -95,6 +95,8 @@ pub(crate) fn parse_kind(value: &str) -> JournalEventKind {
         "ToolBudgetExhausted" => JournalEventKind::ToolBudgetExhausted,
         "ToolLoopWallClockExceeded" => JournalEventKind::ToolLoopWallClockExceeded,
         "ToolLoopDetected" => JournalEventKind::ToolLoopDetected,
+        "RunBudgetResolved" => JournalEventKind::RunBudgetResolved,
+        "RunBudgetTerminated" => JournalEventKind::RunBudgetTerminated,
         "ExternalOperationGranted" => JournalEventKind::ExternalOperationGranted,
         "ExternalOperationRevoked" => JournalEventKind::ExternalOperationRevoked,
         "HarnessChangeRequested" => JournalEventKind::HarnessChangeRequested,

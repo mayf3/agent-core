@@ -1,0 +1,8 @@
+-- 0018_run_budget.sql
+-- Additive migration: frozen Run Budget Hook V0 columns.
+--
+-- Note: SQLite ALTER TABLE ADD COLUMN has no IF NOT EXISTS guard.
+-- The Rust migration runner applies these columns idempotently via
+-- column-existence checks (see sqlite.rs ensure_budget_columns), so this
+-- file is intentionally empty for the loop migration path. For fresh
+-- databases it is executed via execute_batch which calls the guarded helper.

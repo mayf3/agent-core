@@ -4,8 +4,9 @@
 use crate::domain::*;
 use crate::gateway::Gateway;
 use crate::hook::{
-    digest_immutable_refs, CandidateInputRef, ContextHookRequest, HookClient, HookConfig,
-    HookFailureMode, HookKind, OpaqueArtifactRef,
+    compute_operations_digest, digest_immutable_refs, validate_against_ceiling, CandidateInputRef,
+    ContextHookRequest, ExhaustionAction, HookClient, HookConfig, HookFailureMode, HookKind,
+    OpaqueArtifactRef, RunBudgetDecision, RunBudgetHookRequest,
 };
 use crate::journal::JournalStore;
 use crate::llm::AdapterCandidate;
@@ -255,6 +256,17 @@ impl<L: crate::llm::LlmClient + 'static> super::Runtime<L> {
             .load_registry_snapshot(&snapshot_id)
             .map_err(|e| anyhow::anyhow!("registry_snapshot_unavailable: {e}"))?;
         let run = self.create_run(journal, &session, &event, &snapshot_id, &snapshot);
+        // Resolve and freeze the Run's budget (echo path also gets a budget).
+        let budget = self.resolve_run_budget(journal, &run, &session, &snapshot)?;
+        let run = Run {
+            budget_hook_id: Some(budget.hook_id.clone()),
+            budget_hook_version: Some(budget.hook_version.clone()),
+            budget_decision_digest: Some(budget.decision.digest()),
+            budget_max_tool_rounds: Some(budget.decision.max_tool_rounds),
+            budget_max_wall_time_ms: Some(budget.decision.max_wall_time_ms),
+            budget_exhaustion_action: Some(budget.decision.exhaustion_action),
+            ..run
+        };
         journal.insert_run(&run)?;
         journal.append_event(JournalEventKind::RunStarted, Some(&run.id), Some(&session.id),
             Some(&event.event_id.0), json!({"run_id": run.id.0, "trigger_event_id": run.trigger_event_id.0, "principal_id": run.principal.principal_id.0}))?;
@@ -367,6 +379,12 @@ impl<L: crate::llm::LlmClient + 'static> super::Runtime<L> {
             updated_at: now,
             registry_snapshot_id: snapshot_id.to_string(),
             mode: RunMode::Default,
+            budget_hook_id: None,
+            budget_hook_version: None,
+            budget_decision_digest: None,
+            budget_max_tool_rounds: None,
+            budget_max_wall_time_ms: None,
+            budget_exhaustion_action: None,
         }
     }
 
@@ -404,4 +422,262 @@ pub(crate) fn ensure_nonblank_reply(content: &str) -> String {
     } else {
         content.to_string()
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Run Budget Hook resolution (run.budget.resolve.v0)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// The resolved budget decision plus provenance metadata for audit.
+/// Frozen onto the Run and never changed mid-Run.
+pub(crate) struct ResolvedBudget {
+    pub decision: RunBudgetDecision,
+    pub hook_id: String,
+    pub hook_version: String,
+    /// "default" when the built-in default hook was used, "hook" when an
+    /// external hook responded.
+    pub source: &'static str,
+}
+
+/// The default budget hook ID and version. Used when no external
+/// `run.budget.resolve.v0` hook is configured (or when a configured hook
+/// fails open / degrades). This is an ordinary hook artifact — not a second
+/// parallel strategy path.
+pub const DEFAULT_BUDGET_HOOK_ID: &str = "builtin:run-budget-default-v0";
+pub const DEFAULT_BUDGET_HOOK_VERSION: &str = "v0";
+
+impl<L: crate::llm::LlmClient + 'static> super::Runtime<L> {
+    /// Resolve the Run's budget using the default hook or an external
+    /// `run.budget.resolve.v0` hook. Returns a frozen decision with provenance.
+    /// On failure, applies the hook's failure_mode: FailClosed / Disabled →
+    /// Err (the Run fails before it starts); FailOpen / Degrade → default.
+    pub(crate) fn resolve_run_budget(
+        &self,
+        journal: &JournalStore,
+        run: &Run,
+        session: &Session,
+        snapshot: &RegistrySnapshot,
+    ) -> Result<ResolvedBudget> {
+        let default_budget = || ResolvedBudget {
+            decision: default_budget_decision(&self.config),
+            hook_id: DEFAULT_BUDGET_HOOK_ID.to_string(),
+            hook_version: DEFAULT_BUDGET_HOOK_VERSION.to_string(),
+            source: "default",
+        };
+
+        /// Emit a RunBudgetResolved journal event for the default hook path.
+        let emit_default_event = |journal: &JournalStore,
+                                  run: &Run,
+                                  session: &Session,
+                                  b: &ResolvedBudget|
+         -> Result<()> {
+            journal.append_event(
+                JournalEventKind::RunBudgetResolved,
+                Some(&run.id),
+                Some(&session.id),
+                None,
+                json!({
+                    "hook": "run.budget.resolve.v0",
+                    "hook_id": b.hook_id,
+                    "hook_version": b.hook_version,
+                    "source": "default",
+                    "decision_digest": b.decision.digest(),
+                    "max_tool_rounds": b.decision.max_tool_rounds,
+                    "max_wall_time_ms": b.decision.max_wall_time_ms,
+                    "exhaustion_action": match b.decision.exhaustion_action {
+                        ExhaustionAction::Terminate => "terminate",
+                        ExhaustionAction::Yield => "yield",
+                    },
+                }),
+            )?;
+            Ok(())
+        };
+
+        let (Some(client), Some(config)) = (&self.hook_client, &self.budget_hook_config.as_ref())
+        else {
+            // No budget hook configured — use default and emit the audit event.
+            let b = default_budget();
+            emit_default_event(journal, run, session, &b)?;
+            return Ok(b);
+        };
+        if !config.enabled || config.kind != HookKind::RunBudgetResolveV0 {
+            let b = default_budget();
+            emit_default_event(journal, run, session, &b)?;
+            return Ok(b);
+        }
+
+        let operations: Vec<String> = snapshot.operations.iter().map(|o| o.name.clone()).collect();
+        let operations_digest = compute_operations_digest(&operations);
+        let request_id = format!("budget:{}:{}", run.id.0, uuid::Uuid::new_v4().simple());
+        let request = RunBudgetHookRequest {
+            request_id: request_id.clone(),
+            principal: run.principal.principal_id.0.clone(),
+            session_id: session.id.0.clone(),
+            run_id: run.id.0.clone(),
+            registry_snapshot_id: run.registry_snapshot_id.clone(),
+            operations_digest,
+        };
+
+        let started = std::time::Instant::now();
+        let result = (|| {
+            let authenticated = client.call_budget(&request, config)?;
+            if authenticated.provider_id != config.provider_id {
+                bail!("budget_provider_binding_mismatch");
+            }
+            if authenticated.request_id != request_id {
+                bail!("budget_request_correlation_mismatch");
+            }
+            authenticated.response.validate_against(&request)?;
+            Ok(authenticated)
+        })();
+        let duration_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+
+        match result {
+            Ok(authenticated) => {
+                let decision = authenticated.response.decision.clone();
+                journal.append_event(
+                    JournalEventKind::RunBudgetResolved,
+                    Some(&run.id),
+                    Some(&session.id),
+                    Some(&request_id),
+                    json!({
+                        "hook": "run.budget.resolve.v0",
+                        "hook_id": config.provider_id,
+                        "hook_version": "v0",
+                        "source": "hook",
+                        "decision_digest": decision.digest(),
+                        "max_tool_rounds": decision.max_tool_rounds,
+                        "max_wall_time_ms": decision.max_wall_time_ms,
+                        "exhaustion_action": match decision.exhaustion_action {
+                            ExhaustionAction::Terminate => "terminate",
+                            ExhaustionAction::Yield => "yield",
+                        },
+                        "duration_ms": duration_ms,
+                    }),
+                )?;
+                Ok(ResolvedBudget {
+                    decision,
+                    hook_id: config.provider_id.clone(),
+                    hook_version: "v0".to_string(),
+                    source: "hook",
+                })
+            }
+            Err(error) => {
+                let error_code = budget_error_code(&error);
+                let (action, failure_mode) = match config.failure_mode {
+                    HookFailureMode::FailClosed => ("fail_closed_terminate", "fail_closed"),
+                    HookFailureMode::Disabled => ("disabled_terminate", "disabled"),
+                    HookFailureMode::FailOpen => ("fail_open_default", "fail_open"),
+                    HookFailureMode::Degrade => ("degrade_default", "degrade"),
+                };
+                journal.append_event(
+                    JournalEventKind::HookCallRecorded,
+                    Some(&run.id),
+                    Some(&session.id),
+                    Some(&request_id),
+                    json!({
+                        "hook": "run.budget.resolve.v0",
+                        "status": if config.failure_mode == HookFailureMode::FailClosed
+                            || config.failure_mode == HookFailureMode::Disabled
+                        {
+                            "failed"
+                        } else {
+                            "degraded"
+                        },
+                        "provider_id": config.provider_id,
+                        "request_id": request_id,
+                        "failure_mode": failure_mode,
+                        "failure_action": action,
+                        "error_code": error_code,
+                        "duration_ms": duration_ms,
+                    }),
+                )?;
+                if config.failure_mode == HookFailureMode::FailClosed
+                    || config.failure_mode == HookFailureMode::Disabled
+                {
+                    bail!("budget_hook_failed_closed:{error_code}");
+                }
+                // FailOpen / Degrade: use the default decision.
+                let d = default_budget();
+                journal.append_event(
+                    JournalEventKind::RunBudgetResolved,
+                    Some(&run.id),
+                    Some(&session.id),
+                    Some(&request_id),
+                    json!({
+                        "hook": "run.budget.resolve.v0",
+                        "hook_id": d.hook_id,
+                        "hook_version": d.hook_version,
+                        "source": "default",
+                        "fallback_reason": error_code,
+                        "decision_digest": d.decision.digest(),
+                        "max_tool_rounds": d.decision.max_tool_rounds,
+                        "max_wall_time_ms": d.decision.max_wall_time_ms,
+                        "exhaustion_action": "yield",
+                        "duration_ms": duration_ms,
+                    }),
+                )?;
+                Ok(d)
+            }
+        }
+    }
+}
+
+/// The default budget hook: reproduces the pre-V0 effective limits from the
+/// Kernel config. `exhaustion_action = Yield` reproduces the "请发送继续"
+/// behaviour.
+fn default_budget_decision(config: &crate::config::KernelConfig) -> RunBudgetDecision {
+    let decision = RunBudgetDecision {
+        max_tool_rounds: config.max_tool_rounds as u32,
+        max_wall_time_ms: config.tool_loop_timeout_ms,
+        exhaustion_action: ExhaustionAction::Yield,
+    };
+    // The default must always be within the host ceiling. If the config values
+    // somehow exceed it (shouldn't happen — env validation catches this at
+    // startup), clamp to the ceiling rather than fail.
+    if validate_against_ceiling(&decision).is_err() {
+        RunBudgetDecision {
+            max_tool_rounds: config
+                .max_tool_rounds
+                .min(crate::hook::HOST_MAX_TOOL_ROUNDS as usize)
+                as u32,
+            max_wall_time_ms: config
+                .tool_loop_timeout_ms
+                .min(crate::hook::HOST_MAX_WALL_TIME_MS),
+            exhaustion_action: ExhaustionAction::Yield,
+        }
+    } else {
+        decision
+    }
+}
+
+fn budget_error_code(error: &anyhow::Error) -> String {
+    let message = error.to_string();
+    for code in [
+        "http_timeout",
+        "http_connect_error",
+        "http_transport_error",
+        "http_status_4xx",
+        "http_status_5xx",
+        "response_too_large",
+        "request_too_large",
+        "invalid_json",
+        "provider_proof_missing",
+        "provider_authentication_failed",
+        "budget_provider_binding_mismatch",
+        "budget_request_correlation_mismatch",
+        "budget_response_request_id_mismatch",
+        "budget_response_run_id_mismatch",
+        "budget_max_tool_rounds_zero",
+        "budget_max_tool_rounds_exceeds_ceiling",
+        "budget_max_wall_time_ms_zero",
+        "budget_max_wall_time_ms_exceeds_ceiling",
+        "unsupported_hook_response",
+        "hook_request_id_mismatch",
+    ] {
+        if message.contains(code) {
+            return code.into();
+        }
+    }
+    "budget_hook_failed".into()
 }

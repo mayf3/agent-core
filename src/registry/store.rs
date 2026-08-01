@@ -413,21 +413,30 @@ mod tests {
             .pointer("/required")
             .and_then(|v| v.as_array())
             .expect("required must be an array");
-        let required_strs: Vec<&str> = required
-            .iter()
-            .filter_map(|v| v.as_str())
-            .collect();
+        let required_strs: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
         assert_eq!(
             required_strs,
-            ["target_kind", "name", "requirements", "required_contracts", "acceptance_criteria"],
+            [
+                "target_kind",
+                "name",
+                "requirements",
+                "required_contracts",
+                "acceptance_criteria"
+            ],
             "development_request must only require the five draft fields"
         );
 
         // 2. Governance fields must NOT be present in properties.
         let governance_fields = [
-            "request_id", "source_subject", "source_scope", "source_message_id",
-            "requested_permissions", "build_profile", "deployment_profile",
-            "idempotency_key", "contract_catalog_version",
+            "request_id",
+            "source_subject",
+            "source_scope",
+            "source_message_id",
+            "requested_permissions",
+            "build_profile",
+            "deployment_profile",
+            "idempotency_key",
+            "contract_catalog_version",
         ];
         for field in &governance_fields {
             let pointer = format!("/properties/{}", field);

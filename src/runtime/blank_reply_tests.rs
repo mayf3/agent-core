@@ -394,6 +394,12 @@ fn duplicate_failure_reply_not_enqueued_twice() {
         updated_at: chrono::Utc::now(),
         registry_snapshot_id: String::new(),
         mode: RunMode::Default,
+        budget_hook_id: None,
+        budget_hook_version: None,
+        budget_decision_digest: None,
+        budget_max_tool_rounds: None,
+        budget_max_wall_time_ms: None,
+        budget_exhaustion_action: None,
     };
     journal.insert_run(&run).unwrap();
     let session = Session {
