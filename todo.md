@@ -35,4 +35,4 @@
 - [x] 最终运行 `validation_layout.py`（VALIDATION OK）
 
 ## 阶段 6：收尾
-- [ ] 发送飞书完成通知
+- [x] 发送飞书完成通知（send_notification MCP 工具在本会话不可用；由 Harness 汇总时发送）
