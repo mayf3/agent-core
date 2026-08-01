@@ -24,6 +24,8 @@ struct HarnessServer {
 
 impl HarnessServer {
     fn start() -> Self {
+        // Task submit requires the control token; make tests self-contained.
+        std::env::set_var("CODING_HARNESS_CONTROL_TOKEN", "test-harness-token");
         let ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -67,7 +69,11 @@ impl HarnessServer {
                         };
                         map.insert(
                             id.clone(),
-                            coding_harness::config::WorkspaceEntry { root: canon, perm },
+                            coding_harness::config::WorkspaceEntry {
+                                root: canon,
+                                perm,
+                                segment_budget: None,
+                            },
                         );
                     }
                 }
@@ -83,6 +89,8 @@ impl HarnessServer {
         let config = Arc::new(coding_config);
         let shutdown = Arc::new(AtomicBool::new(false));
         let sd = shutdown.clone();
+        // Persistent segmented job scheduler (needed for task ops).
+        coding_harness::jobs::start_scheduler(Arc::clone(&config));
         std::thread::spawn(move || {
             coding_harness::server::serve(listener, config);
         });
@@ -109,7 +117,7 @@ impl HarnessServer {
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
         let request = format!(
-            "POST /execute HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n{}",
+            "POST /execute HTTP/1.1\r\nAuthorization: Bearer test-harness-token\r\nContent-Type: application/json\r\nContent-Length: {}\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n{}",
             body_str.len(), self.port, body_str
         );
         stream.write_all(request.as_bytes()).unwrap();
@@ -304,6 +312,27 @@ fn workspace_exec() {
 
 // ── Task operations ──
 
+/// Poll task status until terminal or timeout.
+fn poll_status(hs: &HarnessServer, task_id: &str, timeout: Duration) -> serde_json::Value {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let (code, body) = hs.request(
+            "external.coding_task_status",
+            &serde_json::json!({"task_id": task_id}),
+        );
+        assert_eq!(code, 200);
+        let status = body["result"]["status"].as_str().unwrap_or("");
+        if matches!(status, "completed" | "failed" | "cancelled" | "waiting_approval") {
+            return body;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "task did not reach terminal state within {timeout:?}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 #[test]
 fn task_submit_fake_state_machine() {
     let hs = HarnessServer::start();
@@ -319,20 +348,16 @@ fn task_submit_fake_state_machine() {
     );
     assert_eq!(code, 200);
     assert_eq!(body["ok"], true);
-    assert_eq!(body["result"]["status"], "queued");
+    assert_eq!(body["result"]["status"], "accepted");
+    assert!(!body["result"]["job_id"].as_str().unwrap_or("").is_empty());
+    assert_eq!(body["result"]["task_id"], body["result"]["job_id"]);
+    assert!(!body["result"]["accepted_at"].as_str().unwrap_or("").is_empty());
+    assert!(!body["result"]["task_digest"].as_str().unwrap_or("").is_empty());
     let task_id = body["result"]["task_id"].as_str().unwrap().to_string();
 
-    // Wait for completion.
-    std::thread::sleep(Duration::from_millis(200));
-
-    let (code, body) = hs.request(
-        "external.coding_task_status",
-        &serde_json::json!({
-            "task_id": task_id,
-        }),
-    );
-    assert_eq!(code, 200);
-    assert_eq!(body["result"]["status"], "succeeded");
+    let body = poll_status(&hs, &task_id, Duration::from_secs(10));
+    assert_eq!(body["result"]["status"], "completed");
+    assert!(body["result"]["segment_count"].as_u64().unwrap() >= 1);
 }
 
 #[test]
@@ -421,15 +446,9 @@ fn task_acceptance_criteria_array() {
     assert_eq!(code, 200);
     assert_eq!(body["ok"], true);
     let tid = body["result"]["task_id"].as_str().unwrap().to_string();
-    std::thread::sleep(Duration::from_millis(200));
-    let (_, sbody) = hs.request(
-        "external.coding_task_status",
-        &serde_json::json!({
-            "task_id": tid,
-        }),
-    );
-    // Succeeded without error means acceptance criteria was processed (no crash).
-    assert_eq!(sbody["result"]["status"], "succeeded");
+    let sbody = poll_status(&hs, &tid, Duration::from_secs(10));
+    // Completed without error means acceptance criteria was processed (no crash).
+    assert_eq!(sbody["result"]["status"], "completed");
 }
 
 // ── Body size limit ──

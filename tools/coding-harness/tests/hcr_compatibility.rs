@@ -42,6 +42,7 @@ fn ordinary_coding_profile_behavior_unchanged() {
                         network: true,
                         shell: false,
                     },
+                    segment_budget: None,
                 },
             );
             map
@@ -170,6 +171,7 @@ fn hcr_exec_via_server_requires_token() {
                         network: true,
                         shell: false,
                     },
+                    segment_budget: None,
                 },
             );
             map
@@ -219,9 +221,12 @@ fn hcr_exec_via_server_requires_token() {
     };
 
     assert_eq!(json_body["ok"], false);
-    assert_eq!(
-        json_body["error_code"], "hcr_token_required",
-        "expected token required, got: {json_body}"
+    // HCR workflow was retired: the server must fail closed without a token
+    // (either the retired-workflow error or the token-required error).
+    let code = json_body["error_code"].as_str().unwrap_or("");
+    assert!(
+        code == "hcr_active_workflow_retired" || code == "hcr_token_required",
+        "expected fail-closed hcr error, got: {json_body}"
     );
 
     let _ = std::fs::remove_dir_all(&ws_root);

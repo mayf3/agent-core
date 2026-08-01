@@ -214,6 +214,7 @@ fn legacy_capability_activation_e2e_capability_host() {
                 network: true,
                 shell: false,
             },
+            segment_budget: None,
         },
     );
     let ch_config = Arc::new(CodingConfig {
