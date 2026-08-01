@@ -1,4 +1,5 @@
 pub mod adapters;
+pub mod binding;
 pub mod capabilities;
 pub mod config;
 pub mod context;
