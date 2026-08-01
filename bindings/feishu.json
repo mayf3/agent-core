@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "bindings": [
+    { "chat_id": "oc_example_group_a", "agent_id": "worker-a" },
+    { "chat_id": "oc_example_group_b", "agent_id": "worker-b" }
+  ]
+}
