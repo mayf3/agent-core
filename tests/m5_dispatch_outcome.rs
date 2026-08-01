@@ -29,6 +29,12 @@ fn seed_run(journal: &JournalStore) -> Result<(RunId, SessionId)> {
         updated_at: Utc::now(),
         registry_snapshot_id: String::new(),
         mode: RunMode::Default,
+        budget_hook_id: None,
+        budget_hook_version: None,
+        budget_decision_digest: None,
+        budget_max_tool_rounds: None,
+        budget_max_wall_time_ms: None,
+        budget_exhaustion_action: None,
     };
     journal.insert_run(&run)?;
     Ok((run_id, session_id))
@@ -66,6 +72,12 @@ fn approved_for_run(
             updated_at: Utc::now(),
             registry_snapshot_id: String::new(),
             mode: RunMode::Default,
+            budget_hook_id: None,
+            budget_hook_version: None,
+            budget_decision_digest: None,
+            budget_max_tool_rounds: None,
+            budget_max_wall_time_ms: None,
+            budget_exhaustion_action: None,
         },
         &Session {
             id: session_id.clone(),

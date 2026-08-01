@@ -19,16 +19,18 @@ use serde_json::json;
 #[test]
 fn journal_records_deployment_pending_status() -> Result<()> {
     let journal = JournalStore::in_memory()?;
-    
+
     journal.append_event(
-        JournalEventKind::CapabilityChangeActivated, None, None,
+        JournalEventKind::CapabilityChangeActivated,
+        None,
+        None,
         Some("corr_callback"),
         json!({
             "proposal_id": "p_callback",
             "status": "deployment_pending",
         }),
     )?;
-    
+
     let events = journal.events()?;
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].payload["status"], "deployment_pending");

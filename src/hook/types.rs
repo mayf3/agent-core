@@ -38,6 +38,13 @@ pub enum HookKind {
     /// bypass Gateway digest validation.
     #[serde(rename = "decision.policy.v0")]
     DecisionPolicyV0,
+    /// Resolves the Run's tool-round / wall-clock budget. Called once at Run
+    /// creation with generic governance context (principal, session, run,
+    /// registry snapshot, operations digest). Returns a frozen decision that
+    /// the Kernel enforces — it never interprets task complexity or product
+    /// type.
+    #[serde(rename = "run.budget.resolve.v0")]
+    RunBudgetResolveV0,
 }
 
 // ---------------------------------------------------------------------------

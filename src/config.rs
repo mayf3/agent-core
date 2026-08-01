@@ -94,6 +94,12 @@ pub struct KernelConfig {
     pub tool_loop_timeout_ms: u64,
     /// context.prepare.v0 hook config. Default disabled. Env: AGENT_CORE_CONTEXT_PREPARE_HOOK_*.
     pub context_prepare_hook: HookConfig,
+    /// run.budget.resolve.v0 hook config. Default disabled — when disabled,
+    /// the built-in default budget hook is used (which reproduces the
+    /// `max_tool_rounds` / `tool_loop_timeout_ms` config values with
+    /// `exhaustion_action=yield`). When enabled, an external hook determines
+    /// the per-Run budget. Env: AGENT_CORE_BUDGET_HOOK_*.
+    pub budget_hook: HookConfig,
 }
 
 impl KernelConfig {
@@ -188,6 +194,18 @@ impl KernelConfig {
                 timeout_ms: env_u64("AGENT_CORE_CONTEXT_PREPARE_HOOK_TIMEOUT_MS", 5_000),
                 provider_id: env_string("AGENT_CORE_CONTEXT_PREPARE_HOOK_PROVIDER_ID", ""),
                 shared_secret: env_string("AGENT_CORE_CONTEXT_PREPARE_HOOK_SHARED_SECRET", ""),
+                ..Default::default()
+            },
+            budget_hook: HookConfig {
+                enabled: env_bool("AGENT_CORE_BUDGET_HOOK_ENABLED", false),
+                kind: HookKind::RunBudgetResolveV0,
+                endpoint: HookEndpoint {
+                    url: env_string("AGENT_CORE_BUDGET_HOOK_URL", ""),
+                },
+                failure_mode: env_hook_failure_mode("AGENT_CORE_BUDGET_HOOK_FAILURE_MODE"),
+                timeout_ms: env_u64("AGENT_CORE_BUDGET_HOOK_TIMEOUT_MS", 5_000),
+                provider_id: env_string("AGENT_CORE_BUDGET_HOOK_PROVIDER_ID", ""),
+                shared_secret: env_string("AGENT_CORE_BUDGET_HOOK_SHARED_SECRET", ""),
                 ..Default::default()
             },
         }

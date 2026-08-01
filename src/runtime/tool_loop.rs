@@ -1,5 +1,6 @@
 use crate::domain::*;
 use crate::gateway::Gateway;
+use crate::hook::ExhaustionAction;
 use crate::journal::JournalStore;
 use crate::llm::{LlmClient, LlmFollowUp, LlmInput, LlmOutput, ProviderToolTurn, ToolCallResult};
 use crate::registry::snapshot::RegistrySnapshot;
@@ -16,6 +17,10 @@ pub(crate) const FOLLOWUP_LLM_FAILED_MSG: &str =
 
 pub(crate) const INITIAL_LLM_FAILED_MSG: &str =
     "这次处理模型暂时不可用，任务尚未开始完成。请稍后重试。";
+
+/// User-facing message when the budget is exhausted with `terminate` action.
+/// The Run is marked Failed and the user is NOT told to send "继续".
+const BUDGET_TERMINATED_MSG: &str = "本轮因预算耗尽而终止，任务尚未完成。如需继续，请重新发起。";
 
 /// Single tool-call MVP: only `tool_calls[0]` is parsed and executed per round.
 
@@ -36,8 +41,19 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
         mut llm: LlmOutput,
         snapshot: &RegistrySnapshot,
     ) -> Result<LlmOutput> {
-        let max_rounds = self.config.max_tool_rounds;
-        let timeout_ms = self.config.tool_loop_timeout_ms;
+        // Read the frozen budget from the Run. If unset (legacy Runs or
+        // code paths that bypassed resolve_run_budget), fall back to the
+        // config values so behaviour is identical to pre-V0.
+        let max_rounds = run
+            .budget_max_tool_rounds
+            .map(|v| v as usize)
+            .unwrap_or(self.config.max_tool_rounds);
+        let timeout_ms = run
+            .budget_max_wall_time_ms
+            .unwrap_or(self.config.tool_loop_timeout_ms);
+        let exhaustion_action = run
+            .budget_exhaustion_action
+            .unwrap_or(ExhaustionAction::Yield);
         let start = Instant::now();
         let mut tool_index: usize = 0;
         // Pre-compute provider tools from the pinned snapshot — same list
@@ -85,7 +101,13 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
                             }
                             // Wall-clock timeout: stop before the next LLM call.
                             if Self::check_wall_clock_timeout(
-                                start, timeout_ms, journal, run, session, &mut llm,
+                                start,
+                                timeout_ms,
+                                exhaustion_action,
+                                journal,
+                                run,
+                                session,
+                                &mut llm,
                             )? {
                                 return Ok(llm);
                             }
@@ -172,7 +194,13 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
                             }
                             // Wall-clock timeout: stop before the next LLM call.
                             if Self::check_wall_clock_timeout(
-                                start, timeout_ms, journal, run, session, &mut llm,
+                                start,
+                                timeout_ms,
+                                exhaustion_action,
+                                journal,
+                                run,
+                                session,
+                                &mut llm,
                             )? {
                                 return Ok(llm);
                             }
@@ -201,17 +229,45 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
                 Some(&run.id),
                 Some(&session.id),
                 None,
-                json!({"run_id": run.id.0, "tool_rounds_used": tool_index, "max_tool_rounds": max_rounds}),
+                json!({"run_id": run.id.0, "tool_rounds_used": tool_index, "max_tool_rounds": max_rounds, "exhaustion_action": match exhaustion_action {
+                    ExhaustionAction::Terminate => "terminate",
+                    ExhaustionAction::Yield => "yield",
+                }}),
             );
-            llm.content = format!(
-                "{}\n\n本轮已达到工具执行上限（{} 轮），任务尚未全部完成。请发送「继续」以在下一 Run 中接着处理。",
-                if llm.content.trim().is_empty() {
-                    "本轮已达到工具执行上限，当前已完成部分工作。"
-                } else {
-                    &llm.content
-                },
-                max_rounds,
-            );
+            match exhaustion_action {
+                ExhaustionAction::Terminate => {
+                    // Mark the Run as Failed and emit an explicit terminal
+                    // event. The user sees a clear "budget exhausted" message
+                    // and is NOT told to send "继续".
+                    let _ = journal.fail_run(&run.id);
+                    let _ = journal.append_event(
+                        JournalEventKind::RunBudgetTerminated,
+                        Some(&run.id),
+                        Some(&session.id),
+                        None,
+                        json!({"run_id": run.id.0, "reason": "rounds", "max_tool_rounds": max_rounds, "used": tool_index}),
+                    );
+                    llm.content = format!(
+                        "{}\n\n{BUDGET_TERMINATED_MSG}",
+                        if llm.content.trim().is_empty() {
+                            "本轮已达到工具执行上限。"
+                        } else {
+                            &llm.content
+                        },
+                    );
+                }
+                ExhaustionAction::Yield => {
+                    llm.content = format!(
+                        "{}\n\n本轮已达到工具执行上限（{} 轮），任务尚未全部完成。请发送「继续」以在下一 Run 中接着处理。",
+                        if llm.content.trim().is_empty() {
+                            "本轮已达到工具执行上限，当前已完成部分工作。"
+                        } else {
+                            &llm.content
+                        },
+                        max_rounds,
+                    );
+                }
+            }
         }
         Ok(llm)
     }
@@ -221,6 +277,7 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
     fn check_wall_clock_timeout(
         start: Instant,
         timeout_ms: u64,
+        exhaustion_action: ExhaustionAction,
         journal: &JournalStore,
         run: &Run,
         session: &Session,
@@ -235,17 +292,42 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
             Some(&run.id),
             Some(&session.id),
             None,
-            json!({"run_id": run.id.0, "elapsed_ms": elapsed_ms, "timeout_ms": timeout_ms}),
+            json!({"run_id": run.id.0, "elapsed_ms": elapsed_ms, "timeout_ms": timeout_ms, "exhaustion_action": match exhaustion_action {
+                ExhaustionAction::Terminate => "terminate",
+                ExhaustionAction::Yield => "yield",
+            }}),
         );
-        llm.content = format!(
-            "{}\n\n本轮已超过工具执行时间限制（{} ms），任务尚未全部完成。请发送「继续」以在下一 Run 中接着处理。",
-            if llm.content.trim().is_empty() {
-                "本轮已超过工具执行时间限制。"
-            } else {
-                &llm.content
-            },
-            timeout_ms,
-        );
+        match exhaustion_action {
+            ExhaustionAction::Terminate => {
+                let _ = journal.fail_run(&run.id);
+                let _ = journal.append_event(
+                    JournalEventKind::RunBudgetTerminated,
+                    Some(&run.id),
+                    Some(&session.id),
+                    None,
+                    json!({"run_id": run.id.0, "reason": "wall_clock", "max_wall_time_ms": timeout_ms, "elapsed_ms": elapsed_ms}),
+                );
+                llm.content = format!(
+                    "{}\n\n{BUDGET_TERMINATED_MSG}",
+                    if llm.content.trim().is_empty() {
+                        "本轮已超过工具执行时间限制。"
+                    } else {
+                        &llm.content
+                    },
+                );
+            }
+            ExhaustionAction::Yield => {
+                llm.content = format!(
+                    "{}\n\n本轮已超过工具执行时间限制（{} ms），任务尚未全部完成。请发送「继续」以在下一 Run 中接着处理。",
+                    if llm.content.trim().is_empty() {
+                        "本轮已超过工具执行时间限制。"
+                    } else {
+                        &llm.content
+                    },
+                    timeout_ms,
+                );
+            }
+        }
         Ok(true)
     }
 

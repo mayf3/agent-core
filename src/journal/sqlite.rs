@@ -24,7 +24,7 @@ pub struct JournalStore {
 /// The schema `PRAGMA user_version` this kernel writes and understands. Bumped
 /// only when `migrations/` gains a new applied migration. The startup
 /// `migrate()` refuses to run against a DB whose version is newer than this.
-const CURRENT_SCHEMA_VERSION: i64 = 17;
+const CURRENT_SCHEMA_VERSION: i64 = 18;
 
 impl JournalStore {
     pub fn open(path: &Path) -> Result<Self> {
@@ -220,10 +220,17 @@ impl JournalStore {
             .lock()
             .map_err(|_| anyhow!("journal mutex poisoned"))?;
         let mode_str = serde_json::to_string(&run.mode)?;
+        let budget_hook_id = run.budget_hook_id.as_deref();
+        let budget_max_tool_rounds = run.budget_max_tool_rounds.map(|v| v as i64);
+        let budget_max_wall_time_ms = run.budget_max_wall_time_ms.map(|v| v as i64);
+        let budget_exhaustion_action = run.budget_exhaustion_action.map(|a| match a {
+            crate::hook::ExhaustionAction::Terminate => "terminate",
+            crate::hook::ExhaustionAction::Yield => "yield",
+        });
         conn.execute(
             "INSERT INTO runs
-             (id, session_id, agent_id, trigger_event_id, principal_json, parent_run_id, delegated_by, status, created_at, updated_at, registry_snapshot_id, mode)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+             (id, session_id, agent_id, trigger_event_id, principal_json, parent_run_id, delegated_by, status, created_at, updated_at, registry_snapshot_id, mode, budget_hook_id, budget_max_tool_rounds, budget_max_wall_time_ms, budget_exhaustion_action)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
                 run.id.0,
                 run.session_id.0,
@@ -241,6 +248,10 @@ impl JournalStore {
                     Some(&run.registry_snapshot_id)
                 },
                 mode_str,
+                budget_hook_id,
+                budget_max_tool_rounds,
+                budget_max_wall_time_ms,
+                budget_exhaustion_action,
             ],
         )?;
         Ok(())
@@ -399,6 +410,7 @@ impl JournalStore {
             conn.execute_batch(include_str!(
                 "../../migrations/0017_generic_acceptance_receipts.sql"
             ))?;
+            ensure_budget_columns(&conn)?;
             super::queue::migrate(&conn)?;
             backfill_feishu_message_dedup(&conn)?;
             conn.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
@@ -502,6 +514,10 @@ impl JournalStore {
                     ))?;
                     conn.pragma_update(None, "user_version", 17)?;
                 }
+                17 => {
+                    ensure_budget_columns(&conn)?;
+                    conn.pragma_update(None, "user_version", 18)?;
+                }
                 _ => break,
             }
         }
@@ -588,6 +604,37 @@ fn backfill_feishu_message_dedup(conn: &Connection) -> Result<()> {
              VALUES (?1, ?2, ?3, ?4)",
             params!["feishu", format!("message:{message_id}"), event_id, created_at],
         )?;
+    }
+    Ok(())
+}
+
+/// Idempotently add the Run Budget Hook V0 columns to the `runs` table.
+/// SQLite has no `ADD COLUMN IF NOT EXISTS`, so we check `PRAGMA table_info`
+/// before each ALTER. Safe to call on fresh and existing databases, and safe
+/// to re-run after a manual version downgrade + reopen (the migration loop
+/// test scenario).
+pub(crate) fn ensure_budget_columns(conn: &Connection) -> Result<()> {
+    for (col, decl) in [
+        ("budget_hook_id", "TEXT"),
+        ("budget_max_tool_rounds", "INTEGER"),
+        ("budget_max_wall_time_ms", "INTEGER"),
+        ("budget_exhaustion_action", "TEXT"),
+    ] {
+        let exists: bool = {
+            let mut stmt = conn.prepare("PRAGMA table_info(runs)")?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+            let mut found = false;
+            for row in rows {
+                if row? == col {
+                    found = true;
+                    break;
+                }
+            }
+            found
+        };
+        if !exists {
+            conn.execute_batch(&format!("ALTER TABLE runs ADD COLUMN {col} {decl};"))?;
+        }
     }
     Ok(())
 }

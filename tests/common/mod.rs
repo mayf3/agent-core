@@ -246,6 +246,7 @@ pub fn test_config() -> KernelConfig {
         capability_decision_token: None,
         tool_loop_timeout_ms: 300_000,
         context_prepare_hook: agent_core_kernel::hook::HookConfig::default(),
+        budget_hook: agent_core_kernel::hook::HookConfig::default(),
     }
 }
 
@@ -277,6 +278,12 @@ pub fn test_run(config: &KernelConfig, session: &Session) -> Run {
         updated_at: Utc::now(),
         registry_snapshot_id: String::new(),
         mode: RunMode::Default,
+        budget_hook_id: None,
+        budget_hook_version: None,
+        budget_decision_digest: None,
+        budget_max_tool_rounds: None,
+        budget_max_wall_time_ms: None,
+        budget_exhaustion_action: None,
     }
 }
 
@@ -330,6 +337,12 @@ pub fn runtime_run(run_id: &RunId, session_id: &SessionId) -> Run {
         updated_at: Utc::now(),
         registry_snapshot_id: String::new(),
         mode: RunMode::Default,
+        budget_hook_id: None,
+        budget_hook_version: None,
+        budget_decision_digest: None,
+        budget_max_tool_rounds: None,
+        budget_max_wall_time_ms: None,
+        budget_exhaustion_action: None,
     }
 }
 
