@@ -40,16 +40,53 @@ pub fn serve(config: KernelConfig) -> Result<()> {
     if config.ipc_token.is_empty() {
         bail!("AGENT_CORE_IPC_TOKEN is required for serve");
     }
+    let running = Arc::new(AtomicBool::new(true));
+    install_shutdown_handler(&running)?;
+    let handle = serve_with_running(config, Arc::clone(&running))?;
+    if handle.accept_loop.join().is_err() {
+        eprintln!("kernel accept loop panicked");
+    }
+    if handle.worker.join().is_err() {
+        eprintln!("kernel worker thread panicked");
+    }
+    if handle.outbox_dispatcher.join().is_err() {
+        eprintln!("kernel outbox dispatcher thread panicked");
+    }
+    if handle.approval_expiry.join().is_err() {
+        eprintln!("kernel approval-expiry thread panicked");
+    }
+    println!("agent-core kernel stopped gracefully");
+    Ok(())
+}
+
+/// Server handle returned by [`serve_with_running`]: the bound port (useful
+/// for ephemeral `kernel_port: 0`) and the background thread handles.
+pub struct ServerHandle {
+    pub port: u16,
+    pub accept_loop: thread::JoinHandle<()>,
+    pub worker: thread::JoinHandle<()>,
+    pub outbox_dispatcher: thread::JoinHandle<()>,
+    pub approval_expiry: thread::JoinHandle<()>,
+}
+
+/// Bind, start the worker/outbox/approval threads and run the accept loop on
+/// a background thread until `running` flips to false. This is the testable
+/// core of [`serve`] — it does NOT install a process-global signal handler,
+/// so tests can start multiple servers in one process and stop them via the
+/// `running` flag. Production [`serve`] wraps this with the ctrlc handler.
+pub fn serve_with_running(
+    config: KernelConfig,
+    running: Arc<AtomicBool>,
+) -> Result<ServerHandle> {
+    if config.ipc_token.is_empty() {
+        bail!("AGENT_CORE_IPC_TOKEN is required for serve");
+    }
     // Validate capability tokens: if configured, they must be distinct from
     validate_capability_tokens(&config)?;
     let listener = TcpListener::bind(("127.0.0.1", config.kernel_port))?;
-    println!(
-        "agent-core kernel listening on 127.0.0.1:{}",
-        config.kernel_port
-    );
+    let port = listener.local_addr()?.port();
+    println!("agent-core kernel listening on 127.0.0.1:{port}");
     listener.set_nonblocking(true)?;
-    let running = Arc::new(AtomicBool::new(true));
-    install_shutdown_handler(&running)?;
     let journal = Arc::new(JournalStore::open(&config.db_path)?);
     // Initialize the registry (creates baseline snapshot, sets current,
     journal.initialize_registry()?;
@@ -84,40 +121,46 @@ pub fn serve(config: KernelConfig) -> Result<()> {
     );
     let approval_expiry =
         start_approval_expiry_loop(config.clone(), Arc::clone(&journal), Arc::clone(&running));
-    while running.load(Ordering::SeqCst) {
-        match listener.accept() {
-            Ok((mut stream, _)) => {
-                if let Err(error) = handle_connection(
-                    &mut stream,
-                    &config,
-                    Arc::clone(&journal),
-                    Arc::clone(&gateway),
-                    Arc::clone(&dispatcher_metrics),
-                ) {
-                    let _ = write_json(
-                        &mut stream,
-                        500,
-                        json!({ "ok": false, "error": error.to_string() }),
-                    );
+    let accept_loop = {
+        let running = Arc::clone(&running);
+        let config = config.clone();
+        let journal = Arc::clone(&journal);
+        let gateway = Arc::clone(&gateway);
+        let dispatcher_metrics = Arc::clone(&dispatcher_metrics);
+        thread::spawn(move || {
+            let listener = listener;
+            while running.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        if let Err(error) = handle_connection(
+                            &mut stream,
+                            &config,
+                            Arc::clone(&journal),
+                            Arc::clone(&gateway),
+                            Arc::clone(&dispatcher_metrics),
+                        ) {
+                            let _ = write_json(
+                                &mut stream,
+                                500,
+                                json!({ "ok": false, "error": error.to_string() }),
+                            );
+                        }
+                    }
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(100));
+                    }
+                    Err(error) => eprintln!("kernel accept failed: {error}"),
                 }
             }
-            Err(error) if error.kind() == ErrorKind::WouldBlock => {
-                thread::sleep(Duration::from_millis(100));
-            }
-            Err(error) => eprintln!("kernel accept failed: {error}"),
-        }
-    }
-    if worker.join().is_err() {
-        eprintln!("kernel worker thread panicked");
-    }
-    if outbox_dispatcher.join().is_err() {
-        eprintln!("kernel outbox dispatcher thread panicked");
-    }
-    if approval_expiry.join().is_err() {
-        eprintln!("kernel approval-expiry thread panicked");
-    }
-    println!("agent-core kernel stopped gracefully");
-    Ok(())
+        })
+    };
+    Ok(ServerHandle {
+        port,
+        accept_loop,
+        worker,
+        outbox_dispatcher,
+        approval_expiry,
+    })
 }
 fn log_dispatcher_startup_state(journal: &JournalStore, enabled: bool) -> Result<()> {
     let pending = journal.outbox_status_count(OutboxDispatchStatus::Pending)?;
@@ -205,6 +248,8 @@ fn handle_connection(
         return write_json(stream, 401, json!({ "ok": false, "error": "unauthorized" }));
     } else if path == "/v1/ingress" {
         handle_ingress(stream, &gateway, &journal, &request)
+    } else if path == "/v1/session-continuation" {
+        handle_session_continuation(stream, &gateway, &journal, &request)
     } else if path == "/v1/approve" {
         handle_approval_decision(stream, &gateway, &journal, &request, true)
     } else if path == "/v1/deny" {
@@ -294,6 +339,73 @@ fn handle_ingress(
             "kernel_event_id": kernel_event_id,
         }),
     )
+}
+/// Same-session continuation seam (Bootstrap V0). An authorized external Agent
+/// Loop Harness requests the next Run in the SAME session after a yield.
+///
+/// Body:
+/// ```json
+/// {
+///   "session_id": "<observed session>",
+///   "trigger_run_id": "<observed run that yielded>",
+///   "principal_id": "<observed principal, optional>",
+///   "continuation_text": "继续",
+///   "idempotency_key": "<harness-generated uuid>",
+///   "feishu_replay": { "sender_open_id": "...", "chat_id": "...", "chat_type": "p2p" }  // feishu only
+/// }
+/// ```
+///
+/// The Kernel verifies the trigger Run belongs to the session, enforces
+/// idempotency atomically, and enqueues the continuation via the normal
+/// ingress path. A duplicate `idempotency_key` returns the same acceptance
+/// without creating a second next Run.
+fn handle_session_continuation(
+    stream: &mut TcpStream,
+    gateway: &Gateway,
+    journal: &JournalStore,
+    request: &HttpRequest,
+) -> Result<()> {
+    let body: Value = serde_json::from_slice(&request.body)?;
+    let continuation: crate::gateway::SessionContinuationRequest = match serde_json::from_value(body)
+    {
+        Ok(value) => value,
+        Err(error) => {
+            return write_json(
+                stream,
+                400,
+                json!({ "ok": false, "error": format!("invalid_request: {error}") }),
+            )
+        }
+    };
+    let session_id = continuation.session_id.clone();
+    match gateway.request_session_continuation(journal, &continuation) {
+        Ok(Some(validated)) => write_json(
+            stream,
+            200,
+            json!({
+                "ok": true,
+                "status": "accepted",
+                "kernel_event_id": validated.event_id.0,
+                "session_id": session_id,
+                "duplicate": false,
+            }),
+        ),
+        Ok(None) => write_json(
+            stream,
+            200,
+            json!({
+                "ok": true,
+                "status": "duplicate",
+                "session_id": session_id,
+                "duplicate": true,
+            }),
+        ),
+        Err(error) => write_json(
+            stream,
+            400,
+            json!({ "ok": false, "error": error.to_string() }),
+        ),
+    }
 }
 /// Phase 2 M2d follow-up: handle `POST /v1/approve` (`approved == true`) and
 /// `POST /v1/deny` (`approved == false`). Body: `{ "run_id": "<id>" }`. Both

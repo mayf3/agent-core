@@ -2,6 +2,7 @@
 node_modules/
 target/
 tools/context-hook-harness/Cargo.lock
+tools/agent-loop-harness/Cargo.lock
 dist/
 build/
 coverage/

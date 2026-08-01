@@ -1,0 +1,18 @@
+[package]
+name = "agent-loop-harness"
+version = "0.1.0"
+edition = "2021"
+description = "External Agent Loop Harness V0 — same-session auto-continuation (Bootstrap phase)."
+
+# Deliberately does NOT depend on `agent-core-kernel`. This crate only talks
+# to the Kernel through its public HTTP contract (/v1/events,
+# /v1/session-continuation). It cannot read the Kernel DB or use Kernel
+# internal types — the boundary is structural, not just convention.
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "3.3.0", features = ["json"] }
+uuid = { version = "1", features = ["v4"] }

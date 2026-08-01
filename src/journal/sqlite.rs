@@ -21,10 +21,25 @@ pub struct JournalStore {
     db_path: Mutex<Option<PathBuf>>,
 }
 
+/// Raw `runs` row shape shared by the read helpers.
+type RunRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    String,
+    String,
+    String,
+    Option<String>,
+);
+
 /// The schema `PRAGMA user_version` this kernel writes and understands. Bumped
 /// only when `migrations/` gains a new applied migration. The startup
 /// `migrate()` refuses to run against a DB whose version is newer than this.
-const CURRENT_SCHEMA_VERSION: i64 = 19;
+const CURRENT_SCHEMA_VERSION: i64 = 20;
 
 impl JournalStore {
     pub fn open(path: &Path) -> Result<Self> {
@@ -308,6 +323,209 @@ impl JournalStore {
         Ok(status)
     }
 
+    /// Load a Run by ID as a generic governance fact. Used by the
+    /// `/v1/session-continuation` seam to verify the trigger Run and recover
+    /// its session / principal so the continuation resolves to the SAME
+    /// session. Read-only; the Kernel never interprets the Run's content.
+    pub fn run_by_id(&self, run_id: &RunId) -> Result<Option<Run>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow!("journal mutex poisoned"))?;
+        let row: Option<RunRow> = conn
+            .query_row(
+                "SELECT id, session_id, agent_id, trigger_event_id, principal_json, parent_run_id, delegated_by, status, created_at, updated_at, registry_snapshot_id
+                 FROM runs WHERE id = ?1",
+                params![run_id.0],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                        row.get(9)?,
+                        row.get(10)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((
+            id,
+            session_id,
+            agent_id,
+            trigger_event_id,
+            principal_json,
+            parent_run_id,
+            delegated_by,
+            status,
+            created_at,
+            updated_at,
+            registry_snapshot_id,
+        )) = row
+        else {
+            return Ok(None);
+        };
+        let principal: RunPrincipal = serde_json::from_str(&principal_json)?;
+        let created_at: String = created_at;
+        let updated_at: String = updated_at;
+        let run_status = match status.as_str() {
+            "Running" => RunStatus::Running,
+            "WaitingDispatch" => RunStatus::WaitingDispatch,
+            "Completed" => RunStatus::Completed,
+            "Failed" => RunStatus::Failed,
+            "AwaitingApproval" => RunStatus::AwaitingApproval,
+            _ => RunStatus::Unknown,
+        };
+        Ok(Some(Run {
+            id: RunId(id),
+            session_id: SessionId(session_id),
+            agent_id: AgentId(agent_id),
+            trigger_event_id: EventId(trigger_event_id),
+            principal,
+            parent_run_id: parent_run_id.map(RunId),
+            delegated_by: delegated_by.map(PrincipalId),
+            status: run_status,
+            created_at: parse_time(created_at)?,
+            updated_at: parse_time(updated_at)?,
+            registry_snapshot_id: registry_snapshot_id.unwrap_or_default(),
+            mode: RunMode::Default,
+            budget_hook_id: None,
+            budget_hook_version: None,
+            budget_decision_digest: None,
+            budget_max_tool_rounds: None,
+            budget_max_wall_time_ms: None,
+            budget_exhaustion_action: None,
+        }))
+    }
+
+    /// Load a Session by ID as a generic governance fact. Used by the
+    /// `/v1/session-continuation` seam to rebuild the session target so the
+    /// continuation resolves to the SAME session row.
+    pub fn session_by_id(&self, session_id: &SessionId) -> Result<Option<Session>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow!("journal mutex poisoned"))?;
+        conn.query_row(
+            "SELECT id, agent_id, channel, conversation_key, last_active_at, status, version
+             FROM sessions WHERE id = ?1",
+            params![session_id.0],
+            |row| {
+                let status: String = row.get(5)?;
+                Ok(Session {
+                    id: SessionId(row.get(0)?),
+                    agent_id: AgentId(row.get(1)?),
+                    channel: match row.get::<_, String>(2)?.as_str() {
+                        "Cli" => ChannelKind::Cli,
+                        "Feishu" => ChannelKind::Feishu,
+                        other => {
+                            return Err(rusqlite::Error::FromSqlConversionFailure(
+                                2,
+                                rusqlite::types::Type::Text,
+                                Box::new(std::io::Error::new(
+                                    std::io::ErrorKind::InvalidData,
+                                    format!("unknown channel: {other}"),
+                                )),
+                            ));
+                        }
+                    },
+                    conversation_key: row.get(3)?,
+                    summary: None,
+                    summarized_until_event_id: None,
+                    last_active_at: parse_time(row.get::<_, String>(4)?)?,
+                    status: if status == "Archived" {
+                        SessionStatus::Archived
+                    } else {
+                        SessionStatus::Active
+                    },
+                    version: row.get::<_, i64>(6)? as u64,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// Atomically accept a same-session continuation: in ONE transaction,
+    /// enforce idempotency (a retried `idempotency_key` never creates a second
+    /// next Run), append the `IngressAccepted` journal event + worker job (so
+    /// the existing worker loop delivers it as a normal Run), and record the
+    /// continuation ledger row.
+    ///
+    /// Returns `Ok(Some(event_id))` on first acceptance, `Ok(None)` when the
+    /// `idempotency_key` was already recorded (duplicate — nothing new is
+    /// created). The Kernel does NOT decide whether the continuation should
+    /// happen; it only verifies generic governance facts and records the fact.
+    pub fn accept_session_continuation(
+        &self,
+        event: &ValidatedEvent,
+        payload: Value,
+        idempotency_key: &str,
+        session_id: &SessionId,
+        trigger_run_id: &RunId,
+        source: &str,
+    ) -> Result<Option<String>> {
+        let job_id = super::queue::worker_job_id(&event.event_id);
+        let now = Utc::now().to_rfc3339();
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow!("journal mutex poisoned"))?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        // Idempotency: if the key was already accepted, return the original
+        // event_id and create NOTHING new.
+        let existing: Option<String> = tx
+            .query_row(
+                "SELECT event_id FROM session_continuations WHERE idempotency_key = ?1",
+                params![idempotency_key],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(_original_event_id) = existing {
+            drop(tx);
+            return Ok(None);
+        }
+        super::queue::append_event_tx(
+            &tx,
+            JournalEventKind::IngressAccepted,
+            None,
+            None,
+            Some(&event.dedupe_key),
+            payload,
+        )?;
+        tx.execute(
+            "INSERT OR IGNORE INTO worker_jobs
+             (job_id, job_type, source_event_id, status, attempts, available_at, created_at, updated_at)
+             VALUES (?1, 'deliver_event', ?2, ?3, 0, ?4, ?4, ?4)",
+            params![
+                job_id.as_str(),
+                event.event_id.0.as_str(),
+                WorkerJobStatus::Queued.as_str(),
+                now.as_str(),
+            ],
+        )?;
+        tx.execute(
+            "INSERT OR IGNORE INTO session_continuations
+             (idempotency_key, session_id, trigger_run_id, source, event_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                idempotency_key,
+                session_id.0,
+                trigger_run_id.0,
+                source,
+                event.event_id.0,
+                now,
+            ],
+        )?;
+        tx.commit()?;
+        Ok(Some(event.event_id.0.clone()))
+    }
+
     pub fn events(&self) -> Result<Vec<JournalEvent>> {
         let conn = self
             .conn
@@ -414,6 +632,9 @@ impl JournalStore {
             ensure_registry_hook_bindings_table(&conn)?;
             super::queue::migrate(&conn)?;
             backfill_feishu_message_dedup(&conn)?;
+            conn.execute_batch(include_str!(
+                "../../migrations/0020_session_continuations.sql"
+            ))?;
             conn.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
         } else if applied == 1 {
             conn.execute_batch(include_str!("../../migrations/0002_registry_snapshots.sql"))?;
@@ -522,6 +743,12 @@ impl JournalStore {
                 18 => {
                     ensure_registry_hook_bindings_table(&conn)?;
                     conn.pragma_update(None, "user_version", 19)?;
+                }
+                19 => {
+                    conn.execute_batch(include_str!(
+                        "../../migrations/0020_session_continuations.sql"
+                    ))?;
+                    conn.pragma_update(None, "user_version", 20)?;
                 }
                 _ => break,
             }
