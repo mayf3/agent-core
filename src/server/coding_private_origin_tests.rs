@@ -38,6 +38,12 @@ fn owner_run(session: &Session) -> Run {
         updated_at: now,
         registry_snapshot_id: "snap_test".into(),
         mode: RunMode::Default,
+        budget_hook_id: None,
+        budget_hook_version: None,
+        budget_decision_digest: None,
+        budget_max_tool_rounds: None,
+        budget_max_wall_time_ms: None,
+        budget_exhaustion_action: None,
     }
 }
 

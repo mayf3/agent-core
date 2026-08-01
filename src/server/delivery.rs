@@ -2,7 +2,7 @@ use crate::adapters::{HttpConnectorAdapter, InvocationAdapter};
 use crate::config::KernelConfig;
 use crate::domain::{EventId, JournalEventKind, ValidatedEvent};
 use crate::gateway::Gateway;
-use crate::hook::{HookClient, HttpHookClient};
+use crate::hook::{HookClient, HookConfig, HttpHookClient};
 use crate::journal::JournalStore;
 use crate::llm::OpenAiCompatibleLlm;
 use crate::runtime::{outbox_dispatcher::dispatch_once, Runtime};
@@ -144,10 +144,24 @@ fn deliver_event(
     validated: ValidatedEvent,
 ) -> Result<()> {
     let llm: Box<dyn crate::llm::LlmClient> = Box::new(build_llm_from_config(&config));
+    let context_hook_enabled = config.context_prepare_hook.enabled;
+    let budget_hook_enabled = config.budget_hook.enabled;
     let mut runtime = Runtime::new(config.clone(), llm);
-    if config.context_prepare_hook.enabled {
+    // Attach the shared HTTP hook client once. It serves both
+    // context.prepare.v0 and run.budget.resolve.v0; each config binding
+    // controls which kind is actually invoked.
+    if context_hook_enabled || budget_hook_enabled {
         let hook_client: Box<dyn HookClient> = Box::new(HttpHookClient::new());
-        runtime = runtime.with_hook(hook_client, config.context_prepare_hook.clone());
+        if context_hook_enabled {
+            runtime = runtime.with_hook(hook_client, config.context_prepare_hook.clone());
+        } else {
+            // Budget-only: attach the client with a disabled placeholder so
+            // the context hook path is skipped but budget calls work.
+            runtime = runtime.with_hook(hook_client, HookConfig::default());
+        }
+        if budget_hook_enabled {
+            runtime = runtime.with_budget_hook(config.budget_hook.clone());
+        }
     }
     if super::calculator_router::matches(&validated) {
         super::calculator_delivery::deliver(config, journal, gateway, validated)?;

@@ -19,6 +19,7 @@
 //! Phase 2 (this PR): HookClient trait + FakeHookClient + context.prepare
 //! integration in the Runtime, still no real HTTP.
 
+mod budget;
 mod client;
 mod config;
 mod context_artifact;
@@ -31,6 +32,7 @@ mod tests;
 #[cfg(test)]
 mod http_tests;
 
+pub use budget::*;
 pub use client::*;
 pub use config::*;
 pub use context_artifact::*;

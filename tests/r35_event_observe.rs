@@ -92,6 +92,12 @@ fn insert_run(
         updated_at: Utc::now(),
         registry_snapshot_id: "".to_string(),
         mode: RunMode::Default,
+        budget_hook_id: None,
+        budget_hook_version: None,
+        budget_decision_digest: None,
+        budget_max_tool_rounds: None,
+        budget_max_wall_time_ms: None,
+        budget_exhaustion_action: None,
     };
     j.insert_run(&run)?;
     Ok(rid)

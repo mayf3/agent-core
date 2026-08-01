@@ -202,6 +202,7 @@ mod tests {
             capability_decision_token: None,
             tool_loop_timeout_ms: 300_000,
             context_prepare_hook: crate::hook::HookConfig::default(),
+            budget_hook: crate::hook::HookConfig::default(),
         }
     }
 
@@ -237,6 +238,12 @@ mod tests {
             updated_at: now,
             registry_snapshot_id: "snapshot_test".into(),
             mode: RunMode::Default,
+            budget_hook_id: None,
+            budget_hook_version: None,
+            budget_decision_digest: None,
+            budget_max_tool_rounds: None,
+            budget_max_wall_time_ms: None,
+            budget_exhaustion_action: None,
         };
         (run, session)
     }

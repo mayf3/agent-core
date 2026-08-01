@@ -70,6 +70,9 @@ mod registry_snapshot_provider_context;
 #[path = "tests/registry_snapshot_recovery_failure.rs"]
 mod registry_snapshot_recovery_failure;
 #[cfg(test)]
+#[path = "tests/run_budget.rs"]
+mod run_budget;
+#[cfg(test)]
 #[path = "tests/tool_execution_dispatch.rs"]
 mod tool_execution_dispatch;
 #[cfg(test)]
@@ -80,6 +83,7 @@ pub struct Runtime<L> {
     llm: L,
     hook_client: Option<Box<dyn HookClient>>,
     hook_config: Option<HookConfig>,
+    budget_hook_config: Option<HookConfig>,
 }
 pub struct RuntimeOutcome {
     pub run_id: RunId,
@@ -98,6 +102,7 @@ where
             llm,
             hook_client: None,
             hook_config: None,
+            budget_hook_config: None,
         }
     }
 
@@ -106,6 +111,14 @@ where
     pub fn with_hook(mut self, client: Box<dyn HookClient>, config: HookConfig) -> Self {
         self.hook_client = Some(client);
         self.hook_config = Some(config);
+        self
+    }
+
+    /// Attach a budget hook config. The same hook client is reused. When set
+    /// and enabled, `run.budget.resolve.v0` is called once at Run creation
+    /// to resolve the Run's frozen budget.
+    pub fn with_budget_hook(mut self, config: HookConfig) -> Self {
+        self.budget_hook_config = Some(config);
         self
     }
     /// Phase 2 M2d: decide whether an approved invocation is dispatched now or
@@ -186,6 +199,24 @@ where
             .load_registry_snapshot(&snapshot_id)
             .map_err(|e| anyhow::anyhow!("registry_snapshot_unavailable: {e}"))?;
         let run = self.create_run(journal, &session, &event, &snapshot_id, &snapshot);
+        // Resolve and freeze the Run's budget before inserting the Run so a
+        // fail-closed budget hook failure prevents Run creation.
+        let budget = match self.resolve_run_budget(journal, &run, &session, &snapshot) {
+            Ok(b) => b,
+            Err(e) => {
+                // Budget hook failed closed — the Run cannot start.
+                return Err(e);
+            }
+        };
+        let run = Run {
+            budget_hook_id: Some(budget.hook_id.clone()),
+            budget_hook_version: Some(budget.hook_version.clone()),
+            budget_decision_digest: Some(budget.decision.digest()),
+            budget_max_tool_rounds: Some(budget.decision.max_tool_rounds),
+            budget_max_wall_time_ms: Some(budget.decision.max_wall_time_ms),
+            budget_exhaustion_action: Some(budget.decision.exhaustion_action),
+            ..run
+        };
         journal.insert_run(&run)?;
         journal.append_event(
             JournalEventKind::RunStarted,
