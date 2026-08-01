@@ -455,9 +455,11 @@ fn yield_action_produces_continue_message() {
         )
         .unwrap();
 
+    // High 3: a yield produces ONLY the structured fact — no user-facing
+    // "请发送继续" text is generated (the external Harness decides).
     assert!(
-        result.content.contains("请发送「继续」"),
-        "yield message must contain 请发送「继续」"
+        !result.content.contains("请发送「继续」"),
+        "yield must not fabricate a continue prompt"
     );
     // Run is NOT Failed (yield is not a failure)
     let status = journal.run_status(&run.id).unwrap();

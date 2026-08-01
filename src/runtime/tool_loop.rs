@@ -294,15 +294,12 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
                     );
                 }
                 ExhaustionAction::Yield => {
-                    llm.content = format!(
-                        "{}\n\n本轮已达到工具执行上限（{} 轮），任务尚未全部完成。请发送「继续」以在下一 Run 中接着处理。",
-                        if llm.content.trim().is_empty() {
-                            "本轮已达到工具执行上限，当前已完成部分工作。"
-                        } else {
-                            &llm.content
-                        },
-                        max_rounds,
-                    );
+                    // High 3: yield produces NO user-facing "请发送继续" text.
+                    // The structured yield fact (ToolBudgetExhausted with
+                    // exhaustion_action=yield) is the only artifact; the
+                    // external Agent Loop Harness observes it and decides
+                    // whether to continue. The model's own content is kept
+                    // untouched — nothing here is ever delivered as a reply.
                 }
             }
         }
@@ -361,15 +358,11 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
                 );
             }
             ExhaustionAction::Yield => {
-                llm.content = format!(
-                    "{}\n\n本轮已超过工具执行时间限制（{} ms），任务尚未全部完成。请发送「继续」以在下一 Run 中接着处理。",
-                    if llm.content.trim().is_empty() {
-                        "本轮已超过工具执行时间限制。"
-                    } else {
-                        &llm.content
-                    },
-                    timeout_ms,
-                );
+                // High 3: yield produces NO user-facing "请发送继续" text. The
+                // structured yield fact (ToolLoopWallClockExceeded with
+                // exhaustion_action=yield) is the only artifact; the external
+                // Agent Loop Harness observes it and decides whether to
+                // continue. The model's own content is kept untouched.
             }
         }
         Ok(true)

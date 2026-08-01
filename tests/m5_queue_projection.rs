@@ -165,7 +165,7 @@ fn worker_job_lease_marks_running_and_returns_event() -> Result<()> {
 
     let leased = journal.lease_next_worker_job()?;
 
-    assert_eq!(leased, Some(source_event_id));
+    assert_eq!(leased, Some(("deliver_event".to_string(), source_event_id)));
     assert_eq!(
         journal.worker_job_status(&job_id)?.as_ref(),
         Some(&WorkerJobStatus::Running)
@@ -183,7 +183,10 @@ fn worker_job_lease_does_not_retake_active_running_job() -> Result<()> {
     let source_event_id = EventId("event_active_lease".to_string());
     journal.enqueue_worker_job(&source_event_id)?;
 
-    assert_eq!(journal.lease_next_worker_job()?, Some(source_event_id));
+    assert_eq!(
+        journal.lease_next_worker_job()?,
+        Some(("deliver_event".to_string(), source_event_id))
+    );
     assert_eq!(journal.lease_next_worker_job()?, None);
     let started_events = journal
         .events()?

@@ -550,9 +550,11 @@ fn no_new_llm_call_after_deadline() {
         1,
         "deadline exceeded recorded"
     );
+    // High 3: a yield produces ONLY the structured fact — no user-facing
+    // "请发送继续" text is generated (the external Harness decides).
     assert!(
-        result.content.contains("请发送「继续」"),
-        "yield message after deadline"
+        !result.content.contains("请发送「继续」"),
+        "yield must not fabricate a continue prompt"
     );
 }
 

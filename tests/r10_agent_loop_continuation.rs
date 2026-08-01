@@ -30,7 +30,7 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 // ---------------------------------------------------------------------------
@@ -131,21 +131,38 @@ struct StubConnector {
     #[allow(dead_code)] // kept alive so the accept thread stays joined on drop
     handle: Option<std::thread::JoinHandle<()>>,
     shutdown: Arc<AtomicBool>,
+    /// Captured request bodies (JSON) sent by the Kernel's outbox dispatcher.
+    /// Used to prove no "请发送继续" prompt is ever delivered to the user.
+    captured_bodies: Arc<Mutex<Vec<Value>>>,
 }
 
 impl StubConnector {
     fn start() -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let shutdown = Arc::new(AtomicBool::new(false));
+        let captured_bodies = Arc::new(Mutex::new(Vec::<Value>::new()));
         let handle = {
             let shutdown = Arc::clone(&shutdown);
+            let captured_bodies = Arc::clone(&captured_bodies);
             let listener = listener.try_clone().unwrap();
             std::thread::spawn(move || {
                 listener.set_nonblocking(true).unwrap();
                 while !shutdown.load(Ordering::SeqCst) {
                     match listener.accept() {
                         Ok((mut stream, _)) => {
-                            let _ = read_http_body(&mut stream);
+                            let request_body = read_http_body(&mut stream);
+                            if let Ok(body_bytes) = request_body {
+                                // Strip the HTTP header section, keep the JSON
+                                // body after \r\n\r\n.
+                                if let Some(pos) = find_subslice(&body_bytes, b"\r\n\r\n") {
+                                    let json_start = pos + 4;
+                                    if let Ok(parsed) = serde_json::from_slice::<Value>(
+                                        &body_bytes[json_start..],
+                                    ) {
+                                        captured_bodies.lock().unwrap().push(parsed);
+                                    }
+                                }
+                            }
                             let body = json!({
                                 "receipt": {
                                     "status": "Succeeded",
@@ -166,11 +183,34 @@ impl StubConnector {
             listener,
             handle: Some(handle),
             shutdown,
+            captured_bodies,
         }
     }
 
     fn url(&self) -> String {
         format!("http://{}/v1/execute", self.listener.local_addr().unwrap())
+    }
+
+    /// Every request body the Kernel sent to the connector.
+    fn captured(&self) -> Vec<Value> {
+        self.captured_bodies.lock().unwrap().clone()
+    }
+
+    /// The concatenated text of every reply operation the Kernel delivered.
+    fn delivered_text(&self) -> String {
+        self.captured()
+            .iter()
+            .filter_map(|body| {
+                let operation = body.get("operation").and_then(Value::as_str)?;
+                if operation != "stdout.send_text" && operation != "feishu.send_message" {
+                    return None;
+                }
+                body.pointer("/arguments/text")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 }
 
@@ -443,8 +483,6 @@ fn start_harness_thread(
         max_total_wall_time_ms: 600_000,
         max_consecutive_failures: 3,
         poll_interval_ms: 50,
-        continuation_text: "继续".to_string(),
-        feishu_replay: None,
     };
     std::thread::spawn(move || {
         let client = agent_loop_harness::KernelClient::new(&config.kernel_url, &config.ipc_token);
@@ -575,17 +613,38 @@ fn one_user_message_drives_three_bounded_runs_same_session() {
         }
         std::thread::sleep(Duration::from_millis(200));
     }
-    // No user "继续" was ever sent: the only ingress was the single user msg.
+    // High 2: NO fake user message. The only IngressAccepted is the single
+    // real user request; continuations are recorded as the generic
+    // SessionContinuationRequested governance event, never as a user message.
     let ingress_events = kernel
         .all_events()
         .into_iter()
         .filter(|e| e["event_kind"] == json!("IngressAccepted"))
         .collect::<Vec<_>>();
-    let user_ingresses = ingress_events
-        .iter()
-        .filter(|e| !e["correlation_id"].as_str().unwrap_or("").starts_with("continuation:"))
-        .count();
-    assert_eq!(user_ingresses, 1, "exactly ONE user ingress, no manual 继续");
+    assert_eq!(
+        ingress_events.len(),
+        1,
+        "REAL_USER_MESSAGE_COUNT_AFTER_3_RUNS=1, no fake continue user messages"
+    );
+    let continuation_events = kernel
+        .all_events()
+        .into_iter()
+        .filter(|e| e["event_kind"] == json!("SessionContinuationRequested"))
+        .collect::<Vec<_>>();
+    assert!(
+        continuation_events.len() >= 2,
+        "continuations recorded as governance events, got {}",
+        continuation_events.len()
+    );
+
+    // High 3: no "请发送继续" prompt was ever delivered to the user. The
+    // yield runs recorded the structured fact only — no reply Invocation was
+    // created for them, so nothing entered the outbox/connector.
+    let delivered = connector.delivered_text();
+    assert!(
+        !delivered.contains("请发送继续"),
+        "USER_CONTINUE_PROMPT_SENT=false; delivered: {delivered:?}"
+    );
 
     // 11. No product model added: the continuation ledger has rows but the
     // events contain no task/progress/checkpoint vocabulary.
@@ -737,8 +796,9 @@ fn waiting_user_never_continues() {
     let _ = handle.approval_expiry.join();
 }
 
-/// Acceptance: a duplicate `/v1/session-continuation` POST (same idempotency
-/// key) never creates a second next Run.
+/// Acceptance: the SAME trigger Run can only ever be continued ONCE,
+/// regardless of idempotency_key, concurrency, or Harness state loss
+/// (UNIQUE(trigger_run_id) in the Kernel).
 #[test]
 fn duplicate_continuation_is_idempotent() {
     let llm = StubLlm::start(1_000_000);
@@ -782,29 +842,89 @@ fn duplicate_continuation_is_idempotent() {
         std::thread::sleep(Duration::from_millis(200));
     };
 
-    // Directly POST the same continuation twice.
+    // Narrow contract: the Harness identifies ONLY the trigger Run.
     let body = json!({
-        "session_id": session_id,
         "trigger_run_id": run_id,
-        "principal_id": "cli:local",
-        "continuation_text": "继续",
-        "idempotency_key": "dup-test-key-1",
+        "expected_session_id": session_id,
+        "idempotency_key": "continuation:".to_string() + &run_id,
     });
     let first = kernel.post("/v1/session-continuation", &body);
     assert_eq!(first["ok"], json!(true), "first accepted: {first}");
     assert_eq!(first["duplicate"], json!(false));
-    let second = kernel.post("/v1/session-continuation", &body);
-    assert_eq!(second["ok"], json!(true), "second must be accepted idempotently: {second}");
-    assert_eq!(second["duplicate"], json!(true), "second must be marked duplicate");
 
-    // Wait: exactly ONE new Run appears (the first continuation), never two.
+    // Same trigger, SAME key → duplicate, no second next Run.
+    let second = kernel.post("/v1/session-continuation", &body);
+    assert_eq!(second["ok"], json!(true), "same-key duplicate accepted: {second}");
+    assert_eq!(second["duplicate"], json!(true), "same-key must be duplicate");
+
+    // Same trigger, DIFFERENT key → still duplicate (UNIQUE(trigger_run_id)).
+    let different_key = json!({
+        "trigger_run_id": run_id,
+        "expected_session_id": session_id,
+        "idempotency_key": "continuation:".to_string() + &run_id + "-other-key",
+    });
+    let third = kernel.post("/v1/session-continuation", &different_key);
+    assert_eq!(
+        third["ok"], json!(true),
+        "different-key duplicate accepted: {third}"
+    );
+    assert_eq!(
+        third["duplicate"], json!(true),
+        "SAME_TRIGGER_DIFFERENT_KEYS_NEXT_RUN_COUNT=1 — different key must still be duplicate"
+    );
+
+    // Concurrent requests (two threads, same trigger) → still one next Run.
+    let kernel_a = HttpKernel::new(handle.port, "test-token");
+    let kernel_b = HttpKernel::new(handle.port, "test-token");
+    let run_id_a = run_id.clone();
+    let session_id_a = session_id.clone();
+    let t1 = std::thread::spawn(move || {
+        kernel_a.post(
+            "/v1/session-continuation",
+            &json!({
+                "trigger_run_id": run_id_a,
+                "expected_session_id": session_id_a,
+                "idempotency_key": "concurrent-a",
+            }),
+        )
+    });
+    let run_id_b = run_id.clone();
+    let session_id_b = session_id.clone();
+    let t2 = std::thread::spawn(move || {
+        kernel_b.post(
+            "/v1/session-continuation",
+            &json!({
+                "trigger_run_id": run_id_b,
+                "expected_session_id": session_id_b,
+                "idempotency_key": "concurrent-b",
+            }),
+        )
+    });
+    let r1 = t1.join().unwrap();
+    let r2 = t2.join().unwrap();
+    assert_eq!(r1["ok"], json!(true), "concurrent A: {r1}");
+    assert_eq!(r2["ok"], json!(true), "concurrent B: {r2}");
+    assert!(
+        r1["duplicate"] == json!(true) || r2["duplicate"] == json!(true),
+        "exactly one of the concurrent requests may create the continuation: A={r1} B={r2}"
+    );
+
+    // Exactly ONE next Run appears (the first continuation), never more.
     std::thread::sleep(Duration::from_secs(2));
     let runs = kernel
         .all_events()
         .into_iter()
         .filter(|e| e["event_kind"] == json!("RunStarted"))
         .count();
-    assert_eq!(runs, 2, "one continuation creates exactly one new Run");
+    assert_eq!(runs, 2, "one trigger Run creates exactly one next Run");
+
+    // STATE_LOSS_DUPLICATE_PROTECTED: delete the Harness state and re-observe —
+    // the Kernel's UNIQUE(trigger_run_id) still blocks a second continuation.
+    let duplicate_after = kernel.post("/v1/session-continuation", &body);
+    assert_eq!(
+        duplicate_after["duplicate"], json!(true),
+        "STATE_LOSS_DUPLICATE_PROTECTED=true — repeat after state loss still duplicate"
+    );
 
     running.store(false, Ordering::SeqCst);
     let _ = handle.accept_loop.join();

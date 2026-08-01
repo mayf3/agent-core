@@ -1,10 +1,11 @@
 use super::hash_chain::event_hash;
+use super::queue::worker_job_id;
 use super::sqlite_read::{parse_time, row_to_event};
 use crate::domain::*;
 use anyhow::{anyhow, bail, Result};
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -323,6 +324,26 @@ impl JournalStore {
         Ok(status)
     }
 
+    /// Whether the Run ended with a budget exhaustion that carried the
+    /// `yield` exhaustion action (a structured yield fact). Used by the
+    /// delivery path to avoid fabricating a "please send 继续" user reply —
+    /// the external Agent Loop Harness observes this fact instead.
+    pub fn run_yielded(&self, run_id: &RunId) -> Result<bool> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow!("journal mutex poisoned"))?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM journal_events
+             WHERE run_id = ?1
+               AND kind IN ('ToolBudgetExhausted', 'ToolLoopWallClockExceeded')
+               AND json_extract(payload_json, '$.exhaustion_action') = 'yield'",
+            params![run_id.0],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
     /// Load a Run by ID as a generic governance fact. Used by the
     /// `/v1/session-continuation` seam to verify the trigger Run and recover
     /// its session / principal so the continuation resolves to the SAME
@@ -452,78 +473,154 @@ impl JournalStore {
     }
 
     /// Atomically accept a same-session continuation: in ONE transaction,
-    /// enforce idempotency (a retried `idempotency_key` never creates a second
-    /// next Run), append the `IngressAccepted` journal event + worker job (so
-    /// the existing worker loop delivers it as a normal Run), and record the
-    /// continuation ledger row.
+    /// enforce UNIQUE(trigger_run_id) (a trigger Run can be continued at most
+    /// ONCE, regardless of idempotency_key, concurrency, or Harness state
+    /// loss), record a generic `SessionContinuationRequested` governance event
+    /// (NOT an IngressAccepted / user message), and enqueue a
+    /// `schedule_continuation` worker job so the existing worker loop schedules
+    /// the next Run in the same session.
     ///
-    /// Returns `Ok(Some(event_id))` on first acceptance, `Ok(None)` when the
-    /// `idempotency_key` was already recorded (duplicate — nothing new is
-    /// created). The Kernel does NOT decide whether the continuation should
-    /// happen; it only verifies generic governance facts and records the fact.
+    /// Returns `Ok(Some((event_id, next_run_id)))` on first acceptance
+    /// (`next_run_id` is `None` until the worker schedules it), and
+    /// `Ok(None)` for a duplicate trigger (nothing new is created — the
+    /// already-accepted continuation is returned via
+    /// [`JournalStore::continuation_by_trigger_run`]).
+    ///
+    /// The Kernel does NOT decide whether the continuation should happen; it
+    /// only verifies generic governance facts and records the fact.
     pub fn accept_session_continuation(
         &self,
-        event: &ValidatedEvent,
-        payload: Value,
-        idempotency_key: &str,
+        request_id: &str,
         session_id: &SessionId,
         trigger_run_id: &RunId,
-        source: &str,
+        requesting_principal: &str,
+        idempotency_key: &str,
     ) -> Result<Option<String>> {
-        let job_id = super::queue::worker_job_id(&event.event_id);
         let now = Utc::now().to_rfc3339();
         let mut conn = self
             .conn
             .lock()
             .map_err(|_| anyhow!("journal mutex poisoned"))?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        // Idempotency: if the key was already accepted, return the original
-        // event_id and create NOTHING new.
+        // Idempotency: a trigger Run may be continued at most once. This check
+        // runs BEFORE any insert so a duplicate trigger creates NOTHING new.
         let existing: Option<String> = tx
             .query_row(
-                "SELECT event_id FROM session_continuations WHERE idempotency_key = ?1",
-                params![idempotency_key],
+                "SELECT event_id FROM session_continuations WHERE trigger_run_id = ?1",
+                params![trigger_run_id.0],
                 |row| row.get(0),
             )
             .optional()?;
-        if let Some(_original_event_id) = existing {
+        if existing.is_some() {
             drop(tx);
             return Ok(None);
         }
-        super::queue::append_event_tx(
+        // Generic governance event: an authorized caller requested the next Run
+        // in the same session based on a trigger Run. This is NOT a user
+        // message and carries no product semantics.
+        let appended = super::queue::append_event_tx(
             &tx,
-            JournalEventKind::IngressAccepted,
+            JournalEventKind::SessionContinuationRequested,
             None,
-            None,
-            Some(&event.dedupe_key),
-            payload,
+            Some(session_id),
+            Some(request_id),
+            json!({
+                "request_id": request_id,
+                "trigger_run_id": trigger_run_id.0,
+                "session_id": session_id.0,
+                "requesting_principal": requesting_principal,
+                "idempotency_key": idempotency_key,
+            }),
         )?;
+        let event_id = appended.event_id;
         tx.execute(
             "INSERT OR IGNORE INTO worker_jobs
              (job_id, job_type, source_event_id, status, attempts, available_at, created_at, updated_at)
-             VALUES (?1, 'deliver_event', ?2, ?3, 0, ?4, ?4, ?4)",
+             VALUES (?1, 'schedule_continuation', ?2, ?3, 0, ?4, ?4, ?4)",
             params![
-                job_id.as_str(),
-                event.event_id.0.as_str(),
+                worker_job_id(&event_id).as_str(),
+                event_id.0.as_str(),
                 WorkerJobStatus::Queued.as_str(),
                 now.as_str(),
             ],
         )?;
         tx.execute(
             "INSERT OR IGNORE INTO session_continuations
-             (idempotency_key, session_id, trigger_run_id, source, event_id, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+             (idempotency_key, session_id, trigger_run_id, event_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 idempotency_key,
                 session_id.0,
                 trigger_run_id.0,
-                source,
-                event.event_id.0,
+                event_id.0,
                 now,
             ],
         )?;
         tx.commit()?;
-        Ok(Some(event.event_id.0.clone()))
+        Ok(Some(event_id.0.clone()))
+    }
+
+    /// Load the accepted continuation for a trigger Run. Returns the
+    /// continuation event_id and the scheduled next_run_id (if the worker has
+    /// already created it). Used to answer duplicate requests with the same
+    /// result instead of creating a second next Run.
+    pub fn continuation_by_trigger_run(
+        &self,
+        trigger_run_id: &RunId,
+    ) -> Result<Option<(String, Option<String>)>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow!("journal mutex poisoned"))?;
+        let row: Option<(String, Option<String>)> = conn
+            .query_row(
+                "SELECT event_id, next_run_id FROM session_continuations WHERE trigger_run_id = ?1",
+                params![trigger_run_id.0],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    /// Load the generic `SessionContinuationRequested` journal event by its
+    /// event_id. Used by the worker loop to recover the trigger Run reference
+    /// for a `schedule_continuation` worker job. This is NOT an ingress event
+    /// and carries no user message.
+    pub fn continuation_request_by_event_id(
+        &self,
+        event_id: &str,
+    ) -> Result<Option<JournalEvent>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow!("journal mutex poisoned"))?;
+        let mut stmt = conn.prepare(
+            "SELECT sequence, event_id, run_id, session_id, correlation_id, kind, payload_json, previous_hash, hash, created_at
+             FROM journal_events
+             WHERE event_id = ?1 AND kind = 'SessionContinuationRequested'
+             ORDER BY sequence DESC LIMIT 1",
+        )?;
+        let mut rows = stmt.query_map(params![event_id], row_to_event)?;
+        Ok(rows.next().transpose()?)
+    }
+
+    /// Backfill `next_run_id` once the worker has scheduled the continuation
+    /// Run. Idempotent: only writes when the column is currently NULL.
+    pub fn record_continuation_next_run(
+        &self,
+        trigger_run_id: &RunId,
+        next_run_id: &RunId,
+    ) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow!("journal mutex poisoned"))?;
+        conn.execute(
+            "UPDATE session_continuations SET next_run_id = ?1
+             WHERE trigger_run_id = ?2 AND next_run_id IS NULL",
+            params![next_run_id.0, trigger_run_id.0],
+        )?;
+        Ok(())
     }
 
     pub fn events(&self) -> Result<Vec<JournalEvent>> {

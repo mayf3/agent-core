@@ -7,7 +7,7 @@ use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
 
 impl JournalStore {
-    pub fn lease_next_worker_job(&self) -> Result<Option<EventId>> {
+    pub fn lease_next_worker_job(&self) -> Result<Option<(String, EventId)>> {
         let mut conn = self
             .conn
             .lock()
@@ -17,7 +17,7 @@ impl JournalStore {
         let now_text = now.to_rfc3339();
         let row = tx
             .query_row(
-                "SELECT job_id, source_event_id
+                "SELECT job_id, job_type, source_event_id
                  FROM worker_jobs
                  WHERE available_at <= ?1
                    AND (
@@ -33,10 +33,16 @@ impl JournalStore {
                     WorkerJobStatus::RetryableFailed.as_str(),
                     WorkerJobStatus::Running.as_str(),
                 ],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
             )
             .optional()?;
-        let Some((job_id, source_event_id)) = row else {
+        let Some((job_id, job_type, source_event_id)) = row else {
             tx.commit()?;
             return Ok(None);
         };
@@ -76,7 +82,7 @@ impl JournalStore {
             Some(&job_id),
             json!({
                 "job_id": job_id,
-                "job_type": "deliver_event",
+                "job_type": job_type,
                 "source_event_id": source_event_id,
                 "status": WorkerJobStatus::Running.as_str(),
                 "attempted_at": now_text,
@@ -84,7 +90,7 @@ impl JournalStore {
             }),
         )?;
         tx.commit()?;
-        Ok(Some(EventId(source_event_id)))
+        Ok(Some((job_type, EventId(source_event_id))))
     }
 
     pub fn accept_ingress_with_worker_job(
@@ -374,7 +380,7 @@ mod tests {
         // First lease makes it running with locked_until = now + 5min.
         assert_eq!(
             journal.lease_next_worker_job()?,
-            Some(source_event_id.clone())
+            Some(("deliver_event".to_string(), source_event_id.clone()))
         );
 
         // Manually expire the lease to simulate a worker crash.
@@ -388,7 +394,7 @@ mod tests {
         }
 
         // Second lease should reclaim the stale running job.
-        assert_eq!(journal.lease_next_worker_job()?, Some(source_event_id));
+        assert_eq!(journal.lease_next_worker_job()?, Some(("deliver_event".to_string(), source_event_id)));
 
         assert_eq!(
             journal.worker_job_status(&job_id)?.as_ref(),
@@ -416,7 +422,7 @@ mod tests {
         // First lease makes it running.
         assert_eq!(
             journal.lease_next_worker_job()?,
-            Some(source_event_id.clone())
+            Some(("deliver_event".to_string(), source_event_id.clone()))
         );
 
         // Extend locked_until far into the future to simulate a busy worker.
