@@ -26,6 +26,7 @@ impl ContextAssembler {
         granted_operations: &[String],
         snapshot: &RegistrySnapshot,
     ) -> Result<Vec<ContextBlock>> {
+        let agent_id = &session.agent_id.0;
         let mut blocks = vec![
             self.file_block(
                 ContextBlockKind::RootSystem,
@@ -50,13 +51,14 @@ impl ContextAssembler {
             ),
             self.file_block(
                 ContextBlockKind::AgentProfile,
-                "agents/main/AGENT.md",
-                "Main agent. You assist the user by answering messages and, when \
-                 useful, calling the tools explicitly provided in the current \
-                 request. Prefer an authorized read-only tool over guessing for \
-                 real-time, system, or session facts. Do not assume tools that \
-                 were not provided or not authorized.",
+                &format!("agents/{agent_id}/AGENT.md"),
+                "You assist the user by answering messages and, when useful, \
+                 calling the tools explicitly provided in the current request. \
+                 Prefer an authorized read-only tool over guessing for real-time, \
+                 system, or session facts. Do not assume tools that were not \
+                 provided or not authorized.",
             ),
+            self.workspace_block(agent_id),
             self.skill_catalog_block(),
             self.tool_catalog_block(granted_operations, snapshot),
             self.file_block(
@@ -102,6 +104,40 @@ impl ContextAssembler {
         let content = skill_catalog(&self.root_dir)
             .unwrap_or_else(|| "chat: basic conversation skill".to_string());
         block(ContextBlockKind::SkillCatalog, &content, "skills/")
+    }
+
+    /// Per-agent workspace block: lists the files under
+    /// `agents/<agent_id>/workspace/` so the model sees exactly this agent's
+    /// workspace. A missing or empty directory is reported explicitly rather
+    /// than fabricated.
+    fn workspace_block(&self, agent_id: &str) -> ContextBlock {
+        let dir = self.root_dir.join(format!("agents/{agent_id}/workspace"));
+        let content = match std::fs::read_dir(&dir) {
+            Ok(entries) => {
+                let mut names: Vec<String> = entries
+                    .filter_map(Result::ok)
+                    .map(|entry| {
+                        let mut name = entry.file_name().to_string_lossy().to_string();
+                        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                            name.push('/');
+                        }
+                        name
+                    })
+                    .collect();
+                names.sort();
+                if names.is_empty() {
+                    "workspace is empty".to_string()
+                } else {
+                    format!("workspace files:\n{}", names.join("\n"))
+                }
+            }
+            Err(_) => "workspace directory not created yet".to_string(),
+        };
+        block(
+            ContextBlockKind::WorkspaceRoot,
+            &content,
+            &format!("agents/{agent_id}/workspace/"),
+        )
     }
     fn tool_catalog_block(
         &self,

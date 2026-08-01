@@ -11,6 +11,8 @@ pub use policy::{evaluate_policy, PolicyVerdict};
 mod message_arguments;
 mod tool_call;
 pub use tool_call::{validate_tool_call, ToolRejection};
+#[cfg(test)]
+mod tests;
 #[derive(Clone)]
 pub struct Gateway {
     config: KernelConfig,
@@ -222,6 +224,7 @@ impl Gateway {
         {
             bail!("skip:bot_not_mentioned");
         }
+        let agent_id = self.feishu_agent_id(&chat_type, &chat_id)?;
         let event_id = EventId::new();
         let dedupe_id = format!("message:{message_id}");
         if !journal.reserve_ingress("feishu", &dedupe_id, &event_id)? {
@@ -247,7 +250,7 @@ impl Gateway {
                 requester_id: Some(format!("feishu:open_id:{sender_open_id}")),
             },
             session_target: SessionTarget {
-                agent_id: self.config.agent_id.clone(),
+                agent_id,
                 channel: ChannelKind::Feishu,
                 conversation_key: conversation_key.clone(),
             },
@@ -268,6 +271,7 @@ impl Gateway {
                 "dedupe_id": dedupe_id,
                 "dedupe_key": event.dedupe_key.clone(),
                 "event_id": event_id.0,
+                "agent_id": event.session_target.agent_id.0,
                 "sender_open_id": sender_open_id,
                 "chat_id": chat_id,
                 "chat_type": chat_type.clone(),
@@ -306,6 +310,22 @@ impl Gateway {
             chat_type: None,
         })
     }
+    /// Resolve the agent_id for a Feishu message. The p2p (private chat) path
+    /// is unchanged: it always uses the configured default agent. Group chats
+    /// consult `data_dir/bindings/feishu.json`; a missing file or an unbound
+    /// chat falls back to the default agent, while an invalid file fails
+    /// closed (the ingress is rejected with `invalid_feishu_bindings`).
+    fn feishu_agent_id(&self, chat_type: &str, chat_id: &str) -> Result<AgentId> {
+        if chat_type == "p2p" {
+            return Ok(self.config.agent_id.clone());
+        }
+        let bindings_path = self.config.data_dir.join("bindings").join("feishu.json");
+        let bindings = crate::binding::FeishuBindings::load(&bindings_path)?;
+        Ok(bindings
+            .and_then(|b| b.resolve_agent_id(chat_id))
+            .unwrap_or_else(|| self.config.agent_id.clone()))
+    }
+
     fn recover_feishu_event(
         &self,
         event_id: EventId,
@@ -320,6 +340,13 @@ impl Gateway {
             .get("chat_type")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+        // Old ingress events predate the `agent_id` field; fall back to the
+        // configured default (preserves prior behavior).
+        let agent_id = payload
+            .get("agent_id")
+            .and_then(Value::as_str)
+            .map(|s| AgentId(s.to_string()))
+            .unwrap_or_else(|| self.config.agent_id.clone());
         Ok(ValidatedEvent {
             event_id,
             source: EventSource::Feishu,
@@ -335,7 +362,7 @@ impl Gateway {
                 requester_id: Some(format!("feishu:open_id:{sender_open_id}")),
             },
             session_target: SessionTarget {
-                agent_id: self.config.agent_id.clone(),
+                agent_id,
                 channel: ChannelKind::Feishu,
                 conversation_key,
             },
