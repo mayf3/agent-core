@@ -9,6 +9,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -262,8 +263,7 @@ fn segmented_auto_continuation_with_checkpoints() {
 
 /// The model cannot override the resolved budget.
 #[test]
-fn budget_override_rejected() {
-    let hs = HarnessServer::start();
+fn budget_override_rejected() {    let hs = HarnessServer::start();
     let args = json!({
         "workspace_id": "test",
         "objective": "fake_work_units:5",
@@ -371,6 +371,69 @@ fn workspace_drift_stops_job() {
         done["last_error"].as_str().unwrap_or("").contains("checkpoint_drift"),
         "job must fail with checkpoint_drift, got: {}",
         done["last_error"]
+    );
+}
+
+/// The model's own in-flight changes (uncommitted work at segment end) are
+/// committed by the Harness as a checkpoint commit — the next segment must
+/// continue instead of failing drift.
+#[test]
+fn checkpoint_commit_lands_model_work() {
+    let hs = HarnessServer::start();
+    for args in [
+        vec!["init", "-q", "-b", "main"],
+        vec!["config", "user.email", "t@t"],
+        vec!["config", "user.name", "t"],
+        vec!["commit", "-q", "--allow-empty", "-m", "init"],
+    ] {
+        let out = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(&hs.ws_root)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?} failed");
+    }
+
+    // fake_dirty:true simulates a real model killed mid-work — the segment
+    // leaves uncommitted workspace changes behind.
+    let job_id = hs.submit("test", "fake_work_units:9 fake_dirty:true", None);
+    let after_first = wait_segment_count(&hs, &job_id, 1);
+    assert_eq!(after_first["status"], "accepted");
+
+    // The job must auto-continue to completion: the Harness committed the
+    // model's in-flight work, so the next segment sees no drift.
+    let done = hs.poll(
+        &job_id,
+        |r| r["status"] == "completed" || r["status"] == "failed",
+        Duration::from_secs(30),
+    );
+    assert_eq!(done["status"], "completed", "in-flight work must not drift-fail");
+    let log = std::process::Command::new("git")
+        .args(["log", "--oneline"])
+        .current_dir(&hs.ws_root)
+        .output()
+        .unwrap();
+    let log = String::from_utf8_lossy(&log.stdout).to_string();
+    assert!(
+        log.contains("checkpoint:"),
+        "checkpoint commits must exist in git log: {log}"
+    );
+    let work = std::fs::read_to_string(hs.ws_root.join("model-work.txt"))
+        .unwrap_or_default();
+    assert!(
+        work.starts_with("segment "),
+        "model work file must be preserved by the checkpoint commits: {work:?}"
+    );
+    // Tree is clean after the final checkpoint commit.
+    let status = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(&hs.ws_root)
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&status.stdout).trim(),
+        "",
+        "working tree must be clean after checkpoint commits"
     );
 }
 

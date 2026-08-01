@@ -443,6 +443,8 @@ fn build_prompt(job: &Job, checkpoint: Option<&Checkpoint>) -> String {
          \"remaining_steps\": [...], \"last_test_result\": \"...\", \
          \"blocker\": \"...\", \"next_action\": \"...\"}}\n\
          - When all work is done, set remaining_steps to [].\n\
+         - The Harness automatically commits your in-flight changes at the end \
+         of each segment as a checkpoint commit; do not commit or push yourself.\n\
          - Keep all other output concise.",
         job.objective,
     )
