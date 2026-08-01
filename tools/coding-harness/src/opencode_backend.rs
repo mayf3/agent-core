@@ -48,14 +48,19 @@ impl EventMonitor {
         self.last_event_at.store(now_nanos(), Ordering::Relaxed);
         let event_type = event.get("type").and_then(Value::as_str).unwrap_or("");
         match event_type {
-            // One assistant message = one model round.
+            // One model generation step = one model round. opencode 1.17+
+            // emits `step_start`; older versions emitted `message` with
+            // role=assistant.
+            "step_start" => {
+                self.rounds.fetch_add(1, Ordering::Relaxed);
+            }
             "message" => {
                 if event.get("role").and_then(Value::as_str) == Some("assistant") {
                     self.rounds.fetch_add(1, Ordering::Relaxed);
                 }
             }
             // Tool executions / subagent work = tool calls.
-            "tool" | "agent" | "shell" => {
+            "tool_use" | "tool" | "agent" | "shell" => {
                 self.tools.fetch_add(1, Ordering::Relaxed);
             }
             _ => {
@@ -240,13 +245,21 @@ pub(super) fn run_segment(
     let rounds_used = monitor.rounds.load(Ordering::Relaxed);
     let tools_used = monitor.tools.load(Ordering::Relaxed);
 
+    // A budget kill (wall clock / rounds / tools / silence) or cancel is NOT
+    // a task failure: the segment is exhausted and the checkpoint drives the
+    // next segment. Only a natural nonzero exit is a hard failure.
     if exit_code != 0 {
-        return SegmentOutcome {
-            end: SegmentEnd::Failed(format!(
+        let end = if timed_out {
+            SegmentEnd::Exhausted(kill_reason)
+        } else {
+            SegmentEnd::Failed(format!(
                 "opencode_exit_{}: {}",
                 exit_code,
                 truncate_str(stderr_str.lines().last().unwrap_or(&stderr_str), 300)
-            )),
+            ))
+        };
+        return SegmentOutcome {
+            end,
             model_rounds_used: rounds_used,
             tool_calls_used: tools_used,
             wall_time_ms,
@@ -436,12 +449,19 @@ fn build_prompt(job: &Job, checkpoint: Option<&Checkpoint>) -> String {
 }
 
 /// Extract the trailing checkpoint JSON from segment output. Accepts bare
-/// JSON objects or ```json fenced blocks; the LAST valid object containing
-/// `remaining_steps` wins.
+/// JSON objects, JSON embedded in opencode `text` event parts (1.17+
+/// event stream), or ```json fenced blocks; the LAST valid object
+/// containing `remaining_steps` wins.
 fn parse_checkpoint(stdout: &str, workspace_root: &str) -> Option<Checkpoint> {
     let mut candidate: Option<Value> = None;
     let mut in_fence = false;
     let mut fenced = String::new();
+
+    let mut try_candidate = |v: &Value, candidate: &mut Option<Value>| {
+        if v.get("remaining_steps").is_some() {
+            *candidate = Some(v.clone());
+        }
+    };
 
     for raw_line in stdout.lines() {
         let line = raw_line.trim();
@@ -452,9 +472,7 @@ fn parse_checkpoint(stdout: &str, workspace_root: &str) -> Option<Checkpoint> {
             } else {
                 in_fence = false;
                 if let Ok(v) = serde_json::from_str::<Value>(&fenced) {
-                    if v.get("remaining_steps").is_some() {
-                        candidate = Some(v);
-                    }
+                    try_candidate(&v, &mut candidate);
                 }
             }
             continue;
@@ -464,9 +482,30 @@ fn parse_checkpoint(stdout: &str, workspace_root: &str) -> Option<Checkpoint> {
             continue;
         }
         if let Ok(v) = serde_json::from_str::<Value>(line) {
-            if v.get("remaining_steps").is_some() {
-                candidate = Some(v);
+            // New opencode event stream: the model's text (including a
+            // trailing checkpoint block) lives in `part.text`.
+            if v.get("type").and_then(Value::as_str) == Some("text") {
+                if let Some(text) = v.pointer("/part/text").and_then(Value::as_str) {
+                    if let Ok(embedded) = serde_json::from_str::<Value>(text.trim()) {
+                        try_candidate(&embedded, &mut candidate);
+                    } else {
+                        // Text may wrap the JSON in markdown fences or
+                        // prose: take the last balanced {...} block.
+                        if let Some(start) = text.rfind('{') {
+                            if let Some(end) = text.rfind('}') {
+                                if end > start {
+                                    if let Ok(v) =
+                                        serde_json::from_str::<Value>(&text[start..=end])
+                                    {
+                                        try_candidate(&v, &mut candidate);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
+            try_candidate(&v, &mut candidate);
         }
     }
 
@@ -540,6 +579,35 @@ fn parse_output(stdout: &str, objective: &str) -> (String, String, String, Strin
         if let Ok(event) = serde_json::from_str::<serde_json::Value>(trimmed) {
             if let Some(et) = event.get("type").and_then(|v| v.as_str()) {
                 match et {
+                    // opencode 1.17+ event stream.
+                    "text" => {
+                        if let Some(t) = event.pointer("/part/text").and_then(|v| v.as_str()) {
+                            summary = truncate_str(t, 200).to_string();
+                        }
+                    }
+                    "tool_use" => {
+                        if let Some(tool) = event.pointer("/part/tool").and_then(|v| v.as_str()) {
+                            if let Some(input) = event
+                                .pointer("/part/state/input/command")
+                                .and_then(|v| v.as_str())
+                            {
+                                test_command = truncate_str(input, 200).to_string();
+                            }
+                            if tool != "bash" {
+                                if let Some(path) = event
+                                    .pointer("/part/state/input/filePath")
+                                    .or_else(|| event.pointer("/part/state/input/file_path"))
+                                    .and_then(|v| v.as_str())
+                                {
+                                    if !changed_files.is_empty() {
+                                        changed_files.push_str(", ");
+                                    }
+                                    changed_files.push_str(path);
+                                }
+                            }
+                        }
+                    }
+                    // Legacy event stream.
                     "completion" | "result" | "done" => {
                         if let Some(c) = event.get("content").and_then(|v| v.as_str()) {
                             summary = truncate_str(c, 200).to_string();
@@ -566,16 +634,12 @@ fn parse_output(stdout: &str, objective: &str) -> (String, String, String, Strin
                             test_result = truncate_str(o, 200).to_string();
                         }
                     }
-                    "bash" | "tool_use" => {
-                        if let Some(cmd_name) = event.pointer("/tool").and_then(|v| v.as_str()) {
-                            if cmd_name == "bash" {
-                                if let Some(input) = event
-                                    .pointer("/state/input/command")
-                                    .and_then(|v| v.as_str())
-                                {
-                                    test_command = truncate_str(input, 200).to_string();
-                                }
-                            }
+                    "bash" => {
+                        if let Some(input) = event
+                            .pointer("/state/input/command")
+                            .and_then(|v| v.as_str())
+                        {
+                            test_command = truncate_str(input, 200).to_string();
                         }
                     }
                     _ => {}
@@ -736,6 +800,21 @@ mod tests {
     }
 
     #[test]
+    fn parse_checkpoint_extracts_from_text_event_part() {
+        // opencode 1.17+ wraps model text in `text` events; the checkpoint
+        // block may be the bare JSON or wrapped in markdown fences.
+        let stdout = r#"{"type":"step_start"}
+{"type":"text","part":{"type":"text","text":"Let me continue the work."}}
+{"type":"text","part":{"type":"text","text":"{\"findings\":\"f1\",\"completed_steps\":[\"a\"],\"remaining_steps\":[\"b\"],\"last_test_result\":\"ok\",\"blocker\":\"\",\"next_action\":\"n1\"}"}}
+{"type":"text","part":{"type":"text","text":"```json\n{\"findings\":\"f2\",\"completed_steps\":[\"a\",\"b\"],\"remaining_steps\":[],\"last_test_result\":\"ok\",\"blocker\":\"\",\"next_action\":\"done\"}\n```"}}
+"#;
+        let cp = parse_checkpoint(stdout, "/tmp/ws").unwrap();
+        assert_eq!(cp.findings, "f2", "last wrapped block must win");
+        assert!(cp.remaining_steps.is_empty());
+        assert_eq!(cp.completed_steps.len(), 2);
+    }
+
+    #[test]
     fn parse_checkpoint_none_when_missing() {
         assert!(parse_checkpoint("no json here\n", "/tmp/ws").is_none());
         assert!(
@@ -751,9 +830,10 @@ mod tests {
     fn monitor_counts_rounds_and_tools() {
         let monitor = EventMonitor::new();
         monitor.observe_event(&serde_json::json!({"type":"message","role":"assistant"}));
-        monitor.observe_event(&serde_json::json!({"type":"message","role":"assistant"}));
+        monitor.observe_event(&serde_json::json!({"type":"step_start"}));
+        monitor.observe_event(&serde_json::json!({"type":"tool_use","part":{"type":"tool","tool":"bash"}}));
         monitor.observe_event(&serde_json::json!({"type":"tool","tool_use":{}}));
         assert_eq!(monitor.rounds.load(Ordering::Relaxed), 2);
-        assert_eq!(monitor.tools.load(Ordering::Relaxed), 1);
+        assert_eq!(monitor.tools.load(Ordering::Relaxed), 2);
     }
 }
