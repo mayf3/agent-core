@@ -24,7 +24,7 @@ pub struct JournalStore {
 /// The schema `PRAGMA user_version` this kernel writes and understands. Bumped
 /// only when `migrations/` gains a new applied migration. The startup
 /// `migrate()` refuses to run against a DB whose version is newer than this.
-const CURRENT_SCHEMA_VERSION: i64 = 18;
+const CURRENT_SCHEMA_VERSION: i64 = 19;
 
 impl JournalStore {
     pub fn open(path: &Path) -> Result<Self> {
@@ -411,6 +411,7 @@ impl JournalStore {
                 "../../migrations/0017_generic_acceptance_receipts.sql"
             ))?;
             ensure_budget_columns(&conn)?;
+            ensure_registry_hook_bindings_table(&conn)?;
             super::queue::migrate(&conn)?;
             backfill_feishu_message_dedup(&conn)?;
             conn.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
@@ -517,6 +518,10 @@ impl JournalStore {
                 17 => {
                     ensure_budget_columns(&conn)?;
                     conn.pragma_update(None, "user_version", 18)?;
+                }
+                18 => {
+                    ensure_registry_hook_bindings_table(&conn)?;
+                    conn.pragma_update(None, "user_version", 19)?;
                 }
                 _ => break,
             }
@@ -635,6 +640,25 @@ pub(crate) fn ensure_budget_columns(conn: &Connection) -> Result<()> {
         if !exists {
             conn.execute_batch(&format!("ALTER TABLE runs ADD COLUMN {col} {decl};"))?;
         }
+    }
+    Ok(())
+}
+
+/// Idempotently add the registry budget hook binding columns to the
+/// `registry_snapshots` table. Same guard pattern as `ensure_budget_columns`;
+/// safe to re-run after a manual version downgrade + reopen.
+pub(crate) fn ensure_registry_hook_bindings_table(conn: &Connection) -> Result<()> {
+    let exists: bool = {
+        let mut stmt = conn.prepare(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='registry_snapshot_hook_bindings'",
+        )?;
+        let count: i64 = stmt.query_row([], |row| row.get(0))?;
+        count > 0
+    };
+    if !exists {
+        conn.execute_batch(include_str!(
+            "../../migrations/0019_registry_hook_bindings.sql"
+        ))?;
     }
     Ok(())
 }

@@ -132,6 +132,7 @@ fn test_snapshot(op: &str) -> crate::registry::snapshot::RegistrySnapshot {
                 binding_key: format!("builtin.{op}"),
             },
         ],
+        hook_bindings: crate::registry::store::builtin_hook_bindings(),
     }
 }
 
@@ -196,6 +197,7 @@ fn run_with_budget(
     let first = runtime
         .llm
         .complete(crate::llm::LlmInput {
+            timeout_override_ms: None,
             blocks: blocks.clone(),
             user_text: "test".into(),
             granted_operations: vec!["system.status".to_string()],

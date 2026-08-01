@@ -4,7 +4,9 @@ use super::trusted_capability_activation::TrustedDecisionIdentity;
 use crate::capabilities::store::Sha256Digest;
 use crate::domain::{JournalEventKind, RunId, SessionId};
 use crate::harness::manifest::HarnessManifest;
-use crate::registry::snapshot::{compute_snapshot_id, BindingKind, OperationSpec, Risk};
+use crate::registry::snapshot::{
+    compute_snapshot_id_with_hook_bindings, BindingKind, HookBinding, OperationSpec, Risk,
+};
 use anyhow::{bail, Result};
 use chrono::Utc;
 use rusqlite::{params, OptionalExtension, Transaction};
@@ -14,6 +16,45 @@ use std::collections::HashSet;
 pub(crate) struct RegistryActivation {
     pub previous_snapshot_id: String,
     pub new_snapshot_id: String,
+}
+
+/// Load the generic hook binding set persisted on a snapshot. Accepts a
+/// `Connection` or a `Transaction` (which derefs to `Connection`).
+pub(crate) fn load_active_hook_bindings(
+    conn: &rusqlite::Connection,
+    snapshot_id: &str,
+) -> Result<Vec<HookBinding>> {
+    let mut stmt = conn.prepare(
+        "SELECT contract, hook_id, hook_version, binding_kind, binding_key, provider_id, endpoint
+         FROM registry_snapshot_hook_bindings
+         WHERE snapshot_id = ?1
+         ORDER BY contract",
+    )?;
+    let rows = stmt.query_map(params![snapshot_id], |row| {
+        let contract: String = row.get(0)?;
+        let hook_id: String = row.get(1)?;
+        let hook_version: String = row.get(2)?;
+        let kind_str: String = row.get(3)?;
+        let binding_key: String = row.get(4)?;
+        let provider_id: String = row.get(5)?;
+        let endpoint: String = row.get(6)?;
+        let binding_kind = match kind_str.as_str() {
+            "Builtin" => BindingKind::Builtin,
+            "External" => BindingKind::External,
+            _ => BindingKind::Builtin,
+        };
+        Ok(HookBinding {
+            contract,
+            hook_id,
+            hook_version,
+            binding_kind,
+            binding_key,
+            provider_id,
+            endpoint,
+        })
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(anyhow::Error::from)
 }
 
 pub(crate) struct Binding {
@@ -71,6 +112,11 @@ pub(crate) struct Binding {
 /// Insert one immutable Registry Snapshot and make it active with the
 /// Registry's version CAS.  Every proposal activation path calls this core;
 /// callers remain responsible for their proposal/decision rows and events.
+///
+/// The new snapshot inherits the complete hook binding set of the currently
+/// active snapshot, falling back to the bootstrap binding set when the active
+/// snapshot has none. Activation never silently drops or switches hook
+/// identity.
 pub(crate) fn activate_registry_tx(
     tx: &Transaction<'_>,
     new_operations: &[OperationSpec],
@@ -92,7 +138,17 @@ pub(crate) fn activate_registry_tx(
         bail!("stale_expected_snapshot: has {active_snapshot_id} expected {expected_snapshot_id}");
     }
 
-    let snapshot_id = compute_snapshot_id(new_operations)?;
+    // Inherit the complete hook binding set from the active snapshot; fall
+    // back to the bootstrap set so activation never silently drops or
+    // switches hook identity.
+    let hook_bindings = load_active_hook_bindings(tx, &active_snapshot_id)?;
+    let hook_bindings = if hook_bindings.is_empty() {
+        crate::registry::store::builtin_hook_bindings()
+    } else {
+        hook_bindings
+    };
+
+    let snapshot_id = compute_snapshot_id_with_hook_bindings(new_operations, &hook_bindings)?;
     let created_at = Utc::now().to_rfc3339();
     tx.execute(
         "INSERT INTO registry_snapshots
@@ -122,6 +178,23 @@ pub(crate) fn activate_registry_tx(
                 op.idempotent as i64,
                 format!("{:?}", op.binding_kind),
                 op.binding_key,
+            ],
+        )?;
+    }
+    for b in &hook_bindings {
+        tx.execute(
+            "INSERT INTO registry_snapshot_hook_bindings
+             (snapshot_id,contract,hook_id,hook_version,binding_kind,binding_key,provider_id,endpoint)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+            params![
+                snapshot_id,
+                b.contract,
+                b.hook_id,
+                b.hook_version,
+                format!("{:?}", b.binding_kind),
+                b.binding_key,
+                b.provider_id,
+                b.endpoint,
             ],
         )?;
     }

@@ -3,9 +3,10 @@
 //! registry tables (migration 0002) store immutable snapshots that each Run
 //! pins to for its lifetime.
 use crate::registry::snapshot::{
-    compute_snapshot_id, BindingKind, OperationSpec, RegistrySnapshot, Risk,
+    compute_snapshot_id_with_hook_bindings, BindingKind, HookBinding, OperationSpec,
+    RegistrySnapshot, Risk,
 };
-use crate::registry::store::builtin_specs;
+use crate::registry::store::{builtin_hook_bindings, builtin_specs};
 use anyhow::{anyhow, bail, Result};
 use chrono::Utc;
 use rusqlite::params;
@@ -62,7 +63,24 @@ impl super::JournalStore {
                     // restart-safe PR3A control-operation seed below.
                 }
                 Ok(false) => {
-                    // No legacy time.now found — return the original.
+                    // No legacy time.now found. Still ensure the active
+                    // snapshot carries the bootstrap hook binding set
+                    // (pre-0019 databases predate the binding table).
+                    let active_id = self
+                        .current_snapshot_id
+                        .lock()
+                        .unwrap()
+                        .clone()
+                        .ok_or_else(|| anyhow!("registry_id_missing_after_upgrade"))?;
+                    let active = self.load_registry_snapshot(&active_id)?;
+                    match self.ensure_required_hook_bindings(&active) {
+                        Ok(true) => { /* upgrade activated a new snapshot */ }
+                        Ok(false) => { /* bindings already present */ }
+                        Err(e) => {
+                            self.refresh_cache_from_db()?;
+                            return Err(e);
+                        }
+                    }
                 }
                 Err(e) => {
                     // CAS conflict or other failure: refresh cache from DB.
@@ -140,7 +158,15 @@ impl super::JournalStore {
                 .ok_or_else(|| anyhow!("coding_control_spec_missing"))?;
             new_specs.push(control.clone());
         }
-        let new_snapshot = self.create_registry_snapshot(new_specs)?;
+        // Inherit the complete hook binding set (a pre-0019 legacy snapshot
+        // has none, in which case the bootstrap binding set is used).
+        let inherited = if current_snap.hook_bindings.is_empty() {
+            builtin_hook_bindings()
+        } else {
+            current_snap.hook_bindings.clone()
+        };
+        let new_snapshot =
+            self.create_registry_snapshot_with_hook_bindings(new_specs, inherited)?;
         let new_snapshot_id = new_snapshot.snapshot_id.clone();
         // Activate atomically with CAS + journal event.
         let old_id = &current_snap.snapshot_id;
@@ -151,6 +177,57 @@ impl super::JournalStore {
             old_id, new_snapshot_id
         );
         Ok(true)
+    }
+    /// Ensure the active snapshot carries the bootstrap hook binding set.
+    /// Pre-0019 databases (snapshots created before the binding table) load
+    /// with an empty `hook_bindings`; without the required binding, new Runs
+    /// fail closed for that contract. If missing, create a new snapshot with
+    /// the same operations + the bootstrap binding set and activate it
+    /// atomically (CAS + event). Returns true if an upgrade was performed.
+    fn ensure_required_hook_bindings(&self, current_snap: &Arc<RegistrySnapshot>) -> Result<bool> {
+        if !current_snap.hook_bindings.is_empty() {
+            return Ok(false);
+        }
+        let new_snapshot = self.create_registry_snapshot_with_hook_bindings(
+            current_snap.operations.clone(),
+            builtin_hook_bindings(),
+        )?;
+        let new_snapshot_id = new_snapshot.snapshot_id.clone();
+        let old_id = &current_snap.snapshot_id;
+        if new_snapshot_id == *old_id {
+            // Same ID but no bindings — should not happen (ID covers the
+            // binding set), but guard against a loop.
+            return Ok(false);
+        }
+        let decision_id = format!("hook_bindings_backfill:{}", old_id);
+        match self.activate_snapshot_transactional(
+            old_id,
+            &new_snapshot_id,
+            &decision_id,
+            "hook_bindings_backfill",
+        ) {
+            Ok(_) => {
+                eprintln!(
+                    "backfilled bootstrap hook bindings: {} -> {}",
+                    old_id, new_snapshot_id
+                );
+                Ok(true)
+            }
+            Err(cas_error) => {
+                self.refresh_cache_from_db().map_err(|refresh_error| {
+                    anyhow::anyhow!(
+                        "hook_bindings_backfill CAS conflict then cache refresh failure: {}; {}",
+                        cas_error.to_string().chars().take(80).collect::<String>(),
+                        refresh_error
+                            .to_string()
+                            .chars()
+                            .take(80)
+                            .collect::<String>(),
+                    )
+                })?;
+                Err(cas_error)
+            }
+        }
     }
     /// Atomically activate a retirement snapshot: CAS on registry_state,
     /// write RegistrySnapshotActivated journal event, update memory cache.
@@ -306,10 +383,32 @@ impl super::JournalStore {
             .clone()
             .ok_or_else(|| anyhow!("registry_snapshot_unavailable: no current registry snapshot"))
     }
-    /// Create (or return existing) an immutable snapshot from specs. If the same
-    /// canonical digest already exists, the existing snapshot is returned.
+    /// Create (or return existing) an immutable snapshot from specs with the
+    /// bootstrap hook binding set. If the same canonical digest already
+    /// exists, the existing snapshot is returned.
     pub fn create_registry_snapshot(&self, specs: Vec<OperationSpec>) -> Result<RegistrySnapshot> {
-        let snapshot_id = compute_snapshot_id(&specs)?;
+        self.create_registry_snapshot_with_hook_bindings(specs, builtin_hook_bindings())
+    }
+
+    /// Create (or return existing) an immutable snapshot from specs and an
+    /// explicit generic hook binding set. An empty set produces a snapshot
+    /// with no hook bindings — contracts fail closed for new Runs pinning to
+    /// it. If the same canonical digest already exists, the existing snapshot
+    /// is returned.
+    pub fn create_registry_snapshot_with_hook_bindings(
+        &self,
+        specs: Vec<OperationSpec>,
+        hook_bindings: Vec<HookBinding>,
+    ) -> Result<RegistrySnapshot> {
+        // A contract must be unique within a snapshot.
+        let mut seen = std::collections::HashSet::new();
+        if hook_bindings
+            .iter()
+            .any(|b| !seen.insert(b.contract.clone()))
+        {
+            bail!("registry_duplicate_hook_contract");
+        }
+        let snapshot_id = compute_snapshot_id_with_hook_bindings(&specs, &hook_bindings)?;
         let created_at = chrono::Utc::now();
         let conn = self
             .conn
@@ -328,7 +427,8 @@ impl super::JournalStore {
         }
         // Insert snapshot header.
         conn.execute(
-            "INSERT INTO registry_snapshots (snapshot_id, created_at, operation_count, canonical_digest)
+            "INSERT INTO registry_snapshots
+             (snapshot_id, created_at, operation_count, canonical_digest)
              VALUES (?1, ?2, ?3, ?4)",
             params![
                 &snapshot_id,
@@ -357,11 +457,30 @@ impl super::JournalStore {
                 ],
             )?;
         }
+        // Insert generic hook binding rows.
+        for b in &hook_bindings {
+            conn.execute(
+                "INSERT INTO registry_snapshot_hook_bindings
+                 (snapshot_id, contract, hook_id, hook_version, binding_kind, binding_key, provider_id, endpoint)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    &snapshot_id,
+                    &b.contract,
+                    &b.hook_id,
+                    &b.hook_version,
+                    format!("{:?}", b.binding_kind),
+                    &b.binding_key,
+                    &b.provider_id,
+                    &b.endpoint,
+                ],
+            )?;
+        }
         drop(conn);
         Ok(RegistrySnapshot {
             snapshot_id,
             created_at,
             operations: sorted,
+            hook_bindings,
         })
     }
     /// Load a snapshot by ID. Returns an Arc for cheap Run-local cloning.
@@ -439,10 +558,44 @@ impl super::JournalStore {
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
+        // Load the generic hook binding set from the sub-table.
+        let hook_bindings: Vec<HookBinding> = {
+            let mut stmt = conn.prepare(
+                "SELECT contract, hook_id, hook_version, binding_kind, binding_key, provider_id, endpoint
+                 FROM registry_snapshot_hook_bindings
+                 WHERE snapshot_id = ?1
+                 ORDER BY contract",
+            )?;
+            let rows = stmt.query_map(params![snapshot_id], |row| {
+                let contract: String = row.get(0)?;
+                let hook_id: String = row.get(1)?;
+                let hook_version: String = row.get(2)?;
+                let kind_str: String = row.get(3)?;
+                let binding_key: String = row.get(4)?;
+                let provider_id: String = row.get(5)?;
+                let endpoint: String = row.get(6)?;
+                let binding_kind = match kind_str.as_str() {
+                    "Builtin" => BindingKind::Builtin,
+                    "External" => BindingKind::External,
+                    _ => BindingKind::Builtin,
+                };
+                Ok(HookBinding {
+                    contract,
+                    hook_id,
+                    hook_version,
+                    binding_kind,
+                    binding_key,
+                    provider_id,
+                    endpoint,
+                })
+            })?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        };
         Ok(RegistrySnapshot {
             snapshot_id: snapshot_id.to_string(),
             created_at,
             operations,
+            hook_bindings,
         })
     }
     /// Activate a snapshot as current (for new Runs). Internal/test-only.

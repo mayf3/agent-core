@@ -70,6 +70,59 @@ impl OperationSpec {
     }
 }
 
+/// The contract name of a hook binding. A `HookBinding` is selected by its
+/// `contract` — the Kernel resolves the exact binding for a lifecycle point
+/// and fails closed when the contract is missing or duplicated.
+pub const BUDGET_HOOK_CONTRACT: &str = "run.budget.resolve.v0";
+
+/// A generic hook binding frozen into a Registry Snapshot. One binding per
+/// `contract` (enforced at creation); a snapshot without the binding a
+/// lifecycle point requires fails closed for new Runs.
+///
+/// `provider_id` / `endpoint` are transport facts owned by the snapshot.
+/// The shared secret is NEVER stored here — it lives in the Kernel's local
+/// config (env) keyed by `provider_id`, so a snapshot can't leak credentials
+/// and env changes can't silently switch hook identity.
+///
+/// New hook contracts (e.g. `context.prepare.v0`) can be added as plain data
+/// values without changing this struct or the database schema.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HookBinding {
+    /// The hook contract this binding serves, e.g. `run.budget.resolve.v0`.
+    pub contract: String,
+    /// Stable hook identity, e.g. `builtin:run-budget-default-v0`.
+    pub hook_id: String,
+    /// Hook contract version, e.g. `v0`.
+    pub hook_version: String,
+    /// How the hook is implemented. `Builtin` = the Kernel's default decision
+    /// function; `External` = an HTTP endpoint resolved from `endpoint`.
+    pub binding_kind: BindingKind,
+    /// Stable handler key (never a function pointer or process handle).
+    pub binding_key: String,
+    /// Trusted identity for an External binding; empty for Builtin.
+    pub provider_id: String,
+    /// HTTP(S) endpoint for an External binding; empty for Builtin.
+    pub endpoint: String,
+}
+
+impl HookBinding {
+    /// The canonical budget hook binding registered in every bootstrap
+    /// snapshot. The Kernel's default decision function is the `Builtin`
+    /// implementation of this binding — an ordinary registered artifact,
+    /// not a parallel strategy path.
+    pub fn builtin_budget() -> Self {
+        Self {
+            contract: BUDGET_HOOK_CONTRACT.to_string(),
+            hook_id: "builtin:run-budget-default-v0".to_string(),
+            hook_version: "v0".to_string(),
+            binding_kind: BindingKind::Builtin,
+            binding_key: "builtin.run_budget_default".to_string(),
+            provider_id: String::new(),
+            endpoint: String::new(),
+        }
+    }
+}
+
 /// An immutable snapshot of the operation registry at a point in time. Each Run
 /// pins to one snapshot; Context, Provider tools, and Gateway validation all
 /// read from that pinned snapshot, so activating a new version mid-Run does not
@@ -79,6 +132,11 @@ pub struct RegistrySnapshot {
     pub snapshot_id: String,
     pub created_at: DateTime<Utc>,
     pub operations: Vec<OperationSpec>,
+    /// The generic hook bindings frozen into this snapshot, one per contract.
+    /// The Kernel resolves the binding for a lifecycle point by `contract` and
+    /// fails closed when the contract is missing or duplicated.
+    #[serde(default)]
+    pub hook_bindings: Vec<HookBinding>,
 }
 
 impl RegistrySnapshot {
@@ -88,6 +146,21 @@ impl RegistrySnapshot {
             snapshot_id: String::new(),
             created_at: Utc::now(),
             operations: vec![],
+            hook_bindings: vec![],
+        }
+    }
+
+    /// Resolve the unique binding for a hook contract. Fails closed when the
+    /// contract is missing or has more than one binding.
+    pub fn hook_binding(&self, contract: &str) -> Option<&HookBinding> {
+        let matches: Vec<&HookBinding> = self
+            .hook_bindings
+            .iter()
+            .filter(|b| b.contract == contract)
+            .collect();
+        match matches.len() {
+            1 => Some(matches[0]),
+            _ => None,
         }
     }
     /// Look up an operation by name.
@@ -135,11 +208,18 @@ impl RegistrySnapshot {
     }
 }
 
-/// Compute a deterministic snapshot ID from the operation specs.
-/// The input is canonicalized: operations sorted by name, using a deterministic
-/// JSON representation that excludes `created_at`, memory addresses, and random
-/// values. Two spec sets with the same operations produce the same ID.
-pub fn compute_snapshot_id(specs: &[OperationSpec]) -> Result<String> {
+/// Compute a deterministic snapshot ID from the operation specs and the
+/// snapshot's budget hook binding. The input is canonicalized: operations
+/// sorted by name, using a deterministic JSON representation that excludes
+/// `created_at`, memory addresses, and random values. Two spec sets with the
+/// same operations AND the same hook bindings produce the same ID — changing
+/// any binding (or adding a new contract) produces a new snapshot ID. The
+/// binding set is canonicalized by sorting on `contract`, so storage order
+/// never affects the digest.
+pub fn compute_snapshot_id_with_hook_bindings(
+    specs: &[OperationSpec],
+    hook_bindings: &[HookBinding],
+) -> Result<String> {
     let mut sorted: Vec<&OperationSpec> = specs.iter().collect();
     sorted.sort_by(|a, b| a.name.cmp(&b.name));
     let mut canonical: BTreeMap<String, serde_json::Value> = BTreeMap::new();
@@ -156,6 +236,30 @@ pub fn compute_snapshot_id(specs: &[OperationSpec]) -> Result<String> {
             }),
         );
     }
+    // Generic hook bindings: sorted by contract, included under a stable key.
+    let mut sorted_bindings: Vec<&HookBinding> = hook_bindings.iter().collect();
+    sorted_bindings.sort_by(|a, b| a.contract.cmp(&b.contract));
+    if !sorted_bindings.is_empty() {
+        canonical.insert(
+            "__hook_bindings".to_string(),
+            serde_json::Value::Array(
+                sorted_bindings
+                    .iter()
+                    .map(|b| {
+                        serde_json::json!({
+                            "contract": b.contract,
+                            "hook_id": b.hook_id,
+                            "hook_version": b.hook_version,
+                            "binding_kind": format!("{:?}", b.binding_kind),
+                            "binding_key": b.binding_key,
+                            "provider_id": b.provider_id,
+                            "endpoint": b.endpoint,
+                        })
+                    })
+                    .collect(),
+            ),
+        );
+    }
     let canonical_json = serde_json::to_string(&serde_json::Value::Object(
         canonical
             .into_iter()
@@ -168,6 +272,13 @@ pub fn compute_snapshot_id(specs: &[OperationSpec]) -> Result<String> {
     Ok(format!("snap_{digest}"))
 }
 
+/// Backward-compatible wrapper: computes the snapshot ID without hook
+/// bindings. Kept for call sites that predate the binding field; all
+/// Registry creation paths must use `compute_snapshot_id_with_hook_bindings`.
+pub fn compute_snapshot_id(specs: &[OperationSpec]) -> Result<String> {
+    compute_snapshot_id_with_hook_bindings(specs, &[])
+}
+
 /// Build a test snapshot from the builtin specs. Available in all build profiles
 /// so integration tests can use it without constructing one manually.
 pub fn test_snapshot() -> RegistrySnapshot {
@@ -177,6 +288,7 @@ pub fn test_snapshot() -> RegistrySnapshot {
         snapshot_id: "snap_test_default".to_string(),
         created_at: chrono::Utc::now(),
         operations,
+        hook_bindings: vec![HookBinding::builtin_budget()],
     }
 }
 
@@ -244,6 +356,7 @@ mod tests {
                     binding_key: "external.key".into(),
                 },
             ],
+            hook_bindings: vec![],
         };
         let tools = snap.provider_tools_for_grants(&[
             "system.status".to_string(),
@@ -268,6 +381,7 @@ mod tests {
             snapshot_id: "snap_test".into(),
             created_at: Utc::now(),
             operations: vec![spec("system.status", Risk::ReadOnly)],
+            hook_bindings: vec![],
         };
         let text = snap.catalog_for_context_grants(&["system.status".to_string()]);
         assert!(text.contains("system.status"));

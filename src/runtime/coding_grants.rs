@@ -113,6 +113,7 @@ mod tests {
                 external_spec("external.deploy_anything", Risk::Write),
                 external_spec("external.write_file_via_new_name", Risk::Write),
             ],
+            hook_bindings: vec![], // coding-grant tests do not resolve budgets
         };
 
         // Non-owner: no grants.
@@ -140,6 +141,7 @@ mod tests {
                 external_spec("external.hotload_probe", Risk::Write),
                 external_spec("external.time_now", Risk::ReadOnly),
             ],
+            hook_bindings: vec![], // coding-grant tests do not resolve budgets
         };
 
         let mut principal = owner_principal();
@@ -166,6 +168,7 @@ mod tests {
                 external_spec(external::TASK_STATUS, Risk::ReadOnly),
                 external_spec(external::CAPABILITY_PROPOSE, Risk::Write),
             ],
+            hook_bindings: vec![], // coding-grant tests do not resolve budgets
         };
 
         let mut principal = owner_principal();
@@ -195,6 +198,7 @@ mod tests {
                 external_spec(external::TASK_SUBMIT, Risk::Write),
                 external_spec(external::CAPABILITY_PROPOSE, Risk::Write),
             ],
+            hook_bindings: vec![], // coding-grant tests do not resolve budgets
         };
 
         let mut principal = non_owner_principal();

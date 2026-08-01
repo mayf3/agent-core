@@ -53,6 +53,13 @@ pub struct LlmInput {
     /// An empty vec means first round. The vec is ordered chronologically
     /// by round (index 0 = first tool round).
     pub follow_ups: Vec<LlmFollowUp>,
+    /// Run-deadline-relative invocation timeout override, in milliseconds.
+    /// Set by the Runtime before each call to the effective remaining Run
+    /// budget (never larger than the client's own fixed timeout). Network
+    /// clients honour `min(self.timeout, override)`. `None` = use the
+    /// client's default timeout.
+    #[serde(default)]
+    pub timeout_override_ms: Option<u64>,
 }
 
 pub struct LlmOutput {
@@ -332,8 +339,15 @@ impl OpenAiCompatibleLlm {
         input: &LlmInput,
     ) -> std::result::Result<LlmOutput, String> {
         let (body, tool_name_mode) = materialized_request_body(endpoint, input);
+        // Effective timeout = min(client fixed timeout, Run-deadline override).
+        // The override is set by the Runtime to the remaining Run budget so an
+        // in-flight model call cannot outlive the Run deadline.
+        let effective_timeout = input
+            .timeout_override_ms
+            .map(|override_ms| self.timeout.min(Duration::from_millis(override_ms)))
+            .unwrap_or(self.timeout);
         let agent = ureq::Agent::config_builder()
-            .timeout_global(Some(self.timeout))
+            .timeout_global(Some(effective_timeout))
             .build()
             .new_agent();
         let response = agent
