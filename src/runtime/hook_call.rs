@@ -414,6 +414,46 @@ impl<L: crate::llm::LlmClient + 'static> super::Runtime<L> {
         }
     }
 
+    /// Continuation Run creation (High 1): the next Run INHERITS the trigger
+    /// Run's FROZEN governance facts — agent_id, registry_snapshot_id, and the
+    /// already-frozen principal/grants — instead of re-deriving them from the
+    /// current KernelConfig or the current registry snapshot. A continuation
+    /// must never silently change Agent, tool versions, or permissions.
+    ///
+    /// This is a NARROW internal entry for the same-session continuation path
+    /// only; the ordinary ingress path keeps using `create_run` /
+    /// `create_run_with_principal` unchanged.
+    pub(crate) fn create_run_frozen(
+        &self,
+        session: &Session,
+        trigger: &Run,
+        event_id: &EventId,
+        next_run_id: &RunId,
+        snapshot_id: &str,
+    ) -> Run {
+        let now = Utc::now();
+        Run {
+            id: next_run_id.clone(),
+            session_id: session.id.clone(),
+            agent_id: trigger.agent_id.clone(),
+            trigger_event_id: event_id.clone(),
+            principal: trigger.principal.clone(),
+            parent_run_id: Some(trigger.id.clone()),
+            delegated_by: None,
+            status: RunStatus::Running,
+            created_at: now,
+            updated_at: now,
+            registry_snapshot_id: snapshot_id.to_string(),
+            mode: RunMode::Default,
+            budget_hook_id: None,
+            budget_hook_version: None,
+            budget_decision_digest: None,
+            budget_max_tool_rounds: None,
+            budget_max_wall_time_ms: None,
+            budget_exhaustion_action: None,
+        }
+    }
+
     pub(crate) fn reply_intent(
         &self,
         run: &Run,

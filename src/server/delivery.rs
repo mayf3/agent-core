@@ -150,7 +150,8 @@ fn deliver_worker_event(
 /// Kernel loads the generic `SessionContinuationRequested` fact, recovers the
 /// trigger Run's session/principal/registry snapshot from its own records (the
 /// external Harness is never the source of identity/routing/session facts),
-/// and schedules the next Run through the shared internal scheduling path.
+/// and schedules the next Run with the PRE-ALLOCATED next_run_id from the
+/// continuation ledger (High 4 — the ledger is the single trusted fact).
 fn deliver_continuation_worker_event(
     config: KernelConfig,
     journal: &JournalStore,
@@ -170,6 +171,14 @@ fn deliver_continuation_worker_event(
     );
     if trigger_run_id.0.is_empty() {
         anyhow::bail!("continuation_request_missing_trigger_run");
+    }
+    // High 4: the ledger is the single trusted fact. It carries the
+    // PRE-ALLOCATED next_run_id — the worker never generates a Run id itself.
+    let (_, next_run_id) = journal
+        .continuation_by_trigger_run(&trigger_run_id)?
+        .ok_or_else(|| anyhow::anyhow!("continuation_ledger_missing"))?;
+    if next_run_id.is_empty() {
+        anyhow::bail!("continuation_next_run_id_missing");
     }
     let trigger = journal
         .run_by_id(&trigger_run_id)?
@@ -199,6 +208,7 @@ fn deliver_continuation_worker_event(
         &trigger,
         &session,
         &trigger_run_id,
+        &RunId(next_run_id),
     )?;
     Ok(())
 }

@@ -49,6 +49,9 @@ mod external_harness_transport;
 #[path = "tests/recall_audit.rs"]
 mod recall_audit;
 #[cfg(test)]
+#[path = "tests/continuation_worker_idempotent.rs"]
+mod continuation_worker_idempotent;
+#[cfg(test)]
 #[path = "tests/recall_isolation.rs"]
 mod recall_isolation;
 #[cfg(test)]
@@ -400,7 +403,7 @@ where
             output: reply_text,
         })
     }
-    /// Same-session continuation scheduling (Bootstrap V0, High 2).
+    /// Same-session continuation scheduling (Bootstrap V0, High 2 + High 1).
     ///
     /// Called by the worker for a `schedule_continuation` job after an
     /// authorized external Agent Loop Harness requested the next Run in the
@@ -409,8 +412,13 @@ where
     /// "user: 继续" — the model continues from the session's accumulated
     /// context (prior turns, tool results, compaction).
     ///
-    /// Identity/routing/session facts are recovered from the Kernel's OWN
-    /// records (the trigger Run + its session), never from the Harness.
+    /// High 1: the next Run INHERITS the trigger Run's FROZEN governance
+    /// facts — `trigger.agent_id`, `trigger.registry_snapshot_id` (and the
+    /// fixed Registry Snapshot loaded from it), and the already-frozen
+    /// `trigger.principal` / grants. Current KernelConfig / current snapshot
+    /// changes never affect a continuation. `next_run_id` is PRE-ALLOCATED in
+    /// the continuation ledger (High 4) and used as-is; the worker never
+    /// generates a Run id itself.
     pub(crate) fn schedule_run_for_existing_session(
         &self,
         journal: &JournalStore,
@@ -418,28 +426,42 @@ where
         trigger: &Run,
         session: &Session,
         trigger_run_id: &RunId,
+        next_run_id: &RunId,
     ) -> Result<RuntimeOutcome> {
-        let snapshot_id = journal
-            .current_registry_snapshot_id()
-            .map_err(|e| anyhow::anyhow!("registry_snapshot_unavailable: {e}"))?;
-        if snapshot_id.is_empty() {
-            anyhow::bail!("registry_snapshot_invalid: snapshot ID is empty");
+        // High 1: the fixed Registry Snapshot pinned by the trigger Run —
+        // never the current one.
+        if trigger.registry_snapshot_id.is_empty() {
+            anyhow::bail!("trigger_run_registry_snapshot_invalid");
         }
         let snapshot = journal
-            .load_registry_snapshot(&snapshot_id)
+            .load_registry_snapshot(&trigger.registry_snapshot_id)
             .map_err(|e| anyhow::anyhow!("registry_snapshot_unavailable: {e}"))?;
+        // High 4: worker idempotency — the pre-allocated Run may already exist
+        // (crash after Run creation before worker ack, or worker re-lease). If
+        // it exists with consistent facts, treat it as success; conflicting
+        // facts fail closed.
+        if let Some(existing) = journal.run_by_id(next_run_id)? {
+            if existing.session_id != session.id
+                || existing.registry_snapshot_id != trigger.registry_snapshot_id
+            {
+                anyhow::bail!("continuation_run_conflict");
+            }
+            return Ok(RuntimeOutcome {
+                run_id: existing.id,
+                session_id: session.id.clone(),
+                output: String::new(),
+            });
+        }
         // The continuation is a NEW governance event: it is NOT the trigger
         // Run's event and NOT a user message. It only carries the fact that an
         // authorized caller asked for the next Run in the same session.
         let continuation_event_id = EventId::new();
-        let run = self.create_run_with_principal(
-            journal,
+        let run = self.create_run_frozen(
             session,
+            trigger,
             &continuation_event_id,
-            &trigger.principal,
-            trigger_chat_type(session),
-            &snapshot_id,
-            &snapshot,
+            next_run_id,
+            &trigger.registry_snapshot_id,
         );
         let budget = match self.resolve_run_budget(journal, &run, session, &snapshot) {
             Ok(b) => b,
@@ -470,9 +492,6 @@ where
                 "continuation_of": trigger_run_id.0,
             }),
         )?;
-        // Backfill the continuation ledger: the duplicate-request response
-        // must be able to report the SAME next_run_id for this trigger.
-        journal.record_continuation_next_run(trigger_run_id, &run.id)?;
 
         let granted_operations: Vec<String> = run
             .principal
@@ -637,19 +656,3 @@ fn apply_pending_proposal_presentation(
     Ok(())
 }
 
-/// Recover the chat_type of the session's channel for grant derivation. The
-/// session's conversation_key encodes the Feishu shape deterministically
-/// (`feishu:open_id:` = p2p, `feishu:chat_id:` = group). A continuation reuses
-/// the trigger Run's session — never Harness-supplied identity.
-fn trigger_chat_type(session: &Session) -> Option<&'static str> {
-    match session.channel {
-        ChannelKind::Cli => None,
-        ChannelKind::Feishu => {
-            if session.conversation_key.starts_with("feishu:open_id:") {
-                Some("p2p")
-            } else {
-                Some("group")
-            }
-        }
-    }
-}
