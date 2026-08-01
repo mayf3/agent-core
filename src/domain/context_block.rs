@@ -23,4 +23,7 @@ pub enum ContextBlockKind {
     ActiveSkill,
     RecentMessages,
     UserMessage,
+    /// The agent's per-agent workspace directory listing. Lets the model see
+    /// which workspace files exist for the current `agent_id`.
+    WorkspaceRoot,
 }
