@@ -381,7 +381,7 @@ fn handle_session_continuation(
     };
     let trigger_run_id = continuation.trigger_run_id.clone();
     match gateway.request_session_continuation(journal, &continuation) {
-        Ok(Some(request_id)) => write_json(
+        Ok(Some((request_id, next_run_id))) => write_json(
             stream,
             200,
             json!({
@@ -389,13 +389,14 @@ fn handle_session_continuation(
                 "status": "accepted",
                 "request_id": request_id,
                 "trigger_run_id": trigger_run_id,
+                "next_run_id": next_run_id,
                 "duplicate": false,
             }),
         ),
         Ok(None) => {
-            // Duplicate trigger: report the already-scheduled continuation and
-            // its next_run_id (when the worker has already created it) so the
-            // caller can converge on the SAME result.
+            // Duplicate trigger: the ledger is the single trusted fact — it
+            // already carries the PRE-ALLOCATED next_run_id, so the duplicate
+            // response returns it IMMEDIATELY (no waiting for the worker).
             let existing = journal.continuation_by_trigger_run(&RunId(trigger_run_id.clone()))?;
             match existing {
                 Some((event_id, next_run_id)) => write_json(

@@ -23,8 +23,13 @@
 //! The harness talks to the Kernel ONLY over HTTP (it is compiled as an
 //! independent crate with no kernel dependency).
 
+use agent_core_kernel::domain::{
+    AgentId, CapabilityGrant, ChannelKind, EventId, PrincipalId, PrincipalSource,
+    PrincipalSubject, Run, RunId, RunMode, RunPrincipal, RunStatus, SessionTarget,
+};
+use agent_core_kernel::journal::JournalStore;
 use agent_core_kernel::server::serve_with_running;
-use agent_core_kernel::{config::KernelConfig, domain::AgentId};
+use agent_core_kernel::config::KernelConfig;
 use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -796,9 +801,15 @@ fn waiting_user_never_continues() {
     let _ = handle.approval_expiry.join();
 }
 
-/// Acceptance: the SAME trigger Run can only ever be continued ONCE,
-/// regardless of idempotency_key, concurrency, or Harness state loss
-/// (UNIQUE(trigger_run_id) in the Kernel).
+/// Acceptance: the SAME trigger Run can only ever be continued ONCE, and the
+/// ledger is the single trusted fact (High 4):
+/// - strict deterministic key validation (idempotency_key must equal
+///   "continuation:" + trigger_run_id; anything else is REJECTED before any
+///   event/ledger/worker job is created);
+/// - next_run_id is PRE-ALLOCATED at acceptance, so a duplicate request
+///   IMMEDIATELY returns the same next_run_id;
+/// - concurrency, different keys, and Harness state loss all converge on one
+///   next Run.
 #[test]
 fn duplicate_continuation_is_idempotent() {
     let llm = StubLlm::start(1_000_000);
@@ -842,7 +853,8 @@ fn duplicate_continuation_is_idempotent() {
         std::thread::sleep(Duration::from_millis(200));
     };
 
-    // Narrow contract: the Harness identifies ONLY the trigger Run.
+    // Narrow contract: the Harness identifies ONLY the trigger Run, with the
+    // strictly-validated deterministic key.
     let body = json!({
         "trigger_run_id": run_id,
         "expected_session_id": session_id,
@@ -851,13 +863,22 @@ fn duplicate_continuation_is_idempotent() {
     let first = kernel.post("/v1/session-continuation", &body);
     assert_eq!(first["ok"], json!(true), "first accepted: {first}");
     assert_eq!(first["duplicate"], json!(false));
+    let first_next_run_id = first["next_run_id"].as_str().unwrap_or("").to_string();
+    assert!(!first_next_run_id.is_empty(), "next_run_id pre-allocated");
 
-    // Same trigger, SAME key → duplicate, no second next Run.
+    // Same trigger, SAME key → duplicate, IMMEDIATELY returns the SAME
+    // pre-allocated next_run_id (no waiting for the worker).
     let second = kernel.post("/v1/session-continuation", &body);
     assert_eq!(second["ok"], json!(true), "same-key duplicate accepted: {second}");
     assert_eq!(second["duplicate"], json!(true), "same-key must be duplicate");
+    assert_eq!(
+        second["next_run_id"].as_str().unwrap_or(""),
+        first_next_run_id,
+        "SAME_TRIGGER_SAME_KEY_NEXT_RUN_COUNT=1 — same next_run_id"
+    );
 
-    // Same trigger, DIFFERENT key → still duplicate (UNIQUE(trigger_run_id)).
+    // Same trigger, DIFFERENT key → REJECTED (strict key validation), no
+    // second next Run and no new governance facts.
     let different_key = json!({
         "trigger_run_id": run_id,
         "expected_session_id": session_id,
@@ -865,38 +886,61 @@ fn duplicate_continuation_is_idempotent() {
     });
     let third = kernel.post("/v1/session-continuation", &different_key);
     assert_eq!(
-        third["ok"], json!(true),
-        "different-key duplicate accepted: {third}"
+        third["ok"], json!(false),
+        "SAME_TRIGGER_DIFFERENT_KEY_NEXT_RUN_COUNT=1 — different key must be rejected: {third}"
     );
+    assert_eq!(third["http_status"], json!(400));
+
+    // Different trigger reusing a WRONG key (key belongs to another trigger)
+    // → rejected, and NO governance event / worker job / ledger row is created.
+    let other_trigger = json!({
+        "trigger_run_id": "run_some_other_trigger",
+        "expected_session_id": session_id,
+        "idempotency_key": "continuation:".to_string() + &run_id, // key of run_id, not this trigger
+    });
+    let cross = kernel.post("/v1/session-continuation", &other_trigger);
     assert_eq!(
-        third["duplicate"], json!(true),
-        "SAME_TRIGGER_DIFFERENT_KEYS_NEXT_RUN_COUNT=1 — different key must still be duplicate"
+        cross["ok"], json!(false),
+        "CROSS_TRIGGER_KEY_COLLISION — wrong key must be rejected: {cross}"
+    );
+    assert_eq!(cross["http_status"], json!(400));
+    let cross_events = kernel
+        .all_events()
+        .into_iter()
+        .filter(|e| e["event_kind"] == json!("SessionContinuationRequested"))
+        .count();
+    assert_eq!(
+        cross_events, 1,
+        "CROSS_TRIGGER_KEY_COLLISION_EVENT_COUNT=1 (only the original request)"
     );
 
-    // Concurrent requests (two threads, same trigger) → still one next Run.
+    // Concurrent requests (two threads, same trigger, SAME valid key) → both
+    // responses carry the SAME next_run_id; exactly one creates.
     let kernel_a = HttpKernel::new(handle.port, "test-token");
     let kernel_b = HttpKernel::new(handle.port, "test-token");
     let run_id_a = run_id.clone();
     let session_id_a = session_id.clone();
+    let key_a = format!("continuation:{run_id_a}");
     let t1 = std::thread::spawn(move || {
         kernel_a.post(
             "/v1/session-continuation",
             &json!({
                 "trigger_run_id": run_id_a,
                 "expected_session_id": session_id_a,
-                "idempotency_key": "concurrent-a",
+                "idempotency_key": key_a,
             }),
         )
     });
     let run_id_b = run_id.clone();
     let session_id_b = session_id.clone();
+    let key_b = format!("continuation:{run_id_b}");
     let t2 = std::thread::spawn(move || {
         kernel_b.post(
             "/v1/session-continuation",
             &json!({
                 "trigger_run_id": run_id_b,
                 "expected_session_id": session_id_b,
-                "idempotency_key": "concurrent-b",
+                "idempotency_key": key_b,
             }),
         )
     });
@@ -908,22 +952,41 @@ fn duplicate_continuation_is_idempotent() {
         r1["duplicate"] == json!(true) || r2["duplicate"] == json!(true),
         "exactly one of the concurrent requests may create the continuation: A={r1} B={r2}"
     );
+    assert_eq!(
+        r1["next_run_id"].as_str().unwrap_or(""),
+        first_next_run_id,
+        "CONCURRENT_NEXT_RUN_IDS — A converges on the same next_run_id"
+    );
+    assert_eq!(
+        r2["next_run_id"].as_str().unwrap_or(""),
+        first_next_run_id,
+        "CONCURRENT_NEXT_RUN_IDS — B converges on the same next_run_id"
+    );
 
-    // Exactly ONE next Run appears (the first continuation), never more.
+    // Exactly ONE next Run appears, with the pre-allocated id.
     std::thread::sleep(Duration::from_secs(2));
     let runs = kernel
         .all_events()
         .into_iter()
         .filter(|e| e["event_kind"] == json!("RunStarted"))
-        .count();
-    assert_eq!(runs, 2, "one trigger Run creates exactly one next Run");
+        .collect::<Vec<_>>();
+    assert_eq!(runs.len(), 2, "one trigger Run creates exactly one next Run");
+    assert!(
+        runs.iter().any(|e| e["run_id"].as_str() == Some(first_next_run_id.as_str())),
+        "the next Run uses the PRE-ALLOCATED next_run_id {first_next_run_id}"
+    );
 
-    // STATE_LOSS_DUPLICATE_PROTECTED: delete the Harness state and re-observe —
-    // the Kernel's UNIQUE(trigger_run_id) still blocks a second continuation.
+    // STATE_LOSS_DUPLICATE_PROTECTED: repeat after state loss still returns
+    // the SAME next_run_id and creates nothing new.
     let duplicate_after = kernel.post("/v1/session-continuation", &body);
     assert_eq!(
         duplicate_after["duplicate"], json!(true),
         "STATE_LOSS_DUPLICATE_PROTECTED=true — repeat after state loss still duplicate"
+    );
+    assert_eq!(
+        duplicate_after["next_run_id"].as_str().unwrap_or(""),
+        first_next_run_id,
+        "STATE_LOSS_NEXT_RUN_COUNT=1 — same next_run_id after state loss"
     );
 
     running.store(false, Ordering::SeqCst);
@@ -1017,6 +1080,165 @@ fn harness_restart_does_not_reprocess() {
     assert_eq!(before, after, "restart must not reprocess resolved runs: {before} → {after}");
 
     stop2.store(true, Ordering::SeqCst);
+    running.store(false, Ordering::SeqCst);
+    let _ = handle.accept_loop.join();
+    let _ = handle.worker.join();
+    let _ = handle.outbox_dispatcher.join();
+    let _ = handle.approval_expiry.join();
+}
+
+/// High 1: the next Run must INHERIT the trigger Run's FROZEN governance facts
+/// (agent_id, registry_snapshot_id, principal/grants) even when the current
+/// KernelConfig or the current registry snapshot changes between them.
+#[test]
+fn continuation_inherits_trigger_frozen_facts() {
+    // The Kernel server runs with agent_id "agent-current" — deliberately
+    // DIFFERENT from the trigger Run's frozen agent_id, to prove the
+    // continuation does not re-read the current config.
+    let llm = StubLlm::start(1_000_000);
+    let connector = StubConnector::start();
+    let db = tmp_db_path("frozen-facts");
+    let mut config = test_config(&db, &llm.base_url(), &connector.url());
+    config.agent_id = AgentId("agent-current".to_string());
+    let running = Arc::new(AtomicBool::new(true));
+    let handle = serve_with_running(config, Arc::clone(&running)).expect("kernel starts");
+    let kernel = HttpKernel::new(handle.port, "test-token");
+
+    // Seed a trigger Run with frozen facts DIFFERENT from the current config
+    // (agent_id "agent-A" vs the server's "agent-current"), pinned to the
+    // snapshot that is current AT SEED TIME. After seeding, we ACTIVATE a NEW
+    // snapshot so the "current" snapshot changes — the continuation must still
+    // use the trigger Run's FROZEN snapshot.
+    let (frozen_snap, trigger_session_id) = {
+        let journal = JournalStore::open(&db).unwrap();
+        // Load the registry cache (initialize_registry is idempotent).
+        journal.initialize_registry().unwrap();
+        let current_snap = journal.current_registry_snapshot_id().unwrap();
+        // Activate a NEW snapshot (with one extra operation) so the "current"
+        // one changes after seeding.
+        let mut specs = agent_core_kernel::registry::store::builtin_specs();
+        specs.push(agent_core_kernel::registry::snapshot::OperationSpec {
+            name: "frozen.extra_probe".to_string(),
+            risk: agent_core_kernel::registry::snapshot::Risk::ReadOnly,
+            description: "frozen facts probe".into(),
+            parameters: json!({"type": "object"}),
+            idempotent: true,
+            binding_kind: agent_core_kernel::registry::snapshot::BindingKind::Builtin,
+            binding_key: "builtin.frozen_extra_probe".into(),
+        });
+        let new_snap = journal.create_registry_snapshot(specs).unwrap();
+        assert_ne!(new_snap.snapshot_id, current_snap, "new snapshot differs");
+        journal.activate_registry_snapshot(&new_snap.snapshot_id).unwrap();
+        // Create the session through the journal so its id is real and
+        // `session_by_id` resolves it.
+        let session = journal
+            .get_or_create_session(&SessionTarget {
+                agent_id: AgentId("agent-A".into()),
+                channel: ChannelKind::Cli,
+                conversation_key: "local".into(),
+            })
+            .unwrap();
+        let trigger = Run {
+            id: RunId("run_trigger_frozen".into()),
+            session_id: session.id.clone(),
+            agent_id: AgentId("agent-A".into()),
+            trigger_event_id: EventId::new(),
+            principal: RunPrincipal {
+                principal_id: PrincipalId("feishu:open_id:frozen_user".into()),
+                subject: PrincipalSubject::FeishuOpenId("frozen_user".into()),
+                source: PrincipalSource::Feishu,
+                grants: vec![CapabilityGrant {
+                    operation: "frozen.op".to_string(),
+                    scope: "current_session".to_string(),
+                }],
+                requester_id: Some("feishu:open_id:frozen_user".into()),
+            },
+            parent_run_id: None,
+            delegated_by: None,
+            status: RunStatus::Completed,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            registry_snapshot_id: current_snap.clone(),
+            mode: RunMode::Default,
+            budget_hook_id: None,
+            budget_hook_version: None,
+            budget_decision_digest: None,
+            budget_max_tool_rounds: None,
+            budget_max_wall_time_ms: None,
+            budget_exhaustion_action: None,
+        };
+        journal.insert_run(&trigger).unwrap();
+        // Sanity: a new snapshot is now active, differing from the trigger's
+        // frozen one — the continuation must still use the frozen one.
+        assert_ne!(
+            journal.current_registry_snapshot_id().unwrap(),
+            current_snap,
+            "current snapshot changed after seeding"
+        );
+        (current_snap, session.id.0.clone())
+    };
+
+    // Request a continuation of the frozen trigger Run.
+    let body = json!({
+        "trigger_run_id": "run_trigger_frozen",
+        "expected_session_id": trigger_session_id,
+        "idempotency_key": "continuation:run_trigger_frozen",
+    });
+    let resp = kernel.post("/v1/session-continuation", &body);
+    assert_eq!(resp["ok"], json!(true), "continuation accepted: {resp}");
+    let next_run_id = resp["next_run_id"].as_str().unwrap_or("").to_string();
+    assert!(!next_run_id.is_empty());
+
+    // Wait for the worker to create the next Run.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let events = kernel.all_events();
+        if events
+            .iter()
+            .any(|e| e["event_kind"] == json!("RunStarted") && e["run_id"].as_str() == Some(next_run_id.as_str()))
+        {
+            break;
+        }
+        if Instant::now() > deadline {
+            panic!("next Run {next_run_id} never started");
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    // Verify the next Run inherited the FROZEN facts, not the current config.
+    {
+        let journal = JournalStore::open(&db).unwrap();
+        let next = journal
+            .run_by_id(&RunId(next_run_id.clone()))
+            .unwrap()
+            .expect("next Run exists");
+        assert_eq!(
+            next.agent_id.0, "agent-A",
+            "AGENT_ID_PRESERVED=true — next agent = trigger agent, not current config"
+        );
+        assert_eq!(
+            next.registry_snapshot_id, frozen_snap,
+            "REGISTRY_SNAPSHOT_PRESERVED=true — next snapshot = trigger snapshot"
+        );
+        assert_eq!(
+            next.principal.principal_id.0, "feishu:open_id:frozen_user",
+            "PRINCIPAL_PRESERVED=true — next principal = trigger principal"
+        );
+        assert_eq!(
+            next.principal.grants.len(), 1,
+            "GRANTS_PRESERVED=true — frozen grants kept"
+        );
+        assert_eq!(
+            next.principal.grants[0].operation, "frozen.op",
+            "GRANTS_PRESERVED=true — frozen grant operation kept"
+        );
+        // The frozen snapshot must be loadable from the journal? It is a
+        // synthetic id — the worker only fails if the snapshot is missing.
+        // Here the snapshot was never created, so the Run may fail to start
+        // the model loop; the FACTS INHERITANCE is what we assert, and the
+        // Run record already proves it.
+    }
+
     running.store(false, Ordering::SeqCst);
     let _ = handle.accept_loop.join();
     let _ = handle.worker.join();

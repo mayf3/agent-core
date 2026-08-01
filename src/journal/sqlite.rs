@@ -472,16 +472,15 @@ impl JournalStore {
         .map_err(Into::into)
     }
 
-    /// Atomically accept a same-session continuation: in ONE transaction,
-    /// enforce UNIQUE(trigger_run_id) (a trigger Run can be continued at most
-    /// ONCE, regardless of idempotency_key, concurrency, or Harness state
-    /// loss), record a generic `SessionContinuationRequested` governance event
-    /// (NOT an IngressAccepted / user message), and enqueue a
-    /// `schedule_continuation` worker job so the existing worker loop schedules
-    /// the next Run in the same session.
+    /// Atomically accept a same-session continuation (High 4): in ONE
+    /// transaction, PRE-ALLOCATE the next_run_id, record the generic
+    /// `SessionContinuationRequested` governance event (NOT an
+    /// IngressAccepted / user message), write the ledger row with the
+    /// pre-allocated next_run_id, and enqueue a `schedule_continuation` worker
+    /// job. All four facts succeed or roll back together — the ledger is the
+    /// single trusted fact.
     ///
-    /// Returns `Ok(Some((event_id, next_run_id)))` on first acceptance
-    /// (`next_run_id` is `None` until the worker schedules it), and
+    /// Returns `Ok(Some((event_id, next_run_id)))` on first acceptance, and
     /// `Ok(None)` for a duplicate trigger (nothing new is created — the
     /// already-accepted continuation is returned via
     /// [`JournalStore::continuation_by_trigger_run`]).
@@ -495,7 +494,8 @@ impl JournalStore {
         trigger_run_id: &RunId,
         requesting_principal: &str,
         idempotency_key: &str,
-    ) -> Result<Option<String>> {
+        next_run_id: &RunId,
+    ) -> Result<Option<(String, String)>> {
         let now = Utc::now().to_rfc3339();
         let mut conn = self
             .conn
@@ -504,6 +504,7 @@ impl JournalStore {
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         // Idempotency: a trigger Run may be continued at most once. This check
         // runs BEFORE any insert so a duplicate trigger creates NOTHING new.
+        // UNIQUE(trigger_run_id) remains the hard guarantee against races.
         let existing: Option<String> = tx
             .query_row(
                 "SELECT event_id FROM session_continuations WHERE trigger_run_id = ?1",
@@ -530,11 +531,28 @@ impl JournalStore {
                 "session_id": session_id.0,
                 "requesting_principal": requesting_principal,
                 "idempotency_key": idempotency_key,
+                "next_run_id": next_run_id.0,
             }),
         )?;
         let event_id = appended.event_id;
+        // The ledger row is inserted FIRST with the pre-allocated next_run_id;
+        // UNIQUE(trigger_run_id) fails this INSERT (rolling back everything)
+        // if a concurrent request won the race.
         tx.execute(
-            "INSERT OR IGNORE INTO worker_jobs
+            "INSERT INTO session_continuations
+             (idempotency_key, session_id, trigger_run_id, event_id, next_run_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                idempotency_key,
+                session_id.0,
+                trigger_run_id.0,
+                event_id.0,
+                next_run_id.0,
+                now,
+            ],
+        )?;
+        tx.execute(
+            "INSERT INTO worker_jobs
              (job_id, job_type, source_event_id, status, attempts, available_at, created_at, updated_at)
              VALUES (?1, 'schedule_continuation', ?2, ?3, 0, ?4, ?4, ?4)",
             params![
@@ -544,35 +562,24 @@ impl JournalStore {
                 now.as_str(),
             ],
         )?;
-        tx.execute(
-            "INSERT OR IGNORE INTO session_continuations
-             (idempotency_key, session_id, trigger_run_id, event_id, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                idempotency_key,
-                session_id.0,
-                trigger_run_id.0,
-                event_id.0,
-                now,
-            ],
-        )?;
         tx.commit()?;
-        Ok(Some(event_id.0.clone()))
+        Ok(Some((event_id.0.clone(), next_run_id.0.clone())))
     }
 
     /// Load the accepted continuation for a trigger Run. Returns the
-    /// continuation event_id and the scheduled next_run_id (if the worker has
-    /// already created it). Used to answer duplicate requests with the same
-    /// result instead of creating a second next Run.
+    /// continuation event_id and the PRE-ALLOCATED next_run_id. The
+    /// next_run_id is always present (pre-allocated at acceptance time), so a
+    /// duplicate request can immediately return the SAME next_run_id without
+    /// waiting for the worker.
     pub fn continuation_by_trigger_run(
         &self,
         trigger_run_id: &RunId,
-    ) -> Result<Option<(String, Option<String>)>> {
+    ) -> Result<Option<(String, String)>> {
         let conn = self
             .conn
             .lock()
             .map_err(|_| anyhow!("journal mutex poisoned"))?;
-        let row: Option<(String, Option<String>)> = conn
+        let row: Option<(String, String)> = conn
             .query_row(
                 "SELECT event_id, next_run_id FROM session_continuations WHERE trigger_run_id = ?1",
                 params![trigger_run_id.0],
@@ -602,25 +609,6 @@ impl JournalStore {
         )?;
         let mut rows = stmt.query_map(params![event_id], row_to_event)?;
         Ok(rows.next().transpose()?)
-    }
-
-    /// Backfill `next_run_id` once the worker has scheduled the continuation
-    /// Run. Idempotent: only writes when the column is currently NULL.
-    pub fn record_continuation_next_run(
-        &self,
-        trigger_run_id: &RunId,
-        next_run_id: &RunId,
-    ) -> Result<()> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| anyhow!("journal mutex poisoned"))?;
-        conn.execute(
-            "UPDATE session_continuations SET next_run_id = ?1
-             WHERE trigger_run_id = ?2 AND next_run_id IS NULL",
-            params![next_run_id.0, trigger_run_id.0],
-        )?;
-        Ok(())
     }
 
     pub fn events(&self) -> Result<Vec<JournalEvent>> {

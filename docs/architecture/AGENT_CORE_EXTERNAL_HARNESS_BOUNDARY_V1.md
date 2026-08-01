@@ -334,22 +334,36 @@ Memory 特判
 ```
 
 * `expected_session_id` 可选，只用于一致性校验；
+* **idempotency_key 严格验证**：必须等于 `"continuation:" + trigger_run_id`，
+  不匹配直接拒绝（400），不创建任何事件 / ledger / worker job —— 不同 trigger
+  不可能复用同一个合法 key；
 * 外部 Harness **不是身份、路由和会话事实的来源** —— Kernel 根据
   `trigger_run_id` 从自身记录加载 prior Run → session_id → agent_id →
   principal → channel → conversation target → Registry Snapshot；
+* **下一 Run 完整继承 trigger Run 的冻结事实（High 1）**：使用
+  `trigger.agent_id`、`trigger.registry_snapshot_id`（加载该固定 Registry
+  Snapshot）、`trigger.principal` / 已冻结 grants。不得读取当前
+  KernelConfig.agent_id、不得调用 current_registry_snapshot_id()、不得按
+  feishu conversation_key 前缀推导 chat_type、不得按当前 Snapshot 重新扩充
+  grants。续跑过程中更换 Agent / 工具版本 / 权限不可能发生；
 * 续跑**不伪造用户消息**：不创建 `IngressAccepted` /
   `RuntimeEventPayload::UserMessage` / "继续" 文本。Kernel 只记录通用治理事件
   `SessionContinuationRequested`（request_id / trigger_run_id / session_id /
   requesting_principal / idempotency_key），并调度下一 Run 复用同一 Session
   上下文（前文、compaction、工具结果）自行继续；
-* **同一个 trigger Run 只能续跑一次**：`UNIQUE(trigger_run_id)` 由数据库保证，
-  Harness 使用确定性 key `continuation:<trigger_run_id>`；相同 key、不同 key、
-  并发、Harness state 丢失、重启后重新观察，都收敛到同一个 next_run_id；
-  重复请求返回 `{duplicate: true, trigger_run_id, next_run_id}`；
-* **yield 不向用户发送"请发送继续"**：预算耗尽只记录结构化 yield 事实
-  （`ToolBudgetExhausted` / `ToolLoopWallClockExceeded` 带 `exhaustion_action=yield`），
-  不生成用户回复、不创建回复 Invocation、不进 outbox。只有正常完成、明确等待
-  用户、达到外部上限、最终失败才向用户发送消息。
+* **ledger 是唯一可信事实（High 4）**：`next_run_id` 在接受事务中**预分配**，
+  与 `SessionContinuationRequested` 事件、ledger 行、`schedule_continuation`
+  worker job 在同一事务内全部成功或全部回滚（普通 INSERT，不用未经检查的
+  INSERT OR IGNORE）。worker 使用**预分配**的 next_run_id 幂等创建 Run：
+  Run 不存在 → 创建一次；相同 Run 已存在且事实一致 → 视为成功；事实冲突 →
+  fail closed。因此同一 trigger（相同 key / 并发 / Harness state 丢失 /
+  重启后重新观察 / worker 崩溃重试）都收敛到同一个 next_run_id；重复请求
+  立即返回 `{duplicate: true, trigger_run_id, next_run_id}`，无需等待 worker；
+* **任何面向用户的"请发送继续"都不存在（High 3）**：预算 yield、follow-up
+  LLM 失败、重复工具调用停止，都只记录结构化事实或发送中性说明（如
+  "本次执行因模型调用失败而停止"），绝不指导用户发送"继续"或暗示"下一 Run
+  接着处理"。只有正常完成、明确等待用户、达到外部上限、最终失败才向用户
+  发送消息。
 
 ### 7.7 Bootstrap 停止条件
 

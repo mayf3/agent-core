@@ -300,7 +300,7 @@ fn missing_workspace_rejection_then_followup_llm_failure_notifies_user() {
     let oq = count_kind(&events, JournalEventKind::OutboxQueued);
     assert_eq!(oq, 1, "failure reply enqueued");
     assert_eq!(count_kind(&events, JournalEventKind::ToolCallRejected), 1);
-    assert!(outcome.output.contains("模型生成后续回复时失败了"));
+    assert!(outcome.output.contains("本次执行因模型调用失败而停止"));
     assert!(!outcome.output.contains("provider"));
     assert!(j.verify_hash_chain().unwrap());
 }
