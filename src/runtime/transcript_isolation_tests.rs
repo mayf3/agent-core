@@ -128,6 +128,7 @@ mod transcript_isolation_tests {
         let llm = OpenAiCompatibleLlm::new(srv.url(), "t".into(), "p".into(), 5000)
             .with_indexed_primary();
         let _ = llm.complete(LlmInput {
+            timeout_override_ms: None,
             blocks: vec![],
             user_text: "hi".into(),
             granted_operations: vec!["system.status".into()],
@@ -227,6 +228,7 @@ mod transcript_isolation_tests {
         let llm_a = Arc::clone(&llm);
         let handle_a = thread::spawn(move || {
             llm_a.complete(LlmInput {
+                timeout_override_ms: None,
                 blocks: vec![],
                 user_text: "a".into(),
                 granted_operations: vec![],
@@ -248,6 +250,7 @@ mod transcript_isolation_tests {
         let llm_b = Arc::clone(&llm);
         let handle_b = thread::spawn(move || {
             llm_b.complete(LlmInput {
+                timeout_override_ms: None,
                 blocks: vec![],
                 user_text: "b".into(),
                 granted_operations: vec![],
@@ -352,6 +355,7 @@ mod transcript_isolation_tests {
         let l1 = Arc::clone(&llm);
         let h1 = thread::spawn(move || {
             l1.complete(LlmInput {
+                timeout_override_ms: None,
                 blocks: vec![],
                 user_text: "a".into(),
                 granted_operations: vec![],
@@ -372,6 +376,7 @@ mod transcript_isolation_tests {
         let l2 = Arc::clone(&llm);
         let h2 = thread::spawn(move || {
             l2.complete(LlmInput {
+                timeout_override_ms: None,
                 blocks: vec![],
                 user_text: "b".into(),
                 granted_operations: vec![],

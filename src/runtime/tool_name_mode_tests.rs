@@ -210,6 +210,7 @@ mod tool_name_mode_tests {
         let llm =
             OpenAiCompatibleLlm::new(fb.url(), "t".into(), "p".into(), 5000).with_indexed_primary();
         let _ = llm.complete(crate::llm::LlmInput {
+            timeout_override_ms: None,
             blocks: vec![],
             user_text: "x".into(),
             granted_operations: vec!["system.status".to_string()],
@@ -241,6 +242,7 @@ mod tool_name_mode_tests {
         let url = fb.url().replace("/v1", "/deepseek/v1");
         let llm = OpenAiCompatibleLlm::new(url, "t".into(), "p".into(), 5000);
         let _ = llm.complete(crate::llm::LlmInput {
+            timeout_override_ms: None,
             blocks: vec![],
             user_text: "x".into(),
             granted_operations: vec!["system.status".to_string()],
