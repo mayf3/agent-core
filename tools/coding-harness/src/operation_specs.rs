@@ -189,42 +189,51 @@ pub fn all_specs(workspace_ids: &[String]) -> Vec<OperationSpec> {
         },
         OperationSpec {
             operation_name: "external.coding_task_submit",
-            description: "提交一个编码任务到后台执行（opencode 后端）。提交后使用 external.coding_task_status 查询进度和结果。这是长时间运行的任务，不会立即返回完成状态。",
+            description: "提交一个开发任务草稿（ModelDevelopmentRequest）到外部 Development Harness。Kernel 绑定治理字段后由 Harness 受理为持久 Job；提交后使用 external.coding_task_status 查询进度。这是长时间运行的任务，不会立即返回完成状态。",
+            // Mirrors the Kernel's builtin seed (src/registry/store.rs):
+            // the model-facing contract is the sealed draft form; governance
+            // fields are bound Kernel-side, never model-supplied.
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "workspace_id": ws,
-                    "backend": {
-                        "type": "string",
-                        "enum": ["opencode"],
-                        "description": "任务后端。生产环境请使用 opencode。",
+                    "session_id": {"type": "string"},
+                    "development_request": {
+                        "type": "object",
+                        "properties": {
+                            "target_kind": {
+                                "type": "string",
+                                "enum": [
+                                    "invocable_capability", "hook_consumer_service", "context_provider",
+                                    "context_transformer", "scheduled_worker", "scheduler_service",
+                                    "ingress_router", "multi_run_orchestrator", "connector_extension"
+                                ]
+                            },
+                            "name": {"type": "string"},
+                            "requirements": {"type": "array", "items": {"type": "string"}},
+                            "required_contracts": {"type": "array", "items": {"type": "string"}},
+                            "acceptance_criteria": {"type": "array", "items": {"type": "string"}}
+                        },
+                        "required": [
+                            "target_kind", "name", "requirements", "required_contracts",
+                            "acceptance_criteria"
+                        ],
+                        "additionalProperties": false
                     },
-                    "objective": {
-                        "type": "string",
-                        "description": "任务的详细目标和说明。"
-                    },
-                    "acceptance_criteria": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "验收标准列表。任务完成后将逐项检查。",
-                    },
-                    "model": {
-                        "type": "string",
-                        "description": "模型标识，格式为 provider/model。",
-                    }
+                    "idempotency_key": {"type": "string"}
                 },
-                "required": ["workspace_id", "backend", "objective"],
+                "required": ["session_id", "development_request", "idempotency_key"],
                 "additionalProperties": false
             }),
             output_schema: json!({
                 "type": "object",
                 "properties": {
+                    "job_id": {"type": "string"},
                     "task_id": {"type": "string"},
                     "status": {"type": "string"},
-                    "backend": {"type": "string"},
-                    "created_at": {"type": "integer"}
+                    "development_request_id": {"type": "string"},
+                    "proposal_id": {"type": "string"}
                 },
-                "required": ["task_id", "status", "backend", "created_at"],
+                "required": ["status"],
             }),
         },
         OperationSpec {

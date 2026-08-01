@@ -1,125 +1,113 @@
-//! OpenCode backend for coding.task.submit.
+//! OpenCode backend for segmented development jobs.
+//!
+//! One segment = one bounded `opencode run` invocation. The Harness enforces
+//! the frozen segment budget live: wall-clock deadline, model-round and
+//! tool-call counts (parsed from the JSON event stream), per-tool silence
+//! timeout, and the job cancel flag. When a segment is killed by budget, the
+//! model's trailing checkpoint JSON is extracted from the output and becomes
+//! the continuation context for the next segment.
 //!
 //! Config is passed via `OPENCODE_CONFIG_CONTENT` env var with proper
 //! `"allow"/"deny"` permission semantics. No `.opencode.json` written to
-//! workspace. Uses `--dangerously-skip-permissions` for non-interactive execution (not
-//! `--dangerously-skip-permissions`). Process lifecycle uses process-group
-//! cleanup, concurrent pipe draining, and a cancel token system.
+//! workspace. Process lifecycle uses process-group cleanup and concurrent
+//! pipe draining.
 
-use super::{truncate_str, TaskOutput};
-use std::collections::HashMap;
+use crate::jobs::{
+    truncate_str, Checkpoint, ExecutionSegmentBudget, Job, SegmentEnd, SegmentOutcome,
+};
+use serde_json::Value;
 use std::io::Read;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-static CANCEL_TOKENS: std::sync::LazyLock<Mutex<HashMap<String, CancelState>>> =
-    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+const MAX_OUTPUT: usize = 100_000;
 
-struct CancelState {
-    cancelled: Arc<AtomicBool>,
-    pid: Option<u32>,
+/// Live counters observed from the `opencode run --format json` event
+/// stream. The Harness (not the model) decides when a budget limit is hit.
+struct EventMonitor {
+    rounds: AtomicU64,
+    tools: AtomicU64,
+    last_event_at: AtomicU64, // unix nanos; 0 = no event yet
+    should_kill: AtomicBool,
+    kill_reason: Mutex<String>,
 }
 
-/// Register a cancellation token for a task. Returns the shared cancelled flag.
-pub(crate) fn register_cancel(task_id: &str) -> Arc<AtomicBool> {
-    let flag = Arc::new(AtomicBool::new(false));
-    let mut map = CANCEL_TOKENS.lock().unwrap();
-    map.insert(
-        task_id.to_string(),
-        CancelState {
-            cancelled: flag.clone(),
-            pid: None,
-        },
-    );
-    flag
-}
+impl EventMonitor {
+    fn new() -> Self {
+        Self {
+            rounds: AtomicU64::new(0),
+            tools: AtomicU64::new(0),
+            last_event_at: AtomicU64::new(0),
+            should_kill: AtomicBool::new(false),
+            kill_reason: Mutex::new(String::new()),
+        }
+    }
 
-/// Set the process ID for a running task.
-pub(crate) fn set_pid(task_id: &str, pid: u32) {
-    let mut map = CANCEL_TOKENS.lock().unwrap();
-    if let Some(state) = map.get_mut(task_id) {
-        state.pid = Some(pid);
+    fn observe_event(&self, event: &Value) {
+        self.last_event_at.store(now_nanos(), Ordering::Relaxed);
+        let event_type = event.get("type").and_then(Value::as_str).unwrap_or("");
+        match event_type {
+            // One model generation step = one model round. opencode 1.17+
+            // emits `step_start`; older versions emitted `message` with
+            // role=assistant.
+            "step_start" => {
+                self.rounds.fetch_add(1, Ordering::Relaxed);
+            }
+            "message" => {
+                if event.get("role").and_then(Value::as_str) == Some("assistant") {
+                    self.rounds.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            // Tool executions / subagent work = tool calls.
+            "tool_use" | "tool" | "agent" | "shell" => {
+                self.tools.fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {
+                if event.get("tool_use").is_some() {
+                    self.tools.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+    }
+
+    fn request_kill(&self, reason: &str) {
+        if self
+            .should_kill
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            *self.kill_reason.lock().unwrap() = reason.to_string();
+        }
     }
 }
 
-/// Cancel a running task: signal the process group and wait for termination.
-/// Returns true if cancellation was initiated.
-pub(crate) fn cancel_task(task_id: &str) -> bool {
-    let (_cancelled, pid) = {
-        let map = CANCEL_TOKENS.lock().unwrap();
-        match map.get(task_id) {
-            Some(state) => {
-                state.cancelled.store(true, Ordering::SeqCst);
-                (state.cancelled.clone(), state.pid)
+/// Run one bounded segment with the OpenCode backend.
+pub(super) fn run_segment(
+    job: &Job,
+    budget: &ExecutionSegmentBudget,
+    checkpoint: Option<&Checkpoint>,
+    cancel_flag: Option<Arc<AtomicBool>>,
+) -> SegmentOutcome {
+    let opencode_path = match find_opencode() {
+        Ok(p) => p,
+        Err(e) => {
+            return SegmentOutcome {
+                end: SegmentEnd::Failed(format!("opencode_not_found: {e}")),
+                model_rounds_used: 0,
+                tool_calls_used: 0,
+                wall_time_ms: 0,
+                checkpoint: None,
             }
-            None => return false,
         }
     };
-
-    if let Some(pid) = pid {
-        // Kill entire process group.
-        #[cfg(unix)]
-        {
-            unsafe {
-                let _ = libc::killpg(pid as libc::pid_t, libc::SIGTERM);
-                std::thread::sleep(Duration::from_millis(500));
-                let _ = libc::killpg(pid as libc::pid_t, libc::SIGKILL);
-            }
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = std::process::Command::new("taskkill")
-                .args(&["/F", "/T", "/PID", &pid.to_string()])
-                .output();
-        }
-    }
-    true
-}
-
-/// Clean up cancel token for a completed task.
-pub(crate) fn cleanup_cancel(task_id: &str) {
-    let mut map = CANCEL_TOKENS.lock().unwrap();
-    map.remove(task_id);
-}
-
-/// Build the permission config JSON for the OPENCODE_CONFIG_CONTENT env var.
-fn build_config_json() -> String {
-    let config = serde_json::json!({
-        "$schema": "https://opencode.ai/config.json",
-        "permission": {
-            "*": "deny",
-            "read": "allow",
-            "edit": "allow",
-            "glob": "allow",
-            "grep": "allow",
-            "bash": "allow",
-            "external_directory": "deny",
-            "webfetch": "deny",
-            "websearch": "deny",
-            "task": "deny",
-            "question": "deny"
-        }
-    });
-    serde_json::to_string(&config).unwrap_or_default()
-}
-
-pub(super) fn run_opencode(
-    task_id: &str,
-    workspace_root: &str,
-    objective: &str,
-    acceptance_criteria: &str,
-    model: &str,
-    cancel_flag: Option<Arc<AtomicBool>>,
-) -> Result<TaskOutput, String> {
-    let opencode_path = find_opencode().map_err(|e| format!("opencode_not_found: {e}"))?;
-    let resolved_model = if model.is_empty() {
+    let resolved_model = if job.model.is_empty() {
         "deepseek/deepseek-v4-flash"
     } else {
-        model
+        &job.model
     };
-    let prompt = build_prompt(objective, acceptance_criteria);
-    let ws_root = workspace_root.to_string();
+    let prompt = build_prompt(job, checkpoint);
+    let ws_root = job.workspace_root.clone();
 
     let mut cmd = std::process::Command::new(&opencode_path);
     cmd.arg("run")
@@ -149,24 +137,32 @@ pub(super) fn run_opencode(
 
     cmd.stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("opencode_spawn_failed: {e}"))?;
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            return SegmentOutcome {
+                end: SegmentEnd::Failed(format!("opencode_spawn_failed: {e}")),
+                model_rounds_used: 0,
+                tool_calls_used: 0,
+                wall_time_ms: 0,
+                checkpoint: None,
+            }
+        }
+    };
     let pid = child.id();
-    set_pid(task_id, pid);
 
-    // Concurrent stdout/stderr drain with byte limits.
     let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();
     let out_buf = Arc::new(Mutex::new(Vec::new()));
     let err_buf = Arc::new(Mutex::new(Vec::new()));
     let done = Arc::new(AtomicBool::new(false));
-    const MAX_OUTPUT: usize = 100_000;
+    let monitor = Arc::new(EventMonitor::new());
 
     if let Some(pipe) = stdout_pipe {
         let b = Arc::clone(&out_buf);
         let d = Arc::clone(&done);
-        std::thread::spawn(move || drain_pipe(pipe, b, d, MAX_OUTPUT));
+        let m = Arc::clone(&monitor);
+        std::thread::spawn(move || drain_stdout(pipe, b, d, MAX_OUTPUT, m));
     }
     if let Some(pipe) = stderr_pipe {
         let b = Arc::clone(&err_buf);
@@ -174,13 +170,12 @@ pub(super) fn run_opencode(
         std::thread::spawn(move || drain_pipe(pipe, b, d, MAX_OUTPUT));
     }
 
-    let deadline = Duration::from_secs(600);
     let start = std::time::Instant::now();
     let mut timed_out = false;
     let mut cancelled = false;
+    let mut kill_reason = String::new();
 
     loop {
-        // Check cancellation flag.
         if let Some(ref flag) = cancel_flag {
             if flag.load(Ordering::SeqCst) {
                 cancelled = true;
@@ -190,25 +185,55 @@ pub(super) fn run_opencode(
                 break;
             }
         }
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) => {}
-            Err(_) => break,
-        }
-        if start.elapsed() >= deadline {
+        if monitor.should_kill.load(Ordering::SeqCst) {
+            kill_reason = monitor.kill_reason.lock().unwrap().clone();
             timed_out = true;
             done.store(true, Ordering::SeqCst);
             kill_process_group(pid);
             let _ = child.wait();
             break;
         }
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {}
+            Err(_) => break,
+        }
+        if start.elapsed() >= Duration::from_millis(budget.max_wall_time_ms) {
+            kill_reason = "max_wall_time_ms".into();
+            timed_out = true;
+            done.store(true, Ordering::SeqCst);
+            kill_process_group(pid);
+            let _ = child.wait();
+            break;
+        }
+        if budget.single_tool_timeout_ms > 0 {
+            let last = monitor.last_event_at.load(Ordering::Relaxed);
+            if last != 0
+                && now_nanos().saturating_sub(last)
+                    > budget.single_tool_timeout_ms * 1_000_000
+            {
+                kill_reason = "single_tool_timeout".into();
+                timed_out = true;
+                done.store(true, Ordering::SeqCst);
+                kill_process_group(pid);
+                let _ = child.wait();
+                break;
+            }
+        }
         std::thread::sleep(Duration::from_millis(100));
     }
     done.store(true, Ordering::SeqCst);
     let exit_code = child.wait().ok().and_then(|s| s.code()).unwrap_or(-1);
+    let wall_time_ms = start.elapsed().as_millis() as u64;
 
     if cancelled {
-        return Err("cancelled".to_string());
+        return SegmentOutcome {
+            end: SegmentEnd::Cancelled,
+            model_rounds_used: monitor.rounds.load(Ordering::Relaxed),
+            tool_calls_used: monitor.tools.load(Ordering::Relaxed),
+            wall_time_ms,
+            checkpoint: None,
+        };
     }
 
     let stdout_all = out_buf.lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -216,30 +241,103 @@ pub(super) fn run_opencode(
     let stdout_str = String::from_utf8_lossy(&stdout_all).to_string();
     let stderr_str = String::from_utf8_lossy(&stderr_all).to_string();
 
-    if exit_code == 0 {
-        let (commit_sha, changed_files, diff_summary, test_command, test_result, summary) =
-            parse_output(&stdout_str, objective);
-        Ok(TaskOutput {
-            summary,
-            commit_sha,
-            changed_files,
-            diff_summary,
-            test_command,
-            test_result,
-            stdout: stdout_str,
-            stderr: stderr_str,
-            exit_code,
-            timed_out,
-        })
+    let parsed_checkpoint = parse_checkpoint(&stdout_str, &job.workspace_root);
+    let rounds_used = monitor.rounds.load(Ordering::Relaxed);
+    let tools_used = monitor.tools.load(Ordering::Relaxed);
+
+    // A budget kill (wall clock / rounds / tools / silence) or cancel is NOT
+    // a task failure: the segment is exhausted and the checkpoint drives the
+    // next segment. Only a natural nonzero exit is a hard failure.
+    if exit_code != 0 {
+        let end = if timed_out {
+            SegmentEnd::Exhausted(kill_reason)
+        } else {
+            SegmentEnd::Failed(format!(
+                "opencode_exit_{}: {}",
+                exit_code,
+                truncate_str(stderr_str.lines().last().unwrap_or(&stderr_str), 300)
+            ))
+        };
+        return SegmentOutcome {
+            end,
+            model_rounds_used: rounds_used,
+            tool_calls_used: tools_used,
+            wall_time_ms,
+            checkpoint: parsed_checkpoint,
+        };
+    }
+
+    let result = build_result(&stdout_str, &job.objective, exit_code, timed_out);
+    let work_remaining = parsed_checkpoint
+        .as_ref()
+        .map(|cp| !cp.remaining_steps.is_empty())
+        .unwrap_or(true);
+    let end = if work_remaining {
+        let reason = if timed_out {
+            kill_reason
+        } else {
+            "model_reports_work_remaining".into()
+        };
+        SegmentEnd::Exhausted(reason)
     } else {
-        Err(format!(
-            "opencode_exit_{}: {}",
-            exit_code,
-            truncate_str(&stderr_str.lines().last().unwrap_or(&stderr_str), 300)
-        ))
+        SegmentEnd::Completed(result)
+    };
+    SegmentOutcome {
+        end,
+        model_rounds_used: rounds_used,
+        tool_calls_used: tools_used,
+        wall_time_ms,
+        checkpoint: parsed_checkpoint,
     }
 }
 
+/// Drain stdout with live JSON event observation and a byte limit.
+fn drain_stdout(
+    mut pipe: impl Read,
+    buf: Arc<Mutex<Vec<u8>>>,
+    done: Arc<AtomicBool>,
+    max: usize,
+    monitor: Arc<EventMonitor>,
+) {
+    let mut local = Vec::new();
+    let mut line_buf = Vec::new();
+    let mut tmp = [0u8; 65536];
+    loop {
+        if done.load(Ordering::SeqCst) {
+            let mut rest = Vec::new();
+            let _ = pipe.read_to_end(&mut rest);
+            if !rest.is_empty() && local.len() < max {
+                let remaining = max.saturating_sub(local.len());
+                local.extend_from_slice(&rest[..rest.len().min(remaining)]);
+            }
+            break;
+        }
+        match pipe.read(&mut tmp) {
+            Ok(0) => break,
+            Ok(n) => {
+                for &byte in &tmp[..n] {
+                    if byte == b'\n' {
+                        let line = std::mem::take(&mut line_buf);
+                        if let Ok(event) = serde_json::from_slice::<Value>(&line) {
+                            monitor.observe_event(&event);
+                        }
+                    } else {
+                        if line_buf.len() < 4096 {
+                            line_buf.push(byte);
+                        }
+                    }
+                }
+                if local.len() < max {
+                    local.extend_from_slice(&tmp[..n.min(max.saturating_sub(local.len()))]);
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    buf.lock().unwrap().extend_from_slice(&local);
+}
+
+/// Drain a plain pipe with a byte limit (stderr).
 fn drain_pipe(mut pipe: impl Read, buf: Arc<Mutex<Vec<u8>>>, done: Arc<AtomicBool>, max: usize) {
     let mut local = Vec::new();
     let mut tmp = [0u8; 65536];
@@ -295,31 +393,183 @@ fn find_opencode() -> Result<String, String> {
     }
 }
 
-fn build_prompt(objective: &str, acceptance_criteria: &str) -> String {
-    let criteria_section = if acceptance_criteria.is_empty() {
+/// Build the per-segment prompt: objective + acceptance + previous
+/// checkpoint (continuation contract) + boundaries + checkpoint reporting.
+fn build_prompt(job: &Job, checkpoint: Option<&Checkpoint>) -> String {
+    let criteria_section = if job.acceptance_criteria.is_empty() {
         String::new()
     } else {
         format!(
             "Acceptance criteria\n\
-             {acceptance_criteria}\n\n"
+             {}\n\n",
+            job.acceptance_criteria
         )
     };
+    let checkpoint_section = match checkpoint {
+        Some(cp) => format!(
+            "Previous checkpoint (from the last execution segment)\n\
+             - Findings: {}\n\
+             - Completed steps: {}\n\
+             - Remaining steps: {}\n\
+             - Last test result: {}\n\
+             - Blocker: {}\n\
+             - Next action: {}\n\
+             Continue from this checkpoint. Do NOT redo completed work.\n\n",
+            cp.findings,
+            cp.completed_steps.join("; "),
+            cp.remaining_steps.join("; "),
+            cp.last_test_result,
+            cp.blocker,
+            cp.next_action,
+        ),
+        None => String::new(),
+    };
     format!(
-        "Objective\n{objective}\n\n\
+        "Objective\n{}\n\n\
          {criteria_section}\
+         {checkpoint_section}\
          Workspace boundary\n\
          - You may ONLY modify files within the current workspace directory.\n\
          - You MUST NOT access files outside the workspace.\n\
          - You MUST NOT read .env, tokens, keys, or production secrets.\n\
-         - You MUST NOT push, merge, or deploy code.\n\n\
+         - You MUST NOT push, merge, or deploy code.\n\
+         - You MUST NOT run destructive git commands: git reset --hard, \
+         git clean -fd, git checkout . / git restore ., or git branch -D. \
+         Your in-flight work is committed by the Harness at each segment \
+         boundary; discarding it loses progress and violates task discipline.\n\n\
          Testing requirements\n\
          - After making changes, run the project's test suite.\n\
          - All existing tests must continue to pass.\n\n\
-         Completion reporting\n\
-         - Report which files were changed and why.\n\
-         - Report test results and any failures.\n\
-         - Keep output concise."
+         Checkpoint reporting\n\
+         - After EVERY major step (reading a file, editing, running a test), \
+         emit a checkpoint JSON block (no markdown fences) with exactly these \
+         keys:\n\
+         {{\"findings\": \"...\", \"completed_steps\": [...], \
+         \"remaining_steps\": [...], \"last_test_result\": \"...\", \
+         \"blocker\": \"...\", \"next_action\": \"...\"}}\n\
+         - Emit the checkpoint repeatedly as you work — the LAST block in \
+         your output wins. The final block must reflect the full state.\n\
+         - When all work is done, set remaining_steps to [].\n\
+         - The Harness automatically commits your in-flight changes at the end \
+         of each segment as a checkpoint commit; do not commit or push yourself.\n\
+         - Keep all other output concise.",
+        job.objective,
     )
+}
+
+/// Extract the trailing checkpoint JSON from segment output. Accepts bare
+/// JSON objects, JSON embedded in opencode `text` event parts (1.17+
+/// event stream), or ```json fenced blocks; the LAST valid object
+/// containing `remaining_steps` wins.
+fn parse_checkpoint(stdout: &str, workspace_root: &str) -> Option<Checkpoint> {
+    let mut candidate: Option<Value> = None;
+    let mut in_fence = false;
+    let mut fenced = String::new();
+
+    let mut try_candidate = |v: &Value, candidate: &mut Option<Value>| {
+        if v.get("remaining_steps").is_some() {
+            *candidate = Some(v.clone());
+        }
+    };
+
+    for raw_line in stdout.lines() {
+        let line = raw_line.trim();
+        if line.starts_with("```json") || line.starts_with("```") && in_fence {
+            if line.starts_with("```json") {
+                in_fence = true;
+                fenced.clear();
+            } else {
+                in_fence = false;
+                if let Ok(v) = serde_json::from_str::<Value>(&fenced) {
+                    try_candidate(&v, &mut candidate);
+                }
+            }
+            continue;
+        }
+        if in_fence {
+            fenced.push_str(line);
+            continue;
+        }
+        if let Ok(v) = serde_json::from_str::<Value>(line) {
+            // New opencode event stream: the model's text (including a
+            // trailing checkpoint block) lives in `part.text`.
+            if v.get("type").and_then(Value::as_str) == Some("text") {
+                if let Some(text) = v.pointer("/part/text").and_then(Value::as_str) {
+                    if let Ok(embedded) = serde_json::from_str::<Value>(text.trim()) {
+                        try_candidate(&embedded, &mut candidate);
+                    } else {
+                        // Text may wrap the JSON in markdown fences or
+                        // prose: take the last balanced {...} block.
+                        if let Some(start) = text.rfind('{') {
+                            if let Some(end) = text.rfind('}') {
+                                if end > start {
+                                    if let Ok(v) =
+                                        serde_json::from_str::<Value>(&text[start..=end])
+                                    {
+                                        try_candidate(&v, &mut candidate);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            try_candidate(&v, &mut candidate);
+        }
+    }
+
+    let value = candidate?;
+    let mut completed = Vec::new();
+    if let Some(arr) = value.get("completed_steps").and_then(Value::as_array) {
+        completed = arr
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
+    }
+    let mut remaining = Vec::new();
+    if let Some(arr) = value.get("remaining_steps").and_then(Value::as_array) {
+        remaining = arr
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
+    }
+    let str_of = |key: &str| {
+        value
+            .get(key)
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    };
+    Some(Checkpoint {
+        objective: str_of("objective"),
+        boundaries: str_of("boundaries"),
+        findings: str_of("findings"),
+        workspace: crate::jobs::workspace_state(workspace_root),
+        completed_steps: completed,
+        remaining_steps: remaining,
+        last_test_result: str_of("last_test_result"),
+        blocker: str_of("blocker"),
+        next_action: str_of("next_action"),
+    })
+}
+
+/// Build the structured result Value (compatible with the previous task
+/// status contract).
+fn build_result(stdout: &str, objective: &str, exit_code: i32, timed_out: bool) -> Value {
+    let (commit_sha, changed_files, diff_summary, test_command, test_result, summary) =
+        parse_output(stdout, objective);
+    serde_json::json!({
+        "summary": summary,
+        "commit_sha": commit_sha,
+        "changed_files": changed_files,
+        "diff_summary": diff_summary,
+        "test_command": test_command,
+        "test_result": test_result,
+        "exit_code": exit_code,
+        "timed_out": timed_out,
+        "stdout_truncated": truncate_str(stdout, MAX_OUTPUT),
+        "stderr_truncated": "",
+    })
 }
 
 fn parse_output(stdout: &str, objective: &str) -> (String, String, String, String, String, String) {
@@ -338,6 +588,35 @@ fn parse_output(stdout: &str, objective: &str) -> (String, String, String, Strin
         if let Ok(event) = serde_json::from_str::<serde_json::Value>(trimmed) {
             if let Some(et) = event.get("type").and_then(|v| v.as_str()) {
                 match et {
+                    // opencode 1.17+ event stream.
+                    "text" => {
+                        if let Some(t) = event.pointer("/part/text").and_then(|v| v.as_str()) {
+                            summary = truncate_str(t, 200).to_string();
+                        }
+                    }
+                    "tool_use" => {
+                        if let Some(tool) = event.pointer("/part/tool").and_then(|v| v.as_str()) {
+                            if let Some(input) = event
+                                .pointer("/part/state/input/command")
+                                .and_then(|v| v.as_str())
+                            {
+                                test_command = truncate_str(input, 200).to_string();
+                            }
+                            if tool != "bash" {
+                                if let Some(path) = event
+                                    .pointer("/part/state/input/filePath")
+                                    .or_else(|| event.pointer("/part/state/input/file_path"))
+                                    .and_then(|v| v.as_str())
+                                {
+                                    if !changed_files.is_empty() {
+                                        changed_files.push_str(", ");
+                                    }
+                                    changed_files.push_str(path);
+                                }
+                            }
+                        }
+                    }
+                    // Legacy event stream.
                     "completion" | "result" | "done" => {
                         if let Some(c) = event.get("content").and_then(|v| v.as_str()) {
                             summary = truncate_str(c, 200).to_string();
@@ -364,16 +643,12 @@ fn parse_output(stdout: &str, objective: &str) -> (String, String, String, Strin
                             test_result = truncate_str(o, 200).to_string();
                         }
                     }
-                    "bash" | "tool_use" => {
-                        if let Some(cmd_name) = event.pointer("/tool").and_then(|v| v.as_str()) {
-                            if cmd_name == "bash" {
-                                if let Some(input) = event
-                                    .pointer("/state/input/command")
-                                    .and_then(|v| v.as_str())
-                                {
-                                    test_command = truncate_str(input, 200).to_string();
-                                }
-                            }
+                    "bash" => {
+                        if let Some(input) = event
+                            .pointer("/state/input/command")
+                            .and_then(|v| v.as_str())
+                        {
+                            test_command = truncate_str(input, 200).to_string();
                         }
                     }
                     _ => {}
@@ -399,21 +674,72 @@ fn parse_output(stdout: &str, objective: &str) -> (String, String, String, Strin
     )
 }
 
+fn now_nanos() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64
+}
+
+fn build_config_json() -> String {
+    let config = serde_json::json!({
+        "$schema": "https://opencode.ai/config.json",
+        "permission": {
+            "*": "deny",
+            "read": "allow",
+            "edit": "allow",
+            "glob": "allow",
+            "grep": "allow",
+            "bash": "allow",
+            "external_directory": "deny",
+            "webfetch": "deny",
+            "websearch": "deny",
+            "task": "deny",
+            "question": "deny"
+        }
+    });
+    serde_json::to_string(&config).unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::jobs::{JobStatus, WorkspaceState};
+
+    fn test_job(objective: &str) -> Job {
+        Job {
+            job_id: "job_test".into(),
+            workspace_id: "test".into(),
+            workspace_root: "/tmp/ws".into(),
+            objective: objective.into(),
+            acceptance_criteria: String::new(),
+            backend: "opencode".into(),
+            model: String::new(),
+            status: JobStatus::Accepted,
+            current_phase: String::new(),
+            checkpoint: None,
+            attempt: 1,
+            created_at: String::new(),
+            created_at_ms: 0,
+            accepted_at: String::new(),
+            updated_at: String::new(),
+            last_error: String::new(),
+            result_summary: String::new(),
+            task_digest: String::new(),
+            segments: Vec::new(),
+            finalize: Default::default(),
+            result: serde_json::Value::Null,
+        }
+    }
 
     #[test]
     fn config_uses_proper_allow_deny() {
         let config_str = build_config_json();
         let parsed: serde_json::Value = serde_json::from_str(&config_str).unwrap();
         let perm = &parsed["permission"];
-        // "*" must be deny as default
         assert_eq!(perm["*"], "deny");
-        // Allowed permissions
         assert_eq!(perm["read"], "allow");
         assert_eq!(perm["edit"], "allow");
-        // Denied permissions
         assert_eq!(perm["external_directory"], "deny");
         assert_eq!(perm["webfetch"], "deny");
         assert_eq!(perm["websearch"], "deny");
@@ -429,68 +755,94 @@ mod tests {
     }
 
     #[test]
-    fn config_env_var_not_written_to_file() {
-        // The config is passed via env var, not file.
-        // Verify no .opencode.json is created by this module.
-        let config_str = build_config_json();
-        assert!(config_str.contains("external_directory"));
-        assert!(config_str.contains("\"deny\""));
+    fn prompt_includes_acceptance_criteria_and_checkpoint() {
+        let job = test_job("do something");
+        let mut job2 = job.clone();
+        job2.acceptance_criteria = "must pass test X".into();
+        let prompt = build_prompt(&job2, None);
+        assert!(prompt.contains("Acceptance criteria"));
+        assert!(prompt.contains("must pass test X"));
+        assert!(prompt.contains("do something"));
+        assert!(prompt.contains("Workspace boundary"));
+        assert!(prompt.contains("remaining_steps"));
     }
 
     #[test]
-    fn allowed_permissions_are_explicit() {
-        let config_str = build_config_json();
-        let parsed: serde_json::Value = serde_json::from_str(&config_str).unwrap();
-        let perm = parsed["permission"].as_object().unwrap();
-        // Each entry must be allow or deny
-        for (_k, v) in perm {
-            let val = v.as_str().unwrap();
-            assert!(
-                val == "allow" || val == "deny" || val == "ask",
-                "permission value must be allow/deny/ask, got: {val}"
-            );
-        }
+    fn prompt_includes_previous_checkpoint() {
+        let job = test_job("do something");
+        let cp = Checkpoint {
+            objective: "do something".into(),
+            boundaries: "ws".into(),
+            findings: "investigated X".into(),
+            workspace: WorkspaceState {
+                repository: String::new(),
+                branch: String::new(),
+                head: String::new(),
+                working_tree_digest: String::new(),
+            },
+            completed_steps: vec!["added test".into()],
+            remaining_steps: vec!["run cargo test".into()],
+            last_test_result: "1 failed".into(),
+            blocker: String::new(),
+            next_action: "fix double(21)".into(),
+        };
+        let prompt = build_prompt(&job, Some(&cp));
+        assert!(prompt.contains("Previous checkpoint"));
+        assert!(prompt.contains("added test"));
+        assert!(prompt.contains("fix double(21)"));
+        assert!(prompt.contains("Do NOT redo completed work"));
     }
 
     #[test]
-    fn prompt_includes_acceptance_criteria() {
-        let prompt = build_prompt("do something", "must pass test X\nmust not crash");
+    fn parse_checkpoint_extracts_last_block() {
+        let stdout = r#"{"type":"message","role":"assistant"}
+{"findings":"f1","completed_steps":["a"],"remaining_steps":["b"],"last_test_result":"ok","blocker":"","next_action":"n1"}
+{"type":"tool"}
+```json
+{"findings":"f2","completed_steps":["a","b"],"remaining_steps":[],"last_test_result":"ok","blocker":"","next_action":"done"}
+```
+"#;
+        let cp = parse_checkpoint(stdout, "/tmp/ws").unwrap();
+        assert_eq!(cp.findings, "f2");
+        assert!(cp.remaining_steps.is_empty());
+        assert_eq!(cp.completed_steps.len(), 2);
+    }
+
+    #[test]
+    fn parse_checkpoint_extracts_from_text_event_part() {
+        // opencode 1.17+ wraps model text in `text` events; the checkpoint
+        // block may be the bare JSON or wrapped in markdown fences.
+        let stdout = r#"{"type":"step_start"}
+{"type":"text","part":{"type":"text","text":"Let me continue the work."}}
+{"type":"text","part":{"type":"text","text":"{\"findings\":\"f1\",\"completed_steps\":[\"a\"],\"remaining_steps\":[\"b\"],\"last_test_result\":\"ok\",\"blocker\":\"\",\"next_action\":\"n1\"}"}}
+{"type":"text","part":{"type":"text","text":"```json\n{\"findings\":\"f2\",\"completed_steps\":[\"a\",\"b\"],\"remaining_steps\":[],\"last_test_result\":\"ok\",\"blocker\":\"\",\"next_action\":\"done\"}\n```"}}
+"#;
+        let cp = parse_checkpoint(stdout, "/tmp/ws").unwrap();
+        assert_eq!(cp.findings, "f2", "last wrapped block must win");
+        assert!(cp.remaining_steps.is_empty());
+        assert_eq!(cp.completed_steps.len(), 2);
+    }
+
+    #[test]
+    fn parse_checkpoint_none_when_missing() {
+        assert!(parse_checkpoint("no json here\n", "/tmp/ws").is_none());
         assert!(
-            prompt.contains("Acceptance criteria"),
-            "prompt must include Acceptance criteria header"
-        );
-        assert!(
-            prompt.contains("must pass test X"),
-            "prompt must include first criterion"
-        );
-        assert!(
-            prompt.contains("must not crash"),
-            "prompt must include second criterion"
-        );
-        assert!(
-            prompt.contains("do something"),
-            "prompt must include objective"
-        );
-        assert!(
-            prompt.contains("Workspace boundary"),
-            "prompt must include workspace boundary"
+            parse_checkpoint(
+                "{\"type\":\"message\",\"role\":\"assistant\"}\n",
+                "/tmp/ws"
+            )
+            .is_none()
         );
     }
 
     #[test]
-    fn prompt_omits_acceptance_criteria_when_empty() {
-        let prompt = build_prompt("do something", "");
-        assert!(
-            !prompt.contains("Acceptance criteria"),
-            "empty criteria should not produce header"
-        );
-        assert!(
-            prompt.contains("do something"),
-            "objective must still be present"
-        );
-        assert!(
-            prompt.contains("Workspace boundary"),
-            "workspace boundary must still be present"
-        );
+    fn monitor_counts_rounds_and_tools() {
+        let monitor = EventMonitor::new();
+        monitor.observe_event(&serde_json::json!({"type":"message","role":"assistant"}));
+        monitor.observe_event(&serde_json::json!({"type":"step_start"}));
+        monitor.observe_event(&serde_json::json!({"type":"tool_use","part":{"type":"tool","tool":"bash"}}));
+        monitor.observe_event(&serde_json::json!({"type":"tool","tool_use":{}}));
+        assert_eq!(monitor.rounds.load(Ordering::Relaxed), 2);
+        assert_eq!(monitor.tools.load(Ordering::Relaxed), 2);
     }
 }

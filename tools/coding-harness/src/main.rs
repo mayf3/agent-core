@@ -11,6 +11,10 @@ fn main() {
         .unwrap_or_else(|| "127.0.0.1:7200".to_string());
 
     let config = Arc::new(coding_harness::config::CodingConfig::from_env());
+    // Persistent segmented job scheduler: recovers interrupted jobs after a
+    // restart, then runs one bounded segment at a time, automatically
+    // continuing until the job reaches a terminal state.
+    coding_harness::jobs::start_scheduler(Arc::clone(&config));
     let listener = TcpListener::bind(&addr).expect("failed to bind");
     eprintln!("coding_harness listening on {addr}");
 

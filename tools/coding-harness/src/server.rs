@@ -1,5 +1,5 @@
 use crate::config::CodingConfig;
-use crate::{capability, tasks, workspace};
+use crate::{capability, jobs, workspace};
 use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -168,7 +168,10 @@ fn dispatch(config: &CodingConfig, operation: &str, args: &Value) -> Value {
         return err_value("hcr_active_workflow_retired");
     }
 
-    let is_task_op = operation == "external.coding_task_status";
+    let is_task_op = matches!(
+        operation,
+        "external.coding_task_status" | "external.coding_task_cancel" | "external.coding_task_resume"
+    );
     let available_ids: Vec<String> = config.workspaces.keys().cloned().collect();
     let ws_id = if is_task_op {
         None
@@ -239,12 +242,41 @@ fn dispatch(config: &CodingConfig, operation: &str, args: &Value) -> Value {
                 .and_then(Value::as_str)
                 .unwrap_or("fake");
             let model = args.get("model").and_then(Value::as_str);
-            let wr = root.as_ref().map(|r| r.to_string_lossy().to_string());
-            tasks::submit_task(ws, objective, &acceptance, backend, wr.as_deref(), model)
+            let wr = root.as_ref().unwrap();
+            jobs::submit(
+                config,
+                ws,
+                wr,
+                objective,
+                &jobs::normalize_acceptance(&acceptance),
+                backend,
+                model,
+                args,
+            )
         }
         "external.coding_task_status" => {
-            let task_id = args.get("task_id").and_then(Value::as_str).unwrap_or("");
-            tasks::get_status(task_id)
+            let task_id = args
+                .get("task_id")
+                .or_else(|| args.get("job_id"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            jobs::status(config, task_id)
+        }
+        "external.coding_task_cancel" => {
+            let task_id = args
+                .get("task_id")
+                .or_else(|| args.get("job_id"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            jobs::cancel(config, task_id)
+        }
+        "external.coding_task_resume" => {
+            let task_id = args
+                .get("task_id")
+                .or_else(|| args.get("job_id"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            jobs::resume(config, task_id)
         }
         "external.coding_capability_propose" => {
             capability::handle_propose(root.as_ref().unwrap(), args, config)
