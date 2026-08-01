@@ -200,6 +200,7 @@ mod tests {
 
     fn input() -> LlmInput {
         LlmInput {
+            timeout_override_ms: None,
             blocks: vec![ContextBlock {
                 kind: ContextBlockKind::UserMessage,
                 content: "original".into(),

@@ -19,6 +19,7 @@ fn fallback_endpoint_is_used_after_primary_http_error() -> Result<()> {
     let llm = OpenAiCompatibleLlm::new(primary, "primary-key".into(), "bad-primary".into(), 2_000)
         .with_fallback(fallback, "fallback-key".into(), "deepseek-v4-flash".into());
     let output = llm.complete(LlmInput {
+        timeout_override_ms: None,
         blocks: vec![],
         user_text: "hello".into(),
         granted_operations: vec![],

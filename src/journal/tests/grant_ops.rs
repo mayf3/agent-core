@@ -25,6 +25,7 @@ fn snapshot_with_op(name: &str, risk: Risk) -> RegistrySnapshot {
             binding_kind: BindingKind::External,
             binding_key: format!("binding.{name}"),
         }],
+        hook_bindings: crate::registry::store::builtin_hook_bindings(),
     }
 }
 
@@ -357,6 +358,7 @@ fn owner_private_seven_coding_grants_remain_available() {
         snapshot_id: "snap_coding".into(),
         created_at: Utc::now(),
         operations: ops,
+        hook_bindings: crate::registry::store::builtin_hook_bindings(),
     };
 
     let mut grants: Vec<CapabilityGrant> = vec![];

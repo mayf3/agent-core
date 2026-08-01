@@ -186,6 +186,7 @@ fn request_includes_time_now_when_granted() -> Result<()> {
         "session.recall_recent".to_string(),
     ]);
     let _ = llm.complete(LlmInput {
+        timeout_override_ms: None,
         blocks: vec![],
         user_text: "x".into(),
         granted_operations: vec![
@@ -243,6 +244,7 @@ fn request_omits_time_now_when_not_granted() -> Result<()> {
     let provider_tools = snap.provider_tools_for_grants(&["session.recall_recent".to_string()]);
     // Grant only session.recall_recent — NOT system.status.
     let _ = llm.complete(LlmInput {
+        timeout_override_ms: None,
         blocks: vec![],
         user_text: "x".into(),
         granted_operations: vec!["session.recall_recent".to_string()],
@@ -281,6 +283,7 @@ fn misconfigured_write_grant_not_in_tools() -> Result<()> {
     // verifies that even when granted, Write ops don't appear in tools.
     let provider_tools: Vec<serde_json::Value> = vec![];
     let _ = llm.complete(LlmInput {
+        timeout_override_ms: None,
         blocks: vec![],
         user_text: "x".into(),
         granted_operations: vec!["feishu.send_message".to_string()],

@@ -131,7 +131,8 @@ fn rejected_tool_call_writes_issued_and_rejected_not_invocation() {
             &bad_op,
             0,
             0,
-            &crate::registry::snapshot::test_snapshot()
+            &crate::registry::snapshot::test_snapshot(),
+            10_000,
         )
         .is_ok());
     let events = journal.events().unwrap();
@@ -181,7 +182,8 @@ fn successful_tool_call_writes_proposed_approved_succeeded_receipt() {
             &tc,
             0,
             0,
-            &crate::registry::snapshot::test_snapshot()
+            &crate::registry::snapshot::test_snapshot(),
+            10_000,
         )
         .is_ok());
     let events = journal.events().unwrap();
@@ -220,7 +222,8 @@ fn capability_failure_writes_failed_receipt_not_running() {
                 &tc,
                 0,
                 0,
-                &crate::registry::snapshot::test_snapshot()
+                &crate::registry::snapshot::test_snapshot(),
+                10_000,
             )
             .is_ok(),
         "capability failure is a ToolResult, not Err"
@@ -289,7 +292,8 @@ fn empty_recall_returns_succeeded_empty_messages() {
             &tc,
             0,
             0,
-            &crate::registry::snapshot::test_snapshot()
+            &crate::registry::snapshot::test_snapshot(),
+            10_000,
         )
         .is_ok());
     let events = journal.events().unwrap();
@@ -377,6 +381,7 @@ fn untrusted_operation_never_leaks_raw_into_journal() {
             0,
             0,
             &crate::registry::snapshot::test_snapshot(),
+            10_000,
         );
         let j = serde_json::to_string(&journal.events().unwrap()).unwrap();
         assert!(!j.contains(&raw_op), "[{}] raw leaked", label);
@@ -475,6 +480,7 @@ fn policy_denial_writes_rejected_with_correlation() {
         0,
         0,
         &crate::registry::snapshot::test_snapshot(),
+        10_000,
     );
     let events = journal.events().unwrap();
     assert_eq!(count(&events, JournalEventKind::InvocationProposed), 1);

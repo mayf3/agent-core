@@ -250,6 +250,7 @@ mod tests {
 
     fn input() -> LlmInput {
         LlmInput {
+            timeout_override_ms: None,
             blocks: vec![],
             user_text: "PRIVATE_PROMPT_TEXT".into(),
             granted_operations: vec![],
@@ -274,7 +275,7 @@ mod tests {
         let journal = JournalStore::in_memory().unwrap();
         let (run, session) = run_and_session();
 
-        let result = runtime.complete_model_invocation(&journal, &run, &session, 0, input());
+        let result = runtime.complete_model_invocation(&journal, &run, &session, 0, input(), None);
         assert!(result.is_err());
         let error = result.err().expect("over-budget error");
         assert!(error.to_string().contains("model_input_over_budget"));
@@ -326,7 +327,7 @@ mod tests {
         let (run, session) = run_and_session();
 
         let error = runtime
-            .complete_model_invocation(&journal, &run, &session, 0, input)
+            .complete_model_invocation(&journal, &run, &session, 0, input, None)
             .err()
             .expect("AgentProfile substitution must fail");
         assert!(error
@@ -347,7 +348,7 @@ mod tests {
         let (run, session) = run_and_session();
 
         let output = runtime
-            .complete_model_invocation(&journal, &run, &session, 0, input())
+            .complete_model_invocation(&journal, &run, &session, 0, input(), None)
             .unwrap();
         let events = journal.events().unwrap();
         let started = events_of_kind(&events, JournalEventKind::ModelInvocationStarted);
@@ -392,7 +393,7 @@ mod tests {
         let (run, session) = run_and_session();
 
         let error = runtime
-            .complete_model_invocation(&journal, &run, &session, 0, input())
+            .complete_model_invocation(&journal, &run, &session, 0, input(), None)
             .err()
             .expect("model failure must surface");
         assert_eq!(error.to_string(), "model invocation failed");
@@ -417,7 +418,7 @@ mod tests {
         let (run, session) = run_and_session();
 
         runtime
-            .complete_model_invocation(&journal, &run, &session, 0, input())
+            .complete_model_invocation(&journal, &run, &session, 0, input(), None)
             .unwrap();
         let events = journal.events().unwrap();
         assert!(events_of_kind(&events, JournalEventKind::ModelInvocationCompleted).is_empty());

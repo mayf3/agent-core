@@ -46,7 +46,10 @@ impl super::JournalStore {
             .cloned()
             .collect();
         specs.extend(expected);
-        let next = self.create_registry_snapshot(specs)?;
+        // Inherit the budget hook binding so control seeding never silently
+        // switches hook identity.
+        let next =
+            self.create_registry_snapshot_with_hook_bindings(specs, current.hook_bindings.clone())?;
         self.activate_snapshot_transactional(
             &current.snapshot_id,
             &next.snapshot_id,
