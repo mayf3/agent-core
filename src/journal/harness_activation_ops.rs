@@ -57,8 +57,13 @@ impl super::JournalStore {
             binding_key: manifest_id.clone(),
         });
 
-        // Compute new snapshot ID.
-        let new_snapshot = self.create_registry_snapshot(new_specs)?;
+        // Compute new snapshot ID. The budget hook binding is inherited from
+        // the current snapshot so enabling a harness never silently switches
+        // hook identity.
+        let new_snapshot = self.create_registry_snapshot_with_hook_bindings(
+            new_specs,
+            current_snap.hook_bindings.clone(),
+        )?;
         let new_snapshot_id = new_snapshot.snapshot_id.clone();
 
         // Atomically: update registry_state and record journal event.
@@ -118,7 +123,11 @@ impl super::JournalStore {
             .cloned()
             .collect();
 
-        let new_snapshot = self.create_registry_snapshot(new_specs)?;
+        // Inherit the budget hook binding from the current snapshot.
+        let new_snapshot = self.create_registry_snapshot_with_hook_bindings(
+            new_specs,
+            current_snap.hook_bindings.clone(),
+        )?;
         let new_snapshot_id = new_snapshot.snapshot_id.clone();
 
         // Atomically: update registry_state and record journal event.

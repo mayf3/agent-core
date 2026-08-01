@@ -23,7 +23,16 @@ impl<L: LlmClient + 'static> Runtime<L> {
         session: &Session,
         round_index: usize,
         input: LlmInput,
+        deadline: Option<std::time::Instant>,
     ) -> Result<LlmOutput> {
+        // Run deadline guard (High 2): do not START a model call once the
+        // frozen Run budget deadline has passed.
+        if let Some(deadline) = deadline {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(anyhow!("run_deadline_exceeded:no_new_llm_invocation"));
+            }
+        }
         let invocation_id = format!("model:{}:{round_index}", run.id.0);
         let receipt_id = format!("model-receipt:{invocation_id}");
         let requested_provider = safe_label(self.llm.provider_hint(), "unknown");
@@ -155,6 +164,22 @@ impl<L: LlmClient + 'static> Runtime<L> {
             }),
         )?;
 
+        // Bind the remaining Run deadline into the invocation so the network
+        // client stops waiting at the deadline (effective timeout =
+        // min(client timeout, remaining)). A call that overruns the deadline
+        // is reported as model_timeout; the caller stops and applies the
+        // frozen yield/terminate semantics instead of waiting for the natural
+        // return.
+        let mut input = input;
+        if let Some(deadline) = deadline {
+            let remaining_ms = deadline
+                .saturating_duration_since(Instant::now())
+                .as_millis() as u64;
+            if remaining_ms > 0 {
+                input.timeout_override_ms =
+                    Some(remaining_ms.min(self.config.model_timeout_ms.max(1)));
+            }
+        }
         let timer = Instant::now();
         let result = self.llm.complete(input);
         let latency_ms = timer.elapsed().as_millis().min(u64::MAX as u128) as u64;

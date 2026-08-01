@@ -23,6 +23,7 @@ fn snapshot_with_op(name: &str, risk: Risk) -> RegistrySnapshot {
             binding_kind: BindingKind::External,
             binding_key: format!("binding.{name}"),
         }],
+        hook_bindings: crate::registry::store::builtin_hook_bindings(),
     }
 }
 

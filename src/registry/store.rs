@@ -1,9 +1,25 @@
 use crate::registry::snapshot::{
-    compute_snapshot_id, BindingKind, OperationSpec, RegistrySnapshot, Risk,
+    compute_snapshot_id_with_hook_bindings, BindingKind, HookBinding, OperationSpec,
+    RegistrySnapshot, Risk,
 };
 use anyhow::{anyhow, Result};
 use rusqlite::{params, Connection};
 use std::sync::{Arc, Mutex};
+
+/// The canonical bootstrap binding for a contract, if one is defined.
+/// Currently only the budget contract is bootstrapped; new contracts are
+/// plain data values and need no struct or schema change.
+pub fn builtin_hook_binding(contract: &str) -> Option<HookBinding> {
+    match contract {
+        crate::registry::snapshot::BUDGET_HOOK_CONTRACT => Some(HookBinding::builtin_budget()),
+        _ => None,
+    }
+}
+
+/// The bootstrap hook binding set: the canonical budget binding.
+pub fn builtin_hook_bindings() -> Vec<HookBinding> {
+    vec![HookBinding::builtin_budget()]
+}
 
 /// The Registry owns the baseline operation definitions and persists snapshots
 /// to the Journal DB. It is passed by reference (not global/static/thread_local).
@@ -120,17 +136,38 @@ impl Registry {
     /// missing, and sets it as the active snapshot.
     pub fn ensure_baseline_snapshot(&self) -> Result<()> {
         let specs = builtin_specs();
-        let snapshot = self.create_snapshot(specs)?;
+        let snapshot = self.create_snapshot_with_hook_bindings(specs, builtin_hook_bindings())?;
         *self.current_snapshot.lock().unwrap() = Some(Arc::new(snapshot));
         Ok(())
     }
 
-    /// Create (or return existing) a snapshot from specs. If a snapshot with the
-    /// same canonical digest already exists, the existing one is returned —
-    /// snapshots are append-only/immutable. Attempting to write a *different*
-    /// content with the same snapshot_id fails.
+    /// Create (or return existing) a snapshot from specs with the bootstrap
+    /// hook binding set. Equivalent to PR #217 behaviour where the default
+    /// hook is always available.
     pub fn create_snapshot(&self, specs: Vec<OperationSpec>) -> Result<RegistrySnapshot> {
-        let snapshot_id = compute_snapshot_id(&specs)?;
+        self.create_snapshot_with_hook_bindings(specs, builtin_hook_bindings())
+    }
+
+    /// Create (or return existing) a snapshot from specs and an explicit
+    /// generic hook binding set. An empty set produces a snapshot with no
+    /// hook bindings (contracts fail closed for new Runs). If a snapshot with
+    /// the same canonical digest already exists, the existing one is
+    /// returned — snapshots are append-only/immutable. Attempting to write a
+    /// *different* content with the same snapshot_id fails.
+    pub fn create_snapshot_with_hook_bindings(
+        &self,
+        specs: Vec<OperationSpec>,
+        hook_bindings: Vec<HookBinding>,
+    ) -> Result<RegistrySnapshot> {
+        // A contract must be unique within a snapshot.
+        let mut seen = std::collections::HashSet::new();
+        if hook_bindings
+            .iter()
+            .any(|b| !seen.insert(b.contract.clone()))
+        {
+            anyhow::bail!("registry_duplicate_hook_contract");
+        }
+        let snapshot_id = compute_snapshot_id_with_hook_bindings(&specs, &hook_bindings)?;
         let created_at = chrono::Utc::now();
         let conn = self
             .conn
@@ -185,11 +222,31 @@ impl Registry {
             )?;
         }
 
+        // Insert generic hook binding rows.
+        for b in &hook_bindings {
+            conn.execute(
+                "INSERT INTO registry_snapshot_hook_bindings
+                 (snapshot_id, contract, hook_id, hook_version, binding_kind, binding_key, provider_id, endpoint)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    &snapshot_id,
+                    &b.contract,
+                    &b.hook_id,
+                    &b.hook_version,
+                    format!("{:?}", b.binding_kind),
+                    &b.binding_key,
+                    &b.provider_id,
+                    &b.endpoint,
+                ],
+            )?;
+        }
+
         drop(conn);
         Ok(RegistrySnapshot {
             snapshot_id,
             created_at,
             operations: sorted,
+            hook_bindings,
         })
     }
 
@@ -292,10 +349,45 @@ impl Registry {
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
+        // Load the generic hook binding set from the sub-table.
+        let hook_bindings: Vec<HookBinding> = {
+            let mut stmt = conn.prepare(
+                "SELECT contract, hook_id, hook_version, binding_kind, binding_key, provider_id, endpoint
+                 FROM registry_snapshot_hook_bindings
+                 WHERE snapshot_id = ?1
+                 ORDER BY contract",
+            )?;
+            let rows = stmt.query_map(params![snapshot_id], |row| {
+                let contract: String = row.get(0)?;
+                let hook_id: String = row.get(1)?;
+                let hook_version: String = row.get(2)?;
+                let kind_str: String = row.get(3)?;
+                let binding_key: String = row.get(4)?;
+                let provider_id: String = row.get(5)?;
+                let endpoint: String = row.get(6)?;
+                let binding_kind = match kind_str.as_str() {
+                    "Builtin" => BindingKind::Builtin,
+                    "External" => BindingKind::External,
+                    _ => BindingKind::Builtin,
+                };
+                Ok(HookBinding {
+                    contract,
+                    hook_id,
+                    hook_version,
+                    binding_kind,
+                    binding_key,
+                    provider_id,
+                    endpoint,
+                })
+            })?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+
         Ok(RegistrySnapshot {
             snapshot_id: snapshot_id.to_string(),
             created_at,
             operations,
+            hook_bindings,
         })
     }
 
@@ -333,6 +425,10 @@ mod tests {
             .unwrap();
         conn.execute_batch(include_str!("../../migrations/0002_registry_snapshots.sql"))
             .unwrap();
+        conn.execute_batch(include_str!(
+            "../../migrations/0019_registry_hook_bindings.sql"
+        ))
+        .unwrap();
         Registry::new(conn).unwrap()
     }
 
@@ -361,6 +457,10 @@ mod tests {
                 .unwrap();
             conn.execute_batch(include_str!("../../migrations/0002_registry_snapshots.sql"))
                 .unwrap();
+            conn.execute_batch(include_str!(
+                "../../migrations/0019_registry_hook_bindings.sql"
+            ))
+            .unwrap();
             let reg = Registry::new(conn).unwrap();
             snap_id = reg.current_snapshot_id().unwrap();
         }

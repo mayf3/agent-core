@@ -236,12 +236,28 @@ pub(crate) fn dispatch_builtin_binding(
             } else {
                 "harness_failed"
             };
-            (
-                ReceiptStatus::Failed,
-                json!({"error_category": cat}),
-                None,
-                format!("status: execution_failed\nerror_category: {cat}"),
-            )
+            if cat == "timeout" {
+                // Honest timeout semantics (High 2): the Kernel stopped
+                // waiting at the deadline. It cannot prove the remote side
+                // effect was cancelled — the remote may still be running.
+                (
+                    ReceiptStatus::Failed,
+                    json!({
+                        "error_category": "timeout",
+                        "caller_stopped_waiting": true,
+                        "remote_side_effect_cancellation_unverified": true,
+                    }),
+                    None,
+                    "status: execution_failed\nerror_category: timeout\ncaller_stopped_waiting=true\nremote_side_effect_cancellation_unverified=true".to_string(),
+                )
+            } else {
+                (
+                    ReceiptStatus::Failed,
+                    json!({"error_category": cat}),
+                    None,
+                    format!("status: execution_failed\nerror_category: {cat}"),
+                )
+            }
         }
     };
     if let Some(fatal) = append_or_fatal(
@@ -300,6 +316,10 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
         turn_index: usize,
         tool_index: usize,
         snapshot: &RegistrySnapshot,
+        // Remaining Run deadline budget in ms (High 2). The harness transport
+        // uses min(remaining, harness_read_timeout_ms) so an in-flight
+        // external call stops waiting AT the Run deadline.
+        remaining_ms: u64,
     ) -> Result<ToolCallOutcome> {
         let audited_op = sanitize_operation_for_audit_with_snapshot(&tool_call.operation, snapshot);
         // Always write ToolCallIssued first (audit trail), even for operations
@@ -425,6 +445,12 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
             ));
         }
 
+        // Effective harness read timeout = min(remaining Run deadline,
+        // configured harness timeout). The Run deadline is authoritative:
+        // when it expires mid-call, the transport stops waiting and the Run
+        // applies the frozen yield/terminate semantics.
+        let harness_read_timeout =
+            Duration::from_millis(remaining_ms.min(self.config.harness_read_timeout_ms));
         return Ok(dispatch_builtin_binding(
             spec,
             &approved,
@@ -432,7 +458,7 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
             run,
             session,
             &correlation_id,
-            Duration::from_millis(self.config.harness_read_timeout_ms),
+            harness_read_timeout,
             &snapshot.snapshot_id,
         ));
     }

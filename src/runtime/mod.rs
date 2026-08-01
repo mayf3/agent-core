@@ -73,6 +73,9 @@ mod registry_snapshot_recovery_failure;
 #[path = "tests/run_budget.rs"]
 mod run_budget;
 #[cfg(test)]
+#[path = "tests/run_budget_closeout.rs"]
+mod run_budget_closeout;
+#[cfg(test)]
 #[path = "tests/tool_execution_dispatch.rs"]
 mod tool_execution_dispatch;
 #[cfg(test)]
@@ -266,6 +269,15 @@ where
         // once here. All LLM rounds for this Run reuse the same tools list.
         let provider_tools = snapshot.provider_tools_for_grants(&granted_operations);
 
+        // Run wall-clock deadline (High 2): frozen once at Run start. The
+        // initial model call and every tool-loop round carry the remaining
+        // budget into the transport so nothing outlives the deadline.
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_millis(
+                run.budget_max_wall_time_ms
+                    .unwrap_or(self.config.tool_loop_timeout_ms),
+            );
+
         // Phase 1: initial LLM call. On failure, record RunFailed and deliver
         // a static notification (never a silent Err).
         let first = match self.complete_model_invocation(
@@ -274,12 +286,14 @@ where
             &session,
             0,
             LlmInput {
+                timeout_override_ms: None,
                 blocks: blocks.clone(),
                 user_text: text.clone(),
                 granted_operations: granted_operations.clone(),
                 provider_tools: provider_tools.clone(),
                 follow_ups: vec![],
             },
+            Some(deadline),
         ) {
             Ok(llm) => llm,
             Err(_) => {

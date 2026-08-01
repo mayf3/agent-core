@@ -343,6 +343,7 @@ fn openai_compatible_llm_missing_config_returns_friendly_output() -> Result<()> 
         100,
     );
     let output = llm.complete(LlmInput {
+        timeout_override_ms: None,
         blocks: vec![],
         user_text: "hello".to_string(),
         granted_operations: vec![],
@@ -369,6 +370,7 @@ fn zai_model_prefix_is_normalized_for_zai_endpoint() -> Result<()> {
         100,
     );
     let output = llm.complete(LlmInput {
+        timeout_override_ms: None,
         blocks: vec![],
         user_text: "hello".to_string(),
         granted_operations: vec![],
@@ -394,6 +396,7 @@ fn provider_model_prefix_is_preserved_for_generic_endpoint() -> Result<()> {
         100,
     );
     let output = llm.complete(LlmInput {
+        timeout_override_ms: None,
         blocks: vec![],
         user_text: "hello".to_string(),
         granted_operations: vec![],

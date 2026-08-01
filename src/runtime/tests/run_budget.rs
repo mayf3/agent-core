@@ -25,7 +25,7 @@ use crate::hook::{
 };
 use crate::journal::JournalStore;
 use crate::llm::{LlmClient, LlmInput, LlmOutput, ToolCall, ToolCallResult};
-use crate::registry::snapshot::{BindingKind, OperationSpec, RegistrySnapshot, Risk};
+use crate::registry::snapshot::{BindingKind, HookBinding, OperationSpec, RegistrySnapshot, Risk};
 use crate::runtime::Runtime;
 use serde_json::json;
 use std::path::PathBuf;
@@ -140,7 +140,24 @@ fn test_snapshot() -> RegistrySnapshot {
                 binding_key: "builtin.system_status".into(),
             },
         ],
+        hook_bindings: crate::registry::store::builtin_hook_bindings(),
     }
+}
+
+/// A snapshot whose budget hook binding is an external endpoint bound to
+/// `provider_id`. Used to exercise the external-hook selection path.
+fn external_binding_snapshot(provider_id: &str, endpoint: &str) -> RegistrySnapshot {
+    let mut snap = test_snapshot();
+    snap.hook_bindings = vec![HookBinding {
+        contract: crate::registry::snapshot::BUDGET_HOOK_CONTRACT.to_string(),
+        hook_id: format!("provider:{provider_id}"),
+        hook_version: "v0".into(),
+        binding_kind: BindingKind::External,
+        binding_key: "external.run_budget_resolve_v0".into(),
+        provider_id: provider_id.into(),
+        endpoint: endpoint.into(),
+    }];
+    snap
 }
 
 fn make_run(snapshot: &RegistrySnapshot) -> Run {
@@ -289,6 +306,7 @@ fn frozen_max_rounds_stops_loop() {
     let first = runtime
         .llm
         .complete(LlmInput {
+            timeout_override_ms: None,
             blocks: blocks.clone(),
             user_text: "test".into(),
             granted_operations: vec!["system.status".to_string()],
@@ -346,6 +364,7 @@ fn terminate_action_marks_run_failed() {
     let first = runtime
         .llm
         .complete(LlmInput {
+            timeout_override_ms: None,
             blocks: blocks.clone(),
             user_text: "test".into(),
             granted_operations: vec!["system.status".to_string()],
@@ -414,6 +433,7 @@ fn yield_action_produces_continue_message() {
     let first = runtime
         .llm
         .complete(LlmInput {
+            timeout_override_ms: None,
             blocks: blocks.clone(),
             user_text: "test".into(),
             granted_operations: vec!["system.status".to_string()],
@@ -516,7 +536,7 @@ fn untrusted_hook_response_rejected_fail_closed() {
         fn call_budget(
             &self,
             req: &crate::hook::RunBudgetHookRequest,
-            cfg: &HookConfig,
+            _cfg: &HookConfig,
         ) -> anyhow::Result<AuthenticatedRunBudgetResponse> {
             // Return with a DIFFERENT provider_id than the config
             Ok(AuthenticatedRunBudgetResponse {
@@ -547,7 +567,7 @@ fn untrusted_hook_response_rejected_fail_closed() {
         )
         .with_budget_hook(config.budget_hook.clone());
 
-    let snapshot = test_snapshot();
+    let snapshot = external_binding_snapshot("trusted-provider", "http://127.0.0.1:9999/budget");
     let run = make_run(&snapshot);
     let session = make_session();
 
@@ -625,6 +645,7 @@ fn model_arguments_cannot_override_budget() {
     let first = runtime
         .llm
         .complete(LlmInput {
+            timeout_override_ms: None,
             blocks: blocks.clone(),
             user_text: "test".into(),
             granted_operations: vec!["system.status".to_string()],
@@ -680,7 +701,7 @@ fn hook_error_fail_open_falls_back_to_default() {
         .with_hook(Box::new(fake), config.context_prepare_hook.clone())
         .with_budget_hook(config.budget_hook.clone());
 
-    let snapshot = test_snapshot();
+    let snapshot = external_binding_snapshot("budget-provider", "http://127.0.0.1:9999/budget");
     let run = make_run(&snapshot);
     let session = make_session();
 
@@ -718,7 +739,7 @@ fn hook_error_fail_closed_rejects_run() {
         .with_hook(Box::new(fake), config.context_prepare_hook.clone())
         .with_budget_hook(config.budget_hook.clone());
 
-    let snapshot = test_snapshot();
+    let snapshot = external_binding_snapshot("budget-provider", "http://127.0.0.1:9999/budget");
     let run = make_run(&snapshot);
     let session = make_session();
 
@@ -753,6 +774,7 @@ fn default_budget_matches_legacy_config_when_unset() {
     let first = runtime
         .llm
         .complete(LlmInput {
+            timeout_override_ms: None,
             blocks: blocks.clone(),
             user_text: "test".into(),
             granted_operations: vec!["system.status".to_string()],
@@ -820,10 +842,10 @@ fn external_hook_valid_decision_accepted() {
         fn call_budget(
             &self,
             req: &crate::hook::RunBudgetHookRequest,
-            cfg: &HookConfig,
+            _cfg: &HookConfig,
         ) -> anyhow::Result<AuthenticatedRunBudgetResponse> {
             Ok(AuthenticatedRunBudgetResponse {
-                provider_id: cfg.provider_id.clone(),
+                provider_id: _cfg.provider_id.clone(),
                 request_id: req.request_id.clone(),
                 response: RunBudgetHookResponse {
                     request_id: req.request_id.clone(),
@@ -852,7 +874,7 @@ fn external_hook_valid_decision_accepted() {
         )
         .with_budget_hook(config.budget_hook.clone());
 
-    let snapshot = test_snapshot();
+    let snapshot = external_binding_snapshot("budget-provider", "http://127.0.0.1:9999/budget");
     let run = make_run(&snapshot);
     let session = make_session();
 
@@ -864,7 +886,9 @@ fn external_hook_valid_decision_accepted() {
     assert_eq!(budget.decision.max_tool_rounds, 2);
     assert_eq!(budget.decision.max_wall_time_ms, 60_000);
     assert_eq!(budget.decision.exhaustion_action, ExhaustionAction::Yield);
-    assert_eq!(budget.hook_id, "budget-provider");
+    // hook_id comes from the snapshot binding, not from env selection
+    assert_eq!(budget.hook_id, "provider:budget-provider");
+    assert_eq!(budget.hook_version, "v0");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -936,6 +960,7 @@ fn frozen_wall_time_is_enforced() {
     let first = runtime
         .llm
         .complete(LlmInput {
+            timeout_override_ms: None,
             blocks: blocks.clone(),
             user_text: "test".into(),
             granted_operations: vec!["system.status".to_string()],
@@ -992,10 +1017,10 @@ fn external_hook_over_ceiling_fail_closed() {
         fn call_budget(
             &self,
             req: &crate::hook::RunBudgetHookRequest,
-            cfg: &HookConfig,
+            _cfg: &HookConfig,
         ) -> anyhow::Result<AuthenticatedRunBudgetResponse> {
             Ok(AuthenticatedRunBudgetResponse {
-                provider_id: cfg.provider_id.clone(),
+                provider_id: _cfg.provider_id.clone(),
                 request_id: req.request_id.clone(),
                 response: RunBudgetHookResponse {
                     request_id: req.request_id.clone(),
@@ -1022,7 +1047,7 @@ fn external_hook_over_ceiling_fail_closed() {
         )
         .with_budget_hook(config.budget_hook.clone());
 
-    let snapshot = test_snapshot();
+    let snapshot = external_binding_snapshot("budget-provider", "http://127.0.0.1:9999/budget");
     let run = make_run(&snapshot);
     let session = make_session();
 
@@ -1067,10 +1092,10 @@ fn external_hook_over_ceiling_fail_open_defaults() {
         fn call_budget(
             &self,
             req: &crate::hook::RunBudgetHookRequest,
-            cfg: &HookConfig,
+            _cfg: &HookConfig,
         ) -> anyhow::Result<AuthenticatedRunBudgetResponse> {
             Ok(AuthenticatedRunBudgetResponse {
-                provider_id: cfg.provider_id.clone(),
+                provider_id: _cfg.provider_id.clone(),
                 request_id: req.request_id.clone(),
                 response: RunBudgetHookResponse {
                     request_id: req.request_id.clone(),
@@ -1097,7 +1122,7 @@ fn external_hook_over_ceiling_fail_open_defaults() {
         )
         .with_budget_hook(config.budget_hook.clone());
 
-    let snapshot = test_snapshot();
+    let snapshot = external_binding_snapshot("budget-provider", "http://127.0.0.1:9999/budget");
     let run = make_run(&snapshot);
     let session = make_session();
 

@@ -3,7 +3,7 @@
 use crate::domain::{AgentId, CapabilityApprovalStatus, JournalEventKind, RunId, SessionId};
 use crate::harness::manifest::HarnessManifest;
 use crate::journal::grant_ops::CreateGrantParams;
-use crate::registry::snapshot::compute_snapshot_id;
+use crate::registry::snapshot::compute_snapshot_id_with_hook_bindings;
 use anyhow::{bail, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, TransactionBehavior};
@@ -98,7 +98,19 @@ impl super::JournalStore {
         }
         validate_pending(&conn, &binding, identity)?;
         let specs = super::activation_core::capability_specs(&conn, identity, manifest)?;
-        compute_snapshot_id(&specs)
+        // The prospective snapshot inherits the active snapshot's complete
+        // hook binding set (mirrors activate_registry_tx), so the computed ID
+        // matches the one produced by the atomic activation path.
+        let inherited = super::activation_core::load_active_hook_bindings(
+            &conn,
+            &identity.expected_source_snapshot_id,
+        )?;
+        let inherited = if inherited.is_empty() {
+            crate::registry::store::builtin_hook_bindings()
+        } else {
+            inherited
+        };
+        compute_snapshot_id_with_hook_bindings(&specs, &inherited)
     }
 
     pub fn activate_trusted_capability_atomic(
@@ -133,7 +145,18 @@ impl super::JournalStore {
         }
         validate_decidable(&binding)?;
         let specs = super::activation_core::capability_specs(&tx, identity, manifest)?;
-        let prospective = compute_snapshot_id(&specs)?;
+        // The prospective ID must cover the inherited complete hook binding
+        // set to match activate_registry_tx below.
+        let inherited = super::activation_core::load_active_hook_bindings(
+            &tx,
+            &identity.expected_source_snapshot_id,
+        )?;
+        let inherited = if inherited.is_empty() {
+            crate::registry::store::builtin_hook_bindings()
+        } else {
+            inherited
+        };
+        let prospective = compute_snapshot_id_with_hook_bindings(&specs, &inherited)?;
         if deployment.target_snapshot_id != prospective {
             bail!("HOST_DEPLOYMENT_SNAPSHOT_MISMATCH");
         }

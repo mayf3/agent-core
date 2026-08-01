@@ -95,6 +95,7 @@ mod tests {
 
     fn input(result: Option<&str>) -> LlmInput {
         LlmInput {
+            timeout_override_ms: None,
             blocks: vec![],
             user_text: super::super::calculator_router::CALCULATOR_SMOKE_SENTENCE.into(),
             granted_operations: vec!["external.calculator".into()],

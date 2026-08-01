@@ -54,7 +54,12 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
         let exhaustion_action = run
             .budget_exhaustion_action
             .unwrap_or(ExhaustionAction::Yield);
+        // Run wall-clock deadline (High 2): frozen at the first loop entry.
+        // Every LLM and tool invocation before the deadline; in-flight calls
+        // carry the remaining time as their effective timeout so the caller
+        // stops waiting AT the deadline, never after a natural return.
         let start = Instant::now();
+        let deadline = start + std::time::Duration::from_millis(timeout_ms);
         let mut tool_index: usize = 0;
         // Pre-compute provider tools from the pinned snapshot — same list
         // for all LLM rounds of this Run.
@@ -101,7 +106,7 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
                             }
                             // Wall-clock timeout: stop before the next LLM call.
                             if Self::check_wall_clock_timeout(
-                                start,
+                                deadline,
                                 timeout_ms,
                                 exhaustion_action,
                                 journal,
@@ -119,6 +124,9 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
                                 user_text,
                                 &provider_tools,
                                 &follow_ups,
+                                deadline,
+                                timeout_ms,
+                                exhaustion_action,
                             )?;
                             pending_turn = llm.provider_turn.take();
                             if llm.tool_call.is_absent() {
@@ -162,10 +170,36 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
                     prev_tool_key = Some((tool_call.operation.clone(), canonicalized));
                     // ----- End duplicate detection -----
 
+                    // Run deadline guard (High 2): do not START a tool call
+                    // once the frozen Run budget deadline has passed. The
+                    // remaining time is also passed down so the harness
+                    // transport stops waiting at the deadline.
+                    if Self::check_wall_clock_timeout(
+                        deadline,
+                        timeout_ms,
+                        exhaustion_action,
+                        journal,
+                        run,
+                        session,
+                        &mut llm,
+                    )? {
+                        return Ok(llm);
+                    }
+                    let remaining_ms = deadline
+                        .saturating_duration_since(Instant::now())
+                        .as_millis() as u64;
                     let this_tool = tool_index;
                     tool_index += 1;
                     let outcome = self.handle_inline_tool_call(
-                        journal, gateway, run, session, &tool_call, turn_index, this_tool, snapshot,
+                        journal,
+                        gateway,
+                        run,
+                        session,
+                        &tool_call,
+                        turn_index,
+                        this_tool,
+                        snapshot,
+                        remaining_ms,
                     )?;
                     match outcome {
                         ToolCallOutcome::Fatal { category } => {
@@ -194,7 +228,7 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
                             }
                             // Wall-clock timeout: stop before the next LLM call.
                             if Self::check_wall_clock_timeout(
-                                start,
+                                deadline,
                                 timeout_ms,
                                 exhaustion_action,
                                 journal,
@@ -212,6 +246,9 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
                                 user_text,
                                 &provider_tools,
                                 &follow_ups,
+                                deadline,
+                                timeout_ms,
+                                exhaustion_action,
                             )?;
                             pending_turn = llm.provider_turn.take();
                             if llm.tool_call.is_absent() {
@@ -272,10 +309,12 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
         Ok(llm)
     }
 
-    /// Check wall-clock timeout before issuing another LLM completion.
-    /// Returns `true` if timed out (event already written, llm.content updated).
+    /// Check whether the Run wall-clock deadline has been reached. Called
+    /// before every LLM and tool invocation. Returns `true` if the deadline
+    /// passed (event already written, llm.content updated with the frozen
+    /// yield/terminate semantics).
     fn check_wall_clock_timeout(
-        start: Instant,
+        deadline: Instant,
         timeout_ms: u64,
         exhaustion_action: ExhaustionAction,
         journal: &JournalStore,
@@ -283,8 +322,13 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
         session: &Session,
         llm: &mut LlmOutput,
     ) -> Result<bool> {
-        let elapsed_ms = start.elapsed().as_millis() as u64;
-        if elapsed_ms < timeout_ms {
+        let elapsed_ms = timeout_ms.saturating_sub(
+            deadline
+                .saturating_duration_since(Instant::now())
+                .as_millis() as u64,
+        );
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if !remaining.is_zero() {
             return Ok(false);
         }
         let _ = journal.append_event(
@@ -340,6 +384,9 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
         user_text: &str,
         provider_tools: &[serde_json::Value],
         follow_ups: &[LlmFollowUp],
+        deadline: Instant,
+        timeout_ms: u64,
+        exhaustion_action: ExhaustionAction,
     ) -> Result<LlmOutput> {
         let next = match self.complete_model_invocation(
             journal,
@@ -347,6 +394,7 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
             session,
             follow_ups.len(),
             LlmInput {
+                timeout_override_ms: None,
                 blocks: blocks.to_vec(),
                 user_text: user_text.to_string(),
                 granted_operations: run
@@ -358,9 +406,33 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
                 provider_tools: provider_tools.to_vec(),
                 follow_ups: follow_ups.to_vec(),
             },
+            Some(deadline),
         ) {
             Ok(next) => next,
-            Err(_) => {
+            Err(error) => {
+                if error.to_string().contains("run_deadline_exceeded") {
+                    // Deadline reached before the LLM call started — apply the
+                    // frozen exhaustion semantics instead of a generic failure.
+                    let mut llm = LlmOutput {
+                        provider: "system".into(),
+                        model: "system".into(),
+                        content: String::new(),
+                        journal_payload: json!({"s":"deadline"}),
+                        tool_call: ToolCallResult::Absent,
+                        provider_turn: None,
+                    };
+                    let timed_out = Self::check_wall_clock_timeout(
+                        deadline,
+                        timeout_ms,
+                        exhaustion_action,
+                        journal,
+                        run,
+                        session,
+                        &mut llm,
+                    )?;
+                    debug_assert!(timed_out, "deadline guard must report timeout");
+                    return Ok(llm);
+                }
                 return self.handle_followup_llm_failure(journal, run, session);
             }
         };

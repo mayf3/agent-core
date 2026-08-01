@@ -439,18 +439,27 @@ pub(crate) struct ResolvedBudget {
     pub source: &'static str,
 }
 
-/// The default budget hook ID and version. Used when no external
-/// `run.budget.resolve.v0` hook is configured (or when a configured hook
-/// fails open / degrades). This is an ordinary hook artifact — not a second
-/// parallel strategy path.
+/// The default budget hook ID and version. Used when the snapshot's binding
+/// is the builtin default. This is an ordinary registered binding — not a
+/// second parallel strategy path.
 pub const DEFAULT_BUDGET_HOOK_ID: &str = "builtin:run-budget-default-v0";
 pub const DEFAULT_BUDGET_HOOK_VERSION: &str = "v0";
 
 impl<L: crate::llm::LlmClient + 'static> super::Runtime<L> {
-    /// Resolve the Run's budget using the default hook or an external
-    /// `run.budget.resolve.v0` hook. Returns a frozen decision with provenance.
-    /// On failure, applies the hook's failure_mode: FailClosed / Disabled →
-    /// Err (the Run fails before it starts); FailOpen / Degrade → default.
+    /// Resolve the Run's budget from the binding frozen in the Run's pinned
+    /// Registry Snapshot. Returns a frozen decision with provenance.
+    ///
+    /// Selection semantics (boundary-audit close-out):
+    /// - The snapshot's generic `hook_bindings` set is the ONLY authority for
+    ///   which hook runs. The binding is selected by `contract ==
+    ///   "run.budget.resolve.v0"`; missing or duplicated contract → fail
+    ///   closed. Kernel env does not pick the hook.
+    /// - `Builtin` binding → the Kernel's default decision function.
+    /// - `External` binding → the endpoint from the binding, authenticated by
+    ///   the local credential whose provider_id matches the binding. A missing
+    ///   or mismatched credential → fail closed (never silently fall back).
+    /// - Hook call failure applies the configured failure_mode: FailClosed /
+    ///   Disabled → Err; FailOpen / Degrade → default decision.
     pub(crate) fn resolve_run_budget(
         &self,
         journal: &JournalStore,
@@ -465,7 +474,7 @@ impl<L: crate::llm::LlmClient + 'static> super::Runtime<L> {
             source: "default",
         };
 
-        /// Emit a RunBudgetResolved journal event for the default hook path.
+        // Emit a RunBudgetResolved journal event for the default hook path.
         let emit_default_event = |journal: &JournalStore,
                                   run: &Run,
                                   session: &Session,
@@ -493,18 +502,61 @@ impl<L: crate::llm::LlmClient + 'static> super::Runtime<L> {
             Ok(())
         };
 
-        let (Some(client), Some(config)) = (&self.hook_client, &self.budget_hook_config.as_ref())
-        else {
-            // No budget hook configured — use default and emit the audit event.
-            let b = default_budget();
-            emit_default_event(journal, run, session, &b)?;
-            return Ok(b);
-        };
-        if !config.enabled || config.kind != HookKind::RunBudgetResolveV0 {
-            let b = default_budget();
+        // The snapshot's generic hook binding set is the single authority for
+        // hook selection. The budget contract must resolve to exactly one
+        // binding; missing or duplicated → fail closed.
+        let binding = snapshot
+            .hook_binding(crate::registry::snapshot::BUDGET_HOOK_CONTRACT)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "budget_hook_binding_missing_or_ambiguous: snapshot has no unique \
+                     run.budget.resolve.v0 hook binding"
+                )
+            })?;
+        if binding.hook_id.trim().is_empty() {
+            bail!("budget_hook_binding_invalid: empty hook_id");
+        }
+
+        // Builtin binding → the Kernel's default decision function.
+        if binding.binding_kind == crate::registry::snapshot::BindingKind::Builtin {
+            let b = ResolvedBudget {
+                decision: default_budget_decision(&self.config),
+                hook_id: binding.hook_id.clone(),
+                hook_version: binding.hook_version.clone(),
+                source: "default",
+            };
             emit_default_event(journal, run, session, &b)?;
             return Ok(b);
         }
+
+        // External binding → the local credential must match the binding's
+        // provider identity, and the endpoint comes from the binding, never
+        // from env selection.
+        let (Some(client), Some(config)) = (&self.hook_client, &self.budget_hook_config.as_ref())
+        else {
+            bail!("budget_hook_credential_missing: no local budget hook credential configured");
+        };
+        if !config.enabled || config.kind != HookKind::RunBudgetResolveV0 {
+            bail!("budget_hook_credential_missing: budget hook credential disabled");
+        }
+        if config.provider_id != binding.provider_id {
+            bail!(
+                "budget_hook_credential_mismatch: binding provider {} != credential provider {}",
+                binding.provider_id,
+                config.provider_id
+            );
+        }
+        if config.shared_secret.is_empty() {
+            bail!("budget_hook_credential_missing: shared secret empty");
+        }
+        if binding.endpoint.trim().is_empty() {
+            bail!("budget_hook_binding_invalid: external binding without endpoint");
+        }
+        // Build the transport config from the binding + local credential.
+        let mut hook_config = (*config).clone();
+        hook_config.endpoint.url = binding.endpoint.clone();
+        hook_config.provider_id = binding.provider_id.clone();
+        hook_config.kind = HookKind::RunBudgetResolveV0;
 
         let operations: Vec<String> = snapshot.operations.iter().map(|o| o.name.clone()).collect();
         let operations_digest = compute_operations_digest(&operations);
@@ -520,8 +572,8 @@ impl<L: crate::llm::LlmClient + 'static> super::Runtime<L> {
 
         let started = std::time::Instant::now();
         let result = (|| {
-            let authenticated = client.call_budget(&request, config)?;
-            if authenticated.provider_id != config.provider_id {
+            let authenticated = client.call_budget(&request, &hook_config)?;
+            if authenticated.provider_id != hook_config.provider_id {
                 bail!("budget_provider_binding_mismatch");
             }
             if authenticated.request_id != request_id {
@@ -542,8 +594,8 @@ impl<L: crate::llm::LlmClient + 'static> super::Runtime<L> {
                     Some(&request_id),
                     json!({
                         "hook": "run.budget.resolve.v0",
-                        "hook_id": config.provider_id,
-                        "hook_version": "v0",
+                        "hook_id": binding.hook_id,
+                        "hook_version": binding.hook_version,
                         "source": "hook",
                         "decision_digest": decision.digest(),
                         "max_tool_rounds": decision.max_tool_rounds,
@@ -557,14 +609,14 @@ impl<L: crate::llm::LlmClient + 'static> super::Runtime<L> {
                 )?;
                 Ok(ResolvedBudget {
                     decision,
-                    hook_id: config.provider_id.clone(),
-                    hook_version: "v0".to_string(),
+                    hook_id: binding.hook_id.clone(),
+                    hook_version: binding.hook_version.clone(),
                     source: "hook",
                 })
             }
             Err(error) => {
                 let error_code = budget_error_code(&error);
-                let (action, failure_mode) = match config.failure_mode {
+                let (action, failure_mode) = match hook_config.failure_mode {
                     HookFailureMode::FailClosed => ("fail_closed_terminate", "fail_closed"),
                     HookFailureMode::Disabled => ("disabled_terminate", "disabled"),
                     HookFailureMode::FailOpen => ("fail_open_default", "fail_open"),
@@ -577,14 +629,14 @@ impl<L: crate::llm::LlmClient + 'static> super::Runtime<L> {
                     Some(&request_id),
                     json!({
                         "hook": "run.budget.resolve.v0",
-                        "status": if config.failure_mode == HookFailureMode::FailClosed
-                            || config.failure_mode == HookFailureMode::Disabled
+                        "status": if hook_config.failure_mode == HookFailureMode::FailClosed
+                            || hook_config.failure_mode == HookFailureMode::Disabled
                         {
                             "failed"
                         } else {
                             "degraded"
                         },
-                        "provider_id": config.provider_id,
+                        "provider_id": hook_config.provider_id,
                         "request_id": request_id,
                         "failure_mode": failure_mode,
                         "failure_action": action,
@@ -592,8 +644,8 @@ impl<L: crate::llm::LlmClient + 'static> super::Runtime<L> {
                         "duration_ms": duration_ms,
                     }),
                 )?;
-                if config.failure_mode == HookFailureMode::FailClosed
-                    || config.failure_mode == HookFailureMode::Disabled
+                if hook_config.failure_mode == HookFailureMode::FailClosed
+                    || hook_config.failure_mode == HookFailureMode::Disabled
                 {
                     bail!("budget_hook_failed_closed:{error_code}");
                 }
