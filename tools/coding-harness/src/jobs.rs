@@ -799,7 +799,11 @@ fn run_next_segment(config: &CodingConfig, job_id: &str) {
         SegmentEnd::Completed(result) => {
             receipt.outcome = "completed".into();
             receipt.reason = "acceptance_satisfied".into();
-            if let Some(cp) = outcome.checkpoint {
+            // Land the model's final in-flight changes as a commit (git
+            // commits are a Harness responsibility).
+            checkpoint_commit(&job);
+            if let Some(mut cp) = outcome.checkpoint {
+                cp.workspace = workspace_state(&job.workspace_root);
                 job.checkpoint = Some(cp);
             }
             job.result = result.clone();
@@ -815,7 +819,12 @@ fn run_next_segment(config: &CodingConfig, job_id: &str) {
         SegmentEnd::Exhausted(reason) => {
             receipt.outcome = "exhausted".into();
             receipt.reason = reason.clone();
-            if let Some(cp) = outcome.checkpoint {
+            // The model's in-flight changes are the continuation payload:
+            // commit them as a checkpoint commit so the next segment starts
+            // from a clean, drift-verifiable tree.
+            checkpoint_commit(&job);
+            if let Some(mut cp) = outcome.checkpoint {
+                cp.workspace = workspace_state(&job.workspace_root);
                 job.checkpoint = Some(cp);
             }
             if job.segments.len() + 1 >= MAX_SEGMENTS_PER_JOB as usize {
@@ -890,6 +899,32 @@ fn cleanup_cancel(job_id: &str) {
 // ---------------------------------------------------------------------------
 // Job setup and finalize
 // ---------------------------------------------------------------------------
+
+/// Commit the model's in-flight workspace changes as a checkpoint commit.
+/// Git commits are a Harness responsibility (the model must not push); this
+/// keeps the inter-segment working tree clean so the drift check can verify
+/// repository/branch/HEAD/working-tree facts before the next segment.
+fn checkpoint_commit(job: &Job) {
+    if !is_git_repo(&job.workspace_root) {
+        return;
+    }
+    let (ok, status) = git(&job.workspace_root, &["status", "--porcelain"]);
+    if !ok || status.trim().is_empty() {
+        return;
+    }
+    let _ = git(&job.workspace_root, &["add", "-A"]);
+    let (ok, err) = git(
+        &job.workspace_root,
+        &[
+            "commit",
+            "-m",
+            &format!("checkpoint: {} segment {}", job.job_id, job.segments.len() + 1),
+        ],
+    );
+    if !ok {
+        eprintln!("coding_harness: checkpoint commit failed for {}: {err}", job.job_id);
+    }
+}
 
 /// Before segment 1: if the job asked for a PR, make sure the workspace is a
 /// git repository and create the job branch from the base branch.
@@ -1175,9 +1210,10 @@ fn collect_tree(root: &Path, dir: &Path, entries: &mut Vec<(String, String)>, sk
 // ---------------------------------------------------------------------------
 
 /// Simulated segmented backend. The objective may contain
-/// `fake_work_units:N` (default 3); each unit consumes one model round and
-/// one tool call. The checkpoint is scripted so continuation is
-/// deterministic.
+/// `fake_work_units:N` (default 3) and `fake_dirty:true` (the segment leaves
+/// an uncommitted workspace file behind, like a real model that was killed
+/// mid-work). Each unit consumes one model round and one tool call. The
+/// checkpoint is scripted so continuation is deterministic.
 fn run_fake_segment(
     job: &Job,
     budget: &ExecutionSegmentBudget,
@@ -1191,6 +1227,7 @@ fn run_fake_segment(
         .last()
         .and_then(|s| s.parse().ok())
         .unwrap_or(3);
+    let fake_dirty = job.objective.contains("fake_dirty:true");
     let units_done = checkpoint
         .map(|cp| cp.completed_steps.len() as u64)
         .unwrap_or(0);
@@ -1233,6 +1270,14 @@ fn run_fake_segment(
                 "max_wall_time_ms"
             };
             findings.push_str(&format!("; segment: {rounds} fake units, budget exhausted ({reason})"));
+            // Leave simulated in-flight work behind, like a real model that
+            // was killed while still working.
+            if fake_dirty {
+                let _ = std::fs::write(
+                    Path::new(&job.workspace_root).join("model-work.txt"),
+                    format!("segment {} of {}", job.segments.len() + 1, units_total),
+                );
+            }
             return SegmentOutcome {
                 end: SegmentEnd::Exhausted(reason.into()),
                 model_rounds_used: rounds,
