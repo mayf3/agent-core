@@ -30,6 +30,12 @@ impl Default for WorkspacePermission {
 pub struct WorkspaceEntry {
     pub root: PathBuf,
     pub perm: WorkspacePermission,
+    /// Per-workspace segment budget override (raw JSON from CODING_CONFIG).
+    /// The builtin segment-budget hook resolves the per-segment budget from
+    /// this value when present; otherwise it falls back to the
+    /// `HARNESS_SEGMENT_BUDGET` env var, then the builtin default.
+    /// The model can never override a resolved budget (rejected server-side).
+    pub segment_budget: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -61,21 +67,29 @@ impl CodingConfig {
                 let root_str = cfg.get("root").and_then(|v| v.as_str()).unwrap_or("");
                 let canon =
                     std::fs::canonicalize(root_str).unwrap_or_else(|_| PathBuf::from(root_str));
-                let perm = WorkspacePermission {
-                    read: cfg.get("read").and_then(|v| v.as_bool()).unwrap_or(false),
-                    write: cfg.get("write").and_then(|v| v.as_bool()).unwrap_or(false),
-                    exec: cfg.get("exec").and_then(|v| v.as_bool()).unwrap_or(false),
-                    opencode: cfg
-                        .get("opencode")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false),
-                    network: cfg
-                        .get("network")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false),
-                    shell: cfg.get("shell").and_then(|v| v.as_bool()).unwrap_or(false),
-                };
-                workspaces.insert(id.clone(), WorkspaceEntry { root: canon, perm });
+                        let perm = WorkspacePermission {
+                            read: cfg.get("read").and_then(|v| v.as_bool()).unwrap_or(false),
+                            write: cfg.get("write").and_then(|v| v.as_bool()).unwrap_or(false),
+                            exec: cfg.get("exec").and_then(|v| v.as_bool()).unwrap_or(false),
+                            opencode: cfg
+                                .get("opencode")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false),
+                            network: cfg
+                                .get("network")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false),
+                            shell: cfg.get("shell").and_then(|v| v.as_bool()).unwrap_or(false),
+                        };
+                        let segment_budget = cfg.get("segment_budget").cloned();
+                        workspaces.insert(
+                            id.clone(),
+                            WorkspaceEntry {
+                                root: canon,
+                                perm,
+                                segment_budget,
+                            },
+                        );
             }
         }
 

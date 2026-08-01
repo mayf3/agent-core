@@ -67,7 +67,11 @@ impl HarnessDevServer {
                         };
                         map.insert(
                             id.clone(),
-                            coding_harness::config::WorkspaceEntry { root: canon, perm },
+                            coding_harness::config::WorkspaceEntry {
+                                root: canon,
+                                perm,
+                                segment_budget: None,
+                            },
                         );
                     }
                 }

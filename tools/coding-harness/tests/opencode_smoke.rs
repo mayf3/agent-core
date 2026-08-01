@@ -23,6 +23,8 @@ struct HarnessServer {
 
 impl HarnessServer {
     fn start() -> Self {
+        // Task submit requires the control token; make tests self-contained.
+        std::env::set_var("CODING_HARNESS_CONTROL_TOKEN", "test-harness-token");
         let ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -49,6 +51,7 @@ impl HarnessServer {
             coding_harness::config::WorkspaceEntry {
                 root: std::fs::canonicalize(&ws_root).unwrap_or_else(|_| ws_root.clone()),
                 perm,
+                segment_budget: None,
             },
         );
         let config = coding_harness::config::CodingConfig {
@@ -62,6 +65,8 @@ impl HarnessServer {
         let config = Arc::new(config);
         let shutdown = Arc::new(AtomicBool::new(false));
         let _sd = shutdown.clone();
+        // Persistent segmented job scheduler (needed for task ops).
+        coding_harness::jobs::start_scheduler(Arc::clone(&config));
         std::thread::spawn(move || {
             coding_harness::server::serve(listener, config);
         });
@@ -86,7 +91,7 @@ impl HarnessServer {
             .set_read_timeout(Some(Duration::from_secs(10)))
             .unwrap();
         let request = format!(
-            "POST /execute HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n{}",
+            "POST /execute HTTP/1.1\r\nAuthorization: Bearer test-harness-token\r\nContent-Type: application/json\r\nContent-Length: {}\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n{}",
             body_str.len(), self.port, body_str
         );
         stream.write_all(request.as_bytes()).unwrap();
@@ -170,8 +175,8 @@ fn opencode_normal_smoke() {
         assert_eq!(code, 200);
         let st = sbody["result"]["status"].as_str().unwrap_or("");
         eprintln!("Poll {i}: {st}");
-        if st == "succeeded" || st == "failed" || st == "cancelled" {
-            if st == "succeeded" {
+        if st == "completed" || st == "failed" || st == "cancelled" {
+            if st == "completed" {
                 eprintln!(
                     "SUMMARY: {}",
                     sbody["result"]["summary"].as_str().unwrap_or("")
@@ -190,7 +195,7 @@ fn opencode_normal_smoke() {
                     sbody["result"]["failure_reason"].as_str().unwrap_or("")
                 );
             }
-            assert_eq!(st, "succeeded", "Normal smoke must succeed; got: {st}");
+            assert_eq!(st, "completed", "Normal smoke must succeed; got: {st}");
             break;
         }
         if i == 90 {
@@ -243,8 +248,8 @@ fn opencode_sentinel_smoke() {
         assert_eq!(code, 200);
         let st = sbody["result"]["status"].as_str().unwrap_or("");
         eprintln!("Poll {i}: {st}");
-        if st == "succeeded" || st == "failed" || st == "cancelled" {
-            task_failed = st != "succeeded";
+        if st == "completed" || st == "failed" || st == "cancelled" {
+            task_failed = st != "completed";
 
             // 1. Verify sentinel file is unchanged (outside workspace).
             let sentinel_now = std::fs::read_to_string(&sentinel_copy).unwrap_or_default();
@@ -304,13 +309,13 @@ fn opencode_sentinel_smoke() {
             //    couldn't access the outside file (assumption: sentinel task
             //    won't fully succeed since it cannot access the outside file).
             let _test_result = sbody["result"]["test_result"].as_str().unwrap_or("");
-            if st == "succeeded" {
+            if st == "completed" {
                 eprintln!(
-                    "NOTE: Task succeeded even though sentinel guard was active. \
+                    "NOTE: Task completed even though sentinel guard was active. \
                           This may mean the model chose not to access the outside file, \
                           or the permission config blocked it. Sentinel is safe regardless."
                 );
-                // If it "succeeded", the acceptance criteria check might not have
+                // If it "completed", the acceptance criteria check might not have
                 // been run. We verify the sentinel is safe regardless.
             } else {
                 eprintln!("EXPECTED: Task failed (outside access denied/not possible)");

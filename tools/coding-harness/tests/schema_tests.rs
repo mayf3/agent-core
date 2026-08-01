@@ -24,6 +24,14 @@ fn coding_manifest_registration_chain_preserves_schema() {
         assert!(!req.is_empty());
         if spec.operation_name == "external.coding_task_status" {
             assert!(req.contains(&"task_id") && !req.contains(&"workspace_id"));
+        } else if spec.operation_name == "external.coding_task_submit" {
+            // The model-facing submit contract is the sealed draft form
+            // (Kernel binds governance fields; workspace/backend are
+            // control-plane arguments, not model-layer properties).
+            assert!(
+                req.contains(&"development_request") && !req.contains(&"workspace_id"),
+                "submit must expose the development_request draft: {req:?}"
+            );
         } else {
             assert!(req.contains(&"workspace_id"));
             let ev = spec
@@ -54,15 +62,13 @@ fn coding_manifest_registration_chain_preserves_schema() {
         .iter()
         .find(|s| s.operation_name == "external.coding_task_submit")
         .unwrap();
-    let be_ev = submit
+    let tk_ev = submit
         .input_schema
-        .pointer("/properties/backend")
-        .unwrap()
-        .get("enum")
+        .pointer("/properties/development_request/properties/target_kind/enum")
         .unwrap()
         .as_array()
         .unwrap();
-    assert_eq!(string_array(be_ev), vec!["opencode"]);
+    assert_eq!(tk_ev.len(), 9);
     let j = JournalStore::in_memory().unwrap();
     for mut m in operation_specs::build_manifests(
         &vec!["agent-dev".to_string(), "prod".to_string()],
@@ -196,10 +202,29 @@ fn coding_manifest_registration_chain_preserves_schema() {
         .pointer("/properties/target_kind/enum")
         .and_then(|v| v.as_array())
         .is_some_and(|values| values.len() == 9));
-    assert!(request
+    // The draft requires exactly the five model-supplied fields; governance
+    // fields (contract_catalog_version, request_id, ...) are bound
+    // Kernel-side and must NOT be required from the model.
+    let draft_required = request
         .pointer("/required")
         .and_then(|v| v.as_array())
-        .is_some_and(|values| values.contains(&serde_json::json!("contract_catalog_version"))));
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect::<Vec<_>>();
+    for field in [
+        "target_kind",
+        "name",
+        "requirements",
+        "required_contracts",
+        "acceptance_criteria",
+    ] {
+        assert!(draft_required.contains(&field), "draft field {field} must be required");
+    }
+    assert!(
+        !draft_required.contains(&"contract_catalog_version"),
+        "governance fields must not be model-required"
+    );
     let ts_params = fn_tool("external.coding_task_status")
         .get("function")
         .unwrap()
@@ -296,6 +321,7 @@ fn coding_manifest_llm_input_receives_complete_tool_definitions() {
         max_tool_rounds: 12,
         tool_loop_timeout_ms: 300_000,
         context_prepare_hook: Default::default(),
+        budget_hook: Default::default(),
     };
     let j = JournalStore::in_memory().unwrap();
     let g = Gateway::new(config.clone());
@@ -467,10 +493,29 @@ fn coding_manifest_llm_input_receives_complete_tool_definitions() {
         .pointer("/properties/target_kind/enum")
         .and_then(|v| v.as_array())
         .is_some_and(|values| values.len() == 9));
-    assert!(request
+    // The draft requires exactly the five model-supplied fields; governance
+    // fields (contract_catalog_version, request_id, ...) are bound
+    // Kernel-side and must NOT be required from the model.
+    let draft_required = request
         .pointer("/required")
         .and_then(|v| v.as_array())
-        .is_some_and(|values| values.contains(&serde_json::json!("contract_catalog_version"))));
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect::<Vec<_>>();
+    for field in [
+        "target_kind",
+        "name",
+        "requirements",
+        "required_contracts",
+        "acceptance_criteria",
+    ] {
+        assert!(draft_required.contains(&field), "draft field {field} must be required");
+    }
+    assert!(
+        !draft_required.contains(&"contract_catalog_version"),
+        "governance fields must not be model-required"
+    );
     let ts_params = fn_tool("external.coding_task_status")
         .get("function")
         .unwrap()

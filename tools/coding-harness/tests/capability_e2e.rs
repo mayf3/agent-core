@@ -93,6 +93,7 @@ fn start_basic_harness() -> HarnessServer {
                 coding_harness::config::WorkspaceEntry {
                     root: std::fs::canonicalize(&ws_root).unwrap_or_else(|_| ws_root.clone()),
                     perm,
+                    segment_budget: None,
                 },
             );
             map
@@ -290,6 +291,7 @@ fn capability_proposal_success_over_real_tcp() {
                 coding_harness::config::WorkspaceEntry {
                     root: std::fs::canonicalize(&ws_root).unwrap_or_else(|_| ws_root.clone()),
                     perm,
+                    segment_budget: None,
                 },
             );
             map

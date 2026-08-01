@@ -66,6 +66,7 @@ fn calculator_vertical_e2e() -> Result<()> {
                         network: true,
                         shell: false,
                     },
+                    segment_budget: None,
                 },
             );
             map
