@@ -436,21 +436,98 @@ where
         let snapshot = journal
             .load_registry_snapshot(&trigger.registry_snapshot_id)
             .map_err(|e| anyhow::anyhow!("registry_snapshot_unavailable: {e}"))?;
-        // High 4: worker idempotency — the pre-allocated Run may already exist
-        // (crash after Run creation before worker ack, or worker re-lease). If
-        // it exists with consistent facts, treat it as success; conflicting
-        // facts fail closed.
+        // High 1 (defense in depth): the trigger Run's frozen governance facts
+        // must be consistent with the Session the worker loaded from
+        // `trigger.session_id`. The gateway already enforces this at acceptance,
+        // but the worker re-reads the journal independently, so it re-verifies
+        // the same generic facts before touching any Run. Any mismatch fails
+        // closed: no Run, no RunStarted, no model call.
+        if trigger.session_id != session.id {
+            anyhow::bail!("continuation_session_mismatch");
+        }
+        if trigger.agent_id != session.agent_id {
+            anyhow::bail!("continuation_agent_mismatch");
+        }
+        if !matches!(
+            (&trigger.principal.source, &session.channel),
+            (PrincipalSource::Cli, ChannelKind::Cli)
+                | (PrincipalSource::Feishu, ChannelKind::Feishu)
+        ) {
+            anyhow::bail!("continuation_principal_mismatch");
+        }
+        // High 4: worker idempotency based on the Run's LIFECYCLE facts. This
+        // is FAIL CLOSED — no automatic recovery, no model/tool replay, no
+        // checkpoint, no compensation. The pre-allocated Run may already be
+        // present from a prior attempt:
+        //   - row missing                     → create it + RunStarted
+        //                                       atomically (the ONLY happy path);
+        //   - row present, terminal state     → return the existing outcome;
+        //   - row present, no RunStarted      → fail closed (pre-fix crash window
+        //                                       or a corrupted DB) — never
+        //                                       auto-recover, never re-execute;
+        //   - row present, RunStarted, no     → fail closed / stranded — do NOT
+        //     terminal state                    re-invoke model/tools, do NOT fake
+        //                                       success;
+        //   - row present, conflicting facts  → fail closed (never overwrite).
         if let Some(existing) = journal.run_by_id(next_run_id)? {
+            // Conflicting facts on the SAME pre-allocated run_id always fail
+            // closed — never overwrite, never execute.
             if existing.session_id != session.id
+                || existing.agent_id != session.agent_id
                 || existing.registry_snapshot_id != trigger.registry_snapshot_id
             {
                 anyhow::bail!("continuation_run_conflict");
             }
-            return Ok(RuntimeOutcome {
-                run_id: existing.id,
-                session_id: session.id.clone(),
-                output: String::new(),
-            });
+            let started = journal.run_has_started(next_run_id)?;
+            match (&existing.status, started) {
+                // Already reached a genuine terminal state — return it as-is.
+                (RunStatus::Completed, _) | (RunStatus::Failed, _) => {
+                    return Ok(RuntimeOutcome {
+                        run_id: existing.id,
+                        session_id: session.id.clone(),
+                        output: String::new(),
+                    });
+                }
+                // RunStarted exists but the Run never converged to a terminal
+                // state — it is stranded mid-execution. Fail closed; do NOT
+                // re-invoke the model or tools, and do NOT pretend success.
+                (_, true) => {
+                    journal.fail_run(&existing.id)?;
+                    journal.append_event(
+                        JournalEventKind::RunFailed,
+                        Some(&existing.id),
+                        Some(&session.id),
+                        None,
+                        json!({
+                            "run_id": existing.id.0,
+                            "error_category": "continuation_run_stranded",
+                            "reason": "RunStarted exists but no terminal state",
+                        }),
+                    )?;
+                    anyhow::bail!("continuation_run_stranded");
+                }
+                // Run row exists but RunStarted was never written (the pre-fix
+                // crash window, or a corrupted DB). Fail closed — do NOT
+                // auto-recover, do NOT re-execute. Report the anomaly.
+                (RunStatus::Running, false)
+                | (RunStatus::WaitingDispatch, false)
+                | (RunStatus::Unknown, false)
+                | (RunStatus::AwaitingApproval, false) => {
+                    journal.fail_run(&existing.id)?;
+                    journal.append_event(
+                        JournalEventKind::RunFailed,
+                        Some(&existing.id),
+                        Some(&session.id),
+                        None,
+                        json!({
+                            "run_id": existing.id.0,
+                            "error_category": "continuation_run_partial",
+                            "reason": "Run row exists but RunStarted missing",
+                        }),
+                    )?;
+                    anyhow::bail!("continuation_run_partial");
+                }
+            }
         }
         // The continuation is a NEW governance event: it is NOT the trigger
         // Run's event and NOT a user message. It only carries the fact that an
@@ -479,18 +556,14 @@ where
             budget_exhaustion_action: Some(budget.decision.exhaustion_action),
             ..run
         };
-        journal.insert_run(&run)?;
-        journal.append_event(
-            JournalEventKind::RunStarted,
-            Some(&run.id),
-            Some(&session.id),
-            Some(&continuation_event_id.0),
-            json!({
-                "run_id": run.id.0,
-                "trigger_event_id": run.trigger_event_id.0,
-                "principal_id": run.principal.principal_id.0,
-                "continuation_of": trigger_run_id.0,
-            }),
+        // High 4: Run row + RunStarted are written in ONE transaction so the
+        // "row exists but RunStarted missing" crash window cannot occur for a
+        // freshly created Run.
+        journal.insert_run_and_start(
+            &run,
+            &session.id,
+            &continuation_event_id.0,
+            trigger_run_id,
         )?;
 
         let granted_operations: Vec<String> = run
@@ -655,4 +728,3 @@ fn apply_pending_proposal_presentation(
     }
     Ok(())
 }
-

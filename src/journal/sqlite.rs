@@ -273,6 +273,62 @@ impl JournalStore {
         Ok(())
     }
 
+    /// Insert a Run row AND append its `RunStarted` event in ONE transaction
+    /// (High 4). A crash between the two otherwise left a Run row present but
+    /// with no `RunStarted`, which the worker mistook for an already-completed
+    /// Run and returned success — losing the continuation forever. This closes
+    /// that window: both facts commit together or not at all.
+    ///
+    pub fn insert_run_and_start(
+        &self,
+        run: &Run,
+        session_id: &SessionId,
+        correlation_id: &str,
+        trigger_run_id: &RunId,
+    ) -> Result<()> {
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow!("journal mutex poisoned"))?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        super::queue::insert_run_tx(&tx, run)?;
+        let payload = json!({
+            "run_id": run.id.0,
+            "trigger_event_id": run.trigger_event_id.0,
+            "principal_id": run.principal.principal_id.0,
+            "continuation_of": trigger_run_id.0,
+        });
+        super::queue::append_event_tx(
+            &tx,
+            JournalEventKind::RunStarted,
+            Some(&run.id),
+            Some(session_id),
+            Some(correlation_id),
+            payload,
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Whether a `RunStarted` journal event exists for a Run (High 4). This is
+    /// the lifecycle fact that distinguishes "a Run row merely exists" from
+    /// "a Run actually started". The worker idempotency path uses it so a
+    /// half-created Run (row present, RunStarted absent — the pre-fix crash
+    /// window) fails closed instead of being re-driven or silently treated as
+    /// success.
+    pub fn run_has_started(&self, run_id: &RunId) -> Result<bool> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow!("journal mutex poisoned"))?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM journal_events WHERE run_id = ?1 AND kind = 'RunStarted'",
+            params![run_id.0],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
     pub fn update_run_status(&self, run_id: &RunId, status: &str) -> Result<()> {
         let conn = self
             .conn
@@ -973,4 +1029,72 @@ pub(crate) fn ensure_registry_hook_bindings_table(conn: &Connection) -> Result<(
         ))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod run_start_atomic_tests {
+    use super::*;
+
+    fn run(id: &str) -> Run {
+        let now = Utc::now();
+        Run {
+            id: RunId(id.to_string()),
+            session_id: SessionId("session_atomic".into()),
+            agent_id: AgentId("agent_atomic".into()),
+            trigger_event_id: EventId("event_atomic".into()),
+            principal: RunPrincipal {
+                principal_id: PrincipalId("cli:local".into()),
+                subject: PrincipalSubject::LocalUser,
+                source: PrincipalSource::Cli,
+                grants: vec![],
+                requester_id: Some("cli:local".into()),
+            },
+            parent_run_id: None,
+            delegated_by: None,
+            status: RunStatus::Running,
+            created_at: now,
+            updated_at: now,
+            registry_snapshot_id: String::new(),
+            mode: RunMode::Default,
+            budget_hook_id: None,
+            budget_hook_version: None,
+            budget_decision_digest: None,
+            budget_max_tool_rounds: None,
+            budget_max_wall_time_ms: None,
+            budget_exhaustion_action: None,
+        }
+    }
+
+    #[test]
+    fn run_row_rolls_back_when_run_started_insert_fails() -> Result<()> {
+        let journal = JournalStore::in_memory()?;
+        {
+            let conn = journal
+                .conn
+                .lock()
+                .map_err(|_| anyhow!("journal mutex poisoned"))?;
+            conn.execute_batch(
+                "CREATE TRIGGER force_run_started_failure
+                 BEFORE INSERT ON journal_events
+                 WHEN NEW.kind = 'RunStarted'
+                 BEGIN
+                   SELECT RAISE(ABORT, 'forced RunStarted failure');
+                 END;",
+            )?;
+        }
+        let run = run("run_atomic_rollback");
+        let result = journal.insert_run_and_start(
+            &run,
+            &run.session_id,
+            "continuation_atomic_event",
+            &RunId("run_trigger_atomic".into()),
+        );
+        assert!(result.is_err(), "forced RunStarted failure must surface");
+        assert!(
+            journal.run_by_id(&run.id)?.is_none(),
+            "Run row must roll back with RunStarted"
+        );
+        assert!(!journal.run_has_started(&run.id)?);
+        Ok(())
+    }
 }

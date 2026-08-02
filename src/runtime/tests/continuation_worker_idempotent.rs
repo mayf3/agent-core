@@ -1,18 +1,15 @@
-//! High 4: worker retry idempotency for the same-session continuation path.
+//! Continuation governance and lifecycle fail-closed regressions.
 //!
 //! The continuation worker uses the PRE-ALLOCATED next_run_id from the
-//! ledger. When the worker retries (crash before Run creation, crash after
-//! Run creation before ack, worker re-lease), `schedule_run_for_existing_session`
-//! must:
-//!   - Run missing  → create it once;
-//!   - Run present with consistent facts → treat as success (no second Run);
-//!   - Run present with conflicting facts → fail closed.
+//! ledger. It may create a missing Run, but it must never recover or replay a
+//! partial/incomplete Run. Governance conflicts must be rejected before a Run,
+//! model invocation, or tool call is created.
 
 use crate::config::KernelConfig;
 use crate::domain::*;
-use crate::gateway::Gateway;
+use crate::gateway::{Gateway, SessionContinuationRequest};
 use crate::journal::JournalStore;
-use crate::llm::{LlmClient, LlmInput, LlmOutput, ToolCall, ToolCallResult};
+use crate::llm::{LlmClient, LlmInput, LlmOutput, ToolCallResult};
 use crate::runtime::Runtime;
 use anyhow::Result;
 use serde_json::json;
@@ -78,7 +75,6 @@ impl LlmClient for ReplyLlm {
     }
 }
 
-
 fn make_trigger(snapshot_id: &str) -> Run {
     Run {
         id: RunId("run_trigger_worker".into()),
@@ -117,49 +113,62 @@ fn make_trigger(snapshot_id: &str) -> Run {
     }
 }
 
-fn make_session() -> Session {
-    Session {
-        id: SessionId("s_cont_worker".into()),
-        agent_id: AgentId("agent-frozen".into()),
-        channel: ChannelKind::Cli,
-        conversation_key: "local".into(),
-        summary: None,
-        summarized_until_event_id: None,
-        last_active_at: chrono::Utc::now(),
-        status: SessionStatus::Active,
-        version: 1,
-    }
-}
-
-/// The worker uses the PRE-ALLOCATED next_run_id; calling
-/// `schedule_run_for_existing_session` twice with the same pre-allocated id
-/// creates the Run ONCE (retry after crash/ack loss is idempotent).
-#[test]
-fn worker_retry_with_preallocated_run_id_creates_once() -> Result<()> {
+fn setup() -> Result<(
+    JournalStore,
+    Runtime<ReplyLlm>,
+    Gateway,
+    Run,
+    Session,
+    Arc<AtomicUsize>,
+)> {
     let journal = JournalStore::in_memory()?;
-    let snapshot = journal
-        .create_registry_snapshot_with_hook_bindings(
-            crate::registry::store::builtin_specs(),
-            crate::registry::store::builtin_hook_bindings(),
-        )
-        .unwrap();
-    let snapshot_id = snapshot.snapshot_id.clone();
-    let trigger = make_trigger(&snapshot_id);
-    journal.insert_run(&trigger)?;
-    let session = make_session();
-    journal.get_or_create_session(&SessionTarget {
+    let snapshot = journal.create_registry_snapshot_with_hook_bindings(
+        crate::registry::store::builtin_specs(),
+        crate::registry::store::builtin_hook_bindings(),
+    )?;
+    let session = journal.get_or_create_session(&SessionTarget {
         agent_id: AgentId("agent-frozen".into()),
         channel: ChannelKind::Cli,
         conversation_key: "local".into(),
     })?;
-    let config = test_config();
-    let runtime = Runtime::new(config, ReplyLlm {
-        calls: Arc::new(AtomicUsize::new(0)),
-    });
+    let mut trigger = make_trigger(&snapshot.snapshot_id);
+    trigger.session_id = session.id.clone();
+    trigger.agent_id = session.agent_id.clone();
+    journal.insert_run(&trigger)?;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let runtime = Runtime::new(
+        test_config(),
+        ReplyLlm {
+            calls: Arc::clone(&calls),
+        },
+    );
     let gateway = Gateway::new(runtime.config().clone());
+    Ok((journal, runtime, gateway, trigger, session, calls))
+}
+
+fn count_events(journal: &JournalStore, kind: JournalEventKind) -> Result<usize> {
+    Ok(journal
+        .events()?
+        .into_iter()
+        .filter(|event| event.kind == kind)
+        .count())
+}
+
+fn continuation_request(trigger: &Run) -> SessionContinuationRequest {
+    SessionContinuationRequest {
+        trigger_run_id: trigger.id.0.clone(),
+        expected_session_id: Some(trigger.session_id.0.clone()),
+        idempotency_key: format!("continuation:{}", trigger.id.0),
+    }
+}
+
+/// A missing Run is created and started once. A retry while it is still
+/// non-terminal is stranded and must not invoke the model or tools again.
+#[test]
+fn incomplete_started_run_fails_closed_without_duplicate_calls() -> Result<()> {
+    let (journal, runtime, gateway, trigger, session, calls) = setup()?;
     let preallocated = RunId("run_next_preallocated".into());
 
-    // First call: creates the Run.
     let first = runtime.schedule_run_for_existing_session(
         &journal,
         &gateway,
@@ -173,18 +182,27 @@ fn worker_retry_with_preallocated_run_id_creates_once() -> Result<()> {
         .run_by_id(&preallocated)?
         .expect("pre-allocated Run created");
     assert_eq!(runs.agent_id.0, "agent-frozen", "frozen agent_id inherited");
+    assert!(journal.run_has_started(&preallocated)?);
+    let model_calls_before = calls.load(Ordering::SeqCst);
+    let tool_calls_before = count_events(&journal, JournalEventKind::ToolCallIssued)?;
 
-    // Second call (worker retry after ack loss): Run already exists with
-    // consistent facts → treated as success, NOT created twice.
-    let second = runtime.schedule_run_for_existing_session(
+    let retry = runtime.schedule_run_for_existing_session(
         &journal,
         &gateway,
         &trigger,
         &session,
         &trigger.id,
         &preallocated,
-    )?;
-    assert_eq!(second.run_id, preallocated);
+    );
+    let error = retry
+        .err()
+        .expect("incomplete started Run must fail closed");
+    assert!(error.to_string().contains("continuation_run_stranded"));
+    assert_eq!(calls.load(Ordering::SeqCst), model_calls_before);
+    assert_eq!(
+        count_events(&journal, JournalEventKind::ToolCallIssued)?,
+        tool_calls_before
+    );
     let started = journal
         .events()?
         .into_iter()
@@ -192,52 +210,170 @@ fn worker_retry_with_preallocated_run_id_creates_once() -> Result<()> {
             e.kind == JournalEventKind::RunStarted && e.run_id.as_ref() == Some(&preallocated)
         })
         .count();
-    assert_eq!(started, 1, "WORKER_RETRY_IDEMPOTENT — RunStarted emitted once");
+    assert_eq!(started, 1, "RunStarted emitted once");
+    let anomaly = journal.events()?.into_iter().any(|event| {
+        event.kind == JournalEventKind::RunFailed
+            && event.run_id.as_ref() == Some(&preallocated)
+            && event.payload["error_category"] == json!("continuation_run_stranded")
+    });
+    assert!(anomaly, "stranded Run anomaly recorded");
     Ok(())
 }
 
-/// A conflicting pre-allocated Run (different session) fails closed.
+/// A legacy partial Run row from the old crash window is never started or
+/// replayed. It is failed closed and the anomaly is recorded.
 #[test]
-fn worker_conflicting_preallocated_run_fails_closed() -> Result<()> {
-    let journal = JournalStore::in_memory()?;
-    let snapshot = journal
-        .create_registry_snapshot_with_hook_bindings(
-            crate::registry::store::builtin_specs(),
-            crate::registry::store::builtin_hook_bindings(),
-        )
-        .unwrap();
-    let snapshot_id = snapshot.snapshot_id.clone();
-    let trigger = make_trigger(&snapshot_id);
-    journal.insert_run(&trigger)?;
-    let session = make_session();
-    journal.get_or_create_session(&SessionTarget {
-        agent_id: AgentId("agent-frozen".into()),
-        channel: ChannelKind::Cli,
-        conversation_key: "local".into(),
-    })?;
-    // Pre-existing Run with the pre-allocated id but a DIFFERENT session.
-    let conflicting = Run {
-        id: RunId("run_next_conflict".into()),
-        session_id: SessionId("s_other".into()),
-        ..make_trigger(&snapshot_id)
+fn partial_run_row_fails_closed_without_model_or_tool_calls() -> Result<()> {
+    let (journal, runtime, gateway, trigger, session, calls) = setup()?;
+    let partial = Run {
+        id: RunId("run_next_partial".into()),
+        session_id: session.id.clone(),
+        agent_id: session.agent_id.clone(),
+        trigger_event_id: EventId::new(),
+        registry_snapshot_id: trigger.registry_snapshot_id.clone(),
+        ..trigger.clone()
     };
-    journal.insert_run(&conflicting)?;
-    let config = test_config();
-    let runtime = Runtime::new(config, ReplyLlm {
-        calls: Arc::new(AtomicUsize::new(0)),
-    });
-    let gateway = Gateway::new(runtime.config().clone());
+    journal.insert_run(&partial)?;
     let result = runtime.schedule_run_for_existing_session(
         &journal,
         &gateway,
         &trigger,
         &session,
         &trigger.id,
-        &conflicting.id,
+        &partial.id,
     );
-    assert!(
-        result.is_err(),
-        "conflicting pre-allocated Run must fail closed"
+    let error = result.err().expect("partial Run row must fail closed");
+    assert!(error.to_string().contains("continuation_run_partial"));
+    assert_eq!(calls.load(Ordering::SeqCst), 0, "no duplicate model call");
+    assert_eq!(count_events(&journal, JournalEventKind::ToolCallIssued)?, 0);
+    assert!(!journal.run_has_started(&partial.id)?);
+    let anomaly = journal.events()?.into_iter().any(|event| {
+        event.kind == JournalEventKind::RunFailed
+            && event.run_id.as_ref() == Some(&partial.id)
+            && event.payload["error_category"] == json!("continuation_run_partial")
+    });
+    assert!(anomaly, "partial Run anomaly recorded");
+    Ok(())
+}
+
+/// A clearly terminal existing Run is returned without re-execution.
+#[test]
+fn terminal_existing_run_is_returned_without_duplicate_calls() -> Result<()> {
+    let (journal, runtime, gateway, trigger, session, calls) = setup()?;
+    let terminal = Run {
+        id: RunId("run_next_terminal".into()),
+        session_id: session.id.clone(),
+        agent_id: session.agent_id.clone(),
+        trigger_event_id: EventId::new(),
+        registry_snapshot_id: trigger.registry_snapshot_id.clone(),
+        status: RunStatus::Completed,
+        ..trigger.clone()
+    };
+    journal.insert_run_and_start(
+        &terminal,
+        &session.id,
+        "continuation_terminal_event",
+        &trigger.id,
+    )?;
+    let outcome = runtime.schedule_run_for_existing_session(
+        &journal,
+        &gateway,
+        &trigger,
+        &session,
+        &trigger.id,
+        &terminal.id,
+    )?;
+    assert_eq!(outcome.run_id, terminal.id);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(count_events(&journal, JournalEventKind::ToolCallIssued)?, 0);
+    Ok(())
+}
+
+/// A caller-supplied Session inconsistent with the trigger is rejected before
+/// the pre-allocated Run, model invocation, or tool call exists.
+#[test]
+fn trigger_session_mismatch_fails_closed() -> Result<()> {
+    let (journal, runtime, gateway, trigger, mut session, calls) = setup()?;
+    session.id = SessionId("s_conflict".into());
+    let next_run_id = RunId("run_must_not_exist_session".into());
+    let error = runtime
+        .schedule_run_for_existing_session(
+            &journal,
+            &gateway,
+            &trigger,
+            &session,
+            &trigger.id,
+            &next_run_id,
+        )
+        .err()
+        .expect("trigger/session mismatch must fail closed");
+    assert!(error.to_string().contains("continuation_session_mismatch"));
+    assert!(journal.run_by_id(&next_run_id)?.is_none());
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(count_events(&journal, JournalEventKind::RunStarted)?, 0);
+    assert_eq!(
+        count_events(&journal, JournalEventKind::ModelInvocationStarted)?,
+        0
     );
+    assert_eq!(count_events(&journal, JournalEventKind::ToolCallIssued)?, 0);
+    Ok(())
+}
+
+/// A persisted trigger/session agent conflict is rejected by the Gateway
+/// before continuation ledger/event/worker acceptance.
+#[test]
+fn trigger_agent_session_mismatch_fails_closed() -> Result<()> {
+    let (journal, _runtime, gateway, mut trigger, _session, calls) = setup()?;
+    trigger.id = RunId("run_trigger_agent_conflict".into());
+    trigger.trigger_event_id = EventId::new();
+    trigger.agent_id = AgentId("agent-conflict".into());
+    journal.insert_run(&trigger)?;
+    let error = gateway
+        .request_session_continuation(&journal, &continuation_request(&trigger))
+        .expect_err("trigger/session agent mismatch must fail closed");
+    assert!(error.to_string().contains("continuation_agent_mismatch"));
+    assert!(journal.continuation_by_trigger_run(&trigger.id)?.is_none());
+    assert_eq!(
+        count_events(&journal, JournalEventKind::SessionContinuationRequested)?,
+        0
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(count_events(&journal, JournalEventKind::RunStarted)?, 0);
+    assert_eq!(
+        count_events(&journal, JournalEventKind::ModelInvocationStarted)?,
+        0
+    );
+    assert_eq!(count_events(&journal, JournalEventKind::ToolCallIssued)?, 0);
+    Ok(())
+}
+
+/// The only principal fact directly comparable to the current Session model
+/// is generic transport source/channel. A conflict fails closed without adding
+/// product-specific identity rules.
+#[test]
+fn comparable_principal_source_conflict_fails_closed() -> Result<()> {
+    let (journal, _runtime, gateway, mut trigger, _session, calls) = setup()?;
+    trigger.id = RunId("run_trigger_principal_conflict".into());
+    trigger.trigger_event_id = EventId::new();
+    trigger.principal.source = PrincipalSource::Feishu;
+    journal.insert_run(&trigger)?;
+    let error = gateway
+        .request_session_continuation(&journal, &continuation_request(&trigger))
+        .expect_err("principal source/session channel mismatch must fail closed");
+    assert!(error
+        .to_string()
+        .contains("continuation_principal_mismatch"));
+    assert!(journal.continuation_by_trigger_run(&trigger.id)?.is_none());
+    assert_eq!(
+        count_events(&journal, JournalEventKind::SessionContinuationRequested)?,
+        0
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(count_events(&journal, JournalEventKind::RunStarted)?, 0);
+    assert_eq!(
+        count_events(&journal, JournalEventKind::ModelInvocationStarted)?,
+        0
+    );
+    assert_eq!(count_events(&journal, JournalEventKind::ToolCallIssued)?, 0);
     Ok(())
 }
