@@ -122,6 +122,31 @@ impl ContractCatalog {
             .find(|contract| contract.contract_id == contract_id)
     }
 
+    /// Return every known contract id, in catalog definition order.
+    ///
+    /// This is the read-only discoverability surface reused by callers that
+    /// must learn which contracts a `DevelopmentRequest` may legally name
+    /// (for example the `external.coding_task_submit` error path). It returns
+    /// references into the catalog's own data, so it never allocates a fresh
+    /// source of contract truth.
+    pub fn known_contract_ids(&self) -> Vec<&str> {
+        self.contracts
+            .iter()
+            .map(|contract| contract.contract_id.as_str())
+            .collect()
+    }
+
+    /// Return every requested contract id that is absent from this catalog,
+    /// preserving the order in which they were requested. Used to report all
+    /// unknown contracts at once instead of stopping at the first miss.
+    pub fn unknown_contracts<'a>(&'a self, requested: &'a [String]) -> Vec<&'a str> {
+        requested
+            .iter()
+            .map(String::as_str)
+            .filter(|contract_id| self.get(contract_id).is_none())
+            .collect()
+    }
+
     pub fn validate_request(&self, request: &DevelopmentRequest) -> Result<()> {
         request.validate()?;
         if request.contract_catalog_version != self.version {
@@ -206,5 +231,61 @@ mod tests {
         ] {
             assert!(catalog.get(id).is_some(), "missing {id}");
         }
+    }
+
+    /// `known_contract_ids` is the discoverability surface reused by the
+    /// `external.coding_task_submit` error path. It must return every v1
+    /// contract in catalog definition order so callers see a stable list.
+    #[test]
+    fn known_contract_ids_returns_full_catalog_in_definition_order() {
+        let catalog = ContractCatalog::v1();
+        let ids = catalog.known_contract_ids();
+        assert_eq!(
+            ids,
+            [
+                "event.observe.v0",
+                "context.prepare.v0",
+                "context.load.v0",
+                "route.proposal.v0",
+                "run.create.v0",
+                "component.invoke.v0",
+                "deployment.effect.v0",
+                "feishu.reply.v0",
+            ]
+        );
+    }
+
+    /// `unknown_contracts` preserves request order and reports only the ids
+    /// that are absent from the catalog, so the error can surface the full gap
+    /// rather than stopping at the first miss.
+    #[test]
+    fn unknown_contracts_preserves_request_order_and_skips_known() {
+        let catalog = ContractCatalog::v1();
+        let requested: Vec<String> = [
+            "route.proposal.v0", // known -> skipped
+            "missing.alpha.v0",  // unknown
+            "component.invoke.v0", // known -> skipped
+            "missing.beta.v0",  // unknown
+            "missing.alpha.v0", // unknown again (duplicate kept on purpose)
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let unknown = catalog.unknown_contracts(&requested);
+        assert_eq!(
+            unknown,
+            ["missing.alpha.v0", "missing.beta.v0", "missing.alpha.v0"]
+        );
+    }
+
+    #[test]
+    fn unknown_contracts_empty_for_all_known_requests() {
+        let catalog = ContractCatalog::v1();
+        let requested: Vec<String> = catalog
+            .known_contract_ids()
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        assert!(catalog.unknown_contracts(&requested).is_empty());
     }
 }
