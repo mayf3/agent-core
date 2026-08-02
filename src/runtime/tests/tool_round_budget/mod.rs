@@ -250,14 +250,13 @@ fn budget_configured_5_limits_to_5() {
         1,
         "ToolBudgetExhausted event recorded"
     );
+    // High 3: yield records ONLY the structured fact — the output contains
+    // no fabricated user-facing exhausted/continue prompt.
     assert!(
-        outcome.output.contains("工具执行上限"),
-        "user sees Chinese exhausted message: {}",
+        !outcome.output.contains("工具执行上限")
+            && !outcome.output.contains("请发送"),
+        "yield must not fabricate a user-facing prompt: {}",
         outcome.output
-    );
-    assert!(
-        !outcome.output.contains("Reached tool-call limit"),
-        "no English internal message"
     );
 }
 
@@ -267,7 +266,12 @@ fn budget_at_lower_bound_allows_1_round() {
     let (events, outcome, _) = run_with_budget(1, 2); // model wants 2, budget is 1
     assert_eq!(count(&events, JournalEventKind::LlmCompleted), 1);
     assert_eq!(count(&events, JournalEventKind::ToolBudgetExhausted), 1);
-    assert!(outcome.output.contains("工具执行上限"));
+    // High 3: structured fact only, no fabricated user prompt.
+    assert!(
+        !outcome.output.contains("工具执行上限") && !outcome.output.contains("请发送"),
+        "yield must not fabricate a user-facing prompt: {}",
+        outcome.output
+    );
 }
 
 /// 3b. Upper bound: 64 rounds allowed (not exhaustive, just verify no crash).
@@ -321,18 +325,11 @@ fn budget_3_exhausted_at_4th_round() {
     let llm = count(&events, JournalEventKind::LlmCompleted);
     assert_eq!(llm, 3, "exactly 3 LlmCompleted (not 4)");
     assert_eq!(count(&events, JournalEventKind::ToolBudgetExhausted), 1);
+    // High 3: structured fact only, no fabricated user prompt.
     assert!(
-        outcome.output.contains("工具执行上限"),
-        "Chinese exhausted: {}",
+        !outcome.output.contains("工具执行上限") && !outcome.output.contains("请发送"),
+        "yield must not fabricate a user-facing prompt: {}",
         outcome.output
-    );
-    assert!(
-        !outcome.output.contains("Reached tool-call limit"),
-        "no English internal message"
-    );
-    assert!(
-        !outcome.output.contains("Using the best answer"),
-        "no English fallback message"
     );
 }
 
@@ -342,7 +339,7 @@ fn budget_is_fixed_per_run() {
     // Run 1 with budget 3
     let (events1, outcome1, _) = run_with_budget(3, 10);
     assert_eq!(count(&events1, JournalEventKind::LlmCompleted), 3);
-    assert!(outcome1.output.contains("工具执行上限"));
+    assert!(!outcome1.output.contains("工具执行上限") && !outcome1.output.contains("请发送"));
 
     // Run 2 with budget 10 (different config, same test)
     let (events2, outcome2, _) = run_with_budget(10, 10);

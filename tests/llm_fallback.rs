@@ -207,19 +207,33 @@ fn recall_loop_is_bounded_by_max_tool_rounds() -> Result<()> {
         .count();
     assert_eq!(
         llm, 3,
-        "LlmCompleted (round 0 tool, round 1 tool, round 2 reply)"
+        "LlmCompleted (round 0 tool, round 1 tool, round 2 triggers exhaustion)"
     );
-    assert_eq!(rec, 2, "ReceiptReceived (2 tool executions, 0 for reply)");
+    assert_eq!(rec, 2, "ReceiptReceived (2 tool executions)");
     assert_eq!(
         tool_proposals, 2,
         "tool InvocationProposed (session.recall_recent)"
     );
+    // High 3: a budget yield produces NO reply Invocation and NO outbox entry —
+    // only the structured ToolBudgetExhausted yield fact is recorded. The
+    // external Agent Loop Harness observes it and decides whether to continue.
     assert_eq!(
-        reply_proposals, 1,
-        "reply InvocationProposed (stdout.send_text)"
+        reply_proposals, 0,
+        "yield must not fabricate a reply Invocation (stdout.send_text)"
     );
-    assert_eq!(oq, 1, "OutboxQueued (only the reply, not tools)");
-    assert!(!outcome.output.is_empty(), "final reply");
+    assert_eq!(oq, 0, "OutboxQueued must be 0 on yield (nothing enters outbox)");
+    assert!(
+        outcome.output.is_empty(),
+        "yield delivers no user-facing text"
+    );
+    let yield_facts = re
+        .iter()
+        .filter(|e| {
+            e.kind == JournalEventKind::ToolBudgetExhausted
+                || e.kind == JournalEventKind::ToolLoopWallClockExceeded
+        })
+        .count();
+    assert_eq!(yield_facts, 1, "structured yield fact recorded");
     Ok(())
 }
 

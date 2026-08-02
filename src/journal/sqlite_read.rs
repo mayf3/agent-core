@@ -106,6 +106,7 @@ pub(crate) fn parse_kind(value: &str) -> JournalEventKind {
         "HcrEvidenceRegistered" => JournalEventKind::HcrEvidenceRegistered,
         "HcrSettlementSucceeded" => JournalEventKind::HcrSettlementSucceeded,
         "HcrSettlementFailed" => JournalEventKind::HcrSettlementFailed,
+        "SessionContinuationRequested" => JournalEventKind::SessionContinuationRequested,
         _ => JournalEventKind::Unknown,
     }
 }

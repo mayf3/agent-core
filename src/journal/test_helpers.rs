@@ -12,7 +12,6 @@ use crate::domain::{InvocationId, OutboxDispatchStatus, Run, RunId};
 use anyhow::{anyhow, Result};
 use chrono::Utc;
 use rusqlite::params;
-use rusqlite::OptionalExtension;
 use serde_json::json;
 
 impl JournalStore {
@@ -236,90 +235,7 @@ impl JournalStore {
 
     /// Look up a Run by ID.
     pub fn run(&self, run_id: &RunId) -> Result<Option<Run>> {
-        use crate::domain::*;
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| anyhow!("journal mutex poisoned"))?;
-        let row: Option<(String, String, String, String, String, Option<String>, Option<String>, String, String, String, Option<String>)> = conn
-            .query_row(
-                "SELECT id, session_id, agent_id, trigger_event_id, principal_json, parent_run_id, delegated_by, status, created_at, updated_at, registry_snapshot_id
-                 FROM runs WHERE id = ?1",
-                params![run_id.0],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                        row.get(5)?,
-                        row.get(6)?,
-                        row.get(7)?,
-                        row.get(8)?,
-                        row.get(9)?,
-                        row.get(10)?,
-                    ))
-                },
-            )
-            .optional()?;
-        let Some((
-            id,
-            session_id,
-            agent_id,
-            trigger_event_id,
-            principal_json,
-            parent_run_id,
-            delegated_by,
-            status,
-            created_at,
-            updated_at,
-            registry_snapshot_id,
-        )) = row
-        else {
-            return Ok(None);
-        };
-        let id: String = id;
-        let session_id: String = session_id;
-        let agent_id: String = agent_id;
-        let trigger_event_id: String = trigger_event_id;
-        let status: String = status;
-        let created_at: String = created_at;
-        let updated_at: String = updated_at;
-        let parent_run_id: Option<String> = parent_run_id;
-        let delegated_by: Option<String> = delegated_by;
-        let registry_snapshot_id: Option<String> = registry_snapshot_id;
-        let principal: RunPrincipal = serde_json::from_str(&principal_json)?;
-        let run_status = match status.as_str() {
-            "Running" => RunStatus::Running,
-            "WaitingDispatch" => RunStatus::WaitingDispatch,
-            "Completed" => RunStatus::Completed,
-            "Failed" => RunStatus::Failed,
-            "AwaitingApproval" => RunStatus::AwaitingApproval,
-            _ => RunStatus::Unknown,
-        };
-        Ok(Some(Run {
-            id: RunId(id),
-            session_id: SessionId(session_id),
-            agent_id: AgentId(agent_id),
-            trigger_event_id: EventId(trigger_event_id),
-            principal,
-            parent_run_id: parent_run_id.map(RunId),
-            delegated_by: delegated_by.map(PrincipalId),
-            status: run_status,
-            created_at: chrono::DateTime::parse_from_rfc3339(&created_at)?
-                .with_timezone(&chrono::Utc),
-            updated_at: chrono::DateTime::parse_from_rfc3339(&updated_at)?
-                .with_timezone(&chrono::Utc),
-            registry_snapshot_id: registry_snapshot_id.unwrap_or_default(),
-            mode: RunMode::Default,
-            budget_hook_id: None,
-            budget_hook_version: None,
-            budget_decision_digest: None,
-            budget_max_tool_rounds: None,
-            budget_max_wall_time_ms: None,
-            budget_exhaustion_action: None,
-        }))
+        self.run_by_id(run_id)
     }
 
     /// Execute a raw SQL batch (e.g. CREATE TRIGGER) for test-only fault

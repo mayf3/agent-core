@@ -15,6 +15,25 @@ pub use tool_call::{validate_tool_call, ToolRejection};
 pub struct Gateway {
     config: KernelConfig,
 }
+
+/// Generic same-session continuation request (Bootstrap V0). Narrow contract:
+/// the external Agent Loop Harness identifies ONLY the trigger Run. All
+/// identity / routing / session facts (session_id, agent_id, principal,
+/// channel, conversation target, registry snapshot) are recovered by the
+/// Kernel from its OWN records — the Harness is never the source of those
+/// facts.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct SessionContinuationRequest {
+    /// The Run that yielded and is the basis for the next Run.
+    pub trigger_run_id: String,
+    /// Optional consistency check: when present, the Kernel verifies the
+    /// trigger Run actually belongs to this session.
+    pub expected_session_id: Option<String>,
+    /// STRICTLY validated deterministic key: must equal
+    /// `"continuation:" + trigger_run_id`. Any other value is rejected before
+    /// any event / ledger / worker job is created (High 4).
+    pub idempotency_key: String,
+}
 impl Gateway {
     pub fn new(config: KernelConfig) -> Self {
         Self { config }
@@ -50,6 +69,103 @@ impl Gateway {
         match envelope.source {
             ExternalSource::Cli => self.validate_cli_ingress(journal, envelope),
             ExternalSource::Feishu => self.validate_feishu_ingress(journal, envelope),
+        }
+    }
+    /// Generic same-session continuation seam (Bootstrap V0).
+    ///
+    /// An authorized external Agent Loop Harness requests the next Run in the
+    /// SAME session after the previous Run yielded. The Kernel does NOT decide
+    /// whether to continue — it only:
+    ///   1. STRICTLY validates the deterministic idempotency key
+    ///      (`"continuation:" + trigger_run_id`) — any other key is rejected
+    ///      before any event/ledger/worker job is created;
+    ///   2. verifies the trigger Run exists;
+    ///   3. verifies `expected_session_id` (when supplied) matches the trigger
+    ///      Run's session;
+    ///   4. PRE-ALLOCATES `next_run_id` and atomically records the generic
+    ///      `SessionContinuationRequested` governance event + ledger row +
+    ///      `schedule_continuation` worker job (all-or-nothing).
+    ///
+    /// All session/principal/channel facts are recovered from the trigger Run
+    /// by the worker — the Harness is never the source of identity facts.
+    ///
+    /// Returns `Ok(Some((request_id, next_run_id)))` on first acceptance, and
+    /// `Ok(None)` when the trigger Run was already continued (duplicate —
+    /// nothing new is created; the caller queries the ledger for the existing
+    /// next_run_id).
+    pub fn request_session_continuation(
+        &self,
+        journal: &JournalStore,
+        request: &SessionContinuationRequest,
+    ) -> Result<Option<(String, String)>> {
+        // High 4: strict deterministic-key validation. A key must equal
+        // "continuation:" + trigger_run_id, so a different trigger can never
+        // reuse a valid key, and a mismatched key is rejected BEFORE any
+        // event, ledger row, or worker job is created.
+        let expected_key = format!("continuation:{}", request.trigger_run_id);
+        if request.idempotency_key != expected_key {
+            bail!("idempotency_key_mismatch");
+        }
+        let trigger = journal
+            .run_by_id(&RunId(request.trigger_run_id.clone()))?
+            .ok_or_else(|| anyhow::anyhow!("trigger_run_not_found"))?;
+        if let Some(expected_session_id) = &request.expected_session_id {
+            if trigger.session_id.0 != *expected_session_id {
+                bail!("trigger_run_session_mismatch");
+            }
+        }
+        // Verify the trigger Run's session still exists (a generic governance
+        // fact check — the continuation resolves to this exact session).
+        let session = journal
+            .session_by_id(&trigger.session_id)?
+            .ok_or_else(|| anyhow::anyhow!("session_not_found"))?;
+
+        // High 1: fail closed BEFORE any event/ledger/worker is created. The
+        // trigger Run's frozen governance facts must be consistent with the
+        // Session they claim to continue. Any mismatch is a governance fault:
+        // no next Run is created, no RunStarted, no model call, no tool call.
+        // Only generic Kernel-stored facts are compared — the Harness is never
+        // trusted as a source of identity, and no Feishu/product string is
+        // re-derived.
+        if trigger.session_id != session.id {
+            bail!("continuation_session_mismatch");
+        }
+        if trigger.agent_id != session.agent_id {
+            bail!("continuation_agent_mismatch");
+        }
+        // The trigger principal's generic transport identity (`source`) must
+        // match the Session's `channel`. `principal_id`/`subject` are frozen
+        // inherited facts (not Session columns), so the strongest generic
+        // consistency check the Kernel can make for the principal is that the
+        // transport it arrived on is the transport the Session lives on.
+        if !matches!(
+            (&trigger.principal.source, &session.channel),
+            (PrincipalSource::Cli, ChannelKind::Cli)
+                | (PrincipalSource::Feishu, ChannelKind::Feishu)
+        ) {
+            bail!("continuation_principal_mismatch");
+        }
+
+        // The requesting principal is the authorized external caller (the
+        // Agent Loop Harness itself), identified by the IPC bearer that this
+        // route already authenticated. It is recorded as a governance fact,
+        // never used to fabricate a user identity.
+        let request_id = format!("cont:{}", uuid::Uuid::new_v4().simple());
+        // High 4: pre-allocate the next Run id at acceptance time so a
+        // duplicate request can IMMEDIATELY return the same next_run_id
+        // without waiting for the worker.
+        let next_run_id = RunId(format!("run_{}", uuid::Uuid::new_v4().simple()));
+        let accepted = journal.accept_session_continuation(
+            &request_id,
+            &session.id,
+            &trigger.id,
+            "ipc:agent-loop-harness",
+            &request.idempotency_key,
+            &next_run_id,
+        )?;
+        match accepted {
+            Some((_event_id, next_run_id)) => Ok(Some((request_id, next_run_id))),
+            None => Ok(None),
         }
     }
     pub fn approve_invocation(

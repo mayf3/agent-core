@@ -11,9 +11,11 @@ use std::time::Instant;
 
 /// Static user-facing message when the LLM fails during processing.
 /// NEVER includes internal error categories, stack traces, or provider details.
-/// The Run is Failed but the user still gets a notification.
+/// The Run is Failed but the user still gets a notification. This is a
+/// NEUTRAL failure notice — it never instructs the user to send "继续" (the
+/// external Agent Loop Harness decides whether to continue).
 pub(crate) const FOLLOWUP_LLM_FAILED_MSG: &str =
-    "这次处理在调用模型生成后续回复时失败了。工具执行结果已记录，但任务可能尚未完成。你可以发送「继续」让我接着处理。";
+    "本次执行因模型调用失败而停止。工具执行结果已记录。";
 
 pub(crate) const INITIAL_LLM_FAILED_MSG: &str =
     "这次处理模型暂时不可用，任务尚未开始完成。请稍后重试。";
@@ -157,13 +159,12 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
                             }),
                         );
                         llm.content = format!(
-                            "{}\n\n检测到重复工具调用（{}），已自动停止。请发送「继续」以在下一 Run 中接着处理。",
+                            "{}\n\n本次执行因检测到重复工具调用而停止。",
                             if llm.content.trim().is_empty() {
                                 "检测到重复工具调用，已自动停止。"
                             } else {
                                 &llm.content
                             },
-                            tool_call.operation,
                         );
                         return Ok(llm);
                     }
@@ -294,15 +295,12 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
                     );
                 }
                 ExhaustionAction::Yield => {
-                    llm.content = format!(
-                        "{}\n\n本轮已达到工具执行上限（{} 轮），任务尚未全部完成。请发送「继续」以在下一 Run 中接着处理。",
-                        if llm.content.trim().is_empty() {
-                            "本轮已达到工具执行上限，当前已完成部分工作。"
-                        } else {
-                            &llm.content
-                        },
-                        max_rounds,
-                    );
+                    // High 3: yield produces NO user-facing "请发送继续" text.
+                    // The structured yield fact (ToolBudgetExhausted with
+                    // exhaustion_action=yield) is the only artifact; the
+                    // external Agent Loop Harness observes it and decides
+                    // whether to continue. The model's own content is kept
+                    // untouched — nothing here is ever delivered as a reply.
                 }
             }
         }
@@ -361,15 +359,11 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
                 );
             }
             ExhaustionAction::Yield => {
-                llm.content = format!(
-                    "{}\n\n本轮已超过工具执行时间限制（{} ms），任务尚未全部完成。请发送「继续」以在下一 Run 中接着处理。",
-                    if llm.content.trim().is_empty() {
-                        "本轮已超过工具执行时间限制。"
-                    } else {
-                        &llm.content
-                    },
-                    timeout_ms,
-                );
+                // High 3: yield produces NO user-facing "请发送继续" text. The
+                // structured yield fact (ToolLoopWallClockExceeded with
+                // exhaustion_action=yield) is the only artifact; the external
+                // Agent Loop Harness observes it and decides whether to
+                // continue. The model's own content is kept untouched.
             }
         }
         Ok(true)

@@ -354,7 +354,7 @@ fn tool_failure_then_llm_failure_still_replies() {
     assert_eq!(oq.len(), 1, "failure reply must be enqueued");
 
     // Static failure message, no internals.
-    assert!(outcome.output.contains("模型生成后续回复时失败了"));
+    assert!(outcome.output.contains("本次执行因模型调用失败而停止"));
     assert!(!outcome.output.contains("shell.exec"));
 }
 /// Verify direct duplicate calls to reply_with_failure produce exactly one

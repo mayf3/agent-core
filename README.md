@@ -60,6 +60,7 @@ Architecture drafts (under `docs/architecture/`):
 - [Model Invocation Telemetry V0](docs/architecture/model-invocation-telemetry-v0.md) — replay-safe Journal facts for real model usage through `event.observe.v0`
 - [Managed Service Lifecycle V0](docs/architecture/managed-service-lifecycle-v0.md) — external Hook Consumer Service deployment, component snapshots, and governed controls
 - [External Orchestration Boundary](docs/architecture/external-orchestration-boundary.md) — Kernel vs External Harness boundary: planning, routing, multi-agent, acceptance, and repair strategy all live outside the Kernel
+- [External Harness Boundary V1](docs/architecture/AGENT_CORE_EXTERNAL_HARNESS_BOUNDARY_V1.md) — frozen Run-outcome/continuation boundary, `run.outcome.resolve.v0`, hook call direction, and Bootstrap → Self-hosting phases (same-session auto-continuation V0)
 - [Deployment Harness Operations](docs/ops/deployment-harness.md) — loopback deployment service configuration, health, upgrade, disable, and rollback
 - [Request-driven Coding Generator](docs/ops/request-driven-coding-generator.md) — model-generated Hook Consumer candidates, isolated repair probes, and operational boundaries
 
