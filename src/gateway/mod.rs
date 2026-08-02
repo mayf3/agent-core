@@ -120,6 +120,32 @@ impl Gateway {
             .session_by_id(&trigger.session_id)?
             .ok_or_else(|| anyhow::anyhow!("session_not_found"))?;
 
+        // High 1: fail closed BEFORE any event/ledger/worker is created. The
+        // trigger Run's frozen governance facts must be consistent with the
+        // Session they claim to continue. Any mismatch is a governance fault:
+        // no next Run is created, no RunStarted, no model call, no tool call.
+        // Only generic Kernel-stored facts are compared — the Harness is never
+        // trusted as a source of identity, and no Feishu/product string is
+        // re-derived.
+        if trigger.session_id != session.id {
+            bail!("continuation_session_mismatch");
+        }
+        if trigger.agent_id != session.agent_id {
+            bail!("continuation_agent_mismatch");
+        }
+        // The trigger principal's generic transport identity (`source`) must
+        // match the Session's `channel`. `principal_id`/`subject` are frozen
+        // inherited facts (not Session columns), so the strongest generic
+        // consistency check the Kernel can make for the principal is that the
+        // transport it arrived on is the transport the Session lives on.
+        if !matches!(
+            (&trigger.principal.source, &session.channel),
+            (PrincipalSource::Cli, ChannelKind::Cli)
+                | (PrincipalSource::Feishu, ChannelKind::Feishu)
+        ) {
+            bail!("continuation_principal_mismatch");
+        }
+
         // The requesting principal is the authorized external caller (the
         // Agent Loop Harness itself), identified by the IPC bearer that this
         // route already authenticated. It is recorded as a governance fact,

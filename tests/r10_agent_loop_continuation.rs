@@ -1134,8 +1134,8 @@ fn continuation_inherits_trigger_frozen_facts() {
         let session = journal
             .get_or_create_session(&SessionTarget {
                 agent_id: AgentId("agent-A".into()),
-                channel: ChannelKind::Cli,
-                conversation_key: "local".into(),
+                channel: ChannelKind::Feishu,
+                conversation_key: "feishu:open_id:frozen_user".into(),
             })
             .unwrap();
         let trigger = Run {
