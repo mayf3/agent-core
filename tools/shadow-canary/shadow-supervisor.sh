@@ -27,13 +27,13 @@ if [ ! -f "$SHADOW_ENV" ]; then
 fi
 
 # Binary paths (same as canary-runtime.sh)
-KERNEL_BIN="/Users/yanfenma/.agent-core/hcr-linux/agent-core-linux/target/release/agent-core-kernel"
-CODING_HARNESS_BIN="/Users/yanfenma/.agent-core/hcr-linux/agent-core-linux/tools/coding-harness/target/release/coding-harness"
-DEPLOYMENT_HARNESS_BIN="/Users/yanfenma/.agent-core/hcr-linux/agent-core-linux/tools/deployment-harness/target/release/deployment-harness"
-CAPABILITY_HOST_BIN="/Users/yanfenma/.agent-core/hcr-linux/agent-core-linux/tools/capability-host/target/release/capability-host"
+KERNEL_BIN="${HOME}/.agent-core/hcr-linux/agent-core-linux/target/release/agent-core-kernel"
+CODING_HARNESS_BIN="${HOME}/.agent-core/hcr-linux/agent-core-linux/tools/coding-harness/target/release/coding-harness"
+DEPLOYMENT_HARNESS_BIN="${HOME}/.agent-core/hcr-linux/agent-core-linux/tools/deployment-harness/target/release/deployment-harness"
+CAPABILITY_HOST_BIN="${HOME}/.agent-core/hcr-linux/agent-core-linux/tools/capability-host/target/release/capability-host"
 
 # Shadow tool paths (deployed to shared mount by canary-runtime)
-SHADOW_TOOLS_DIR="/Users/yanfenma/.agent-core/hcr-linux/shadow-tools"
+SHADOW_TOOLS_DIR="${HOME}/.agent-core/hcr-linux/shadow-tools"
 CONNECTOR_SCRIPT="${SHADOW_TOOLS_DIR}/tools/shadow-canary/connector-shadow.ts"
 INJECT_SCRIPT="${SHADOW_TOOLS_DIR}/tools/shadow-canary/inject.ts"
 CARD_DIR="${SHADOW_ROOT}/evidence"

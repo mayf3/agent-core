@@ -41,7 +41,7 @@ RUNTIME_ENV="$PROJECT_DIR/runtime.env"
 VM_NAME="${HCR_VM_NAME:-agent-core-hcr}"
 
 # Binary locations (inside the VM, on the shared mount)
-LINUX_BUILD_DIR="/Users/yanfenma/.agent-core/hcr-linux/agent-core-linux"
+LINUX_BUILD_DIR="${HOME}/.agent-core/hcr-linux/agent-core-linux"
 KERNEL_BIN="$LINUX_BUILD_DIR/target/release/agent-core-kernel"
 CODING_HARNESS_BIN="$LINUX_BUILD_DIR/tools/coding-harness/target/release/coding-harness"
 DEPLOYMENT_HARNESS_BIN="$LINUX_BUILD_DIR/tools/deployment-harness/target/release/deployment-harness"
@@ -389,7 +389,7 @@ cmd_start() {
 
     # Create required directories
     echo "--- Creating runtime directories ---"
-    vm_exec "mkdir -p /Users/yanfenma/.agent-core/hcr-linux/{artifacts,state,workspaces/scratch}"
+    vm_exec "mkdir -p ${HOME}/.agent-core/hcr-linux/{artifacts,state,workspaces/scratch}"
     vm_exec "mkdir -p /home/yanfenma.guest/.agent-core"
 
     # Build if --build flag is passed
@@ -997,7 +997,7 @@ shadow_cleanup() {
 
 # Generate shadow.env from runtime.env with explicit allowlist
 # (bash 3.2 compatible — no associative arrays)
-SHADOW_MOUNT_PREFIX="/Users/yanfenma/.agent-core/hcr-linux/shadow"
+SHADOW_MOUNT_PREFIX="${HOME}/.agent-core/hcr-linux/shadow"
 generate_shadow_env() {
     local shadow_root="$1"
     local src="$PROJECT_DIR/runtime.env"
@@ -1131,7 +1131,7 @@ collect_shadow_evidence() {
 cmd_shadow_e2e() {
     local variant="${1:-fresh}"
     local run_id="shadow_$(date +%s)"
-    local shadow_root="/Users/yanfenma/.agent-core/hcr-linux/shadow/shadow_${run_id}"
+    local shadow_root="${HOME}/.agent-core/hcr-linux/shadow/shadow_${run_id}"
     
     echo "=== canary-runtime: shadow-e2e (${variant}) ==="
     echo "Run ID: ${run_id}"
@@ -1222,7 +1222,7 @@ cmd_shadow_e2e() {
     " 2>/dev/null || true
 
     # 8. Deploy shadow tools to shared VM mount
-    local shadow_tools_dir="/Users/yanfenma/.agent-core/hcr-linux/shadow-tools"
+    local shadow_tools_dir="${HOME}/.agent-core/hcr-linux/shadow-tools"
     rm -rf "${shadow_tools_dir}"
     mkdir -p "${shadow_tools_dir}/tools/shadow-canary" "${shadow_tools_dir}/connectors/feishu/src" "${shadow_tools_dir}/shadow-failure-proxy/target/release"
     cp -r "${PROJECT_DIR}/tools/shadow-canary/"* "${shadow_tools_dir}/tools/shadow-canary/"

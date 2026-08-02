@@ -148,7 +148,7 @@ fn child_home_is_not_real_user_home() {
         // The child HOME should NOT be the real user home.  Check for
         // the "HOME=<real_home>" line specifically, rather than a plain
         // substring match, because PATH may legitimately contain the
-        // home directory (e.g. /Users/yanfenma/bin).
+        // home directory (e.g. ${HOME}/bin).
         let home_line = format!("HOME={}", real_home);
         assert!(
             !result.stdout.contains(&home_line),
