@@ -325,9 +325,35 @@ impl<L: crate::llm::LlmClient + 'static> super::Runtime<L> {
         snapshot_id: &str,
         snapshot: &RegistrySnapshot,
     ) -> Run {
+        self.create_run_with_principal(
+            journal,
+            session,
+            &event.event_id,
+            &event.principal,
+            event.chat_type.as_deref(),
+            snapshot_id,
+            snapshot,
+        )
+    }
+
+    /// Shared Run-creation core used by BOTH the user-ingress path and the
+    /// same-session continuation path. The continuation path recovers
+    /// event_id/principal/chat_type from the trigger Run's own records — the
+    /// external Harness is never the source of identity facts.
+    #[allow(clippy::too_many_arguments)] // all args are distinct governance facts
+    pub(crate) fn create_run_with_principal(
+        &self,
+        journal: &JournalStore,
+        session: &Session,
+        event_id: &EventId,
+        principal: &RunPrincipal,
+        chat_type: Option<&str>,
+        snapshot_id: &str,
+        snapshot: &RegistrySnapshot,
+    ) -> Run {
         let now = Utc::now();
-        let mut principal = event.principal.clone();
-        let is_owner = self.is_coding_owner(&principal, event.chat_type.as_deref());
+        let mut principal = principal.clone();
+        let is_owner = self.is_coding_owner(&principal, chat_type);
         super::coding_grants::augment_grants(&mut principal, snapshot, is_owner);
 
         // Load explicit external operation grants from the journal.
@@ -335,11 +361,11 @@ impl<L: crate::llm::LlmClient + 'static> super::Runtime<L> {
         // JournalStore::create_external_operation_grant and are separate
         // from channel-default grants and owner coding grants.
         //
-        // conversation_kind is derived from event.chat_type and the session
+        // conversation_kind is derived from chat_type and the session
         // channel to distinguish Feishu private/p2p from group chat.
         // Fail-closed: unrecognized combinations map to "" which matches
         // no grant (conversation_kind has CHECK constraint p2p/group/cli).
-        let conversation_kind = match (&session.channel, event.chat_type.as_deref()) {
+        let conversation_kind = match (&session.channel, chat_type) {
             (ChannelKind::Cli, _) => "cli",
             (ChannelKind::Feishu, Some("p2p")) => "p2p",
             (ChannelKind::Feishu, Some("group")) => "group",
@@ -370,9 +396,49 @@ impl<L: crate::llm::LlmClient + 'static> super::Runtime<L> {
             id: RunId::new(),
             session_id: session.id.clone(),
             agent_id: self.config.agent_id.clone(),
-            trigger_event_id: event.event_id.clone(),
+            trigger_event_id: event_id.clone(),
             principal,
             parent_run_id: None,
+            delegated_by: None,
+            status: RunStatus::Running,
+            created_at: now,
+            updated_at: now,
+            registry_snapshot_id: snapshot_id.to_string(),
+            mode: RunMode::Default,
+            budget_hook_id: None,
+            budget_hook_version: None,
+            budget_decision_digest: None,
+            budget_max_tool_rounds: None,
+            budget_max_wall_time_ms: None,
+            budget_exhaustion_action: None,
+        }
+    }
+
+    /// Continuation Run creation (High 1): the next Run INHERITS the trigger
+    /// Run's FROZEN governance facts — agent_id, registry_snapshot_id, and the
+    /// already-frozen principal/grants — instead of re-deriving them from the
+    /// current KernelConfig or the current registry snapshot. A continuation
+    /// must never silently change Agent, tool versions, or permissions.
+    ///
+    /// This is a NARROW internal entry for the same-session continuation path
+    /// only; the ordinary ingress path keeps using `create_run` /
+    /// `create_run_with_principal` unchanged.
+    pub(crate) fn create_run_frozen(
+        &self,
+        session: &Session,
+        trigger: &Run,
+        event_id: &EventId,
+        next_run_id: &RunId,
+        snapshot_id: &str,
+    ) -> Run {
+        let now = Utc::now();
+        Run {
+            id: next_run_id.clone(),
+            session_id: session.id.clone(),
+            agent_id: trigger.agent_id.clone(),
+            trigger_event_id: event_id.clone(),
+            principal: trigger.principal.clone(),
+            parent_run_id: Some(trigger.id.clone()),
             delegated_by: None,
             status: RunStatus::Running,
             created_at: now,
@@ -676,8 +742,9 @@ impl<L: crate::llm::LlmClient + 'static> super::Runtime<L> {
 }
 
 /// The default budget hook: reproduces the pre-V0 effective limits from the
-/// Kernel config. `exhaustion_action = Yield` reproduces the "请发送继续"
-/// behaviour.
+/// Kernel config. `exhaustion_action = Yield` ends the Run with a structured
+/// yield fact (no user-facing "请发送继续" prompt — the external Agent Loop
+/// Harness decides whether to continue).
 fn default_budget_decision(config: &crate::config::KernelConfig) -> RunBudgetDecision {
     let decision = RunBudgetDecision {
         max_tool_rounds: config.max_tool_rounds as u32,

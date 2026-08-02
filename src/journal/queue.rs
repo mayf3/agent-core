@@ -181,3 +181,46 @@ pub(crate) fn append_event_tx(
         created_at,
     })
 }
+
+/// Insert a Run row inside an existing transaction. Used by
+/// `insert_run_and_start` to make Run creation and the `RunStarted` event
+/// atomic (High 4: a crash between them left a Run row with no RunStarted,
+/// which the worker then mistook for a completed Run).
+pub(crate) fn insert_run_tx(tx: &Transaction<'_>, run: &Run) -> Result<()> {
+    let mode_str = serde_json::to_string(&run.mode)?;
+    let budget_hook_id = run.budget_hook_id.as_deref();
+    let budget_max_tool_rounds = run.budget_max_tool_rounds.map(|v| v as i64);
+    let budget_max_wall_time_ms = run.budget_max_wall_time_ms.map(|v| v as i64);
+    let budget_exhaustion_action = run.budget_exhaustion_action.map(|a| match a {
+        crate::hook::ExhaustionAction::Terminate => "terminate",
+        crate::hook::ExhaustionAction::Yield => "yield",
+    });
+    tx.execute(
+        "INSERT INTO runs
+         (id, session_id, agent_id, trigger_event_id, principal_json, parent_run_id, delegated_by, status, created_at, updated_at, registry_snapshot_id, mode, budget_hook_id, budget_max_tool_rounds, budget_max_wall_time_ms, budget_exhaustion_action)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+        params![
+            run.id.0,
+            run.session_id.0,
+            run.agent_id.0,
+            run.trigger_event_id.0,
+            serde_json::to_string(&run.principal)?,
+            run.parent_run_id.as_ref().map(|id| id.0.as_str()),
+            run.delegated_by.as_ref().map(|id| id.0.as_str()),
+            format!("{:?}", run.status),
+            run.created_at.to_rfc3339(),
+            run.updated_at.to_rfc3339(),
+            if run.registry_snapshot_id.is_empty() {
+                None
+            } else {
+                Some(&run.registry_snapshot_id)
+            },
+            mode_str,
+            budget_hook_id,
+            budget_max_tool_rounds,
+            budget_max_wall_time_ms,
+            budget_exhaustion_action,
+        ],
+    )?;
+    Ok(())
+}

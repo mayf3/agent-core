@@ -63,12 +63,12 @@ fn stale_running_worker_job_is_re_leased_on_next_poll() -> Result<()> {
     let event_id = EventId("evt_re_lease".to_string());
     let job_id = journal.enqueue_worker_job(&event_id)?;
     let first = journal.lease_next_worker_job()?;
-    assert_eq!(first.as_ref().map(|e| &e.0), Some(&event_id.0));
+    assert_eq!(first.as_ref().map(|(_, e)| &e.0), Some(&event_id.0));
     let second = journal.lease_next_worker_job()?;
     assert!(second.is_none());
     journal.expire_worker_lease_for_test(&job_id)?;
     let re_leased = journal.lease_next_worker_job()?;
-    assert_eq!(re_leased.as_ref().map(|e| &e.0), Some(&event_id.0));
+    assert_eq!(re_leased.as_ref().map(|(_, e)| &e.0), Some(&event_id.0));
     assert_eq!(journal.worker_job_stale_count()?, 0);
     Ok(())
 }

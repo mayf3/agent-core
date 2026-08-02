@@ -31,3 +31,7 @@ uuid = { version = "1", features = ["v4"] }
 # library with the `test-helpers` feature unified in. Production `cargo build`
 # does not enable it.
 agent-core-kernel = { path = ".", features = ["test-helpers"] }
+# The external Agent Loop Harness — the E2E tests run its real logic against a
+# real Kernel HTTP server. The harness itself does NOT depend on the kernel.
+agent-loop-harness = { path = "tools/agent-loop-harness" }
+ureq = { version = "3.3.0", features = ["json"] }

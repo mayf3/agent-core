@@ -1,10 +1,11 @@
 use super::hash_chain::event_hash;
+use super::queue::worker_job_id;
 use super::sqlite_read::{parse_time, row_to_event};
 use crate::domain::*;
 use anyhow::{anyhow, bail, Result};
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -21,10 +22,25 @@ pub struct JournalStore {
     db_path: Mutex<Option<PathBuf>>,
 }
 
+/// Raw `runs` row shape shared by the read helpers.
+type RunRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    String,
+    String,
+    String,
+    Option<String>,
+);
+
 /// The schema `PRAGMA user_version` this kernel writes and understands. Bumped
 /// only when `migrations/` gains a new applied migration. The startup
 /// `migrate()` refuses to run against a DB whose version is newer than this.
-const CURRENT_SCHEMA_VERSION: i64 = 19;
+const CURRENT_SCHEMA_VERSION: i64 = 20;
 
 impl JournalStore {
     pub fn open(path: &Path) -> Result<Self> {
@@ -257,6 +273,62 @@ impl JournalStore {
         Ok(())
     }
 
+    /// Insert a Run row AND append its `RunStarted` event in ONE transaction
+    /// (High 4). A crash between the two otherwise left a Run row present but
+    /// with no `RunStarted`, which the worker mistook for an already-completed
+    /// Run and returned success — losing the continuation forever. This closes
+    /// that window: both facts commit together or not at all.
+    ///
+    pub fn insert_run_and_start(
+        &self,
+        run: &Run,
+        session_id: &SessionId,
+        correlation_id: &str,
+        trigger_run_id: &RunId,
+    ) -> Result<()> {
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow!("journal mutex poisoned"))?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        super::queue::insert_run_tx(&tx, run)?;
+        let payload = json!({
+            "run_id": run.id.0,
+            "trigger_event_id": run.trigger_event_id.0,
+            "principal_id": run.principal.principal_id.0,
+            "continuation_of": trigger_run_id.0,
+        });
+        super::queue::append_event_tx(
+            &tx,
+            JournalEventKind::RunStarted,
+            Some(&run.id),
+            Some(session_id),
+            Some(correlation_id),
+            payload,
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Whether a `RunStarted` journal event exists for a Run (High 4). This is
+    /// the lifecycle fact that distinguishes "a Run row merely exists" from
+    /// "a Run actually started". The worker idempotency path uses it so a
+    /// half-created Run (row present, RunStarted absent — the pre-fix crash
+    /// window) fails closed instead of being re-driven or silently treated as
+    /// success.
+    pub fn run_has_started(&self, run_id: &RunId) -> Result<bool> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow!("journal mutex poisoned"))?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM journal_events WHERE run_id = ?1 AND kind = 'RunStarted'",
+            params![run_id.0],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
     pub fn update_run_status(&self, run_id: &RunId, status: &str) -> Result<()> {
         let conn = self
             .conn
@@ -306,6 +378,293 @@ impl JournalStore {
             )
             .optional()?;
         Ok(status)
+    }
+
+    /// Whether the Run ended with a budget exhaustion that carried the
+    /// `yield` exhaustion action (a structured yield fact). Used by the
+    /// delivery path to avoid fabricating a "please send 继续" user reply —
+    /// the external Agent Loop Harness observes this fact instead.
+    pub fn run_yielded(&self, run_id: &RunId) -> Result<bool> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow!("journal mutex poisoned"))?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM journal_events
+             WHERE run_id = ?1
+               AND kind IN ('ToolBudgetExhausted', 'ToolLoopWallClockExceeded')
+               AND json_extract(payload_json, '$.exhaustion_action') = 'yield'",
+            params![run_id.0],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    /// Load a Run by ID as a generic governance fact. Used by the
+    /// `/v1/session-continuation` seam to verify the trigger Run and recover
+    /// its session / principal so the continuation resolves to the SAME
+    /// session. Read-only; the Kernel never interprets the Run's content.
+    pub fn run_by_id(&self, run_id: &RunId) -> Result<Option<Run>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow!("journal mutex poisoned"))?;
+        let row: Option<RunRow> = conn
+            .query_row(
+                "SELECT id, session_id, agent_id, trigger_event_id, principal_json, parent_run_id, delegated_by, status, created_at, updated_at, registry_snapshot_id
+                 FROM runs WHERE id = ?1",
+                params![run_id.0],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                        row.get(9)?,
+                        row.get(10)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((
+            id,
+            session_id,
+            agent_id,
+            trigger_event_id,
+            principal_json,
+            parent_run_id,
+            delegated_by,
+            status,
+            created_at,
+            updated_at,
+            registry_snapshot_id,
+        )) = row
+        else {
+            return Ok(None);
+        };
+        let principal: RunPrincipal = serde_json::from_str(&principal_json)?;
+        let created_at: String = created_at;
+        let updated_at: String = updated_at;
+        let run_status = match status.as_str() {
+            "Running" => RunStatus::Running,
+            "WaitingDispatch" => RunStatus::WaitingDispatch,
+            "Completed" => RunStatus::Completed,
+            "Failed" => RunStatus::Failed,
+            "AwaitingApproval" => RunStatus::AwaitingApproval,
+            _ => RunStatus::Unknown,
+        };
+        Ok(Some(Run {
+            id: RunId(id),
+            session_id: SessionId(session_id),
+            agent_id: AgentId(agent_id),
+            trigger_event_id: EventId(trigger_event_id),
+            principal,
+            parent_run_id: parent_run_id.map(RunId),
+            delegated_by: delegated_by.map(PrincipalId),
+            status: run_status,
+            created_at: parse_time(created_at)?,
+            updated_at: parse_time(updated_at)?,
+            registry_snapshot_id: registry_snapshot_id.unwrap_or_default(),
+            mode: RunMode::Default,
+            budget_hook_id: None,
+            budget_hook_version: None,
+            budget_decision_digest: None,
+            budget_max_tool_rounds: None,
+            budget_max_wall_time_ms: None,
+            budget_exhaustion_action: None,
+        }))
+    }
+
+    /// Load a Session by ID as a generic governance fact. Used by the
+    /// `/v1/session-continuation` seam to rebuild the session target so the
+    /// continuation resolves to the SAME session row.
+    pub fn session_by_id(&self, session_id: &SessionId) -> Result<Option<Session>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow!("journal mutex poisoned"))?;
+        conn.query_row(
+            "SELECT id, agent_id, channel, conversation_key, last_active_at, status, version
+             FROM sessions WHERE id = ?1",
+            params![session_id.0],
+            |row| {
+                let status: String = row.get(5)?;
+                Ok(Session {
+                    id: SessionId(row.get(0)?),
+                    agent_id: AgentId(row.get(1)?),
+                    channel: match row.get::<_, String>(2)?.as_str() {
+                        "Cli" => ChannelKind::Cli,
+                        "Feishu" => ChannelKind::Feishu,
+                        other => {
+                            return Err(rusqlite::Error::FromSqlConversionFailure(
+                                2,
+                                rusqlite::types::Type::Text,
+                                Box::new(std::io::Error::new(
+                                    std::io::ErrorKind::InvalidData,
+                                    format!("unknown channel: {other}"),
+                                )),
+                            ));
+                        }
+                    },
+                    conversation_key: row.get(3)?,
+                    summary: None,
+                    summarized_until_event_id: None,
+                    last_active_at: parse_time(row.get::<_, String>(4)?)?,
+                    status: if status == "Archived" {
+                        SessionStatus::Archived
+                    } else {
+                        SessionStatus::Active
+                    },
+                    version: row.get::<_, i64>(6)? as u64,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// Atomically accept a same-session continuation (High 4): in ONE
+    /// transaction, PRE-ALLOCATE the next_run_id, record the generic
+    /// `SessionContinuationRequested` governance event (NOT an
+    /// IngressAccepted / user message), write the ledger row with the
+    /// pre-allocated next_run_id, and enqueue a `schedule_continuation` worker
+    /// job. All four facts succeed or roll back together — the ledger is the
+    /// single trusted fact.
+    ///
+    /// Returns `Ok(Some((event_id, next_run_id)))` on first acceptance, and
+    /// `Ok(None)` for a duplicate trigger (nothing new is created — the
+    /// already-accepted continuation is returned via
+    /// [`JournalStore::continuation_by_trigger_run`]).
+    ///
+    /// The Kernel does NOT decide whether the continuation should happen; it
+    /// only verifies generic governance facts and records the fact.
+    pub fn accept_session_continuation(
+        &self,
+        request_id: &str,
+        session_id: &SessionId,
+        trigger_run_id: &RunId,
+        requesting_principal: &str,
+        idempotency_key: &str,
+        next_run_id: &RunId,
+    ) -> Result<Option<(String, String)>> {
+        let now = Utc::now().to_rfc3339();
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow!("journal mutex poisoned"))?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        // Idempotency: a trigger Run may be continued at most once. This check
+        // runs BEFORE any insert so a duplicate trigger creates NOTHING new.
+        // UNIQUE(trigger_run_id) remains the hard guarantee against races.
+        let existing: Option<String> = tx
+            .query_row(
+                "SELECT event_id FROM session_continuations WHERE trigger_run_id = ?1",
+                params![trigger_run_id.0],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if existing.is_some() {
+            drop(tx);
+            return Ok(None);
+        }
+        // Generic governance event: an authorized caller requested the next Run
+        // in the same session based on a trigger Run. This is NOT a user
+        // message and carries no product semantics.
+        let appended = super::queue::append_event_tx(
+            &tx,
+            JournalEventKind::SessionContinuationRequested,
+            None,
+            Some(session_id),
+            Some(request_id),
+            json!({
+                "request_id": request_id,
+                "trigger_run_id": trigger_run_id.0,
+                "session_id": session_id.0,
+                "requesting_principal": requesting_principal,
+                "idempotency_key": idempotency_key,
+                "next_run_id": next_run_id.0,
+            }),
+        )?;
+        let event_id = appended.event_id;
+        // The ledger row is inserted FIRST with the pre-allocated next_run_id;
+        // UNIQUE(trigger_run_id) fails this INSERT (rolling back everything)
+        // if a concurrent request won the race.
+        tx.execute(
+            "INSERT INTO session_continuations
+             (idempotency_key, session_id, trigger_run_id, event_id, next_run_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                idempotency_key,
+                session_id.0,
+                trigger_run_id.0,
+                event_id.0,
+                next_run_id.0,
+                now,
+            ],
+        )?;
+        tx.execute(
+            "INSERT INTO worker_jobs
+             (job_id, job_type, source_event_id, status, attempts, available_at, created_at, updated_at)
+             VALUES (?1, 'schedule_continuation', ?2, ?3, 0, ?4, ?4, ?4)",
+            params![
+                worker_job_id(&event_id).as_str(),
+                event_id.0.as_str(),
+                WorkerJobStatus::Queued.as_str(),
+                now.as_str(),
+            ],
+        )?;
+        tx.commit()?;
+        Ok(Some((event_id.0.clone(), next_run_id.0.clone())))
+    }
+
+    /// Load the accepted continuation for a trigger Run. Returns the
+    /// continuation event_id and the PRE-ALLOCATED next_run_id. The
+    /// next_run_id is always present (pre-allocated at acceptance time), so a
+    /// duplicate request can immediately return the SAME next_run_id without
+    /// waiting for the worker.
+    pub fn continuation_by_trigger_run(
+        &self,
+        trigger_run_id: &RunId,
+    ) -> Result<Option<(String, String)>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow!("journal mutex poisoned"))?;
+        let row: Option<(String, String)> = conn
+            .query_row(
+                "SELECT event_id, next_run_id FROM session_continuations WHERE trigger_run_id = ?1",
+                params![trigger_run_id.0],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    /// Load the generic `SessionContinuationRequested` journal event by its
+    /// event_id. Used by the worker loop to recover the trigger Run reference
+    /// for a `schedule_continuation` worker job. This is NOT an ingress event
+    /// and carries no user message.
+    pub fn continuation_request_by_event_id(
+        &self,
+        event_id: &str,
+    ) -> Result<Option<JournalEvent>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow!("journal mutex poisoned"))?;
+        let mut stmt = conn.prepare(
+            "SELECT sequence, event_id, run_id, session_id, correlation_id, kind, payload_json, previous_hash, hash, created_at
+             FROM journal_events
+             WHERE event_id = ?1 AND kind = 'SessionContinuationRequested'
+             ORDER BY sequence DESC LIMIT 1",
+        )?;
+        let mut rows = stmt.query_map(params![event_id], row_to_event)?;
+        Ok(rows.next().transpose()?)
     }
 
     pub fn events(&self) -> Result<Vec<JournalEvent>> {
@@ -414,6 +773,9 @@ impl JournalStore {
             ensure_registry_hook_bindings_table(&conn)?;
             super::queue::migrate(&conn)?;
             backfill_feishu_message_dedup(&conn)?;
+            conn.execute_batch(include_str!(
+                "../../migrations/0020_session_continuations.sql"
+            ))?;
             conn.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
         } else if applied == 1 {
             conn.execute_batch(include_str!("../../migrations/0002_registry_snapshots.sql"))?;
@@ -522,6 +884,12 @@ impl JournalStore {
                 18 => {
                     ensure_registry_hook_bindings_table(&conn)?;
                     conn.pragma_update(None, "user_version", 19)?;
+                }
+                19 => {
+                    conn.execute_batch(include_str!(
+                        "../../migrations/0020_session_continuations.sql"
+                    ))?;
+                    conn.pragma_update(None, "user_version", 20)?;
                 }
                 _ => break,
             }
@@ -661,4 +1029,72 @@ pub(crate) fn ensure_registry_hook_bindings_table(conn: &Connection) -> Result<(
         ))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod run_start_atomic_tests {
+    use super::*;
+
+    fn run(id: &str) -> Run {
+        let now = Utc::now();
+        Run {
+            id: RunId(id.to_string()),
+            session_id: SessionId("session_atomic".into()),
+            agent_id: AgentId("agent_atomic".into()),
+            trigger_event_id: EventId("event_atomic".into()),
+            principal: RunPrincipal {
+                principal_id: PrincipalId("cli:local".into()),
+                subject: PrincipalSubject::LocalUser,
+                source: PrincipalSource::Cli,
+                grants: vec![],
+                requester_id: Some("cli:local".into()),
+            },
+            parent_run_id: None,
+            delegated_by: None,
+            status: RunStatus::Running,
+            created_at: now,
+            updated_at: now,
+            registry_snapshot_id: String::new(),
+            mode: RunMode::Default,
+            budget_hook_id: None,
+            budget_hook_version: None,
+            budget_decision_digest: None,
+            budget_max_tool_rounds: None,
+            budget_max_wall_time_ms: None,
+            budget_exhaustion_action: None,
+        }
+    }
+
+    #[test]
+    fn run_row_rolls_back_when_run_started_insert_fails() -> Result<()> {
+        let journal = JournalStore::in_memory()?;
+        {
+            let conn = journal
+                .conn
+                .lock()
+                .map_err(|_| anyhow!("journal mutex poisoned"))?;
+            conn.execute_batch(
+                "CREATE TRIGGER force_run_started_failure
+                 BEFORE INSERT ON journal_events
+                 WHEN NEW.kind = 'RunStarted'
+                 BEGIN
+                   SELECT RAISE(ABORT, 'forced RunStarted failure');
+                 END;",
+            )?;
+        }
+        let run = run("run_atomic_rollback");
+        let result = journal.insert_run_and_start(
+            &run,
+            &run.session_id,
+            "continuation_atomic_event",
+            &RunId("run_trigger_atomic".into()),
+        );
+        assert!(result.is_err(), "forced RunStarted failure must surface");
+        assert!(
+            journal.run_by_id(&run.id)?.is_none(),
+            "Run row must roll back with RunStarted"
+        );
+        assert!(!journal.run_has_started(&run.id)?);
+        Ok(())
+    }
 }

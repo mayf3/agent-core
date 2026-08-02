@@ -1,6 +1,6 @@
 use crate::adapters::{HttpConnectorAdapter, InvocationAdapter};
 use crate::config::KernelConfig;
-use crate::domain::{EventId, JournalEventKind, ValidatedEvent};
+use crate::domain::{EventId, JournalEventKind, RunId, ValidatedEvent};
 use crate::gateway::Gateway;
 use crate::hook::{HookClient, HookConfig, HttpHookClient};
 use crate::journal::JournalStore;
@@ -90,11 +90,19 @@ fn process_next_worker_job(
     journal: &JournalStore,
     gateway: &Gateway,
 ) -> Result<bool> {
-    let Some(source_event_id) = journal.lease_next_worker_job()? else {
+    let Some((job_type, source_event_id)) = journal.lease_next_worker_job()? else {
         return Ok(false);
     };
     let event_id = source_event_id.0.clone();
-    let result = deliver_worker_event(config.clone(), journal, gateway, &source_event_id);
+    let result = match job_type.as_str() {
+        "deliver_event" => {
+            deliver_worker_event(config.clone(), journal, gateway, &source_event_id)
+        }
+        "schedule_continuation" => {
+            deliver_continuation_worker_event(config.clone(), journal, gateway, &source_event_id)
+        }
+        other => Err(anyhow::anyhow!("unknown_worker_job_type:{other}")),
+    };
     if let Err(error) = result {
         let category = error_category(&error);
         eprintln!(
@@ -135,6 +143,74 @@ fn deliver_worker_event(
         .ok_or_else(|| anyhow::anyhow!("missing_ingress_event"))?;
     let validated = gateway.recover_validated_event(&event)?;
     deliver_event(config, journal, gateway, validated)
+}
+
+/// A continuation worker job: an authorized external Agent Loop Harness
+/// requested the next Run in the same session based on a trigger Run. The
+/// Kernel loads the generic `SessionContinuationRequested` fact, recovers the
+/// trigger Run's session/principal/registry snapshot from its own records (the
+/// external Harness is never the source of identity/routing/session facts),
+/// and schedules the next Run with the PRE-ALLOCATED next_run_id from the
+/// continuation ledger (High 4 — the ledger is the single trusted fact).
+fn deliver_continuation_worker_event(
+    config: KernelConfig,
+    journal: &JournalStore,
+    gateway: &Gateway,
+    request_event_id: &EventId,
+) -> Result<()> {
+    let event = journal
+        .continuation_request_by_event_id(&request_event_id.0)?
+        .ok_or_else(|| anyhow::anyhow!("missing_continuation_request"))?;
+    let trigger_run_id = RunId(
+        event
+            .payload
+            .get("trigger_run_id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+    );
+    if trigger_run_id.0.is_empty() {
+        anyhow::bail!("continuation_request_missing_trigger_run");
+    }
+    // High 4: the ledger is the single trusted fact. It carries the
+    // PRE-ALLOCATED next_run_id — the worker never generates a Run id itself.
+    let (_, next_run_id) = journal
+        .continuation_by_trigger_run(&trigger_run_id)?
+        .ok_or_else(|| anyhow::anyhow!("continuation_ledger_missing"))?;
+    if next_run_id.is_empty() {
+        anyhow::bail!("continuation_next_run_id_missing");
+    }
+    let trigger = journal
+        .run_by_id(&trigger_run_id)?
+        .ok_or_else(|| anyhow::anyhow!("trigger_run_not_found"))?;
+    let session = journal
+        .session_by_id(&trigger.session_id)?
+        .ok_or_else(|| anyhow::anyhow!("session_not_found"))?;
+    // The next Run reuses the trigger Run's own session context (prior turns,
+    // compaction, tool results). No user message is fabricated — the model
+    // continues from the session's accumulated context.
+    let llm: Box<dyn crate::llm::LlmClient> = Box::new(build_llm_from_config(&config));
+    let mut runtime = Runtime::new(config.clone(), llm);
+    if config.context_prepare_hook.enabled || config.budget_hook.enabled {
+        let hook_client: Box<dyn HookClient> = Box::new(HttpHookClient::new());
+        if config.context_prepare_hook.enabled {
+            runtime = runtime.with_hook(hook_client, config.context_prepare_hook.clone());
+        } else {
+            runtime = runtime.with_hook(hook_client, HookConfig::default());
+        }
+        if config.budget_hook.enabled {
+            runtime = runtime.with_budget_hook(config.budget_hook.clone());
+        }
+    }
+    runtime.schedule_run_for_existing_session(
+        journal,
+        gateway,
+        &trigger,
+        &session,
+        &trigger_run_id,
+        &RunId(next_run_id),
+    )?;
+    Ok(())
 }
 
 fn deliver_event(

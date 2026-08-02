@@ -26,7 +26,70 @@ impl ContextAssembler {
         granted_operations: &[String],
         snapshot: &RegistrySnapshot,
     ) -> Result<Vec<ContextBlock>> {
-        let mut blocks = vec![
+        let mut blocks = self.base_blocks(granted_operations, snapshot);
+        let turns = journal.conversation_turns(&session.id, Some(&event.event_id.0))?;
+        if !turns.is_empty() {
+            let history = turns
+                .into_iter()
+                .flat_map(|(user, assistant)| {
+                    [format!("User: {user}"), format!("Assistant: {assistant}")]
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            blocks.push(block(
+                ContextBlockKind::RecentMessages,
+                &history,
+                "journal/conversation",
+            ));
+        }
+        blocks.push(block(
+            ContextBlockKind::UserMessage,
+            user_text,
+            &event.event_id.0,
+        ));
+        Ok(blocks)
+    }
+
+    /// Build the model context for a same-session continuation Run. The model
+    /// continues from the session's accumulated history (prior turns, tool
+    /// results, compaction) — NO user message block is injected, because no
+    /// fake "user: 继续" exists. The external Agent Loop Harness decides
+    /// whether to continue; the Kernel only schedules the Run.
+    pub fn build_continuation(
+        &self,
+        journal: &JournalStore,
+        session: &Session,
+        continuation_event_id: &str,
+        granted_operations: &[String],
+        snapshot: &RegistrySnapshot,
+    ) -> Result<Vec<ContextBlock>> {
+        let mut blocks = self.base_blocks(granted_operations, snapshot);
+        let turns = journal.conversation_turns(&session.id, Some(continuation_event_id))?;
+        if !turns.is_empty() {
+            let history = turns
+                .into_iter()
+                .flat_map(|(user, assistant)| {
+                    [format!("User: {user}"), format!("Assistant: {assistant}")]
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            blocks.push(block(
+                ContextBlockKind::RecentMessages,
+                &history,
+                "journal/conversation",
+            ));
+        }
+        Ok(blocks)
+    }
+
+    /// Shared leading blocks (system, profile, catalog) for both the ingress
+    /// and the continuation context. No user-message semantics live here.
+    fn base_blocks(
+        &self,
+        granted_operations: &[String],
+        snapshot: &RegistrySnapshot,
+    ) -> Vec<ContextBlock> {
+        vec![
             self.file_block(
                 ContextBlockKind::RootSystem,
                 "system/root.md",
@@ -64,28 +127,7 @@ impl ContextAssembler {
                 "skills/chat/SKILL.md",
                 "Reply clearly and briefly to the current user message.",
             ),
-        ];
-        let turns = journal.conversation_turns(&session.id, Some(&event.event_id.0))?;
-        if !turns.is_empty() {
-            let history = turns
-                .into_iter()
-                .flat_map(|(user, assistant)| {
-                    [format!("User: {user}"), format!("Assistant: {assistant}")]
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            blocks.push(block(
-                ContextBlockKind::RecentMessages,
-                &history,
-                "journal/conversation",
-            ));
-        }
-        blocks.push(block(
-            ContextBlockKind::UserMessage,
-            user_text,
-            &event.event_id.0,
-        ));
-        Ok(blocks)
+        ]
     }
 
     fn file_block(
