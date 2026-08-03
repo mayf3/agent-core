@@ -45,9 +45,10 @@ pub(super) fn accept(
             .map_err(|_| "ACCEPTANCE_FINGERPRINT_FAILED")?
         ))
     ));
+    let attempt_key = required(args, "idempotency_key")?;
     let store = ExecutionStore::new(artifact_root);
     let result = store
-        .execute(&request.idempotency_key, &fingerprint, || {
+        .execute(attempt_key, &fingerprint, || {
             execute(
                 artifact_root,
                 request,

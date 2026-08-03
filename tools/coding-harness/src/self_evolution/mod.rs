@@ -4,6 +4,7 @@ pub mod artifact_manifest;
 mod component_profile;
 mod generator;
 mod profile_acceptance;
+mod submission_store;
 
 pub(crate) use generator::invocable::contract::CapabilityContract as InvocableCapabilityContract;
 pub(crate) use generator::invocable::process_input as invocable_process_input;
@@ -26,6 +27,33 @@ pub struct DevelopmentPlan {
 }
 
 pub fn handle_submit(artifact_root: &Path, args: &Value) -> Value {
+    let invocation_id = args
+        .get("invocation_intent_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let expected_attempt_key = format!("development-attempt:{invocation_id}");
+    let attempt_key = match args.get("idempotency_key").and_then(Value::as_str) {
+        Some(value) if invocation_id.starts_with("attempt_") && value == expected_attempt_key => {
+            value
+        }
+        None => return error("MISSING_OR_INVALID_ATTEMPT_KEY"),
+        _ => return error("MISSING_OR_INVALID_ATTEMPT_KEY"),
+    };
+    let store = submission_store::SubmissionStore::new(artifact_root);
+    // This single persisted closure contains plan, candidate generation, and
+    // every build/test/acceptance gate. Replays never enter it a second time.
+    match store.execute(attempt_key, args, || {
+        handle_submit_once(artifact_root, args, attempt_key)
+    }) {
+        submission_store::SubmissionExecution::Completed(result) => result,
+        submission_store::SubmissionExecution::InProgress => submission_store::in_progress(),
+        submission_store::SubmissionExecution::OutcomeUnknown => {
+            submission_store::outcome_unknown()
+        }
+    }
+}
+
+fn handle_submit_once(artifact_root: &Path, args: &Value, attempt_key: &str) -> Value {
     let request_value = match args.get("development_request") {
         Some(value) => value,
         None => return error("MISSING_DEVELOPMENT_REQUEST"),
@@ -38,9 +66,11 @@ pub fn handle_submit(artifact_root: &Path, args: &Value) -> Value {
         Ok(plan) => plan,
         Err(code) => return error(&code),
     };
-    let generated = match crate::fixtures::generate(artifact_root, &request) {
+    let generated = match crate::fixtures::generate(artifact_root, &request, attempt_key) {
         Some(result) => result.map_err(|_| "CANDIDATE_GENERATION_FAILED"),
-        None => generator::generate(artifact_root, &request).map_err(|error| error.code()),
+        None => {
+            generator::generate(artifact_root, &request, attempt_key).map_err(|error| error.code())
+        }
     };
     match generated {
         Ok(mut result) => {
@@ -54,6 +84,7 @@ pub fn handle_submit(artifact_root: &Path, args: &Value) -> Value {
             json!({
                 "protocol_version": "external-harness-v1",
                 "ok": true,
+                "outcome": "succeeded",
                 "result": accepted,
             })
         }
@@ -91,6 +122,7 @@ fn error(code: &str) -> Value {
     json!({
         "protocol_version": "external-harness-v1",
         "ok": false,
+        "outcome": "definitively_rejected",
         "error_code": code,
     })
 }
@@ -144,5 +176,13 @@ mod tests {
                 .len(),
             7
         );
+    }
+
+    #[test]
+    fn operation_errors_carry_the_generic_definitive_rejection_signal() {
+        let value = error("ANY_BUSINESS_REASON");
+        assert_eq!(value["ok"], false);
+        assert_eq!(value["outcome"], "definitively_rejected");
+        assert_eq!(value["error_code"], "ANY_BUSINESS_REASON");
     }
 }

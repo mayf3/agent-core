@@ -78,7 +78,14 @@ fn hook_consumer_passes_all_five_gates() {
     let root = temp_base("submit");
 
     // ── Step 1: Generate via deterministic fixture ────────────────
-    let response = self_evolution::handle_submit(&root, &json!({"development_request": request}));
+    let response = self_evolution::handle_submit(
+        &root,
+        &json!({
+        "development_request": request,
+        "idempotency_key": "development-attempt:attempt_hook_consumer_gates",
+        "invocation_intent_id": "attempt_hook_consumer_gates"
+        }),
+    );
     assert!(
         response["ok"].as_bool().unwrap_or(false),
         "fixture generation failed: {}",
