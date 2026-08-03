@@ -539,13 +539,15 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
 
 /// Returns true when `operation` is in the coding-harness mutating set for
 /// which duplicate detection applies. Polling operations like
-/// `external.coding_task_status` are excluded.
+/// `external.coding_task_status` are excluded. DevelopmentRequest submission
+/// is also excluded because its durable attempt state machine, not argument
+/// equality, decides whether a call is a replay or a safely authorized next
+/// attempt after definitive rejection.
 fn is_mutating_coding_op(operation: &str) -> bool {
     matches!(
         operation,
         "external.coding_workspace_write"
             | "external.coding_workspace_exec"
-            | "external.coding_task_submit"
             | "external.coding_capability_propose"
     )
 }
