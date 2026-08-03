@@ -88,6 +88,7 @@ fn authenticated_sentence_creates_real_pending_proposal() -> Result<()> {
         &run,
         &session,
         "om_pr3a_real_message",
+        "tool:test:pr3a:real",
     )?;
 
     assert_eq!(journal.harness_change_request_count()?, 1);
@@ -207,6 +208,7 @@ fn same_message_twenty_way_is_exactly_once(
                 &run,
                 &session,
                 "om_pr3a_twenty_way",
+                "tool:test:pr3a:twenty-way",
             )
         }));
     }
@@ -293,6 +295,7 @@ fn missing_submit_grant_fails_before_hcr_creation() -> Result<()> {
         &run,
         &session,
         "om_pr3a_intruder",
+        "tool:test:pr3a:intruder",
     )
     .expect_err("missing grant must fail closed");
     assert!(error.to_string().contains("capability_not_enabled"));

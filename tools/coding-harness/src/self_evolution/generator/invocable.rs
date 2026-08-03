@@ -46,11 +46,12 @@ Do not define main. Do not import or reference any other crate or std path. Do n
 pub(super) fn generate(
     artifact_root: &Path,
     request: &DevelopmentRequest,
+    attempt_key: &str,
 ) -> Result<Value, GenerationError> {
     validate_profile(request)?;
     let base = artifact_root.join("generated");
     std::fs::create_dir_all(&base)?;
-    let key_hash = hex::encode(Sha256::digest(request.idempotency_key.as_bytes()));
+    let key_hash = hex::encode(Sha256::digest(attempt_key.as_bytes()));
     let candidate_id = format!("generated_invocable_{}", &key_hash[..24]);
     let mut lock = open_lock(&base, &candidate_id)?;
     let candidate = base.join(&candidate_id).join("candidate");
