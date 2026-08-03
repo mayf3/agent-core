@@ -1,6 +1,7 @@
 //! Durable, ordered ownership for Coding Harness submission attempts.
 
-use crate::domain::{InvocationId, RunId, SessionId};
+use super::queue::append_event_tx;
+use crate::domain::{InvocationId, JournalEventKind, RunId, SessionId};
 use anyhow::{bail, Result};
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
 use serde_json::Value;
@@ -10,7 +11,10 @@ pub(crate) enum CodingTaskSubmissionClaim {
         attempt_id: String,
         invocation_id: InvocationId,
     },
-    InProgress,
+    InProgress {
+        attempt_id: String,
+        invocation_id: InvocationId,
+    },
     Succeeded {
         invocation_id: InvocationId,
         result: Value,
@@ -31,11 +35,15 @@ impl super::JournalStore {
         proposed_invocation_id: &InvocationId,
         run_id: &RunId,
         session_id: &SessionId,
+        decision_id: &str,
     ) -> Result<CodingTaskSubmissionClaim> {
         if source_message_id.trim().is_empty() {
             bail!("MISSING_SOURCE_MESSAGE_ID");
         }
-        if submission_call_key.trim().is_empty() || proposed_attempt_id.trim().is_empty() {
+        if submission_call_key.trim().is_empty()
+            || proposed_attempt_id.trim().is_empty()
+            || decision_id.trim().is_empty()
+        {
             bail!("MISSING_CODING_SUBMISSION_IDENTITY");
         }
         crate::capabilities::store::Sha256Digest::parse(request_digest)?;
@@ -91,7 +99,10 @@ impl super::JournalStore {
                 bail!("CODING_SUBMISSION_REPLAY_IDENTITY_CONFLICT");
             }
             return match status.as_str() {
-                "running" => Ok(CodingTaskSubmissionClaim::InProgress),
+                "running" => Ok(CodingTaskSubmissionClaim::InProgress {
+                    attempt_id,
+                    invocation_id: InvocationId(invocation_id),
+                }),
                 "succeeded" => {
                     let result = result
                         .ok_or_else(|| anyhow::anyhow!("CODING_SUBMISSION_RESULT_MISSING"))?;
@@ -160,6 +171,33 @@ impl super::JournalStore {
                 now,
             ],
         )?;
+        let attempt_key = format!("development-attempt:{proposed_attempt_id}");
+        append_event_tx(
+            &tx,
+            JournalEventKind::InvocationProposed,
+            Some(run_id),
+            Some(session_id),
+            Some(&proposed_invocation_id.0),
+            serde_json::json!({
+                "attempt_id": proposed_attempt_id,
+                "invocation_id": proposed_invocation_id.0,
+                "operation": crate::domain::operation::external::TASK_SUBMIT,
+                "idempotency_key": attempt_key,
+            }),
+        )?;
+        append_event_tx(
+            &tx,
+            JournalEventKind::InvocationApproved,
+            Some(run_id),
+            Some(session_id),
+            Some(&proposed_invocation_id.0),
+            serde_json::json!({
+                "attempt_id": proposed_attempt_id,
+                "invocation_id": proposed_invocation_id.0,
+                "operation": crate::domain::operation::external::TASK_SUBMIT,
+                "decision_id": decision_id,
+            }),
+        )?;
         tx.commit()?;
         Ok(CodingTaskSubmissionClaim::Claimed {
             attempt_id: proposed_attempt_id.to_string(),
@@ -219,12 +257,87 @@ impl super::JournalStore {
         result: Option<&Value>,
         error_code: Option<&str>,
     ) -> Result<()> {
-        let conn = self
+        let mut conn = self
             .conn
             .lock()
             .map_err(|_| anyhow::anyhow!("journal mutex poisoned"))?;
         let result_json = result.map(serde_json::to_string).transpose()?;
-        let changed = conn.execute(
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (run_id, session_id, current_status, persisted_result, persisted_error): (
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+        ) = tx.query_row(
+            "SELECT origin_run_id,origin_session_id,status,result_json,error_code
+             FROM coding_task_submissions
+             WHERE attempt_id=?1 AND invocation_id=?2",
+            params![attempt_id, invocation_id.0],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )?;
+        if current_status == status {
+            if persisted_result == result_json && persisted_error.as_deref() == error_code {
+                tx.commit()?;
+                return Ok(());
+            }
+            bail!("CODING_SUBMISSION_FINISH_CONFLICT");
+        }
+        if current_status != "running" {
+            bail!("CODING_SUBMISSION_FINISH_CONFLICT");
+        }
+        let (kind, payload) = match status {
+            "succeeded" => (
+                JournalEventKind::ReceiptReceived,
+                serde_json::json!({
+                    "attempt_id": attempt_id,
+                    "invocation_id": invocation_id.0,
+                    "operation": crate::domain::operation::external::TASK_SUBMIT,
+                    "status": "Succeeded",
+                    "outcome": "succeeded",
+                    "acceptance_receipt_digest": result.and_then(|value| value.get("receipt_digest")),
+                }),
+            ),
+            "definitively_rejected" => (
+                JournalEventKind::ReceiptReceived,
+                serde_json::json!({
+                    "attempt_id": attempt_id,
+                    "invocation_id": invocation_id.0,
+                    "operation": crate::domain::operation::external::TASK_SUBMIT,
+                    "status": "Failed",
+                    "outcome": "definitively_rejected",
+                    "error_code": error_code,
+                }),
+            ),
+            "outcome_unknown" => (
+                JournalEventKind::CodingSubmissionOutcomeUnknown,
+                serde_json::json!({
+                    "attempt_id": attempt_id,
+                    "invocation_id": invocation_id.0,
+                    "operation": crate::domain::operation::external::TASK_SUBMIT,
+                    "status": "Unknown",
+                    "outcome": "outcome_unknown",
+                }),
+            ),
+            _ => bail!("CODING_SUBMISSION_INVALID_STATUS"),
+        };
+        append_event_tx(
+            &tx,
+            kind,
+            Some(&RunId(run_id)),
+            Some(&SessionId(session_id)),
+            Some(&invocation_id.0),
+            payload,
+        )?;
+        let changed = tx.execute(
             "UPDATE coding_task_submissions
              SET status=?3,result_json=?4,error_code=?5,updated_at=?6
              WHERE attempt_id=?1 AND invocation_id=?2 AND status='running'",
@@ -240,6 +353,7 @@ impl super::JournalStore {
         if changed != 1 {
             bail!("CODING_SUBMISSION_FINISH_CONFLICT");
         }
+        tx.commit()?;
         Ok(())
     }
 }

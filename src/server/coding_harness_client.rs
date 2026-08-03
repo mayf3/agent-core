@@ -15,6 +15,7 @@ pub enum CodingHarnessExecutionOutcome {
     Succeeded(Value),
     DefinitivelyRejected { error_code: String },
     OutcomeUnknown(anyhow::Error),
+    InProgress,
 }
 
 pub fn execute(approved: &ApprovedInvocation, timeout: Duration) -> CodingHarnessExecutionOutcome {
@@ -113,6 +114,7 @@ fn classify_response(value: Value) -> Result<CodingHarnessExecutionOutcome> {
         (Some("outcome_unknown"), _) => Ok(CodingHarnessExecutionOutcome::OutcomeUnknown(
             anyhow::anyhow!("CODING_HARNESS_REPORTED_OUTCOME_UNKNOWN"),
         )),
+        (Some("in_progress"), Some(false)) => Ok(CodingHarnessExecutionOutcome::InProgress),
         _ => bail!("CODING_HARNESS_OUTCOME_MISSING_OR_INVALID"),
     }
 }
@@ -144,5 +146,17 @@ mod tests {
             "error_code": "ANY_BUSINESS_REASON"
         }))
         .is_err());
+    }
+
+    #[test]
+    fn explicit_in_progress_is_not_misclassified_as_unknown_or_rejected() {
+        let outcome = classify_response(json!({
+            "protocol_version": "external-harness-v1",
+            "ok": false,
+            "outcome": "in_progress",
+            "error_code": "SUBMISSION_IN_PROGRESS"
+        }))
+        .unwrap();
+        assert!(matches!(outcome, CodingHarnessExecutionOutcome::InProgress));
     }
 }
