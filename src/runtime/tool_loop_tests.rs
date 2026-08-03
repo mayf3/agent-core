@@ -2,11 +2,13 @@ use crate::config::KernelConfig;
 use crate::domain::*;
 use crate::gateway::Gateway;
 use crate::journal::JournalStore;
-use crate::llm::ToolCall;
+use crate::llm::{LlmClient, LlmInput, LlmOutput, ToolCall, ToolCallResult};
 use crate::runtime::tool_rejection::sanitize_operation_for_audit;
 use crate::runtime::Runtime;
 use serde_json::json;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 pub(super) fn test_config() -> KernelConfig {
     KernelConfig {
@@ -111,6 +113,279 @@ fn fixture() -> (
 
 fn count(events: &[JournalEvent], kind: JournalEventKind) -> usize {
     events.iter().filter(|e| e.kind == kind).count()
+}
+
+struct SameSubmissionLlm {
+    calls: AtomicUsize,
+    arguments: serde_json::Value,
+}
+
+impl LlmClient for SameSubmissionLlm {
+    fn complete(&self, _input: LlmInput) -> anyhow::Result<LlmOutput> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(if call == 0 {
+            LlmOutput {
+                provider: "test".into(),
+                model: "same-submission".into(),
+                content: String::new(),
+                journal_payload: json!({"round": call}),
+                tool_call: ToolCallResult::Valid(ToolCall {
+                    id: "same_submit_second".into(),
+                    operation: crate::domain::operation::external::TASK_SUBMIT.into(),
+                    arguments: self.arguments.clone(),
+                }),
+                provider_turn: None,
+            }
+        } else {
+            LlmOutput {
+                provider: "test".into(),
+                model: "same-submission".into(),
+                content: "done".into(),
+                journal_payload: json!({"round": call}),
+                tool_call: ToolCallResult::Absent,
+                provider_turn: None,
+            }
+        })
+    }
+}
+
+struct EnvRestore {
+    key: &'static str,
+    previous: Option<String>,
+}
+
+impl Drop for EnvRestore {
+    fn drop(&mut self) {
+        if let Some(value) = self.previous.as_ref() {
+            std::env::set_var(self.key, value);
+        } else {
+            std::env::remove_var(self.key);
+        }
+    }
+}
+
+fn start_rejecting_coding_harness(
+    calls: Arc<AtomicUsize>,
+) -> (String, std::thread::JoinHandle<()>) {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind Coding Harness test port");
+    listener.set_nonblocking(true).unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    let handle = std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while calls.load(Ordering::SeqCst) < 2 && std::time::Instant::now() < deadline {
+            let mut stream = match listener.accept() {
+                Ok((stream, _)) => stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    continue;
+                }
+                Err(error) => panic!("accept Coding Harness request: {error}"),
+            };
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut bytes = Vec::new();
+            let mut chunk = [0u8; 4096];
+            loop {
+                let read = stream.read(&mut chunk).expect("read Harness request");
+                if read == 0 {
+                    break;
+                }
+                bytes.extend_from_slice(&chunk[..read]);
+                let Some(header_end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") else {
+                    continue;
+                };
+                let headers = String::from_utf8_lossy(&bytes[..header_end]);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .and_then(|value| value.trim().parse::<usize>().ok())
+                    })
+                    .unwrap_or_default();
+                if bytes.len() >= header_end + 4 + content_length {
+                    break;
+                }
+            }
+            calls.fetch_add(1, Ordering::SeqCst);
+            let body = json!({
+                "protocol_version": "external-harness-v1",
+                "ok": false,
+                "outcome": "definitively_rejected",
+                "error_code": "GENERIC_DEFINITIVE_REJECTION"
+            })
+            .to_string();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .expect("write Harness response");
+        }
+    });
+    (address, handle)
+}
+
+#[test]
+fn definitive_rejection_allows_byte_identical_submission_to_reach_harness_again() {
+    let harness_calls = Arc::new(AtomicUsize::new(0));
+    let (harness_addr, harness) = start_rejecting_coding_harness(harness_calls.clone());
+    let previous_token = std::env::var("AGENT_CORE_CODING_HARNESS_CONTROL_TOKEN").ok();
+    std::env::set_var(
+        "AGENT_CORE_CODING_HARNESS_CONTROL_TOKEN",
+        "test-control-token",
+    );
+    let _restore = EnvRestore {
+        key: "AGENT_CORE_CODING_HARNESS_CONTROL_TOKEN",
+        previous: previous_token,
+    };
+    let previous_addr = std::env::var("AGENT_CORE_TEST_CODING_HARNESS_ADDR").ok();
+    std::env::set_var("AGENT_CORE_TEST_CODING_HARNESS_ADDR", harness_addr);
+    let _restore_addr = EnvRestore {
+        key: "AGENT_CORE_TEST_CODING_HARNESS_ADDR",
+        previous: previous_addr,
+    };
+
+    let owner = "owner_same_submission";
+    let mut config = test_config();
+    config.feishu_coding_owner_id = Some(owner.into());
+    config.harness_artifact_root = std::env::temp_dir().join(format!(
+        "same_submission_runtime_{}_{}",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    let journal = JournalStore::in_memory().unwrap();
+    let session = journal
+        .get_or_create_session(&SessionTarget {
+            agent_id: AgentId("main".into()),
+            channel: ChannelKind::Feishu,
+            conversation_key: format!("feishu:open_id:{owner}"),
+        })
+        .unwrap();
+    let source_event_id = EventId::new();
+    journal
+        .append_event(
+            JournalEventKind::IngressAccepted,
+            None,
+            Some(&session.id),
+            Some("message_same_submission"),
+            json!({
+                "event_id": source_event_id.0,
+                "source": "feishu",
+                "message_id": "message_same_submission",
+                "text": "submit"
+            }),
+        )
+        .unwrap();
+    let snapshot_id = journal.current_registry_snapshot_id().unwrap();
+    let snapshot = journal.load_registry_snapshot(&snapshot_id).unwrap();
+    let now = chrono::Utc::now();
+    let run = Run {
+        id: RunId::new(),
+        session_id: session.id.clone(),
+        agent_id: AgentId("main".into()),
+        trigger_event_id: source_event_id,
+        principal: RunPrincipal {
+            principal_id: PrincipalId(format!("feishu:open_id:{owner}")),
+            subject: PrincipalSubject::FeishuOpenId(owner.into()),
+            source: PrincipalSource::Feishu,
+            grants: vec![CapabilityGrant {
+                operation: crate::domain::operation::external::TASK_SUBMIT.into(),
+                scope: "current_session".into(),
+            }],
+            requester_id: Some(owner.into()),
+        },
+        parent_run_id: None,
+        delegated_by: None,
+        status: RunStatus::Running,
+        created_at: now,
+        updated_at: now,
+        registry_snapshot_id: snapshot_id,
+        mode: RunMode::Default,
+        budget_hook_id: None,
+        budget_hook_version: None,
+        budget_decision_digest: None,
+        budget_max_tool_rounds: Some(3),
+        budget_max_wall_time_ms: Some(30_000),
+        budget_exhaustion_action: Some(crate::hook::ExhaustionAction::Terminate),
+    };
+    journal.insert_run(&run).unwrap();
+    let arguments = json!({
+        "development_request": {
+            "target_kind": "invocable_capability",
+            "name": "external.same_submission",
+            "requirements": ["provide a bounded capability"],
+            "required_contracts": ["component.invoke.v0"],
+            "acceptance_criteria": ["profile gates pass"]
+        }
+    });
+    let runtime = Runtime::new(
+        config.clone(),
+        SameSubmissionLlm {
+            calls: AtomicUsize::new(0),
+            arguments: arguments.clone(),
+        },
+    );
+    let gateway = Gateway::new(config);
+    let initial = LlmOutput {
+        provider: "test".into(),
+        model: "same-submission".into(),
+        content: String::new(),
+        journal_payload: json!({"round": "initial"}),
+        tool_call: ToolCallResult::Valid(ToolCall {
+            id: "same_submit_first".into(),
+            operation: crate::domain::operation::external::TASK_SUBMIT.into(),
+            arguments,
+        }),
+        provider_turn: None,
+    };
+    let final_output = runtime
+        .run_tool_recall_loop(
+            &journal,
+            &gateway,
+            &run,
+            &session,
+            &mut Vec::new(),
+            "submit",
+            initial,
+            &snapshot,
+        )
+        .unwrap();
+    assert!(final_output.tool_call.is_absent());
+    harness.join().unwrap();
+    let events = journal.events().unwrap();
+    assert_eq!(
+        harness_calls.load(Ordering::SeqCst),
+        2,
+        "events={} final_content={}",
+        serde_json::to_string(&events).unwrap(),
+        final_output.content
+    );
+    assert_eq!(count(&events, JournalEventKind::ToolLoopDetected), 0);
+    let conn = journal.conn.lock().unwrap();
+    let attempts: Vec<(i64, String)> = conn
+        .prepare(
+            "SELECT attempt_sequence,status FROM coding_task_submissions
+             WHERE source_message_id='message_same_submission'
+             ORDER BY attempt_sequence",
+        )
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        attempts,
+        vec![
+            (1, "definitively_rejected".into()),
+            (2, "definitively_rejected".into())
+        ]
+    );
 }
 
 // ===== §1/§9: rejected tool call → Issued+Rejected, no Receipt =====

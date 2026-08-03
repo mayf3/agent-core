@@ -51,12 +51,13 @@ fn execute_inner(
         .ok()
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| anyhow::anyhow!("CODING_HARNESS_CONTROL_NOT_CONFIGURED"))?;
+    let harness_addr = coding_harness_addr();
     let request = format!(
-        "POST /execute HTTP/1.1\r\nHost: {CODING_HARNESS_ADDR}\r\nAuthorization: Bearer {control_token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "POST /execute HTTP/1.1\r\nHost: {harness_addr}\r\nAuthorization: Bearer {control_token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         bytes.len(),
         String::from_utf8_lossy(&bytes),
     );
-    let mut stream = TcpStream::connect(CODING_HARNESS_ADDR)
+    let mut stream = TcpStream::connect(&harness_addr)
         .map_err(|_| anyhow::anyhow!("CODING_HARNESS_CONNECT_FAILED"))?;
     stream.set_read_timeout(Some(timeout))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
@@ -85,6 +86,16 @@ fn execute_inner(
         .ok_or_else(|| anyhow::anyhow!("CODING_HARNESS_MALFORMED_RESPONSE"))?;
     let value: Value = serde_json::from_str(payload)?;
     classify_response(value)
+}
+
+fn coding_harness_addr() -> String {
+    #[cfg(test)]
+    if let Ok(value) = std::env::var("AGENT_CORE_TEST_CODING_HARNESS_ADDR") {
+        if value.starts_with("127.0.0.1:") {
+            return value;
+        }
+    }
+    CODING_HARNESS_ADDR.to_string()
 }
 
 fn classify_response(value: Value) -> Result<CodingHarnessExecutionOutcome> {
