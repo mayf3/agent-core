@@ -181,7 +181,7 @@ fn coding_manifest_registration_chain_preserves_schema() {
     );
     assert_eq!(
         submit_params.pointer("/required").unwrap(),
-        &serde_json::json!(["session_id", "development_request", "idempotency_key"])
+        &serde_json::json!(["development_request"])
     );
     let request = submit_params
         .pointer("/properties/development_request")
@@ -413,10 +413,7 @@ fn coding_manifest_llm_input_receives_complete_tool_definitions() {
         .iter()
         .filter_map(|v| v.as_str())
         .collect();
-    assert_eq!(
-        cp_req,
-        ["session_id", "development_request", "idempotency_key"]
-    );
+    assert_eq!(cp_req, ["development_request"]);
     let write_params = fn_tool("external.coding_workspace_write")
         .get("function")
         .unwrap()
@@ -452,7 +449,7 @@ fn coding_manifest_llm_input_receives_complete_tool_definitions() {
     );
     assert_eq!(
         submit_params.pointer("/required").unwrap(),
-        &serde_json::json!(["session_id", "development_request", "idempotency_key"])
+        &serde_json::json!(["development_request"])
     );
     let request = submit_params
         .pointer("/properties/development_request")

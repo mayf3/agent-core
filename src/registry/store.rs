@@ -87,7 +87,6 @@ pub fn builtin_specs() -> Vec<OperationSpec> {
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "session_id": {"type": "string"},
                     "development_request": {
                         "type": "object",
                         "properties": {
@@ -106,10 +105,9 @@ pub fn builtin_specs() -> Vec<OperationSpec> {
                             "acceptance_criteria"
                         ],
                         "additionalProperties": false
-                    },
-                    "idempotency_key": {"type": "string"}
+                    }
                 },
-                "required": ["session_id", "development_request", "idempotency_key"],
+                "required": ["development_request"],
                 "additionalProperties": false,
             }),
             idempotent: true,
@@ -503,6 +501,19 @@ mod tests {
         let task_submit = snap
             .lookup(crate::domain::operation::external::TASK_SUBMIT)
             .expect("task_submit op must exist");
+        let tool_properties = task_submit
+            .parameters
+            .pointer("/properties")
+            .and_then(|value| value.as_object())
+            .expect("task_submit properties must be an object");
+        assert_eq!(
+            tool_properties
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["development_request"],
+            "attempt, session and idempotency identities are Kernel-owned"
+        );
         let dev_req = task_submit
             .parameters
             .pointer("/properties/development_request")

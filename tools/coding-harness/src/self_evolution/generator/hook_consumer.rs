@@ -228,6 +228,7 @@ pub(super) fn verify_frozen_candidate(
 pub(super) fn generate(
     artifact_root: &Path,
     request: &DevelopmentRequest,
+    attempt_key: &str,
 ) -> Result<Value, GenerationError> {
     if request.target_kind != TargetKind::HookConsumerService
         || request.build_profile != "hook-consumer-service-v0"
@@ -244,7 +245,7 @@ pub(super) fn generate(
 
     let base = artifact_root.join("generated");
     std::fs::create_dir_all(&base)?;
-    let key_hash = hex::encode(Sha256::digest(request.idempotency_key.as_bytes()));
+    let key_hash = hex::encode(Sha256::digest(attempt_key.as_bytes()));
     let candidate_id = format!("generated_hook_{}", &key_hash[..24]);
     let lock_path = base.join(format!("{candidate_id}.lock"));
     let mut lock = std::fs::OpenOptions::new()

@@ -43,7 +43,14 @@ fn live_token_dashboard_model_generation() {
             .unwrap_or_default()
             .as_nanos()
     ));
-    let response = self_evolution::handle_submit(&root, &json!({"development_request": request}));
+    let response = self_evolution::handle_submit(
+        &root,
+        &json!({
+        "development_request": request,
+        "idempotency_key": "development-attempt:attempt_generic_generator_live",
+        "invocation_intent_id": "attempt_generic_generator_live"
+        }),
+    );
     assert_eq!(response["ok"], true, "generation failed: {response}");
     let result = &response["result"];
     assert_eq!(
