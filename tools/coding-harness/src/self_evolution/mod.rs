@@ -4,6 +4,7 @@ pub mod artifact_manifest;
 mod component_profile;
 mod generator;
 mod profile_acceptance;
+mod submission_store;
 
 pub(crate) use generator::invocable::contract::CapabilityContract as InvocableCapabilityContract;
 pub(crate) use generator::invocable::process_input as invocable_process_input;
@@ -38,6 +39,21 @@ pub fn handle_submit(artifact_root: &Path, args: &Value) -> Value {
         None => return error("MISSING_OR_INVALID_ATTEMPT_KEY"),
         _ => return error("MISSING_OR_INVALID_ATTEMPT_KEY"),
     };
+    let store = submission_store::SubmissionStore::new(artifact_root);
+    // This single persisted closure contains plan, candidate generation, and
+    // every build/test/acceptance gate. Replays never enter it a second time.
+    match store.execute(attempt_key, args, || {
+        handle_submit_once(artifact_root, args, attempt_key)
+    }) {
+        submission_store::SubmissionExecution::Completed(result) => result,
+        submission_store::SubmissionExecution::InProgress => submission_store::in_progress(),
+        submission_store::SubmissionExecution::OutcomeUnknown => {
+            submission_store::outcome_unknown()
+        }
+    }
+}
+
+fn handle_submit_once(artifact_root: &Path, args: &Value, attempt_key: &str) -> Value {
     let request_value = match args.get("development_request") {
         Some(value) => value,
         None => return error("MISSING_DEVELOPMENT_REQUEST"),

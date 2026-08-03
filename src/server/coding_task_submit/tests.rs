@@ -375,6 +375,7 @@ mod receipt_workflow_tests {
             &running,
             &run.id,
             &session.id,
+            "decision_running_first",
         )?;
         let error = journal
             .claim_coding_task_submission(
@@ -385,6 +386,7 @@ mod receipt_workflow_tests {
                 &InvocationId("attempt_running_second".into()),
                 &run.id,
                 &session.id,
+                "decision_running_second",
             )
             .err()
             .expect("running attempt must block a new attempt");
@@ -404,8 +406,22 @@ mod receipt_workflow_tests {
             &succeeded,
             &run.id,
             &session.id,
+            "decision_succeeded_first",
         )?;
         journal.complete_coding_task_submission(&succeeded.0, &succeeded, &json!({"ok":true}))?;
+        journal.complete_coding_task_submission(&succeeded.0, &succeeded, &json!({"ok":true}))?;
+        assert_eq!(
+            journal
+                .events()?
+                .into_iter()
+                .filter(|event| {
+                    event.kind == JournalEventKind::ReceiptReceived
+                        && event.correlation_id.as_deref() == Some(&succeeded.0)
+                })
+                .count(),
+            1,
+            "idempotent terminal replay must not append a second Receipt"
+        );
         let error = journal
             .claim_coding_task_submission(
                 &request.source_message_id,
@@ -415,6 +431,7 @@ mod receipt_workflow_tests {
                 &InvocationId("attempt_succeeded_second".into()),
                 &run.id,
                 &session.id,
+                "decision_succeeded_second",
             )
             .err()
             .expect("succeeded attempt must block a new attempt");
@@ -434,6 +451,7 @@ mod receipt_workflow_tests {
             &unknown,
             &run.id,
             &session.id,
+            "decision_unknown_first",
         )?;
         journal.mark_coding_task_submission_outcome_unknown(&unknown.0, &unknown)?;
         let error = journal
@@ -445,12 +463,192 @@ mod receipt_workflow_tests {
                 &InvocationId("attempt_unknown_second".into()),
                 &run.id,
                 &session.id,
+                "decision_unknown_second",
             )
             .err()
             .expect("unknown attempt must block a new attempt");
         assert!(error
             .to_string()
             .contains("CODING_SUBMISSION_OUTCOME_UNKNOWN"));
+        Ok(())
+    }
+
+    #[test]
+    fn claim_and_initial_governance_facts_are_atomic() -> anyhow::Result<()> {
+        let (journal, gateway, config, request, run, session) = fixture()?;
+        journal.execute_sql_for_test(
+            "CREATE TRIGGER fail_submission_approval_fact
+             BEFORE INSERT ON journal_events
+             WHEN NEW.kind='InvocationApproved'
+             BEGIN SELECT RAISE(ABORT, 'forced approval fact failure'); END;",
+        )?;
+        let calls = AtomicUsize::new(0);
+        let error = handle_coding_task_submit_with(
+            &journal,
+            &gateway,
+            &config,
+            &request,
+            &run,
+            &session,
+            &request.source_message_id,
+            "tool:test:claim-atomic",
+            &|_, _| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                CodingHarnessExecutionOutcome::OutcomeUnknown(anyhow::anyhow!("unexpected"))
+            },
+        )
+        .expect_err("forced Journal failure must abort the claim");
+        assert!(error.to_string().contains("forced approval fact failure"));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        let conn = journal.conn.lock().unwrap();
+        let attempts: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM coding_task_submissions WHERE source_message_id=?1",
+            [&request.source_message_id],
+            |row| row.get(0),
+        )?;
+        let facts: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM journal_events WHERE correlation_id LIKE 'attempt_%'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(attempts, 0);
+        assert_eq!(facts, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn terminal_receipt_and_attempt_status_are_atomic() -> anyhow::Result<()> {
+        let (journal, gateway, config, request, run, session) = fixture()?;
+        journal.execute_sql_for_test(
+            "CREATE TRIGGER fail_submission_receipt
+             BEFORE INSERT ON journal_events
+             WHEN NEW.kind='ReceiptReceived'
+             BEGIN SELECT RAISE(ABORT, 'forced receipt failure'); END;",
+        )?;
+        let error = handle_coding_task_submit_with(
+            &journal,
+            &gateway,
+            &config,
+            &request,
+            &run,
+            &session,
+            &request.source_message_id,
+            "tool:test:terminal-atomic",
+            &|_, _| CodingHarnessExecutionOutcome::DefinitivelyRejected {
+                error_code: "GENERIC_REJECTION".into(),
+            },
+        )
+        .expect_err("forced Receipt failure must roll back terminal status");
+        assert!(error.to_string().contains("forced receipt failure"));
+        let conn = journal.conn.lock().unwrap();
+        let (status, invocation_id): (String, String) = conn.query_row(
+            "SELECT status,invocation_id FROM coding_task_submissions
+             WHERE source_message_id=?1",
+            [&request.source_message_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(status, "running");
+        let receipts: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM journal_events
+             WHERE correlation_id=?1 AND kind='ReceiptReceived'",
+            [&invocation_id],
+            |row| row.get(0),
+        )?;
+        assert_eq!(receipts, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn unknown_fact_and_attempt_status_are_atomic() -> anyhow::Result<()> {
+        let (journal, gateway, config, request, run, session) = fixture()?;
+        journal.execute_sql_for_test(
+            "CREATE TRIGGER fail_submission_unknown_fact
+             BEFORE INSERT ON journal_events
+             WHEN NEW.kind='CodingSubmissionOutcomeUnknown'
+             BEGIN SELECT RAISE(ABORT, 'forced unknown fact failure'); END;",
+        )?;
+        let error = handle_coding_task_submit_with(
+            &journal,
+            &gateway,
+            &config,
+            &request,
+            &run,
+            &session,
+            &request.source_message_id,
+            "tool:test:unknown-atomic",
+            &|_, _| {
+                CodingHarnessExecutionOutcome::OutcomeUnknown(anyhow::anyhow!(
+                    "transport boundary unknown"
+                ))
+            },
+        )
+        .expect_err("forced unknown fact failure must roll back terminal status");
+        assert!(error.to_string().contains("forced unknown fact failure"));
+        let conn = journal.conn.lock().unwrap();
+        let (status, invocation_id): (String, String) = conn.query_row(
+            "SELECT status,invocation_id FROM coding_task_submissions
+             WHERE source_message_id=?1",
+            [&request.source_message_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(status, "running");
+        let facts: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM journal_events
+             WHERE correlation_id=?1 AND kind='CodingSubmissionOutcomeUnknown'",
+            [&invocation_id],
+            |row| row.get(0),
+        )?;
+        assert_eq!(facts, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn replay_closes_unprovable_running_attempt_as_unknown() -> anyhow::Result<()> {
+        let (journal, gateway, config, request, run, session) = fixture()?;
+        let digest = request_digest(&request);
+        let invocation = InvocationId("attempt_crash_window".into());
+        journal.claim_coding_task_submission(
+            &request.source_message_id,
+            "tool:test:crash-window",
+            &digest,
+            &invocation.0,
+            &invocation,
+            &run.id,
+            &session.id,
+            "decision_crash_window",
+        )?;
+        let error = handle_coding_task_submit_with(
+            &journal,
+            &gateway,
+            &config,
+            &request,
+            &run,
+            &session,
+            &request.source_message_id,
+            "tool:test:crash-window",
+            &|approved, _| {
+                assert_eq!(approved.intent().invocation_id, invocation);
+                CodingHarnessExecutionOutcome::OutcomeUnknown(anyhow::anyhow!(
+                    "persisted handler state incomplete"
+                ))
+            },
+        )
+        .expect_err("unprovable replay must fail closed");
+        assert!(error.to_string().contains("CODING_HARNESS_OUTCOME_UNKNOWN"));
+        let conn = journal.conn.lock().unwrap();
+        let status: String = conn.query_row(
+            "SELECT status FROM coding_task_submissions WHERE attempt_id=?1",
+            [&invocation.0],
+            |row| row.get(0),
+        )?;
+        assert_eq!(status, "outcome_unknown");
+        let unknown_facts: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM journal_events
+             WHERE correlation_id=?1 AND kind='CodingSubmissionOutcomeUnknown'",
+            [&invocation.0],
+            |row| row.get(0),
+        )?;
+        assert_eq!(unknown_facts, 1);
         Ok(())
     }
 

@@ -469,6 +469,10 @@ pub enum JournalEventKind {
     OutboxDispatchDead,
     DispatchStarted,
     ReceiptReceived,
+    /// Terminal fact for a Coding Harness submission whose external outcome
+    /// cannot be proved. This is deliberately distinct from ReceiptReceived:
+    /// no trusted receipt exists at an unknown-outcome boundary.
+    CodingSubmissionOutcomeUnknown,
     /// Explicitly recorded when a reply invocation was successfully delivered
     /// to the user (stdout/feishu). The payload carries the final user-visible
     /// text so conversation history can be reconstructed without guessing from

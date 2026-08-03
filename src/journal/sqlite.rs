@@ -711,7 +711,7 @@ impl JournalStore {
     }
 
     fn migrate(&self) -> Result<()> {
-        let conn = self
+        let mut conn = self
             .conn
             .lock()
             .map_err(|_| anyhow!("journal mutex poisoned"))?;
@@ -776,10 +776,7 @@ impl JournalStore {
             conn.execute_batch(include_str!(
                 "../../migrations/0020_session_continuations.sql"
             ))?;
-            conn.execute_batch(include_str!(
-                "../../migrations/0021_coding_submission_attempts.sql"
-            ))?;
-            conn.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
+            migrate_v20_to_v21(&mut conn, None)?;
         } else if applied == 1 {
             conn.execute_batch(include_str!("../../migrations/0002_registry_snapshots.sql"))?;
             super::queue::migrate(&conn)?;
@@ -895,10 +892,7 @@ impl JournalStore {
                     conn.pragma_update(None, "user_version", 20)?;
                 }
                 20 => {
-                    conn.execute_batch(include_str!(
-                        "../../migrations/0021_coding_submission_attempts.sql"
-                    ))?;
-                    conn.pragma_update(None, "user_version", 21)?;
+                    migrate_v20_to_v21(&mut conn, None)?;
                 }
                 _ => break,
             }
@@ -949,6 +943,28 @@ impl JournalStore {
         .optional()
         .map_err(Into::into)
     }
+}
+
+/// Apply the destructive v20→v21 table replacement and its version stamp in
+/// one SQLite transaction. The optional fail point exists only to prove every
+/// DDL boundary rolls back cleanly in unit tests.
+fn migrate_v20_to_v21(conn: &mut Connection, fail_after: Option<usize>) -> Result<()> {
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let stages: Vec<&str> = include_str!("../../migrations/0021_coding_submission_attempts.sql")
+        .split("-- v21-stage-boundary")
+        .collect();
+    for (index, sql) in stages.iter().enumerate() {
+        tx.execute_batch(sql)?;
+        if fail_after == Some(index) {
+            bail!("forced v21 migration failure after DDL stage {index}");
+        }
+    }
+    tx.pragma_update(None, "user_version", 21)?;
+    if fail_after == Some(stages.len()) {
+        bail!("forced v21 migration failure after version stamp");
+    }
+    tx.commit()?;
+    Ok(())
 }
 
 fn backfill_feishu_message_dedup(conn: &Connection) -> Result<()> {
@@ -1104,6 +1120,127 @@ mod run_start_atomic_tests {
             "Run row must roll back with RunStarted"
         );
         assert!(!journal.run_has_started(&run.id)?);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod v21_migration_atomic_tests {
+    use super::*;
+
+    fn seed_v20(conn: &Connection) -> Result<()> {
+        conn.execute_batch(
+            "CREATE TABLE coding_task_submissions (
+                 source_message_id TEXT NOT NULL PRIMARY KEY,
+                 request_digest TEXT NOT NULL,
+                 invocation_id TEXT NOT NULL UNIQUE,
+                 origin_run_id TEXT NOT NULL,
+                 origin_session_id TEXT NOT NULL,
+                 status TEXT NOT NULL,
+                 result_json TEXT,
+                 error_code TEXT,
+                 created_at TEXT NOT NULL,
+                 updated_at TEXT NOT NULL
+             ) STRICT;
+             INSERT INTO coding_task_submissions VALUES (
+                 'message_v20',
+                 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                 'invocation_v20','run_v20','session_v20','failed',NULL,
+                 'SUBMIT_FAILED','2026-08-01T00:00:00Z','2026-08-01T00:01:00Z'
+             );
+             PRAGMA user_version=20;",
+        )?;
+        Ok(())
+    }
+
+    fn assert_intact_v20(conn: &Connection) -> Result<()> {
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        assert_eq!(version, 20);
+        let legacy_rows: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM coding_task_submissions
+             WHERE source_message_id='message_v20' AND status='failed'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(legacy_rows, 1);
+        let temporary: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type='table' AND name='coding_task_submissions_v20'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(temporary, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn every_v21_ddl_interruption_rolls_back_and_can_rerun() -> Result<()> {
+        // Five SQL stages plus the in-transaction user_version stamp.
+        for fail_after in 0..=5 {
+            let path = std::env::temp_dir().join(format!(
+                "agent_core_v21_fail_{fail_after}_{}_{}.sqlite",
+                std::process::id(),
+                uuid::Uuid::new_v4().simple()
+            ));
+            {
+                let mut conn = Connection::open(&path)?;
+                seed_v20(&conn)?;
+                assert!(migrate_v20_to_v21(&mut conn, Some(fail_after)).is_err());
+            }
+            // Simulate a process restart after the interrupted migration.
+            {
+                let mut conn = Connection::open(&path)?;
+                assert_intact_v20(&conn)?;
+                migrate_v20_to_v21(&mut conn, None)?;
+            }
+            {
+                let conn = Connection::open(&path)?;
+                let version: i64 =
+                    conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+                assert_eq!(version, 21);
+                let status: String = conn.query_row(
+                    "SELECT status FROM coding_task_submissions WHERE source_message_id='message_v20'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                assert_eq!(status, "outcome_unknown");
+            }
+            std::fs::remove_file(path).ok();
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn quiesced_cutover_and_rollback_are_valid_on_database_copy() -> Result<()> {
+        let base = std::env::temp_dir().join(format!(
+            "agent_core_v21_cutover_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        let database = base.with_extension("sqlite");
+        let backup = base.with_extension("v20.backup.sqlite");
+        {
+            let conn = Connection::open(&database)?;
+            seed_v20(&conn)?;
+        }
+        std::fs::copy(&database, &backup)?;
+        {
+            let mut conn = Connection::open(&database)?;
+            migrate_v20_to_v21(&mut conn, None)?;
+            assert_eq!(
+                conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))?,
+                21
+            );
+        }
+        // Rollback is replacement from the quiesced v20 backup, never a
+        // down-migration of a database touched by v21 binaries.
+        std::fs::copy(&backup, &database)?;
+        {
+            let conn = Connection::open(&database)?;
+            assert_intact_v20(&conn)?;
+        }
+        std::fs::remove_file(database).ok();
+        std::fs::remove_file(backup).ok();
         Ok(())
     }
 }

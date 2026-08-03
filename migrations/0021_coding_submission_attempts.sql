@@ -7,6 +7,7 @@
 
 ALTER TABLE coding_task_submissions RENAME TO coding_task_submissions_v20;
 
+-- v21-stage-boundary
 CREATE TABLE coding_task_submissions (
     attempt_id          TEXT NOT NULL PRIMARY KEY CHECK(length(attempt_id) > 0),
     source_message_id   TEXT NOT NULL CHECK(length(source_message_id) > 0),
@@ -29,6 +30,7 @@ CREATE TABLE coding_task_submissions (
     UNIQUE(source_message_id, attempt_sequence)
 ) STRICT;
 
+-- v21-stage-boundary
 INSERT INTO coding_task_submissions (
     attempt_id, source_message_id, attempt_sequence, submission_call_key,
     request_digest, invocation_id, origin_run_id, origin_session_id,
@@ -57,7 +59,9 @@ SELECT
     updated_at
 FROM coding_task_submissions_v20;
 
+-- v21-stage-boundary
 DROP TABLE coding_task_submissions_v20;
 
+-- v21-stage-boundary
 CREATE INDEX idx_coding_task_submissions_message_sequence
     ON coding_task_submissions(source_message_id, attempt_sequence DESC);
