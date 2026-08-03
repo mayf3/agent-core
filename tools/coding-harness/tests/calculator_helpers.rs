@@ -209,6 +209,7 @@ pub fn kcfg(artifact_root: &PathBuf) -> KernelConfig {
         capability_submit_token: Some("test-submit-token".into()),
         capability_decision_token: Some("test-decision-token".into()),
         context_prepare_hook: Default::default(),
+        budget_hook: Default::default(),
     }
 }
 

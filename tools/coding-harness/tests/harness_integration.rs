@@ -10,10 +10,13 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
+use std::sync::{Arc, Once};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 // ── Test helpers ──
+
+const TEST_CONTROL_TOKEN: &str = "harness-integration-control-token";
+static CONTROL_TOKEN_ENV: Once = Once::new();
 
 struct HarnessServer {
     port: u16,
@@ -24,6 +27,10 @@ struct HarnessServer {
 
 impl HarnessServer {
     fn start() -> Self {
+        CONTROL_TOKEN_ENV.call_once(|| {
+            std::env::set_var("CODING_HARNESS_CONTROL_TOKEN", TEST_CONTROL_TOKEN);
+        });
+
         let ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -97,20 +104,32 @@ impl HarnessServer {
     }
 
     fn request(&self, operation: &str, args: &serde_json::Value) -> (u16, serde_json::Value) {
+        self.request_with_control_token(operation, args, Some(TEST_CONTROL_TOKEN))
+    }
+
+    fn request_with_control_token(
+        &self,
+        operation: &str,
+        args: &serde_json::Value,
+        control_token: Option<&str>,
+    ) -> (u16, serde_json::Value) {
         let body = serde_json::json!({
             "protocol_version": "external-harness-v1",
             "operation": operation,
             "arguments": args,
         });
         let body_str = serde_json::to_string(&body).unwrap();
+        let authorization = control_token
+            .map(|token| format!("Authorization: Bearer {token}\r\n"))
+            .unwrap_or_default();
 
         let mut stream = TcpStream::connect(format!("127.0.0.1:{}", self.port)).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
         let request = format!(
-            "POST /execute HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n{}",
-            body_str.len(), self.port, body_str
+            "POST /execute HTTP/1.1\r\n{authorization}Content-Type: application/json\r\nContent-Length: {}\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n{}",
+            body_str.len(), self.port, body_str,
         );
         stream.write_all(request.as_bytes()).unwrap();
 
@@ -353,6 +372,40 @@ fn task_unknown_backend() {
         .as_str()
         .unwrap_or("")
         .starts_with("unsupported_backend"));
+}
+
+#[test]
+fn task_submit_missing_control_token_is_unauthorized() {
+    let hs = HarnessServer::start();
+    let (code, body) = hs.request_with_control_token(
+        "external.coding_task_submit",
+        &serde_json::json!({
+            "workspace_id": "test",
+            "objective": "build",
+            "acceptance_criteria": "pass",
+            "backend": "fake",
+        }),
+        None,
+    );
+    assert_eq!(code, 401);
+    assert_eq!(body["error_code"], "unauthorized");
+}
+
+#[test]
+fn task_submit_wrong_control_token_is_unauthorized() {
+    let hs = HarnessServer::start();
+    let (code, body) = hs.request_with_control_token(
+        "external.coding_task_submit",
+        &serde_json::json!({
+            "workspace_id": "test",
+            "objective": "build",
+            "acceptance_criteria": "pass",
+            "backend": "fake",
+        }),
+        Some("wrong-harness-integration-control-token"),
+    );
+    assert_eq!(code, 401);
+    assert_eq!(body["error_code"], "unauthorized");
 }
 
 // ── Permission tests ──

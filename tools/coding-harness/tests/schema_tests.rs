@@ -197,9 +197,8 @@ fn coding_manifest_registration_chain_preserves_schema() {
         .and_then(|v| v.as_array())
         .is_some_and(|values| values.len() == 9));
     assert!(request
-        .pointer("/required")
-        .and_then(|v| v.as_array())
-        .is_some_and(|values| values.contains(&serde_json::json!("contract_catalog_version"))));
+        .pointer("/properties/contract_catalog_version")
+        .is_none());
     let ts_params = fn_tool("external.coding_task_status")
         .get("function")
         .unwrap()
@@ -296,6 +295,7 @@ fn coding_manifest_llm_input_receives_complete_tool_definitions() {
         max_tool_rounds: 12,
         tool_loop_timeout_ms: 300_000,
         context_prepare_hook: Default::default(),
+        budget_hook: Default::default(),
     };
     let j = JournalStore::in_memory().unwrap();
     let g = Gateway::new(config.clone());
@@ -465,9 +465,8 @@ fn coding_manifest_llm_input_receives_complete_tool_definitions() {
         .and_then(|v| v.as_array())
         .is_some_and(|values| values.len() == 9));
     assert!(request
-        .pointer("/required")
-        .and_then(|v| v.as_array())
-        .is_some_and(|values| values.contains(&serde_json::json!("contract_catalog_version"))));
+        .pointer("/properties/contract_catalog_version")
+        .is_none());
     let ts_params = fn_tool("external.coding_task_status")
         .get("function")
         .unwrap()
