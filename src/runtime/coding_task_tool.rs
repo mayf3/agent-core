@@ -67,6 +67,11 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
             })
             .and_then(|draft| seal_development_request(journal, run, session, draft))
             .and_then(|request| {
+                let submission_call_key = approved
+                    .intent()
+                    .idempotency_key
+                    .as_deref()
+                    .ok_or_else(|| anyhow::anyhow!("CODING_SUBMISSION_CALL_IDENTITY_MISSING"))?;
                 crate::server::coding_task_submit::handle_coding_task_submit(
                     journal,
                     gateway,
@@ -75,6 +80,7 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
                     run,
                     session,
                     &request.source_message_id,
+                    submission_call_key,
                 )
             })
             .and_then(|result| serde_json::to_value(result).map_err(Into::into));

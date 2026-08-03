@@ -268,13 +268,14 @@ fn html_escape(s: &str) -> String {
 pub fn generate(
     artifact_root: &Path,
     request: &DevelopmentRequest,
+    attempt_key: &str,
 ) -> Result<Value, std::io::Error> {
     if !supports(request) {
         return Err(std::io::Error::other("hook_consumer fixture mismatch"));
     }
     generate_locked(
         artifact_root,
-        &request.idempotency_key,
+        attempt_key,
         &request.request_id,
         &request.name,
     )
@@ -500,7 +501,12 @@ mod tests {
     #[test]
     fn fixture_materializes_hook_consumer_manifest() {
         let root = unique_root("manifest");
-        let result = generate(&root, &hook_consumer_request()).unwrap();
+        let result = generate(
+            &root,
+            &hook_consumer_request(),
+            "development-attempt:attempt_hook_fixture_test",
+        )
+        .unwrap();
         let m = &result["component_manifest"];
         assert_eq!(m["profile_id"], "hook-consumer-service-v0");
         assert_eq!(m["test_kit"], "hook-consumer-service-contract-v0");
@@ -524,8 +530,18 @@ mod tests {
         let request = hook_consumer_request();
         let root1 = unique_root("stable1");
         let root2 = unique_root("stable2");
-        let r1 = generate(&root1, &request).unwrap();
-        let r2 = generate(&root2, &request).unwrap();
+        let r1 = generate(
+            &root1,
+            &request,
+            "development-attempt:attempt_hook_fixture_deterministic",
+        )
+        .unwrap();
+        let r2 = generate(
+            &root2,
+            &request,
+            "development-attempt:attempt_hook_fixture_deterministic",
+        )
+        .unwrap();
         assert_eq!(
             r1["candidate_digest"], r2["candidate_digest"],
             "digest must be stable across different artifact roots"
@@ -539,9 +555,19 @@ mod tests {
     fn candidate_digest_is_stable_across_time() {
         let request = hook_consumer_request();
         let root = unique_root("time");
-        let r1 = generate(&root, &request).unwrap();
+        let r1 = generate(
+            &root,
+            &request,
+            "development-attempt:attempt_hook_fixture_replay",
+        )
+        .unwrap();
         // Re-generate into the same root (second call hits cached path).
-        let r2 = generate(&root, &request).unwrap();
+        let r2 = generate(
+            &root,
+            &request,
+            "development-attempt:attempt_hook_fixture_replay",
+        )
+        .unwrap();
         assert_eq!(
             r1["candidate_digest"], r2["candidate_digest"],
             "digest must match across cached re-generation"
@@ -578,8 +604,18 @@ mod tests {
 
         let root1 = unique_root("diff1");
         let root2 = unique_root("diff2");
-        let r1 = generate(&root1, &req1).unwrap();
-        let r2 = generate(&root2, &req2).unwrap();
+        let r1 = generate(
+            &root1,
+            &req1,
+            "development-attempt:attempt_hook_fixture_request_one",
+        )
+        .unwrap();
+        let r2 = generate(
+            &root2,
+            &req2,
+            "development-attempt:attempt_hook_fixture_request_two",
+        )
+        .unwrap();
         assert_ne!(
             r1["candidate_digest"], r2["candidate_digest"],
             "different requests must produce different digests"

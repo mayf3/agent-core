@@ -30,10 +30,13 @@ impl From<std::io::Error> for GenerationError {
 pub(super) fn generate(
     artifact_root: &Path,
     request: &DevelopmentRequest,
+    attempt_key: &str,
 ) -> Result<Value, GenerationError> {
     match request.target_kind {
-        TargetKind::InvocableCapability => invocable::generate(artifact_root, request),
-        TargetKind::HookConsumerService => hook_consumer::generate(artifact_root, request),
+        TargetKind::InvocableCapability => invocable::generate(artifact_root, request, attempt_key),
+        TargetKind::HookConsumerService => {
+            hook_consumer::generate(artifact_root, request, attempt_key)
+        }
         _ => Err(GenerationError::new("GENERATOR_NOT_CONFIGURED_FOR_PROFILE")),
     }
 }

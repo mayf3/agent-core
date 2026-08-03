@@ -10,7 +10,24 @@ use std::time::Duration;
 const CODING_HARNESS_ADDR: &str = "127.0.0.1:7200";
 const MAX_RESPONSE_BYTES: usize = 128 * 1024;
 
-pub fn execute(approved: &ApprovedInvocation, timeout: Duration) -> Result<Value> {
+#[derive(Debug)]
+pub enum CodingHarnessExecutionOutcome {
+    Succeeded(Value),
+    DefinitivelyRejected { error_code: String },
+    OutcomeUnknown(anyhow::Error),
+}
+
+pub fn execute(approved: &ApprovedInvocation, timeout: Duration) -> CodingHarnessExecutionOutcome {
+    match execute_inner(approved, timeout) {
+        Ok(outcome) => outcome,
+        Err(error) => CodingHarnessExecutionOutcome::OutcomeUnknown(error),
+    }
+}
+
+fn execute_inner(
+    approved: &ApprovedInvocation,
+    timeout: Duration,
+) -> Result<CodingHarnessExecutionOutcome> {
     let intent = approved.intent();
     if intent.operation != crate::domain::operation::external::TASK_SUBMIT {
         bail!("CODING_HARNESS_OPERATION_MISMATCH");
@@ -66,17 +83,66 @@ pub fn execute(approved: &ApprovedInvocation, timeout: Duration) -> Result<Value
         .map(|(_, payload)| payload)
         .ok_or_else(|| anyhow::anyhow!("CODING_HARNESS_MALFORMED_RESPONSE"))?;
     let value: Value = serde_json::from_str(payload)?;
-    if value.get("protocol_version").and_then(Value::as_str) != Some("external-harness-v1")
-        || value.get("ok").and_then(Value::as_bool) != Some(true)
-    {
-        let harness_code = value
-            .get("error_code")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown");
-        bail!("CODING_HARNESS_SUBMIT_FAILED:{}", harness_code);
+    classify_response(value)
+}
+
+fn classify_response(value: Value) -> Result<CodingHarnessExecutionOutcome> {
+    if value.get("protocol_version").and_then(Value::as_str) != Some("external-harness-v1") {
+        bail!("CODING_HARNESS_PROTOCOL_MISMATCH");
     }
-    value
-        .get("result")
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("CODING_HARNESS_RESULT_MISSING"))
+    match (
+        value.get("outcome").and_then(Value::as_str),
+        value.get("ok").and_then(Value::as_bool),
+    ) {
+        (Some("succeeded"), Some(true)) => Ok(CodingHarnessExecutionOutcome::Succeeded(
+            value
+                .get("result")
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("CODING_HARNESS_RESULT_MISSING"))?,
+        )),
+        (Some("definitively_rejected"), Some(false)) => {
+            let error_code = value
+                .get("error_code")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| anyhow::anyhow!("CODING_HARNESS_REJECTION_CODE_MISSING"))?;
+            Ok(CodingHarnessExecutionOutcome::DefinitivelyRejected {
+                error_code: error_code.to_string(),
+            })
+        }
+        (Some("outcome_unknown"), _) => Ok(CodingHarnessExecutionOutcome::OutcomeUnknown(
+            anyhow::anyhow!("CODING_HARNESS_REPORTED_OUTCOME_UNKNOWN"),
+        )),
+        _ => bail!("CODING_HARNESS_OUTCOME_MISSING_OR_INVALID"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_explicit_generic_rejection_is_definitive() {
+        let rejected = classify_response(json!({
+            "protocol_version": "external-harness-v1",
+            "ok": false,
+            "outcome": "definitively_rejected",
+            "error_code": "ANY_BUSINESS_REASON"
+        }))
+        .unwrap();
+        assert!(matches!(
+            rejected,
+            CodingHarnessExecutionOutcome::DefinitivelyRejected { error_code }
+                if error_code == "ANY_BUSINESS_REASON"
+        ));
+
+        // An old or malformed Harness error has no proof that execution had
+        // no successful effect, so the client refuses to call it definitive.
+        assert!(classify_response(json!({
+            "protocol_version": "external-harness-v1",
+            "ok": false,
+            "error_code": "ANY_BUSINESS_REASON"
+        }))
+        .is_err());
+    }
 }

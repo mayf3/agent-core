@@ -36,13 +36,14 @@ pub struct SmokeCase {
 pub fn generate(
     artifact_root: &Path,
     request: &DevelopmentRequest,
+    attempt_key: &str,
 ) -> Option<Result<Value, std::io::Error>> {
     if calculator::supports(request) {
-        return Some(calculator::generate(artifact_root, request));
+        return Some(calculator::generate(artifact_root, request, attempt_key));
     }
     #[cfg(feature = "test-fixtures")]
     if hook_consumer::supports(request) {
-        return Some(hook_consumer::generate(artifact_root, request));
+        return Some(hook_consumer::generate(artifact_root, request, attempt_key));
     }
     None
 }

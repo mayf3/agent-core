@@ -123,11 +123,12 @@ fn respond_error(code: &str) {
 pub fn generate(
     artifact_root: &Path,
     request: &DevelopmentRequest,
+    attempt_key: &str,
 ) -> Result<Value, std::io::Error> {
     if !supports(request) {
         return Err(std::io::Error::other("calculator fixture mismatch"));
     }
-    generate_locked(artifact_root, &request.idempotency_key, &request.request_id)
+    generate_locked(artifact_root, attempt_key, &request.request_id)
 }
 
 pub(super) fn supports(request: &DevelopmentRequest) -> bool {
@@ -215,7 +216,12 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        let result = generate(&root, &calculator_request()).unwrap();
+        let result = generate(
+            &root,
+            &calculator_request(),
+            "development-attempt:attempt_calculator_fixture_test",
+        )
+        .unwrap();
         assert_eq!(
             result["component_manifest"]["profile_id"],
             "invocable-capability-v0"

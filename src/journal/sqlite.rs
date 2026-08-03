@@ -40,7 +40,7 @@ type RunRow = (
 /// The schema `PRAGMA user_version` this kernel writes and understands. Bumped
 /// only when `migrations/` gains a new applied migration. The startup
 /// `migrate()` refuses to run against a DB whose version is newer than this.
-const CURRENT_SCHEMA_VERSION: i64 = 20;
+const CURRENT_SCHEMA_VERSION: i64 = 21;
 
 impl JournalStore {
     pub fn open(path: &Path) -> Result<Self> {
@@ -776,6 +776,9 @@ impl JournalStore {
             conn.execute_batch(include_str!(
                 "../../migrations/0020_session_continuations.sql"
             ))?;
+            conn.execute_batch(include_str!(
+                "../../migrations/0021_coding_submission_attempts.sql"
+            ))?;
             conn.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
         } else if applied == 1 {
             conn.execute_batch(include_str!("../../migrations/0002_registry_snapshots.sql"))?;
@@ -890,6 +893,12 @@ impl JournalStore {
                         "../../migrations/0020_session_continuations.sql"
                     ))?;
                     conn.pragma_update(None, "user_version", 20)?;
+                }
+                20 => {
+                    conn.execute_batch(include_str!(
+                        "../../migrations/0021_coding_submission_attempts.sql"
+                    ))?;
+                    conn.pragma_update(None, "user_version", 21)?;
                 }
                 _ => break,
             }

@@ -6,6 +6,7 @@ use crate::domain::*;
 use crate::gateway::Gateway;
 use crate::journal::{CodingTaskSubmissionClaim, JournalStore};
 use crate::server::coding_harness_client;
+use crate::server::coding_harness_client::CodingHarnessExecutionOutcome;
 use anyhow::{bail, Result};
 use chrono::Utc;
 use serde_json::{json, Value};
@@ -38,6 +39,7 @@ pub fn handle_coding_task_submit(
     run: &Run,
     session: &Session,
     source_message_id: &str,
+    submission_call_key: &str,
 ) -> Result<CodingTaskSubmitResult> {
     handle_coding_task_submit_with(
         journal,
@@ -47,6 +49,7 @@ pub fn handle_coding_task_submit(
         run,
         session,
         source_message_id,
+        submission_call_key,
         &coding_harness_client::execute,
     )
 }
@@ -60,17 +63,23 @@ pub(super) fn handle_coding_task_submit_with(
     run: &Run,
     session: &Session,
     source_message_id: &str,
-    execute: &impl Fn(&ApprovedInvocation, std::time::Duration) -> Result<Value>,
+    submission_call_key: &str,
+    execute: &impl Fn(&ApprovedInvocation, std::time::Duration) -> CodingHarnessExecutionOutcome,
 ) -> Result<CodingTaskSubmitResult> {
     ContractCatalog::v1().validate_request(request)?;
     validate_private_owner_context(config.feishu_coding_owner_id.as_deref(), run, session)?;
     validate_source_binding(request, run, session, source_message_id)?;
     let snapshot = journal.load_registry_snapshot(&run.registry_snapshot_id)?;
     let request_digest = digest_json(request)?;
-    let proposed_invocation = InvocationId::new();
+    let proposed_attempt_id = format!("attempt_{}", uuid::Uuid::new_v4().simple());
+    // The attempt is also the external invocation identity.  Both are created
+    // by the Kernel and are never accepted from model arguments.
+    let proposed_invocation = InvocationId(proposed_attempt_id.clone());
     let claim = journal.claim_coding_task_submission(
         source_message_id,
+        submission_call_key,
         &request_digest,
+        &proposed_attempt_id,
         &proposed_invocation,
         &run.id,
         &session.id,
@@ -81,7 +90,14 @@ pub(super) fn handle_coding_task_submit_with(
             invocation_id,
             result,
         } => (invocation_id, result),
-        CodingTaskSubmissionClaim::Claimed { invocation_id } => {
+        CodingTaskSubmissionClaim::DefinitivelyRejected { error_code } => {
+            bail!("CODING_HARNESS_DEFINITIVELY_REJECTED:{error_code}")
+        }
+        CodingTaskSubmissionClaim::Claimed {
+            attempt_id,
+            invocation_id,
+        } => {
+            let attempt_key = format!("development-attempt:{attempt_id}");
             match execute_new_submission(
                 journal,
                 gateway,
@@ -90,25 +106,30 @@ pub(super) fn handle_coding_task_submit_with(
                 session,
                 &snapshot,
                 &invocation_id,
-                &request.idempotency_key,
+                &attempt_key,
                 request,
                 execute,
             ) {
-                Ok(result) => {
+                Ok(CodingHarnessExecutionOutcome::Succeeded(result)) => {
                     journal.complete_coding_task_submission(
-                        source_message_id,
+                        &attempt_id,
                         &invocation_id,
                         &result,
                     )?;
                     (invocation_id, result)
                 }
-                Err(error) => {
-                    journal.fail_coding_task_submission(
-                        source_message_id,
+                Ok(CodingHarnessExecutionOutcome::DefinitivelyRejected { error_code }) => {
+                    journal.reject_coding_task_submission(
+                        &attempt_id,
                         &invocation_id,
-                        "SUBMIT_FAILED",
+                        &error_code,
                     )?;
-                    return Err(error);
+                    bail!("CODING_HARNESS_DEFINITIVELY_REJECTED:{error_code}");
+                }
+                Ok(CodingHarnessExecutionOutcome::OutcomeUnknown(error)) | Err(error) => {
+                    journal
+                        .mark_coding_task_submission_outcome_unknown(&attempt_id, &invocation_id)?;
+                    return Err(error.context("CODING_HARNESS_OUTCOME_UNKNOWN"));
                 }
             }
         }
@@ -195,8 +216,8 @@ fn execute_new_submission(
     invocation_id: &InvocationId,
     submit_key: &str,
     request: &DevelopmentRequest,
-    execute: &impl Fn(&ApprovedInvocation, std::time::Duration) -> Result<Value>,
-) -> Result<Value> {
+    execute: &impl Fn(&ApprovedInvocation, std::time::Duration) -> CodingHarnessExecutionOutcome,
+) -> Result<CodingHarnessExecutionOutcome> {
     use super::invocable::{append_invocation_approved, append_invocation_proposed};
     let intent = InvocationIntent {
         invocation_id: invocation_id.clone(),
@@ -212,23 +233,44 @@ fn execute_new_submission(
     append_invocation_proposed(journal, run, session, &intent)?;
     let approved = gateway.approve_invocation(intent, run, session, snapshot)?;
     append_invocation_approved(journal, run, session, &approved)?;
-    let result = execute(
+    let outcome = execute(
         &approved,
         std::time::Duration::from_millis(config.harness_read_timeout_ms.max(900_000)),
-    )?;
-    journal.append_event(
-        JournalEventKind::ReceiptReceived,
-        Some(&run.id),
-        Some(&session.id),
-        Some(&invocation_id.0),
-        json!({
-            "invocation_id": invocation_id.0,
-            "operation": crate::domain::operation::external::TASK_SUBMIT,
-            "status": "Succeeded",
-            "acceptance_receipt_digest": result.get("receipt_digest"),
-        }),
-    )?;
-    Ok(result)
+    );
+    match &outcome {
+        CodingHarnessExecutionOutcome::Succeeded(result) => {
+            journal.append_event(
+                JournalEventKind::ReceiptReceived,
+                Some(&run.id),
+                Some(&session.id),
+                Some(&invocation_id.0),
+                json!({
+                    "invocation_id": invocation_id.0,
+                    "operation": crate::domain::operation::external::TASK_SUBMIT,
+                    "status": "Succeeded",
+                    "outcome": "succeeded",
+                    "acceptance_receipt_digest": result.get("receipt_digest"),
+                }),
+            )?;
+        }
+        CodingHarnessExecutionOutcome::DefinitivelyRejected { error_code } => {
+            journal.append_event(
+                JournalEventKind::ReceiptReceived,
+                Some(&run.id),
+                Some(&session.id),
+                Some(&invocation_id.0),
+                json!({
+                    "invocation_id": invocation_id.0,
+                    "operation": crate::domain::operation::external::TASK_SUBMIT,
+                    "status": "Failed",
+                    "outcome": "definitively_rejected",
+                    "error_code": error_code,
+                }),
+            )?;
+        }
+        CodingHarnessExecutionOutcome::OutcomeUnknown(_) => {}
+    }
+    Ok(outcome)
 }
 
 pub(super) struct AcceptedCandidate {
