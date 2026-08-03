@@ -138,10 +138,10 @@ fn unsupported_platform_fails_closed() {
     }
 }
 
-// ── Extra: HCR exec via server requires token ──
+// ── Extra: active HCR workflow stays retired ──
 
 #[test]
-fn hcr_exec_via_server_requires_token() {
+fn hcr_exec_via_server_stays_retired() {
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -220,8 +220,8 @@ fn hcr_exec_via_server_requires_token() {
 
     assert_eq!(json_body["ok"], false);
     assert_eq!(
-        json_body["error_code"], "hcr_token_required",
-        "expected token required, got: {json_body}"
+        json_body["error_code"], "hcr_active_workflow_retired",
+        "expected active HCR workflow to stay retired, got: {json_body}"
     );
 
     let _ = std::fs::remove_dir_all(&ws_root);
