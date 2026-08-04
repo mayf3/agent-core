@@ -3,9 +3,20 @@ use serde_json::json;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+fn unique_temp_suffix() -> String {
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    format!("{}_{}_{}", std::process::id(), ts, sequence)
+}
 
 struct HarnessServer {
     port: u16,
@@ -59,14 +70,10 @@ impl Drop for HarnessServer {
 }
 
 fn start_basic_harness() -> HarnessServer {
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let ws_root = std::env::temp_dir().join(format!("ch_cap_{}_{}", std::process::id(), ts));
+    let suffix = unique_temp_suffix();
+    let ws_root = std::env::temp_dir().join(format!("ch_cap_{suffix}"));
     std::fs::create_dir_all(&ws_root).unwrap();
-    let artifact_root =
-        std::env::temp_dir().join(format!("ch_cap_art_{}_{}", std::process::id(), ts));
+    let artifact_root = std::env::temp_dir().join(format!("ch_cap_art_{suffix}"));
     std::fs::create_dir_all(&artifact_root).unwrap();
     std::fs::write(ws_root.join("artifact.bin"), b"test artifact").unwrap();
     std::fs::write(
@@ -236,14 +243,10 @@ fn capability_proposal_success_over_real_tcp() {
     });
 
     // Start coding-harness server.
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let ws_root = std::env::temp_dir().join(format!("ch_suc_{}_{}", std::process::id(), ts));
+    let suffix = unique_temp_suffix();
+    let ws_root = std::env::temp_dir().join(format!("ch_suc_{suffix}"));
     std::fs::create_dir_all(&ws_root).unwrap();
-    let artifact_root =
-        std::env::temp_dir().join(format!("ch_suc_art_{}_{}", std::process::id(), ts));
+    let artifact_root = std::env::temp_dir().join(format!("ch_suc_art_{suffix}"));
     std::fs::create_dir_all(&artifact_root).unwrap();
 
     // Write fixture files.
