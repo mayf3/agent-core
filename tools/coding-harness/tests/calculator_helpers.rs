@@ -10,15 +10,46 @@ use agent_core_kernel::journal::JournalStore;
 use agent_core_kernel::llm::{LlmClient, LlmInput, LlmOutput, ToolCall, ToolCallResult};
 use agent_core_kernel::runtime::{Runtime, RuntimeOutcome};
 use agent_core_kernel::server::capability_routes;
-use anyhow::Result;
+use anyhow::{bail, Context, Result};
 use chrono::Utc;
 use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::atomic::AtomicBool;
 use std::thread;
 use std::time::Duration;
+
+pub const CODING_HARNESS_CONTROL_TOKEN: &str = "harness-integration-control-token";
+
+pub fn configure_coding_harness_control_auth() {
+    std::env::set_var("CODING_HARNESS_CONTROL_TOKEN", CODING_HARNESS_CONTROL_TOKEN);
+    std::env::set_var(
+        "AGENT_CORE_CODING_HARNESS_CONTROL_TOKEN",
+        CODING_HARNESS_CONTROL_TOKEN,
+    );
+}
+
+pub fn run_test_in_isolated_network_if_needed(marker: &str, test_name: &str) -> Result<bool> {
+    if std::env::var(marker).as_deref() == Ok("1") {
+        return Ok(false);
+    }
+    let executable = std::env::current_exe()?;
+    let status = Command::new("unshare")
+        .args(["--user", "--map-root-user", "--net", "--"])
+        .arg("/bin/sh")
+        .args(["-c", "ip link set lo up && exec \"$@\"", "sh"])
+        .arg(executable)
+        .args(["--exact", test_name, "--nocapture", "--test-threads=1"])
+        .env(marker, "1")
+        .status()
+        .context("failed to enter isolated Linux network namespace")?;
+    if !status.success() {
+        bail!("isolated Linux test child failed: {status}");
+    }
+    Ok(true)
+}
 
 pub struct SingleToolLlm {
     tc: Option<Value>,
