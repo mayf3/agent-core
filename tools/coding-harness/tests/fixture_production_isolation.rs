@@ -4,9 +4,40 @@
 //! in production builds and that fixture symbols are absent from release
 //! artifacts.
 //!
+//! # Namespace scope
+//!
+//! `hook_consumer` names TWO distinct modules:
+//!
+//! - `coding_harness::fixtures::hook_consumer` — deterministic test fixture,
+//!   gated behind `#[cfg(feature = "test-fixtures")]` in
+//!   `src/fixtures/mod.rs`. Must never appear in release artifacts.
+//! - `coding_harness::self_evolution::generator::hook_consumer` — production
+//!   model-driven generator for `HookConsumerService` development requests.
+//!   Required in release builds by design (see `src/fixtures/mod.rs`: "real
+//!   Token Dashboard requests always go through the model generator").
+//!
+//! The isolation assertions therefore target the fixture namespace only. A
+//! bare `hook_consumer` substring check would incorrectly flag the
+//! production generator as a fixture leak.
+//!
 //! Run: `cargo test --test fixture_production_isolation`
 
 use std::process::Command;
+
+/// Mangled encoding of the `coding_harness::fixtures::hook_consumer`
+/// namespace. rustc encodes path segments as `{length}{identifier}`
+/// (`fixtures` = 8, `hook_consumer` = 13) in both the legacy (`_ZN...E`)
+/// and v0 (`_RNv...`) mangling schemes, so this fragment uniquely
+/// identifies the fixture namespace in `nm` output without a
+/// platform-specific `--demangle` flag (GNU nm supports it; macOS nm does
+/// not). It must not match the production generator namespace
+/// (`...14self_evolution9generator13hook_consumer`), which is allowed in
+/// release builds.
+const FIXTURE_NAMESPACE_MANGLED: &str = "8fixtures13hook_consumer";
+
+fn contains_fixture_namespace(symbols: &str) -> bool {
+    symbols.contains(FIXTURE_NAMESPACE_MANGLED)
+}
 
 /// Helper: return the target directory for the coding-harness crate.
 fn target_dir() -> std::path::PathBuf {
@@ -48,9 +79,10 @@ fn release_build_rejects_test_fixtures() {
 }
 
 /// Default release build (no test-fixtures) must succeed and produce a
-/// clean artifact without hook_consumer symbols.
+/// clean artifact without fixture symbols. Production generator symbols
+/// (e.g. `self_evolution::generator::hook_consumer`) may be present.
 #[test]
-fn release_build_has_no_hook_consumer_symbol() {
+fn release_build_has_no_fixture_symbols() {
     let status = Command::new("cargo")
         .args([
             "build",
@@ -82,7 +114,7 @@ fn release_build_has_no_hook_consumer_symbol() {
         })
         .expect("coding-harness release artifact found in target/release");
 
-    // Use `nm` (macOS/Linux) to check for hook_consumer symbols.
+    // Use `nm` (macOS/Linux) to check for fixture namespace symbols.
     let nm_output = Command::new("nm")
         .arg(&harness_artifact)
         .output()
@@ -92,20 +124,20 @@ fn release_build_has_no_hook_consumer_symbol() {
     let stderr = String::from_utf8_lossy(&nm_output.stderr);
 
     assert!(
-        !stdout.contains("hook_consumer"),
-        "Release build contains hook_consumer symbol — test-fixtures leaked! \
+        !contains_fixture_namespace(&stdout),
+        "Release build contains fixtures::hook_consumer symbols — test-fixtures leaked! \
          Matching symbols:\n{}",
         stdout
             .lines()
-            .filter(|l| l.contains("hook_consumer"))
+            .filter(|l| contains_fixture_namespace(l))
             .collect::<Vec<_>>()
             .join("\n")
     );
     // nm on macOS .rlib archives prints the archive member paths — the
-    // hook_consumer module object file would appear as a member name.
+    // fixture module object file would appear as a member name.
     assert!(
-        !stderr.contains("hook_consumer"),
-        "nm stderr mentions hook_consumer: {}",
+        !contains_fixture_namespace(&stderr),
+        "nm stderr mentions the fixture namespace: {}",
         stderr
     );
 }
@@ -164,7 +196,7 @@ fn no_env_var_enables_test_fixtures() {
 
     let stdout = String::from_utf8_lossy(&nm_output.stdout);
     assert!(
-        !stdout.contains("hook_consumer"),
-        "hook_consumer symbol present in release build without --features"
+        !contains_fixture_namespace(&stdout),
+        "fixtures::hook_consumer symbols present in release build without --features"
     );
 }
