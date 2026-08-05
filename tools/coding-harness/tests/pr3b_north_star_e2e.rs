@@ -8,6 +8,7 @@ mod helpers;
 #[path = "pr3b_north_star/support.rs"]
 mod support;
 
+use agent_core_kernel::capabilities::store::{ContentStore, Sha256Digest};
 use agent_core_kernel::domain::{JournalEvent, JournalEventKind};
 use agent_core_kernel::journal::JournalStore;
 use anyhow::{Context, Result};
@@ -17,7 +18,10 @@ use support::*;
 
 #[test]
 fn one_sentence_develops_activates_and_executes_calculator() -> Result<()> {
-    if run_in_isolated_network_if_needed()? {
+    if helpers::run_test_in_isolated_network_if_needed(
+        "AGENT_CORE_PR3B_ISOLATED_NETNS",
+        "one_sentence_develops_activates_and_executes_calculator",
+    )? {
         return Ok(());
     }
     require_real_linux_sandbox()?;
@@ -30,11 +34,21 @@ fn one_sentence_develops_activates_and_executes_calculator() -> Result<()> {
     std::fs::create_dir_all(&artifact_root)?;
 
     let connector = MockFeishuSender::start()?;
+    helpers::configure_coding_harness_control_auth();
+    std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
+    std::env::set_var("no_proxy", "127.0.0.1,localhost");
+    let model = MockDevelopmentModel::start()?;
     configure_host_clients(&artifact_root);
     start_harness(&artifact_root)?;
     start_capability_host()?;
     let kernel_port = free_port()?;
-    start_kernel(kernel_port, &db_path, &artifact_root, connector.port)?;
+    start_kernel(
+        kernel_port,
+        &db_path,
+        &artifact_root,
+        connector.port,
+        &model.base_url,
+    )?;
 
     let kernel = format!("http://127.0.0.1:{kernel_port}");
     wait_for_health(&kernel, Duration::from_secs(20))?;
@@ -157,7 +171,7 @@ fn one_sentence_develops_activates_and_executes_calculator() -> Result<()> {
     })
     .context("production Connector delivery did not send final text 42")?;
 
-    assert_north_star_journal(&journal, &s1)?;
+    assert_north_star_journal(&journal, &s1, &artifact_root, &proposal_id)?;
     assert!(
         journal.verify_hash_chain()?,
         "Journal hash chain must verify"
@@ -172,16 +186,31 @@ fn open_journal(path: &std::path::Path) -> Result<JournalStore> {
     Ok(journal)
 }
 
-fn assert_north_star_journal(journal: &JournalStore, s1: &str) -> Result<()> {
+fn assert_north_star_journal(
+    journal: &JournalStore,
+    s1: &str,
+    artifact_root: &std::path::Path,
+    proposal_id: &str,
+) -> Result<()> {
     let events = journal.events()?;
-    let gates: std::collections::BTreeSet<_> = events
+    let link = journal
+        .load_proposal_receipt_link(proposal_id)?
+        .context("trusted acceptance Receipt link missing")?;
+    let evidence = ContentStore::new(artifact_root.to_path_buf())
+        .load(&Sha256Digest::parse(&link.evidence_digest)?)?;
+    let evidence: Value = serde_json::from_slice(&evidence)?;
+    let gate_results = evidence["gate_results"]
+        .as_array()
+        .context("trusted acceptance evidence missing gate_results")?;
+    assert!(
+        gate_results
+            .iter()
+            .all(|result| result.get("passed").and_then(Value::as_bool) == Some(true)),
+        "all five real Harness gates must pass"
+    );
+    let gates: std::collections::BTreeSet<_> = gate_results
         .iter()
-        .filter(|event| {
-            event.kind == JournalEventKind::InvocationProposed
-                && event.payload.get("operation").and_then(Value::as_str)
-                    == Some("external.coding_hcr_accept")
-        })
-        .filter_map(|event| event.payload.get("gate_kind").and_then(Value::as_str))
+        .filter_map(|result| result.get("gate_kind").and_then(Value::as_str))
         .collect();
     assert_eq!(
         gates,
@@ -194,7 +223,7 @@ fn assert_north_star_journal(journal: &JournalStore, s1: &str) -> Result<()> {
         ]
         .into_iter()
         .collect(),
-        "all five real Harness gates must be journaled"
+        "all five real Harness gates must be bound into trusted acceptance evidence"
     );
     assert!(events
         .iter()
@@ -224,7 +253,7 @@ fn assert_north_star_journal(journal: &JournalStore, s1: &str) -> Result<()> {
         .as_ref()
         .context("final reply has no Run")?;
     let run = journal
-        .get_run(&run_id.0)?
+        .run_by_id(run_id)?
         .context("fresh calculator Run missing")?;
     assert_eq!(run.registry_snapshot_id, s1, "new Run must pin S1");
     assert_eq!(run.principal.principal_id.0, OWNER_PRINCIPAL);

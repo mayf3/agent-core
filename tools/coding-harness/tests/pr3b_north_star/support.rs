@@ -8,6 +8,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -18,34 +19,59 @@ pub const IPC_TOKEN: &str = "pr3b-ipc-token";
 pub const DECISION_TOKEN: &str = "pr3b-decision-token";
 const HOST_CONTROL_TOKEN: &str = "pr3b-host-control-token-7cb8665fc7a84f1e";
 const HOST_EXECUTION_TOKEN: &str = "pr3b-host-execution-token-981a16858d4746b1";
-const NETNS_MARKER: &str = "AGENT_CORE_PR3B_ISOLATED_NETNS";
 
-/// Re-exec the one-test binary in a fresh user/network namespace. This keeps
-/// fixed production ports 7200/7300 independent from developer services and
-/// makes failure to obtain isolation a hard test failure.
-pub fn run_in_isolated_network_if_needed() -> Result<bool> {
-    if std::env::var(NETNS_MARKER).as_deref() == Ok("1") {
-        return Ok(false);
+pub struct MockDevelopmentModel {
+    pub base_url: String,
+}
+
+impl MockDevelopmentModel {
+    pub fn start() -> Result<Self> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let port = listener.local_addr()?.port();
+        let calls = Arc::new(AtomicUsize::new(0));
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                if read_http_request(&mut stream).is_err() {
+                    continue;
+                }
+                let body = if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    let arguments = json!({
+                        "development_request": {
+                            "target_kind": "invocable_capability",
+                            "name": "external.calculator",
+                            "requirements": ["provide add, subtract, multiply, and divide operations"],
+                            "required_contracts": ["component.invoke.v0"],
+                            "acceptance_criteria": ["multiply 6 by 7 returns 42"]
+                        }
+                    });
+                    json!({
+                        "model": "pr3b-development-model",
+                        "choices": [{"message": {
+                            "content": "",
+                            "tool_calls": [{
+                                "id": "pr3b-development-call",
+                                "type": "function",
+                                "function": {
+                                    "name": "external.coding_task_submit",
+                                    "arguments": arguments.to_string()
+                                }
+                            }]
+                        }}]
+                    })
+                } else {
+                    json!({
+                        "model": "pr3b-development-model",
+                        "choices": [{"message": {"content": "DevelopmentRequest submitted"}}]
+                    })
+                };
+                let _ = write_http_response(&mut stream, 200, body);
+            }
+        });
+        Ok(Self {
+            base_url: format!("http://127.0.0.1:{port}/v1"),
+        })
     }
-    let executable = std::env::current_exe()?;
-    let status = Command::new("unshare")
-        .args(["--user", "--map-root-user", "--net", "--"])
-        .arg("/bin/sh")
-        .args(["-c", "ip link set lo up && exec \"$@\"", "sh"])
-        .arg(executable)
-        .args([
-            "--exact",
-            "one_sentence_develops_activates_and_executes_calculator",
-            "--nocapture",
-            "--test-threads=1",
-        ])
-        .env(NETNS_MARKER, "1")
-        .status()
-        .context("failed to enter isolated Linux network namespace")?;
-    if !status.success() {
-        bail!("isolated PR3B North Star child failed: {status}");
-    }
-    Ok(true)
 }
 
 pub fn start_harness(artifact_root: &Path) -> Result<()> {
@@ -74,6 +100,7 @@ pub fn start_kernel(
     db_path: &Path,
     artifact_root: &Path,
     connector_port: u16,
+    model_base_url: &str,
 ) -> Result<()> {
     let mut config: KernelConfig = helpers::kcfg(&artifact_root.to_path_buf());
     config.db_path = db_path.to_path_buf();
@@ -90,6 +117,10 @@ pub fn start_kernel(
     config.outbox_dispatcher_poll_interval_ms = 10;
     config.capability_decision_token = Some(DECISION_TOKEN.into());
     config.capability_submit_token = Some("pr3b-submit-token".into());
+    config.openai_base_url = model_base_url.into();
+    config.openai_api_key = "pr3b-model-test-key".into();
+    config.model = "pr3b-development-model".into();
+    config.model_timeout_ms = 10_000;
     thread::spawn(move || agent_core_kernel::server::serve(config).expect("Kernel server failed"));
     Ok(())
 }

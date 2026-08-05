@@ -24,8 +24,15 @@ mod helpers;
 
 #[test]
 fn authenticated_sentence_creates_real_pending_proposal() -> Result<()> {
+    if helpers::run_test_in_isolated_network_if_needed(
+        "AGENT_CORE_PR3A_ISOLATED_NETNS",
+        "authenticated_sentence_creates_real_pending_proposal",
+    )? {
+        return Ok(());
+    }
     let artifact_root = unique_temp_dir("pr3a-real-artifacts");
     std::fs::create_dir_all(&artifact_root)?;
+    helpers::configure_coding_harness_control_auth();
 
     let listener =
         TcpListener::bind("127.0.0.1:7200").expect("PR3A E2E requires exclusive 127.0.0.1:7200");
@@ -71,6 +78,12 @@ fn authenticated_sentence_creates_real_pending_proposal() -> Result<()> {
         updated_at: Utc::now(),
         registry_snapshot_id: snapshot_id.clone(),
         mode: RunMode::Default,
+        budget_hook_id: None,
+        budget_hook_version: None,
+        budget_decision_digest: None,
+        budget_max_tool_rounds: None,
+        budget_max_wall_time_ms: None,
+        budget_exhaustion_action: None,
     };
     journal.insert_run(&run)?;
 
@@ -91,30 +104,42 @@ fn authenticated_sentence_creates_real_pending_proposal() -> Result<()> {
         "tool:test:pr3a:real",
     )?;
 
-    assert_eq!(journal.harness_change_request_count()?, 1);
-    let hcr = journal
-        .get_harness_change_request(&result.hcr_id)?
-        .expect("HCR must exist");
-    assert_eq!(hcr.status, "succeeded");
-    assert_eq!(hcr.session_id, session.id.0);
-    assert_eq!(hcr.principal_id, run.principal.principal_id.0);
+    assert_eq!(
+        submission_event_count(&journal, JournalEventKind::InvocationProposed)?,
+        1,
+        "one durable submission attempt must be created"
+    );
+    assert_eq!(
+        submission_event_count(&journal, JournalEventKind::ReceiptReceived)?,
+        1,
+        "the submission attempt must have one terminal Receipt"
+    );
 
     let link = journal
-        .load_proposal_hcr_link(&result.proposal_id)?
-        .expect("trusted HCR link must exist");
+        .load_proposal_receipt_link(&result.proposal_id)?
+        .expect("trusted acceptance Receipt link must exist");
     assert_eq!(link.operation, "external.calculator");
-    assert_eq!(link.hcr_id, result.hcr_id);
+    assert_eq!(link.acceptance_outcome, "passed");
+    assert_eq!(link.acceptance_invocation_id, result.submit_invocation_id);
+    assert_eq!(link.receipt_digest, result.acceptance_receipt_digest);
+    assert_eq!(link.issuer_principal_id, result.acceptance_issuer);
+    assert_eq!(link.request_id, result.development_request_id);
     assert_eq!(link.candidate_id, result.candidate_id);
     assert_eq!(link.candidate_digest, result.candidate_digest);
     assert_eq!(link.artifact_ref, result.artifact_ref);
     assert_eq!(link.artifact_digest, result.artifact_digest);
     assert_eq!(link.evidence_digest, result.evidence_digest);
-    assert_eq!(link.settlement_id, result.settlement_id);
+    assert_eq!(link.origin_run_id, run.id.0);
+    assert_eq!(link.origin_session_id, session.id.0);
 
     let proposal = journal
         .load_proposal(&result.proposal_id)?
         .expect("Proposal must exist");
     assert_eq!(proposal.status, ProposalStatus::PendingApproval);
+    assert_eq!(
+        proposal.submitter_principal_id,
+        run.principal.principal_id.0
+    );
     assert_eq!(proposal.origin_run_id, run.id);
     assert_eq!(proposal.origin_session_id, session.id);
     assert_eq!(proposal.expected_active_snapshot_id, snapshot_id);
@@ -179,6 +204,12 @@ fn same_message_twenty_way_is_exactly_once(
         updated_at: Utc::now(),
         registry_snapshot_id: journal.current_registry_snapshot_id()?,
         mode: RunMode::Default,
+        budget_hook_id: None,
+        budget_hook_version: None,
+        budget_decision_digest: None,
+        budget_max_tool_rounds: None,
+        budget_max_wall_time_ms: None,
+        budget_exhaustion_action: None,
     });
     journal.insert_run(&run)?;
     let request = Arc::new(development_request(
@@ -227,7 +258,11 @@ fn same_message_twenty_way_is_exactly_once(
     assert!(successes
         .iter()
         .all(|result| &result.proposal_id == proposal_id));
-    assert_eq!(journal.harness_change_request_count()?, 1);
+    assert_eq!(
+        submission_event_count(&journal, JournalEventKind::InvocationProposed)?,
+        1,
+        "twenty concurrent replays must create one durable attempt"
+    );
     let submit_receipts = journal
         .events()?
         .iter()
@@ -244,7 +279,14 @@ fn same_message_twenty_way_is_exactly_once(
         submit_receipts, 1,
         "Harness submit invocation must be unique"
     );
-    assert!(journal.load_proposal_hcr_link(proposal_id)?.is_some());
+    let link = journal
+        .load_proposal_receipt_link(proposal_id)?
+        .expect("successful replay must retain its trusted Receipt link");
+    assert_eq!(link.acceptance_outcome, "passed");
+    assert_eq!(
+        link.acceptance_invocation_id,
+        successes[0].submit_invocation_id
+    );
     assert!(journal.verify_hash_chain()?);
     Ok(())
 }
@@ -279,6 +321,12 @@ fn missing_submit_grant_fails_before_hcr_creation() -> Result<()> {
         updated_at: Utc::now(),
         registry_snapshot_id: journal.current_registry_snapshot_id()?,
         mode: RunMode::Default,
+        budget_hook_id: None,
+        budget_hook_version: None,
+        budget_decision_digest: None,
+        budget_max_tool_rounds: None,
+        budget_max_wall_time_ms: None,
+        budget_exhaustion_action: None,
     };
     journal.insert_run(&run)?;
     let request = development_request(
@@ -299,8 +347,32 @@ fn missing_submit_grant_fails_before_hcr_creation() -> Result<()> {
     )
     .expect_err("missing grant must fail closed");
     assert!(error.to_string().contains("capability_not_enabled"));
-    assert_eq!(journal.harness_change_request_count()?, 0);
+    assert_eq!(
+        submission_event_count(&journal, JournalEventKind::InvocationProposed)?,
+        0,
+        "missing grant must fail before submission-attempt creation"
+    );
+    assert_eq!(
+        submission_event_count(&journal, JournalEventKind::ReceiptReceived)?,
+        0,
+        "missing grant must not create a submission Receipt"
+    );
     Ok(())
+}
+
+fn submission_event_count(journal: &JournalStore, kind: JournalEventKind) -> Result<usize> {
+    Ok(journal
+        .events()?
+        .iter()
+        .filter(|event| {
+            event.kind == kind
+                && event
+                    .payload
+                    .get("operation")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("external.coding_task_submit")
+        })
+        .count())
 }
 
 fn development_request(

@@ -238,7 +238,10 @@ fn five_gates_bind_stable_artifact_digest_into_acceptance_receipt() {
         "test-model",
     )
     .unwrap();
-    let args = json!({"invocation_intent_id":"invocation-test"});
+    let args = json!({
+        "invocation_intent_id": "attempt_invocation_test",
+        "idempotency_key": "development-attempt:attempt_invocation_test"
+    });
     let first =
         crate::self_evolution::profile_acceptance::accept(&root, &args, &request, &generated)
             .unwrap();
