@@ -1,0 +1,24 @@
+[Unit]
+Description=Agent Core Feishu Connector (fixed runtime)
+Documentation=file:///opt/agent-core/docs/ops/deployment-harness.md
+# The Connector never starts before the Kernel unit, and never runs while the
+# Kernel unit is down. This prevents the failure mode where the Connector kept
+# receiving Feishu messages with no Kernel behind it.
+Requires=agent-core-kernel.service
+After=agent-core-kernel.service
+PartOf=agent-core-kernel.service
+
+[Service]
+Type=exec
+# preflight enforces BOTH port hygiene AND the Kernel /health==ok gate.
+ExecStartPre=%h/.agent-core/infra/preflight.sh connector
+ExecStart=%h/.agent-core/infra/run-svc.sh connector
+Restart=always
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
