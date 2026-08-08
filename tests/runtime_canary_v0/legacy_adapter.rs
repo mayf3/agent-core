@@ -1,9 +1,9 @@
 //! CANARY / LEGACY COMPATIBILITY ONLY.
 //!
-//! Mechanical translation between the canary's narrow invocation port and
-//! the shared external-harness execution mechanism. Everything here is
-//! test compatibility debt — the canary deletes together with this module.
-//! This is NOT the V2.1 Kernel boundary.
+//! Mechanical translation between the production `runtime_v0` module's
+//! narrow invocation port and the shared external-harness execution
+//! mechanism. Everything here is test compatibility debt — the canary
+//! deletes together with this module. This is NOT the V2.1 Kernel boundary.
 //!
 //! Second cut: the legacy governance simulation is gone. The adapter now
 //! only resolves the test capability reference `C17` to an inline test
@@ -14,7 +14,8 @@ use agent_core_kernel::adapters::external_harness::{
 };
 use agent_core_kernel::domain::{InvocationId, ReceiptStatus};
 use agent_core_kernel::harness::manifest::HarnessManifest;
-use crate::canary_runtime::{self, InvocationPort, InvocationResult, InvocationStatus};
+use agent_core_kernel::runtime_v0::{InvocationPort, InvocationResult, InvocationStatus};
+use super::C17;
 use serde_json::{json, Value};
 use std::time::Duration;
 
@@ -84,7 +85,7 @@ impl InvocationPort for CanaryBindingAdapter {
         capability_ref: &str,
         arguments: Value,
     ) -> Result<InvocationResult, String> {
-        if capability_ref != canary_runtime::C17 {
+        if capability_ref != C17 {
             return Err(format!("unknown capability reference: {capability_ref}"));
         }
         // TEST COMPATIBILITY DEBT: snapshot id placeholder ("" = none; the
