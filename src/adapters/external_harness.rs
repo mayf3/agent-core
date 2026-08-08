@@ -54,6 +54,11 @@ pub fn execute_external_harness(
 /// The `registry_snapshot_id` is the Run's pinned snapshot (empty string if
 /// unavailable) — it is forwarded to the harness so the Capability Host can
 /// audit which snapshot selected this operation.
+///
+/// Thin wrapper over [`execute_external_harness_binding`]: it extracts the
+/// invocation id and arguments from the approved invocation (stripping the
+/// internal `session_id` field) and delegates to the shared execution
+/// mechanism. Production policy/approval behaviour is unchanged.
 pub fn execute_external_harness_with_config(
     manifest: &HarnessManifest,
     invocation: &ApprovedInvocation,
@@ -69,6 +74,33 @@ pub fn execute_external_harness_with_config(
         obj.remove("session_id");
     }
 
+    execute_external_harness_binding(
+        manifest,
+        &invocation_id,
+        &clean_args,
+        config,
+        registry_snapshot_id,
+    )
+}
+
+/// The shared external-harness execution mechanism.
+///
+/// Executes a resolved harness binding with an explicit invocation id and
+/// already-clean arguments, returning the Provider Receipt. This is the
+/// single real HTTP/dispatch/receipt implementation; callers own any policy
+/// they require (production goes through the V1 approval path above; the
+/// Runtime canary calls this seam directly with its own binding).
+///
+/// This is NOT the V2.1 Kernel invocation boundary: capability reference
+/// semantics, caller validation, and durable invocation records are not
+/// implemented here.
+pub(crate) fn execute_external_harness_binding(
+    manifest: &HarnessManifest,
+    invocation_id: &InvocationId,
+    arguments: &Value,
+    config: &ExternalHarnessTransportConfig,
+    registry_snapshot_id: &str,
+) -> Result<Receipt> {
     // Build request body WITH authoritative manifest identity.
     // manifest_id and artifact_digest come from the manifest (never from LLM
     // arguments). registry_snapshot_id comes from the Run's pinned snapshot.
@@ -77,7 +109,7 @@ pub fn execute_external_harness_with_config(
         "protocol_version": manifest.protocol_version,
         "invocation_id": invocation_id.0,
         "operation": manifest.operation_name,
-        "arguments": clean_args,
+        "arguments": arguments,
         "manifest_id": manifest.manifest_id,
         "artifact_digest": manifest.artifact_digest,
         "registry_snapshot_id": registry_snapshot_id,
@@ -172,7 +204,7 @@ pub fn execute_external_harness_with_config(
     if status_code == 0 {
         // Illegal status line → malformed_response.
         return Ok(Receipt {
-            invocation_id,
+            invocation_id: invocation_id.clone(),
             status: ReceiptStatus::Failed,
             output: serde_json::json!({"error_category": "malformed_response"}),
             external_ref: None,
@@ -181,7 +213,7 @@ pub fn execute_external_harness_with_config(
     }
     if !(200..300).contains(&status_code) {
         return Ok(Receipt {
-            invocation_id,
+            invocation_id: invocation_id.clone(),
             status: ReceiptStatus::Failed,
             output: serde_json::json!({"error_category": "http_error", "http_code": status_code}),
             external_ref: None,
@@ -198,7 +230,7 @@ pub fn execute_external_harness_with_config(
     // Empty body with 2xx is malformed.
     if body.is_empty() {
         return Ok(Receipt {
-            invocation_id,
+            invocation_id: invocation_id.clone(),
             status: ReceiptStatus::Failed,
             output: serde_json::json!({"error_category": "malformed_response"}),
             external_ref: None,
@@ -216,7 +248,7 @@ pub fn execute_external_harness_with_config(
         .unwrap_or("");
     if resp_protocol != manifest.protocol_version {
         return Ok(Receipt {
-            invocation_id,
+            invocation_id: invocation_id.clone(),
             status: ReceiptStatus::Failed,
             output: serde_json::json!({"error_category": "protocol_mismatch"}),
             external_ref: None,
@@ -240,7 +272,7 @@ pub fn execute_external_harness_with_config(
             .is_err()
         {
             return Ok(Receipt {
-                invocation_id,
+                invocation_id: invocation_id.clone(),
                 status: ReceiptStatus::Failed,
                 output: serde_json::json!({"error_category": "output_schema_violation"}),
                 external_ref: None,
@@ -264,7 +296,7 @@ pub fn execute_external_harness_with_config(
             && external_ref.is_none()
         {
             return Ok(Receipt {
-                invocation_id,
+                invocation_id: invocation_id.clone(),
                 status: ReceiptStatus::Failed,
                 output: serde_json::json!({"error_category": "missing_execution_identity"}),
                 external_ref: None,
@@ -272,7 +304,7 @@ pub fn execute_external_harness_with_config(
             });
         }
         Ok(Receipt {
-            invocation_id,
+            invocation_id: invocation_id.clone(),
             status: ReceiptStatus::Succeeded,
             output: result.clone(),
             external_ref,
@@ -297,11 +329,32 @@ pub fn execute_external_harness_with_config(
             "detail_code": bounded,
         });
         Ok(Receipt {
-            invocation_id,
+            invocation_id: invocation_id.clone(),
             status: ReceiptStatus::Failed,
             output,
             external_ref: None,
             occurred_at: Utc::now(),
         })
     }
+}
+
+/// Test-support surface (existing `test-helpers` convention): exposes the
+/// shared execution mechanism to integration tests without widening the
+/// production API. The Runtime canary uses this to execute a resolved
+/// binding without any legacy governance objects.
+#[cfg(feature = "test-helpers")]
+pub fn execute_external_harness_binding_for_tests(
+    manifest: &HarnessManifest,
+    invocation_id: &InvocationId,
+    arguments: &Value,
+    config: &ExternalHarnessTransportConfig,
+    registry_snapshot_id: &str,
+) -> Result<Receipt> {
+    execute_external_harness_binding(
+        manifest,
+        invocation_id,
+        arguments,
+        config,
+        registry_snapshot_id,
+    )
 }
