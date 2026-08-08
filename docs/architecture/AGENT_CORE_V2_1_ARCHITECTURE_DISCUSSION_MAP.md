@@ -25,6 +25,8 @@ Conflict rule:
 * Registry / ToolCatalog
 * Context
 
+Runtime 基础语义见 [AGENT_RUNTIME_V0_SEMANTICS.md](./AGENT_RUNTIME_V0_SEMANTICS.md)。
+
 0. 为什么需要这份文档
 
 当前讨论已经从「Kernel 里哪些东西应该搬出去」进入下一阶段：
