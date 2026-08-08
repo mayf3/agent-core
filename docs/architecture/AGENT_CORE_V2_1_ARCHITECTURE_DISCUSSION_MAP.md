@@ -103,7 +103,7 @@ Agent 已经决定要调用一个外部能力后，这次调用是否正确绑�
 
 Actor / Credential Reference
 
-Capability Handle
+Capability Reference（fd-style Handle 仅为其候选实现，见 RUNTIME_KERNEL_INVOCATION_BOUNDARY_V0）
 
 Invocation
 
@@ -544,7 +544,7 @@ Level 2：讨论一次外部调用
 Runtime
   ↓ invoke(handle)
 Kernel
-  ├ Handle
+  ├ Capability Reference
   ├ Invocation
   ├ Result
   └ Event
