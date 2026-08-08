@@ -12,5 +12,4 @@ pub mod journal;
 pub mod llm;
 pub mod registry;
 pub mod runtime;
-pub mod runtime_v0;
 pub mod server;
