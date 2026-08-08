@@ -1,5 +1,8 @@
-//! FIRST production Canary: an engine switch that routes every message
-//! through the standalone `agent-runtime` crate while it is ON.
+//! THE DEFAULT Runtime: every message is delivered through the
+//! standalone `agent-runtime` crate. The legacy Runtime is frozen and
+//! reachable only through the explicit emergency flag
+//! `AGENT_CORE_FORCE_LEGACY_RUNTIME` (a short-term escape hatch and
+//! comparison path, not a routing framework).
 //!
 //! Host-side wiring ONLY. This module knows the legacy Kernel intimately
 //! (journal, gateway, run lifecycle, reply path) — the new Runtime knows
@@ -18,12 +21,10 @@
 //! `run_id` remains LEGACY COMPATIBILITY DEBT — the Runtime -> run_id ->
 //! Kernel shape is NOT the final V2 Kernel boundary.
 //!
-//! Canary switch: `AGENT_CORE_RUNTIME_CANARY_ENABLED`. Off (default) →
-//! everyone stays on the legacy Runtime. On → every message goes through
-//! the new Runtime. NO identity selection: future multi-agent routing
-//! belongs to an external Router Harness, not this switch. On failure this
-//! path NEVER falls back to the legacy Runtime for the same message — the
-//! Run is failed and the message is done.
+//! NO identity selection: future multi-agent routing belongs to an
+//! external Router Harness, not this module. On failure this path NEVER
+//! falls back to the legacy Runtime for the same message — the Run is
+//! failed and the message is done.
 
 use crate::config::KernelConfig;
 use crate::domain::{
@@ -422,11 +423,10 @@ mod tests {
     /// Run completes, and the reply invocation is queued through the
     /// legacy reply path.
     #[test]
-    fn canary_enabled_delivers_through_new_runtime() -> Result<()> {
+    fn new_runtime_is_default_delivers_through_new_runtime() -> Result<()> {
         let journal = JournalStore::in_memory()?;
         journal.initialize_registry()?;
-        let mut config = KernelConfig::from_cli(None);
-        config.runtime_canary_enabled = true;
+        let config = KernelConfig::from_cli(None); // no switch set: new Runtime is the default
         let gateway = Gateway::new(config.clone());
 
         super::super::delivery::deliver_event(config, &journal, &gateway, validated_cli_event("hello"))?;
@@ -466,32 +466,15 @@ mod tests {
         Ok(())
     }
 
-    /// Switch off by default → every message keeps the legacy Runtime:
-    /// the legacy ContextAssembler runs (ContextBuilt).
+    /// The EMERGENCY escape hatch: AGENT_CORE_FORCE_LEGACY_RUNTIME=true
+    /// routes through the legacy Runtime (ContextBuilt appears) while the
+    /// frozen legacy path is kept reachable.
     #[test]
-    fn canary_disabled_by_default_keeps_legacy_runtime() -> Result<()> {
-        let journal = JournalStore::in_memory()?;
-        journal.initialize_registry()?;
-        let config = KernelConfig::from_cli(None); // runtime_canary_enabled defaults to false
-        let gateway = Gateway::new(config.clone());
-
-        super::super::delivery::deliver_event(config, &journal, &gateway, validated_cli_event("hello"))?;
-
-        let events = journal.events()?;
-        assert!(
-            events.iter().any(|e| e.kind == JournalEventKind::ContextBuilt),
-            "legacy path must run the ContextAssembler when the switch is off"
-        );
-        Ok(())
-    }
-
-    /// Switch explicitly off → legacy Runtime, exactly like the default.
-    #[test]
-    fn canary_disabled_explicitly_keeps_legacy_runtime() -> Result<()> {
+    fn force_legacy_runtime_uses_legacy_runtime() -> Result<()> {
         let journal = JournalStore::in_memory()?;
         journal.initialize_registry()?;
         let mut config = KernelConfig::from_cli(None);
-        config.runtime_canary_enabled = false;
+        config.force_legacy_runtime = true;
         let gateway = Gateway::new(config.clone());
 
         super::super::delivery::deliver_event(config, &journal, &gateway, validated_cli_event("hello"))?;
@@ -499,7 +482,7 @@ mod tests {
         let events = journal.events()?;
         assert!(
             events.iter().any(|e| e.kind == JournalEventKind::ContextBuilt),
-            "legacy path must run the ContextAssembler when explicitly disabled"
+            "explicit force-legacy must run the legacy ContextAssembler"
         );
         Ok(())
     }
@@ -510,11 +493,10 @@ mod tests {
     /// Failed, the delivery errors, and no second Run is ever created — the
     /// legacy Runtime is never invoked for the same message.
     #[test]
-    fn canary_failure_never_falls_back_to_legacy_runtime() -> Result<()> {
+    fn new_runtime_failure_never_falls_back_to_legacy_runtime() -> Result<()> {
         let journal = JournalStore::in_memory()?;
         journal.initialize_registry()?;
-        let mut config = KernelConfig::from_cli(None);
-        config.runtime_canary_enabled = true;
+        let config = KernelConfig::from_cli(None); // default path: new Runtime
         let gateway = Gateway::new(config.clone());
 
         let mut event = validated_cli_event("hi");

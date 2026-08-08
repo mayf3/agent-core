@@ -122,7 +122,7 @@ mod receipt_workflow_tests {
             harness_artifact_root: root.join("artifacts"),
             max_tool_rounds: 12,
             feishu_coding_owner_id: Some("owner".into()),
-            runtime_canary_enabled: false,
+            force_legacy_runtime: false,
             tool_loop_timeout_ms: 300_000,
             context_prepare_hook: HookConfig::default(),
             budget_hook: HookConfig::default(),

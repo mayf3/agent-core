@@ -249,7 +249,7 @@ fn test_config() -> KernelConfig {
         feishu_allowed_open_ids: vec![],
         feishu_allowed_chat_ids: vec![],
         feishu_coding_owner_id: None,
-        runtime_canary_enabled: false,
+        force_legacy_runtime: false,
         feishu_require_group_mention: true,
         openai_base_url: "https://example.invalid/v1".to_string(),
         openai_api_key: String::new(),
