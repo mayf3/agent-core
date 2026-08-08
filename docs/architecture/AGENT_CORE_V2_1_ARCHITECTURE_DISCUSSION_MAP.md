@@ -2,6 +2,29 @@ AGENT_CORE_V2_1_ARCHITECTURE_DISCUSSION_MAP
 
 状态：WORKING DRAFT用途：记录当前阶段已经形成的架构共识；控制概念数量；为后续逐项讨论和仓库迁移提供导航。注意：本文不是新的冻结边界，不代表所有名词都已经证明有必要存在。
 
+## 当前权威关系（Documentation Governance V0）
+
+```text
+Current implementation/governance baseline:
+    AGENT_CORE_EXTERNAL_HARNESS_BOUNDARY_V1.md（V1 冻结边界）+ 当前代码
+
+Architecture evolution discussion:
+    本文档（V2.1 Discussion Map，WORKING DRAFT，尚未取代 V1）
+
+Conflict rule:
+    在 V2.1 尚未冻结前，讨论可以挑战 V1 ownership，
+    但实际开发不得把讨论稿自动当成已生效架构。
+```
+
+已知但尚未裁决的 ownership 冲突（只列名字与指向，不在本文解决）：
+
+* Session
+* Run
+* Agent Runtime
+* Approval
+* Registry / ToolCatalog
+* Context
+
 0. 为什么需要这份文档
 
 当前讨论已经从「Kernel 里哪些东西应该搬出去」进入下一阶段：

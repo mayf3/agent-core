@@ -1,5 +1,9 @@
 # Kernel 负面宪法
 
+> 提示（Documentation Governance V0）：本文目前仍是 Kernel 修改的有效开发守则。
+> 其中 `Run` 是否属于 Kernel primitive 正在 [`AGENT_CORE_V2_1_ARCHITECTURE_DISCUSSION_MAP.md`](./AGENT_CORE_V2_1_ARCHITECTURE_DISCUSSION_MAP.md)（WORKING DRAFT）中重新审查；
+> 在裁决前不得自行推断结果。V2.1 冻结前本文不得按讨论稿改写。
+
 ## 宗旨
 
 这份文档定义了 Kernel 代码库（`src/`）的明确边界。任何修改 Kernel 的 PR 都必须通过以下检查。
