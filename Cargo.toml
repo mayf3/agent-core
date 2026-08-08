@@ -12,6 +12,10 @@ test-helpers = []
 
 [dependencies]
 anyhow = "1"
+# The standalone Agent Runtime. The production delivery path routes the
+# designated Canary agent through it (AGENT_CORE_RUNTIME_CANARY_AGENT_ID);
+# agent-runtime itself has ZERO dependency on this crate.
+agent-runtime = { path = "agent-runtime" }
 chrono = { version = "0.4", features = ["serde"] }
 ctrlc = { version = "3.5.2", features = ["termination"] }
 hex = "0.4"
@@ -31,9 +35,6 @@ uuid = { version = "1", features = ["v4"] }
 # library with the `test-helpers` feature unified in. Production `cargo build`
 # does not enable it.
 agent-core-kernel = { path = ".", features = ["test-helpers"] }
-# The standalone Agent Runtime — the integration Canary tests the independent
-# Runtime crate directly. Production does NOT depend on it.
-agent-runtime = { path = "agent-runtime" }
 # The external Agent Loop Harness — the E2E tests run its real logic against a
 # real Kernel HTTP server. The harness itself does NOT depend on the kernel.
 agent-loop-harness = { path = "tools/agent-loop-harness" }

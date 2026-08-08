@@ -451,6 +451,7 @@ fn test_config(tmp_db: &PathBuf, llm_url: &str, connector_url: &str) -> KernelCo
         harness_artifact_root: artifact_root,
         max_tool_rounds: 2, // deliberately small → budget exhaustion → yield
         feishu_coding_owner_id: None,
+        runtime_canary_enabled: false,
         capability_submit_token: None,
         capability_decision_token: None,
         tool_loop_timeout_ms: 300_000,

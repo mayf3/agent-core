@@ -18,6 +18,7 @@ mod tool_loop;
 mod tool_rejection;
 pub use crate::gateway::ToolRejection;
 pub use tool_rejection::validate_model_arguments;
+pub(crate) use tool_loop::ToolCallOutcome;
 #[cfg(test)]
 #[path = "tests/capability_probe_e2e.rs"]
 mod capability_probe_e2e;
