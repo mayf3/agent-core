@@ -108,6 +108,7 @@ fn test_config() -> KernelConfig {
         harness_artifact_root: std::env::temp_dir().join(format!("ha_root_{}", std::process::id())),
         max_tool_rounds: 12,
         feishu_coding_owner_id: None,
+        force_legacy_runtime: false,
         capability_submit_token: None,
         capability_decision_token: None,
         tool_loop_timeout_ms: 300_000,
@@ -223,6 +224,8 @@ fn default_hook_returns_config_values() {
     let snapshot = test_snapshot();
     let run = make_run(&snapshot);
     let session = make_session();
+    journal.persist_snapshot_for_tests(&snapshot).unwrap();
+    journal.insert_session_for_tests(&session).unwrap();
 
     let budget = runtime
         .resolve_run_budget(&journal, &run, &session, &snapshot)
@@ -258,6 +261,8 @@ fn run_budget_resolved_event_is_emitted() {
     let snapshot = test_snapshot();
     let run = make_run(&snapshot);
     let session = make_session();
+    journal.persist_snapshot_for_tests(&snapshot).unwrap();
+    journal.insert_session_for_tests(&session).unwrap();
 
     let budget = runtime
         .resolve_run_budget(&journal, &run, &session, &snapshot)
@@ -298,6 +303,8 @@ fn frozen_max_rounds_stops_loop() {
     journal.insert_run(&run).unwrap();
 
     let session = make_session();
+    journal.persist_snapshot_for_tests(&snapshot).unwrap();
+    journal.insert_session_for_tests(&session).unwrap();
     let mut blocks = vec![ContextBlock {
         kind: ContextBlockKind::UserMessage,
         content: "test".to_string(),
@@ -356,6 +363,8 @@ fn terminate_action_marks_run_failed() {
     journal.insert_run(&run).unwrap();
 
     let session = make_session();
+    journal.persist_snapshot_for_tests(&snapshot).unwrap();
+    journal.insert_session_for_tests(&session).unwrap();
     let mut blocks = vec![ContextBlock {
         kind: ContextBlockKind::UserMessage,
         content: "test".to_string(),
@@ -425,6 +434,8 @@ fn yield_action_produces_continue_message() {
     journal.insert_run(&run).unwrap();
 
     let session = make_session();
+    journal.persist_snapshot_for_tests(&snapshot).unwrap();
+    journal.insert_session_for_tests(&session).unwrap();
     let mut blocks = vec![ContextBlock {
         kind: ContextBlockKind::UserMessage,
         content: "test".to_string(),
@@ -572,6 +583,8 @@ fn untrusted_hook_response_rejected_fail_closed() {
     let snapshot = external_binding_snapshot("trusted-provider", "http://127.0.0.1:9999/budget");
     let run = make_run(&snapshot);
     let session = make_session();
+    journal.persist_snapshot_for_tests(&snapshot).unwrap();
+    journal.insert_session_for_tests(&session).unwrap();
 
     let result = runtime.resolve_run_budget(&journal, &run, &session, &snapshot);
     assert!(
@@ -638,6 +651,8 @@ fn model_arguments_cannot_override_budget() {
     journal.insert_run(&run).unwrap();
 
     let session = make_session();
+    journal.persist_snapshot_for_tests(&snapshot).unwrap();
+    journal.insert_session_for_tests(&session).unwrap();
     let mut blocks = vec![ContextBlock {
         kind: ContextBlockKind::UserMessage,
         content: "test".to_string(),
@@ -706,6 +721,8 @@ fn hook_error_fail_open_falls_back_to_default() {
     let snapshot = external_binding_snapshot("budget-provider", "http://127.0.0.1:9999/budget");
     let run = make_run(&snapshot);
     let session = make_session();
+    journal.persist_snapshot_for_tests(&snapshot).unwrap();
+    journal.insert_session_for_tests(&session).unwrap();
 
     let budget = runtime
         .resolve_run_budget(&journal, &run, &session, &snapshot)
@@ -744,6 +761,8 @@ fn hook_error_fail_closed_rejects_run() {
     let snapshot = external_binding_snapshot("budget-provider", "http://127.0.0.1:9999/budget");
     let run = make_run(&snapshot);
     let session = make_session();
+    journal.persist_snapshot_for_tests(&snapshot).unwrap();
+    journal.insert_session_for_tests(&session).unwrap();
 
     let result = runtime.resolve_run_budget(&journal, &run, &session, &snapshot);
     assert!(
@@ -768,6 +787,8 @@ fn default_budget_matches_legacy_config_when_unset() {
     journal.insert_run(&run).unwrap();
 
     let session = make_session();
+    journal.persist_snapshot_for_tests(&snapshot).unwrap();
+    journal.insert_session_for_tests(&session).unwrap();
     let mut blocks = vec![ContextBlock {
         kind: ContextBlockKind::UserMessage,
         content: "test".to_string(),
@@ -879,6 +900,8 @@ fn external_hook_valid_decision_accepted() {
     let snapshot = external_binding_snapshot("budget-provider", "http://127.0.0.1:9999/budget");
     let run = make_run(&snapshot);
     let session = make_session();
+    journal.persist_snapshot_for_tests(&snapshot).unwrap();
+    journal.insert_session_for_tests(&session).unwrap();
 
     let budget = runtime
         .resolve_run_budget(&journal, &run, &session, &snapshot)
@@ -954,6 +977,8 @@ fn frozen_wall_time_is_enforced() {
     journal.insert_run(&run).unwrap();
 
     let session = make_session();
+    journal.persist_snapshot_for_tests(&snapshot).unwrap();
+    journal.insert_session_for_tests(&session).unwrap();
     let mut blocks = vec![ContextBlock {
         kind: ContextBlockKind::UserMessage,
         content: "test".to_string(),
@@ -1052,6 +1077,8 @@ fn external_hook_over_ceiling_fail_closed() {
     let snapshot = external_binding_snapshot("budget-provider", "http://127.0.0.1:9999/budget");
     let run = make_run(&snapshot);
     let session = make_session();
+    journal.persist_snapshot_for_tests(&snapshot).unwrap();
+    journal.insert_session_for_tests(&session).unwrap();
 
     let result = runtime.resolve_run_budget(&journal, &run, &session, &snapshot);
     assert!(
@@ -1127,6 +1154,8 @@ fn external_hook_over_ceiling_fail_open_defaults() {
     let snapshot = external_binding_snapshot("budget-provider", "http://127.0.0.1:9999/budget");
     let run = make_run(&snapshot);
     let session = make_session();
+    journal.persist_snapshot_for_tests(&snapshot).unwrap();
+    journal.insert_session_for_tests(&session).unwrap();
 
     let budget = runtime
         .resolve_run_budget(&journal, &run, &session, &snapshot)

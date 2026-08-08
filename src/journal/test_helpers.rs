@@ -8,7 +8,8 @@
 //! `Cargo.toml`.
 
 use super::sqlite::JournalStore;
-use crate::domain::{InvocationId, OutboxDispatchStatus, Run, RunId};
+use crate::domain::{InvocationId, OutboxDispatchStatus, Run, RunId, Session};
+use crate::registry::snapshot::RegistrySnapshot;
 use anyhow::{anyhow, Result};
 use chrono::Utc;
 use rusqlite::params;
@@ -246,6 +247,94 @@ impl JournalStore {
             .lock()
             .map_err(|_| anyhow!("journal mutex poisoned"))?;
         conn.execute_batch(sql)?;
+        Ok(())
+    }
+}
+
+impl JournalStore {
+    /// Test-support: persist an existing snapshot (header + operations +
+    /// hook bindings) so the narrow invocation entry can reload it by id.
+    pub fn persist_snapshot_for_tests(&self, snapshot: &RegistrySnapshot) -> Result<()> {
+        let conn = self.conn.lock().map_err(|_| anyhow!("journal mutex poisoned"))?;
+        let exists: Option<String> = conn
+            .query_row(
+                "SELECT snapshot_id FROM registry_snapshots WHERE snapshot_id = ?1",
+                params![snapshot.snapshot_id],
+                |row| row.get(0),
+            )
+            .ok();
+        if exists.is_some() {
+            return Ok(());
+        }
+        conn.execute(
+            "INSERT INTO registry_snapshots (snapshot_id, created_at, operation_count, canonical_digest)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                snapshot.snapshot_id,
+                snapshot.created_at.to_rfc3339(),
+                snapshot.operations.len() as i64,
+                snapshot.snapshot_id,
+            ],
+        )?;
+        let mut sorted = snapshot.operations.clone();
+        sorted.sort_by(|a, b| a.name.cmp(&b.name));
+        for op in &sorted {
+            conn.execute(
+                "INSERT INTO registry_snapshot_operations
+                 (snapshot_id, operation_name, risk, description, parameters_json, idempotent, binding_kind, binding_key)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    snapshot.snapshot_id,
+                    op.name,
+                    format!("{:?}", op.risk),
+                    op.description,
+                    serde_json::to_string(&op.parameters)?,
+                    op.idempotent as i64,
+                    format!("{:?}", op.binding_kind),
+                    op.binding_key,
+                ],
+            )?;
+        }
+        for b in &snapshot.hook_bindings {
+            conn.execute(
+                "INSERT INTO registry_snapshot_hook_bindings
+                 (snapshot_id, contract, hook_id, hook_version, binding_kind, binding_key, provider_id, endpoint)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    snapshot.snapshot_id,
+                    b.contract,
+                    b.hook_id,
+                    b.hook_version,
+                    format!("{:?}", b.binding_kind),
+                    b.binding_key,
+                    b.provider_id,
+                    b.endpoint,
+                ],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Test-support: insert a session row exactly as built (used by
+    /// fixtures that construct sessions with fixed ids).
+    pub fn insert_session_for_tests(&self, session: &Session) -> Result<()> {
+        let conn = self.conn.lock().map_err(|_| anyhow!("journal mutex poisoned"))?;
+        conn.execute(
+            "INSERT INTO sessions
+             (id, agent_id, channel, conversation_key, summary, summarized_until_event_id, last_active_at, status, version)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                session.id.0,
+                session.agent_id.0,
+                format!("{:?}", session.channel),
+                session.conversation_key,
+                session.summary,
+                session.summarized_until_event_id.as_ref().map(|e| e.0.clone()),
+                session.last_active_at.to_rfc3339(),
+                format!("{:?}", session.status),
+                session.version,
+            ],
+        )?;
         Ok(())
     }
 }

@@ -70,6 +70,7 @@ fn test_config() -> KernelConfig {
         harness_artifact_root: std::env::temp_dir().join(format!("ha_root_{}", std::process::id())),
         max_tool_rounds: 12,
         feishu_coding_owner_id: None,
+        force_legacy_runtime: false,
         capability_submit_token: None,
         capability_decision_token: None,
         tool_loop_timeout_ms: 300_000,
@@ -232,6 +233,8 @@ fn default_binding_resolvable_from_snapshot() {
     let snapshot = builtin_snapshot();
     let run = make_run(&snapshot);
     let session = make_session();
+    journal.persist_snapshot_for_tests(&snapshot).unwrap();
+    journal.insert_session_for_tests(&session).unwrap();
 
     let binding = snapshot
         .hook_binding(crate::registry::snapshot::BUDGET_HOOK_CONTRACT)
@@ -278,6 +281,8 @@ fn same_snapshot_does_not_switch_hook_on_env_change() {
     );
     let run = make_run(&snapshot);
     let session = make_session();
+    journal.persist_snapshot_for_tests(&snapshot).unwrap();
+    journal.insert_session_for_tests(&session).unwrap();
 
     // Scenario A: env credential matches the binding → external hook selected.
     let mut config_a = config.clone();
@@ -362,6 +367,7 @@ fn old_run_keeps_old_binding_new_run_uses_new() {
     let old_snap = builtin_snapshot();
     let new_snap = external_snapshot("provider:hook-v2", "p2", "http://127.0.0.1:0/x");
     let session = make_session();
+    journal.insert_session_for_tests(&session).unwrap();
 
     // Old Run: frozen from the old snapshot's builtin binding.
     let old_run = make_run(&old_snap);
@@ -452,6 +458,8 @@ fn model_cannot_select_hook_or_override_budget() {
     journal.insert_run(&run).unwrap();
 
     let session = make_session();
+    journal.persist_snapshot_for_tests(&snapshot).unwrap();
+    journal.insert_session_for_tests(&session).unwrap();
     let mut blocks = vec![ContextBlock {
         kind: ContextBlockKind::UserMessage,
         content: "test".to_string(),
@@ -513,6 +521,8 @@ fn no_new_llm_call_after_deadline() {
     journal.insert_run(&run).unwrap();
 
     let session = make_session();
+    journal.persist_snapshot_for_tests(&snapshot).unwrap();
+    journal.insert_session_for_tests(&session).unwrap();
     let mut blocks = vec![ContextBlock {
         kind: ContextBlockKind::UserMessage,
         content: "test".to_string(),
@@ -576,6 +586,8 @@ fn no_new_tool_call_after_deadline() {
     journal.insert_run(&run).unwrap();
 
     let session = make_session();
+    journal.persist_snapshot_for_tests(&snapshot).unwrap();
+    journal.insert_session_for_tests(&session).unwrap();
     let mut blocks = vec![ContextBlock {
         kind: ContextBlockKind::UserMessage,
         content: "test".to_string(),
@@ -746,6 +758,8 @@ fn blocking_http_tool_stops_waiting_at_deadline() {
     let snapshot = builtin_snapshot();
     let run = make_run(&snapshot);
     let session = make_session();
+    journal.persist_snapshot_for_tests(&snapshot).unwrap();
+    journal.insert_session_for_tests(&session).unwrap();
 
     let spec = OperationSpec {
         name: "external.blocking_probe".into(),
@@ -820,6 +834,8 @@ fn deadline_terminate_marks_run_failed() {
     journal.insert_run(&run).unwrap();
 
     let session = make_session();
+    journal.persist_snapshot_for_tests(&snapshot).unwrap();
+    journal.insert_session_for_tests(&session).unwrap();
     let mut blocks = vec![ContextBlock {
         kind: ContextBlockKind::UserMessage,
         content: "test".to_string(),
@@ -873,6 +889,8 @@ fn deadline_exceeded_event_records_honest_semantics() {
     journal.insert_run(&run).unwrap();
 
     let session = make_session();
+    journal.persist_snapshot_for_tests(&snapshot).unwrap();
+    journal.insert_session_for_tests(&session).unwrap();
     let mut blocks = vec![ContextBlock {
         kind: ContextBlockKind::UserMessage,
         content: "test".to_string(),

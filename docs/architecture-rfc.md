@@ -1,5 +1,9 @@
 # Agent Core Architecture RFC
 
+> **STATUS: Current V1 implementation/history authority.** This RFC matches the current code and is part of the current implementation/governance baseline.
+>
+> **V2.1 NOTE:** Some ownership decisions (Session / Run / Agent Runtime / Approval / Registry-ToolCatalog / Context) are under active reconsideration in [`AGENT_CORE_V2_1_ARCHITECTURE_DISCUSSION_MAP.md`](architecture/AGENT_CORE_V2_1_ARCHITECTURE_DISCUSSION_MAP.md), which remains a WORKING DRAFT. Do not silently rewrite this document to match V2.1; preserve it as V1 evidence until a replacement is explicitly frozen.
+
 This RFC records long-lived semantics. It is not a phase-one implementation
 checklist. Protocols may be defined here before they are implemented.
 
