@@ -124,11 +124,14 @@ pub(crate) fn deliver_via_runtime_v0(
         journal,
         gateway,
         run_id: run.id.clone(),
-        turn_index: 0,
-        tool_index: 0,
+        tool_call_count: std::cell::Cell::new(0),
         remaining_ms: config.tool_loop_timeout_ms,
     };
-    let mut loop_runtime = RuntimeLoop::new(port, model);
+    // The bounded working loop: the model may keep calling tools, but at
+    // most `max_tool_rounds` REAL executions per Run. The new Runtime only
+    // receives this plain integer — no budget, no deadline, no yield.
+    let mut loop_runtime =
+        RuntimeLoop::with_max_tool_calls(port, model, config.max_tool_rounds);
     let reply = match loop_runtime.run(&text, &tool_view) {
         Ok(reply) => reply,
         Err(error) => {
@@ -237,12 +240,15 @@ fn to_runtime_tools(provider_tools: &[Value]) -> Vec<Tool> {
 ///
 /// Only the minimal conversions: turn -> LlmInput (no full ContextAssembler,
 /// no history, no memory, no compaction) and LlmOutput -> ModelOutput. The
-/// provider transcript needed for the second round is remembered here,
-/// host-side.
+/// provider transcripts of EVERY prior tool round are remembered here,
+/// host-side, so a later model turn can replay all accumulated tool results
+/// as proper provider tool turns.
 struct RuntimeV0Model {
     llm: Box<dyn LlmClient>,
     tools_json: Vec<Value>,
-    prior_provider_turn: Option<ProviderToolTurn>,
+    /// Provider transcript of each executed tool round, in execution order.
+    /// Index `i` pairs with `turn.follow_ups[i]`.
+    provider_turn_history: Vec<ProviderToolTurn>,
 }
 
 impl RuntimeV0Model {
@@ -250,30 +256,29 @@ impl RuntimeV0Model {
         Self {
             llm,
             tools_json,
-            prior_provider_turn: None,
+            provider_turn_history: vec![],
         }
     }
 }
 
 impl Model for RuntimeV0Model {
     fn complete(&mut self, turn: &Turn) -> Result<ModelOutput, String> {
-        let follow_ups: Vec<LlmFollowUp> = if turn.follow_ups.is_empty() {
-            vec![]
-        } else {
-            // Second round: replay the first round's provider transcript so
-            // the real tool result reaches the model as a proper tool turn.
-            let provider_turn = self
-                .prior_provider_turn
-                .clone()
-                .ok_or_else(|| "missing_provider_turn_for_follow_up".to_string())?;
-            turn.follow_ups
-                .iter()
-                .map(|fr| LlmFollowUp {
-                    provider_turn: provider_turn.clone(),
+        // Every accumulated tool result is replayed to the model with its
+        // OWN provider transcript, so round N sees all prior results A..N-1.
+        let follow_ups: Vec<LlmFollowUp> = turn
+            .follow_ups
+            .iter()
+            .enumerate()
+            .map(|(i, fr)| {
+                let provider_turn = self.provider_turn_history.get(i).cloned().ok_or_else(|| {
+                    format!("missing_provider_turn_for_follow_up_{i}")
+                })?;
+                Ok(LlmFollowUp {
+                    provider_turn,
                     result_content: fr.text.clone(),
                 })
-                .collect()
-        };
+            })
+            .collect::<Result<_, String>>()?;
         let input = LlmInput {
             blocks: vec![], // minimal single-round context for the first Canary
             user_text: turn.user_text.clone(),
@@ -283,7 +288,9 @@ impl Model for RuntimeV0Model {
             timeout_override_ms: None,
         };
         let output = self.llm.complete(input).map_err(|e| e.to_string())?;
-        self.prior_provider_turn = output.provider_turn.clone();
+        if let Some(provider_turn) = output.provider_turn.clone() {
+            self.provider_turn_history.push(provider_turn);
+        }
         match output.tool_call {
             ToolCallResult::Valid(call) => Ok(ModelOutput {
                 text: output.content,
@@ -310,8 +317,11 @@ struct RuntimeV0InvocationAdapter<'a> {
     journal: &'a JournalStore,
     gateway: &'a Gateway,
     run_id: RunId,
-    turn_index: usize,
-    tool_index: usize,
+    /// Monotonic counter of REAL tool actions submitted through this
+    /// adapter. Each action maps to a distinct legacy turn position
+    /// (0, 1, 2, ...), matching the legacy `tool:{run}:{turn}:{tool}:{id}`
+    /// idempotency-key shape — consecutive actions never collide.
+    tool_call_count: std::cell::Cell<usize>,
     remaining_ms: u64,
 }
 
@@ -322,6 +332,8 @@ impl InvocationPort for RuntimeV0InvocationAdapter<'_> {
         capability_ref: &str,
         arguments: Value,
     ) -> Result<InvocationResult, String> {
+        let turn_index = self.tool_call_count.get();
+        self.tool_call_count.set(turn_index + 1);
         let tool_call = ToolCall {
             id: invocation_id.to_string(),
             operation: capability_ref.to_string(),
@@ -334,8 +346,8 @@ impl InvocationPort for RuntimeV0InvocationAdapter<'_> {
                 self.gateway,
                 &self.run_id,
                 &tool_call,
-                self.turn_index,
-                self.tool_index,
+                turn_index,
+                0, // one action per model round on this path
                 self.remaining_ms,
             )
             .map_err(|e| format!("tool_execution_failed: {e}"))?;
@@ -525,6 +537,117 @@ mod tests {
             journal.run_status(&run_id)?,
             Some("Failed".to_string()),
             "the canary Run must be marked Failed, not left dangling"
+        );
+        Ok(())
+    }
+
+    /// A recording fake LlmClient: remembers the tool-result contents of
+    /// every call and scripted as: tool call → tool call → final answer.
+    struct RecordingLlm {
+        seen: std::rc::Rc<std::cell::RefCell<Vec<Vec<String>>>>,
+        rounds: std::cell::Cell<u32>,
+    }
+
+    impl LlmClient for RecordingLlm {
+        fn complete(&self, input: crate::llm::LlmInput) -> anyhow::Result<crate::llm::LlmOutput> {
+            self.seen.borrow_mut().push(
+                input
+                    .follow_ups
+                    .iter()
+                    .map(|f| f.result_content.clone())
+                    .collect(),
+            );
+            let round = self.rounds.get();
+            self.rounds.set(round + 1);
+            let (tool_call, provider_turn) = match round {
+                0 => (
+                    crate::llm::ToolCallResult::Valid(crate::llm::ToolCall {
+                        id: "tc_1".into(),
+                        operation: "system.status".into(),
+                        arguments: json!({}),
+                    }),
+                    Some(crate::llm::ProviderToolTurn {
+                        endpoint: crate::llm::EndpointChoice::Primary,
+                        provider_tool_call_id: "pc_1".into(),
+                        wire_name: "system.status".into(),
+                        canonical_operation: "system.status".into(),
+                        arguments_json: "{}".into(),
+                        reasoning_content: None,
+                    }),
+                ),
+                1 => (
+                    crate::llm::ToolCallResult::Valid(crate::llm::ToolCall {
+                        id: "tc_2".into(),
+                        operation: "system.status".into(),
+                        arguments: json!({}),
+                    }),
+                    Some(crate::llm::ProviderToolTurn {
+                        endpoint: crate::llm::EndpointChoice::Primary,
+                        provider_tool_call_id: "pc_2".into(),
+                        wire_name: "system.status".into(),
+                        canonical_operation: "system.status".into(),
+                        arguments_json: "{}".into(),
+                        reasoning_content: None,
+                    }),
+                ),
+                _ => (crate::llm::ToolCallResult::Absent, None),
+            };
+            Ok(crate::llm::LlmOutput {
+                provider: "rec".into(),
+                model: "rec".into(),
+                content: if round == 2 { "final answer".into() } else { String::new() },
+                journal_payload: json!({}),
+                tool_call,
+                provider_turn,
+            })
+        }
+    }
+
+    /// The production LLM adapter must hand ALL accumulated tool results to
+    /// the third model call: the bounded loop (2 tools) runs through the
+    /// real `RuntimeV0Model`, and the third `LlmClient::complete` invocation
+    /// must carry both prior results in order.
+    #[test]
+    fn runtime_v0_host_loop_passes_accumulated_results_to_third_llm_call() -> Result<()> {
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let llm: Box<dyn LlmClient> = Box::new(RecordingLlm {
+            seen: seen.clone(),
+            rounds: std::cell::Cell::new(0),
+        });
+        let model = RuntimeV0Model::new(llm, vec![]);
+        struct OkPort;
+        impl InvocationPort for OkPort {
+            fn submit(
+                &self,
+                invocation_id: &str,
+                _capability_ref: &str,
+                _arguments: Value,
+            ) -> Result<InvocationResult, String> {
+                Ok(InvocationResult {
+                    invocation_id: invocation_id.into(),
+                    status: InvocationStatus::Succeeded,
+                    output: json!({"stdout": "out"}),
+                })
+            }
+        }
+        let tool = agent_runtime::Tool {
+            name: "system.status".into(),
+            description: String::new(),
+            parameters: json!({}),
+        };
+        let mut runtime = RuntimeLoop::with_max_tool_calls(OkPort, model, 3);
+        let reply = runtime.run("go", &[tool]).expect("loop");
+        assert_eq!(reply, "final answer", "reply must come from the third model call");
+
+        let seen = seen.borrow();
+        assert_eq!(seen.len(), 3, "exactly three LLM calls");
+        assert!(seen[0].is_empty(), "first call sees nothing");
+        assert_eq!(seen[1].len(), 1, "second call sees result A");
+        assert_eq!(
+            seen[2].len(),
+            2,
+            "third call MUST see both prior tool results: {:?}",
+            *seen
         );
         Ok(())
     }
