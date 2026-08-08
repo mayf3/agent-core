@@ -1,5 +1,9 @@
 # Agent Core 外部 Harness 边界 V1（冻结）
 
+> **STATUS: Current V1 implementation/history authority.** 本文与当前代码一致，是当前实施/治理基线。
+>
+> **V2.1 NOTE:** 部分 ownership 决策（Session / Run / Agent Runtime / Approval / Registry-ToolCatalog / Context）正在 [`AGENT_CORE_V2_1_ARCHITECTURE_DISCUSSION_MAP.md`](./AGENT_CORE_V2_1_ARCHITECTURE_DISCUSSION_MAP.md) 中重新审查，该文仍为 WORKING DRAFT。不要静默改写本文以匹配 V2.1；在新的替代边界明确冻结前，保留本文作为 V1 证据。
+
 > 状态：**架构强约束（冻结）**
 > 关系：本文在 [`external-orchestration-boundary.md`](./external-orchestration-boundary.md) 与
 > [`extension-hook-and-external-harness-boundary-v0.md`](./extension-hook-and-external-harness-boundary-v0.md)
