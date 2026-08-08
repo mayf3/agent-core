@@ -69,6 +69,7 @@ pub struct Action {
 }
 
 /// One completed action fed back to the model as plain text.
+#[derive(Clone)]
 pub struct ToolResult {
     pub tool: String,
     pub text: String,
@@ -93,45 +94,72 @@ pub trait Model {
     fn complete(&mut self, turn: &Turn) -> Result<ModelOutput, String>;
 }
 
-/// The V0 loop: one model turn, one action through the port, the result
-/// comes back as a follow-up for the next model turn.
+/// The V0 loop: model turn -> (optional) one action through the port ->
+/// the result comes back as a follow-up for the next model turn — repeated
+/// until the model answers directly, the model fails, the port fails, or
+/// the bounded tool-call budget is exceeded.
+///
+/// The loop counts REAL tool calls, not model rounds: after the final
+/// allowed tool executes, the model still gets one more turn to summarize
+/// before the limit can trip.
 pub struct RuntimeLoop<P: InvocationPort, M: Model> {
     port: P,
     model: M,
+    max_tool_calls: usize,
 }
 
 impl<P: InvocationPort, M: Model> RuntimeLoop<P, M> {
+    /// Default: at most ONE real tool call (the original two-round shape).
     pub fn new(port: P, model: M) -> Self {
-        Self { port, model }
+        Self::with_max_tool_calls(port, model, 1)
+    }
+
+    /// `max_tool_calls` is the maximum number of REAL tool executions. The
+    /// loop knows nothing else about budgets or deadlines.
+    pub fn with_max_tool_calls(port: P, model: M, max_tool_calls: usize) -> Self {
+        Self {
+            port,
+            model,
+            max_tool_calls,
+        }
     }
 
     pub fn run(&mut self, user_text: &str, tool_view: &[Tool]) -> Result<String, String> {
-        let first = Turn {
-            user_text: user_text.to_string(),
-            tool_view: tool_view.to_vec(),
-            follow_ups: vec![],
-        };
-        // Round 1 model failure propagates; no fake output, no fallback.
-        let out = self.model.complete(&first)?;
-        let Some(action) = out.action else {
-            return Ok(out.text);
-        };
-        // The loop generates a stable id for this call before submitting.
-        let invocation_id = format!("inv_{}", uuid::Uuid::new_v4().simple());
-        let result = self.port.submit(&invocation_id, &action.tool, action.arguments)?;
-        let follow_up = ToolResult {
-            tool: action.tool,
-            text: render(&result),
-        };
-        let second = Turn {
-            user_text: user_text.to_string(),
-            tool_view: tool_view.to_vec(),
-            follow_ups: vec![follow_up],
-        };
-        // Round 2 model failure also propagates. If round 1 already executed
-        // an Invocation, we only fail — we never re-execute it.
-        let final_out = self.model.complete(&second)?;
-        Ok(final_out.text)
+        // Accumulated tool results: every executed tool's outcome stays
+        // visible to every later model turn.
+        let mut follow_ups: Vec<ToolResult> = vec![];
+        loop {
+            let turn = Turn {
+                user_text: user_text.to_string(),
+                tool_view: tool_view.to_vec(),
+                follow_ups: follow_ups.clone(),
+            };
+            // Model failure propagates; no fake output, no fallback.
+            let out = self.model.complete(&turn)?;
+            let Some(action) = out.action else {
+                // The model answered directly — this is the final reply.
+                return Ok(out.text);
+            };
+            // The model wants another tool. If the budget is exhausted,
+            // fail explicitly — NEVER execute, NEVER fabricate a reply.
+            if follow_ups.len() >= self.max_tool_calls {
+                return Err(format!(
+                    "tool_call_limit_reached: {} (max_tool_calls={})",
+                    action.tool, self.max_tool_calls
+                ));
+            }
+            // The loop generates a stable id for this call before submitting.
+            let invocation_id = format!("inv_{}", uuid::Uuid::new_v4().simple());
+            // Port failure propagates; a business-level Failed/Unknown
+            // result is handed to the model as a plain result — never
+            // silently retried.
+            let result = self.port.submit(&invocation_id, &action.tool, action.arguments)?;
+            follow_ups.push(ToolResult {
+                tool: action.tool,
+                text: render(&result),
+            });
+            // Continue asking the model with the accumulated results.
+        }
     }
 }
 
@@ -302,5 +330,192 @@ mod tests {
         let err = runtime.run("hello", &[tool]).expect_err("must fail");
         assert!(err.contains("round 2 model failed"), "got: {err}");
         assert_eq!(runtime.port.submits.get(), 1, "exactly one Invocation, never retried");
+    }
+
+    // ── bounded continuous loop scenarios ────────────────────────────────
+
+    /// A port that records every submission's invocation id and count.
+    struct RecordingPort {
+        submissions: std::cell::Cell<u32>,
+        invocation_ids: std::cell::RefCell<Vec<String>>,
+    }
+
+    impl InvocationPort for RecordingPort {
+        fn submit(
+            &self,
+            invocation_id: &str,
+            _capability_ref: &str,
+            _arguments: Value,
+        ) -> Result<InvocationResult, String> {
+            self.submissions.set(self.submissions.get() + 1);
+            self.invocation_ids.borrow_mut().push(invocation_id.to_string());
+            Ok(InvocationResult {
+                invocation_id: invocation_id.into(),
+                status: InvocationStatus::Succeeded,
+                output: json!({"stdout": format!("out-{}", self.submissions.get())}),
+            })
+        }
+    }
+
+    enum Step {
+        Action(&'static str),
+        Answer(&'static str),
+        Fail(&'static str),
+    }
+
+    /// A scripted model: returns each preset step in order and records the
+    /// follow-up texts it saw on every turn (proves result accumulation).
+    struct SequenceModel {
+        steps: Vec<Step>,
+        seen: Vec<Vec<String>>,
+    }
+
+    impl Model for SequenceModel {
+        fn complete(&mut self, turn: &Turn) -> Result<ModelOutput, String> {
+            self.seen
+                .push(turn.follow_ups.iter().map(|f| f.text.clone()).collect());
+            match self.steps.remove(0) {
+                Step::Action(tool) => Ok(ModelOutput {
+                    text: String::new(),
+                    action: Some(Action {
+                        tool: tool.into(),
+                        arguments: json!({}),
+                    }),
+                }),
+                Step::Answer(text) => Ok(ModelOutput {
+                    text: text.into(),
+                    action: None,
+                }),
+                Step::Fail(msg) => Err(msg.into()),
+            }
+        }
+    }
+
+    fn test_tool() -> Tool {
+        Tool {
+            name: "c17".into(),
+            description: "run a command".into(),
+            parameters: json!({"type": "object"}),
+        }
+    }
+
+    #[test]
+    fn loop_answers_directly_without_any_tool() {
+        let port = RecordingPort {
+            submissions: std::cell::Cell::new(0),
+            invocation_ids: std::cell::RefCell::new(vec![]),
+        };
+        let model = SequenceModel {
+            steps: vec![Step::Answer("no tools needed")],
+            seen: vec![],
+        };
+        let mut runtime = RuntimeLoop::with_max_tool_calls(port, model, 8);
+        let reply = runtime.run("hello", &[test_tool()]).expect("loop");
+        assert_eq!(reply, "no tools needed");
+        assert_eq!(runtime.port.submissions.get(), 0, "zero tool calls");
+    }
+
+    #[test]
+    fn loop_runs_two_tools_and_third_turn_sees_both_results() {
+        let port = RecordingPort {
+            submissions: std::cell::Cell::new(0),
+            invocation_ids: std::cell::RefCell::new(vec![]),
+        };
+        let model = SequenceModel {
+            steps: vec![
+                Step::Action("tool_a"),
+                Step::Action("tool_b"),
+                Step::Answer("final"),
+            ],
+            seen: vec![],
+        };
+        let mut runtime = RuntimeLoop::with_max_tool_calls(port, model, 3);
+        let reply = runtime.run("hello", &[test_tool()]).expect("loop");
+        assert_eq!(reply, "final");
+        assert_eq!(runtime.port.submissions.get(), 2, "exactly two tool calls");
+        let ids = runtime.port.invocation_ids.borrow();
+        assert_ne!(ids[0], ids[1], "the two Invocations must have distinct ids");
+        // Third model turn must see BOTH prior results, in order.
+        assert_eq!(runtime.model.seen.len(), 3);
+        assert!(runtime.model.seen[0].is_empty());
+        assert_eq!(runtime.model.seen[1].len(), 1, "turn 2 sees result A");
+        assert!(runtime.model.seen[1][0].contains("out-1"), "got: {:?}", runtime.model.seen[1]);
+        assert_eq!(runtime.model.seen[2].len(), 2, "turn 3 sees results A+B");
+        assert!(runtime.model.seen[2][0].contains("out-1"), "got: {:?}", runtime.model.seen[2]);
+        assert!(runtime.model.seen[2][1].contains("out-2"), "got: {:?}", runtime.model.seen[2]);
+    }
+
+    #[test]
+    fn loop_succeeds_when_answer_comes_exactly_at_limit() {
+        // max_tool_calls=2: tools A and B execute, then the model may still
+        // summarize once — the "last tool must be followed by a summary"
+        // guard.
+        let port = RecordingPort {
+            submissions: std::cell::Cell::new(0),
+            invocation_ids: std::cell::RefCell::new(vec![]),
+        };
+        let model = SequenceModel {
+            steps: vec![
+                Step::Action("tool_a"),
+                Step::Action("tool_b"),
+                Step::Answer("final after B"),
+            ],
+            seen: vec![],
+        };
+        let mut runtime = RuntimeLoop::with_max_tool_calls(port, model, 2);
+        let reply = runtime.run("hello", &[test_tool()]).expect("loop");
+        assert_eq!(reply, "final after B");
+        assert_eq!(runtime.port.submissions.get(), 2);
+    }
+
+    #[test]
+    fn loop_fails_explicitly_when_limit_exceeded_without_executing() {
+        let port = RecordingPort {
+            submissions: std::cell::Cell::new(0),
+            invocation_ids: std::cell::RefCell::new(vec![]),
+        };
+        let model = SequenceModel {
+            steps: vec![
+                Step::Action("tool_a"),
+                Step::Action("tool_b"),
+                Step::Action("tool_c"),
+            ],
+            seen: vec![],
+        };
+        let mut runtime = RuntimeLoop::with_max_tool_calls(port, model, 2);
+        let err = runtime.run("hello", &[test_tool()]).expect_err("must fail at the limit");
+        assert!(
+            err.contains("tool_call_limit_reached"),
+            "must be an explicit limit failure, got: {err}"
+        );
+        assert_eq!(
+            runtime.port.submissions.get(),
+            2,
+            "tool C must NOT execute; total stays at 2"
+        );
+    }
+
+    #[test]
+    fn loop_never_reruns_executed_tools_after_model_failure() {
+        let port = RecordingPort {
+            submissions: std::cell::Cell::new(0),
+            invocation_ids: std::cell::RefCell::new(vec![]),
+        };
+        let model = SequenceModel {
+            steps: vec![
+                Step::Action("tool_a"),
+                Step::Action("tool_b"),
+                Step::Fail("second tool round failed"),
+            ],
+            seen: vec![],
+        };
+        let mut runtime = RuntimeLoop::with_max_tool_calls(port, model, 8);
+        let err = runtime.run("hello", &[test_tool()]).expect_err("must fail");
+        assert!(err.contains("second tool round failed"), "got: {err}");
+        assert_eq!(
+            runtime.port.submissions.get(),
+            2,
+            "already-executed tools are never re-executed"
+        );
     }
 }
