@@ -86,9 +86,11 @@ pub struct ModelOutput {
     pub action: Option<Action>,
 }
 
-/// A model that speaks in turns.
+/// A model that speaks in turns. A `Result` error means the model call
+/// itself failed (LLM failure) — the loop must propagate it honestly
+/// instead of fabricating an output.
 pub trait Model {
-    fn complete(&mut self, turn: Turn) -> ModelOutput;
+    fn complete(&mut self, turn: &Turn) -> Result<ModelOutput, String>;
 }
 
 /// The V0 loop: one model turn, one action through the port, the result
@@ -109,7 +111,8 @@ impl<P: InvocationPort, M: Model> RuntimeLoop<P, M> {
             tool_view: tool_view.to_vec(),
             follow_ups: vec![],
         };
-        let out = self.model.complete(first);
+        // Round 1 model failure propagates; no fake output, no fallback.
+        let out = self.model.complete(&first)?;
         let Some(action) = out.action else {
             return Ok(out.text);
         };
@@ -125,7 +128,9 @@ impl<P: InvocationPort, M: Model> RuntimeLoop<P, M> {
             tool_view: tool_view.to_vec(),
             follow_ups: vec![follow_up],
         };
-        let final_out = self.model.complete(second);
+        // Round 2 model failure also propagates. If round 1 already executed
+        // an Invocation, we only fail — we never re-execute it.
+        let final_out = self.model.complete(&second)?;
         Ok(final_out.text)
     }
 }
@@ -168,26 +173,26 @@ mod tests {
     }
 
     impl Model for TwoRoundModel {
-        fn complete(&mut self, turn: Turn) -> ModelOutput {
+        fn complete(&mut self, turn: &Turn) -> Result<ModelOutput, String> {
             if self.round == 0 {
                 self.round += 1;
-                ModelOutput {
+                Ok(ModelOutput {
                     text: String::new(),
                     action: Some(Action {
                         tool: "c17".into(),
                         arguments: json!({"command": "echo", "args": ["x"]}),
                     }),
-                }
+                })
             } else {
                 let seen = turn
                     .follow_ups
                     .first()
                     .map(|f| f.text.clone())
                     .unwrap_or_default();
-                ModelOutput {
+                Ok(ModelOutput {
                     text: format!("final reply: {seen}"),
                     action: None,
-                }
+                })
             }
         }
     }
@@ -210,13 +215,92 @@ mod tests {
     fn loop_returns_plain_reply_when_model_takes_no_action() {
         struct ReplyOnly;
         impl Model for ReplyOnly {
-            fn complete(&mut self, _turn: Turn) -> ModelOutput {
-                ModelOutput { text: "no tools needed".into(), action: None }
+            fn complete(&mut self, _turn: &Turn) -> Result<ModelOutput, String> {
+                Ok(ModelOutput { text: "no tools needed".into(), action: None })
             }
         }
         let port = FakePort;
         let mut runtime = RuntimeLoop::new(port, ReplyOnly);
         let reply = runtime.run("hello", &[]).expect("loop");
         assert_eq!(reply, "no tools needed");
+    }
+
+    /// A port that counts submissions — used to prove an Invocation is
+    /// executed exactly once even when a later model call fails.
+    struct CountingPort {
+        submits: std::cell::Cell<u32>,
+    }
+
+    impl InvocationPort for CountingPort {
+        fn submit(
+            &self,
+            _invocation_id: &str,
+            _capability_ref: &str,
+            _arguments: Value,
+        ) -> Result<InvocationResult, String> {
+            self.submits.set(self.submits.get() + 1);
+            Ok(InvocationResult {
+                invocation_id: _invocation_id.into(),
+                status: InvocationStatus::Succeeded,
+                output: json!({"stdout": "hello from v0"}),
+            })
+        }
+    }
+
+    /// Round 1 model call fails outright.
+    struct FailFirstModel;
+
+    impl Model for FailFirstModel {
+        fn complete(&mut self, _turn: &Turn) -> Result<ModelOutput, String> {
+            Err("round 1 model failed".into())
+        }
+    }
+
+    /// Round 1 succeeds with an action; the round 2 model call fails after
+    /// the Invocation has already been submitted.
+    struct FailSecondModel;
+
+    impl Model for FailSecondModel {
+        fn complete(&mut self, turn: &Turn) -> Result<ModelOutput, String> {
+            if turn.follow_ups.is_empty() {
+                Ok(ModelOutput {
+                    text: String::new(),
+                    action: Some(Action {
+                        tool: "c17".into(),
+                        arguments: json!({"command": "echo", "args": ["x"]}),
+                    }),
+                })
+            } else {
+                Err("round 2 model failed".into())
+            }
+        }
+    }
+
+    #[test]
+    fn first_model_call_failure_propagates_without_invocation() {
+        let port = CountingPort { submits: std::cell::Cell::new(0) };
+        let mut runtime = RuntimeLoop::new(port, FailFirstModel);
+        let tool = Tool {
+            name: "c17".into(),
+            description: "run a command".into(),
+            parameters: json!({"type": "object"}),
+        };
+        let err = runtime.run("hello", &[tool]).expect_err("must fail");
+        assert!(err.contains("round 1 model failed"), "got: {err}");
+        assert_eq!(runtime.port.submits.get(), 0, "no invocation may be submitted");
+    }
+
+    #[test]
+    fn second_model_call_failure_propagates_without_retrying_invocation() {
+        let port = CountingPort { submits: std::cell::Cell::new(0) };
+        let mut runtime = RuntimeLoop::new(port, FailSecondModel);
+        let tool = Tool {
+            name: "c17".into(),
+            description: "run a command".into(),
+            parameters: json!({"type": "object"}),
+        };
+        let err = runtime.run("hello", &[tool]).expect_err("must fail");
+        assert!(err.contains("round 2 model failed"), "got: {err}");
+        assert_eq!(runtime.port.submits.get(), 1, "exactly one Invocation, never retried");
     }
 }

@@ -68,10 +68,10 @@ struct FakeCanaryModel {
 }
 
 impl Model for FakeCanaryModel {
-    fn complete(&mut self, turn: Turn) -> ModelOutput {
+    fn complete(&mut self, turn: &Turn) -> Result<ModelOutput, String> {
         if self.round == 0 {
             self.round += 1;
-            ModelOutput {
+            Ok(ModelOutput {
                 text: String::new(),
                 action: Some(agent_runtime::Action {
                     tool: C17.into(),
@@ -82,17 +82,17 @@ impl Model for FakeCanaryModel {
                         "timeout_seconds": 10,
                     }),
                 }),
-            }
+            })
         } else {
             let seen = turn
                 .follow_ups
                 .first()
                 .map(|f| f.text.clone())
                 .unwrap_or_default();
-            ModelOutput {
+            Ok(ModelOutput {
                 text: format!("final reply: {seen}"),
                 action: None,
-            }
+            })
         }
     }
 }
