@@ -22,6 +22,12 @@
 //! + the real external `agent-loop-harness` logic running in a thread.
 //! The harness talks to the Kernel ONLY over HTTP (it is compiled as an
 //! independent crate with no kernel dependency).
+//!
+//! NOTE: same-session continuation, budget yield and the run.outcome
+//! policy are LEGACY Runtime capabilities. The standalone agent-runtime is
+//! the default delivery path and does not carry them; these tests run with
+//! `force_legacy_runtime = true` to verify the frozen legacy path still
+//! works through the emergency fallback flag.
 
 use agent_core_kernel::domain::{
     AgentId, CapabilityGrant, ChannelKind, EventId, PrincipalId, PrincipalSource,
@@ -451,7 +457,9 @@ fn test_config(tmp_db: &PathBuf, llm_url: &str, connector_url: &str) -> KernelCo
         harness_artifact_root: artifact_root,
         max_tool_rounds: 2, // deliberately small → budget exhaustion → yield
         feishu_coding_owner_id: None,
-        runtime_canary_enabled: false,
+        // continuation/yield live on the frozen legacy path; force it so
+        // these tests verify the emergency-fallback Runtime keeps working.
+        force_legacy_runtime: true,
         capability_submit_token: None,
         capability_decision_token: None,
         tool_loop_timeout_ms: 300_000,
