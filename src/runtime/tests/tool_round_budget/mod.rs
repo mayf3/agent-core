@@ -188,6 +188,8 @@ fn run_with_budget(
         status: SessionStatus::Active,
         version: 1,
     };
+    journal.persist_snapshot_for_tests(&snapshot).unwrap();
+    journal.insert_session_for_tests(&session).unwrap();
 
     let mut blocks = vec![ContextBlock {
         kind: ContextBlockKind::UserMessage,

@@ -9,6 +9,7 @@ use crate::llm::{LlmClient, ToolCall};
 use crate::registry::snapshot::RegistrySnapshot;
 use anyhow::Result;
 use serde_json::json;
+use std::sync::Arc;
 use std::time::Duration;
 fn append_or_fatal(
     journal: &JournalStore,
@@ -306,6 +307,70 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
         }
         Ok(rejected_result(ToolRejection::MalformedToolCall, None))
     }
+    /// LEGACY COMPATIBILITY DEBT: reload the V1 governance objects the
+    /// legacy tool path requires from the journal by `run_id`. The Runtime
+    /// no longer passes these objects across the invocation seam.
+    fn load_legacy_governance(
+        &self,
+        journal: &JournalStore,
+        run_id: &RunId,
+    ) -> Result<(Run, Session, Arc<RegistrySnapshot>)> {
+        let run = journal
+            .run_by_id(run_id)?
+            .ok_or_else(|| anyhow::anyhow!("run_not_found: {}", run_id.0))?;
+        let session = journal
+            .session_by_id(&run.session_id)?
+            .ok_or_else(|| anyhow::anyhow!("session_not_found: {}", run.session_id.0))?;
+        let snapshot = journal.load_registry_snapshot(&run.registry_snapshot_id)?;
+        Ok((run, session, snapshot))
+    }
+
+    /// Narrow tool invocation entry (third cut).
+    ///
+    /// The Runtime passes only `run_id` plus the model action and loop
+    /// scalars; the V1 governance objects are reloaded inside from the
+    /// journal and the existing validate / policy / approve / dispatch
+    /// path runs unchanged.
+    ///
+    /// This is NOT the V2.1 Kernel invocation boundary: `run_id` remains
+    /// LEGACY COMPATIBILITY DEBT and the V1 policy is still authoritative.
+    pub(crate) fn invoke_tool(
+        &self,
+        journal: &JournalStore,
+        gateway: &Gateway,
+        run_id: &RunId,
+        tool_call: &ToolCall,
+        turn_index: usize,
+        tool_index: usize,
+        remaining_ms: u64,
+    ) -> Result<ToolCallOutcome> {
+        let (run, session, snapshot) = self.load_legacy_governance(journal, run_id)?;
+        self.handle_inline_tool_call(
+            journal,
+            gateway,
+            &run,
+            &session,
+            tool_call,
+            turn_index,
+            tool_index,
+            &snapshot,
+            remaining_ms,
+        )
+    }
+
+    /// Narrow malformed-tool entry (third cut): same boundary as
+    /// [`Self::invoke_tool`] for the malformed tool-call path.
+    pub(crate) fn invoke_malformed_tool(
+        &self,
+        journal: &JournalStore,
+        run_id: &RunId,
+        turn_index: usize,
+        tool_index: usize,
+    ) -> Result<ToolCallOutcome> {
+        let (run, session, _snapshot) = self.load_legacy_governance(journal, run_id)?;
+        self.handle_malformed_tool_call(journal, &run, &session, turn_index, tool_index)
+    }
+
     pub(crate) fn handle_inline_tool_call(
         &self,
         journal: &JournalStore,
