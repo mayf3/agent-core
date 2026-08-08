@@ -1,26 +1,33 @@
 //! Runtime V0 boundary canary.
 //!
-//! Proves that a new minimal Agent loop can complete a REAL external call
-//! through the current V1 Kernel using only a narrow invocation port
+//! Proves that the PRODUCTION `runtime_v0` module (not a test-only loop
+//! copy) can complete a REAL external call through the current V1 Kernel
+//! using only a narrow invocation port
 //! (`submit(invocation_id, capability_ref, args)`), without knowing Run
 //! lifecycle, grants, registry snapshot, approval, or any product
 //! semantics.
 //!
-//! IMPORTANT: the loop runs on a Canary-only compatibility adapter that
-//! mechanically translates to the current V1 Kernel. This proves the
-//! Runtime can be isolated from V1 governance — it does NOT mean the
-//! V2.1 Kernel boundary is implemented. Deleting this test together with
-//! `canary_runtime.rs` and `legacy_adapter.rs` is the complete rollback.
+//! The host side of this canary: the integration test instantiates
+//! [`agent_core_kernel::runtime_v0::RuntimeLoop`] with a deterministic
+//! fake model and the existing Invocation compatibility path
+//! (`legacy_adapter.rs`, which mechanically translates the narrow port to
+//! the shared external-harness execution mechanism). The loop itself knows
+//! nothing about V1 governance — it only sees the model, the port, and the
+//! tool view the host supplies.
+//!
+//! IMPORTANT: the compatibility adapter is Canary-only. This proves the
+//! Runtime can be isolated from V1 governance — it does NOT mean the V2.1
+//! Kernel boundary is implemented. Deleting `src/runtime_v0/` together
+//! with this test and `legacy_adapter.rs` is the complete rollback.
 //!
 //! The Provider is the REAL execution harness (`tools/execution-harness`),
 //! spawned on a test port with a test token; the whole external dispatch
 //! chain (manifest -> HTTP -> real `echo` execution -> receipt) is real.
 
-#[path = "runtime_canary_v0/canary_runtime.rs"]
-mod canary_runtime;
 #[path = "runtime_canary_v0/legacy_adapter.rs"]
 mod legacy_adapter;
 
+use agent_core_kernel::runtime_v0::{Model, ModelOutput, RuntimeLoop, Tool, Turn};
 use serde_json::json;
 use std::net::TcpStream;
 use std::process::{Child, Command, Stdio};
@@ -33,20 +40,41 @@ const HARNESS_BIN: &str = concat!(
 const HARNESS_PORT: u16 = 27654;
 const HARNESS_TOKEN: &str = "canary-test-token-0123456789abcdef";
 
+/// The test capability reference this canary offers (host-side contract).
+const C17: &str = "C17";
+
+/// The tool view the host offers for C17.
+fn c17_tool() -> Tool {
+    Tool {
+        name: C17.into(),
+        description: "run a harmless command inside an isolated workspace".into(),
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "workspace_id": {"type": "string"},
+                "command": {"type": "string"},
+                "args": {"type": "array", "items": {"type": "string"}},
+                "timeout_seconds": {"type": "integer"}
+            },
+            "required": ["workspace_id", "command"]
+        }),
+    }
+}
+
 /// Deterministic two-round model: round 0 takes one action through C17,
 /// round 1 reads the real result from the follow-up and replies.
 struct FakeCanaryModel {
     round: u32,
 }
 
-impl canary_runtime::CanaryModel for FakeCanaryModel {
-    fn complete(&mut self, turn: canary_runtime::CanaryTurn) -> canary_runtime::CanaryModelOutput {
+impl Model for FakeCanaryModel {
+    fn complete(&mut self, turn: Turn) -> ModelOutput {
         if self.round == 0 {
             self.round += 1;
-            canary_runtime::CanaryModelOutput {
+            ModelOutput {
                 text: String::new(),
-                action: Some(canary_runtime::CanaryAction {
-                    tool: canary_runtime::C17.into(),
+                action: Some(agent_core_kernel::runtime_v0::Action {
+                    tool: C17.into(),
                     arguments: json!({
                         "workspace_id": "canary",
                         "command": "echo",
@@ -61,7 +89,7 @@ impl canary_runtime::CanaryModel for FakeCanaryModel {
                 .first()
                 .map(|f| f.text.clone())
                 .unwrap_or_default();
-            canary_runtime::CanaryModelOutput {
+            ModelOutput {
                 text: format!("final reply: {seen}"),
                 action: None,
             }
@@ -108,8 +136,10 @@ fn canary_runtime_completes_real_invocation() {
         HARNESS_TOKEN.into(),
     );
     let model = FakeCanaryModel { round: 0 };
-    let mut runtime = canary_runtime::CanaryRuntimeLoop::new(adapter, model);
-    let reply = runtime.run("run a harmless command through capability C17").expect("loop");
+    let mut runtime = RuntimeLoop::new(adapter, model);
+    let reply = runtime
+        .run("run a harmless command through capability C17", &[c17_tool()])
+        .expect("loop");
     eprintln!("CANARY FINAL REPLY: {reply}");
 
     // Cleanup regardless of assertion outcome.
