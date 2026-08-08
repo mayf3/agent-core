@@ -1,7 +1,7 @@
 //! Runtime V0 — the minimal production Agent loop.
 //!
 //! A self-contained model-turn loop that lives NEXT TO the legacy V1
-//! [`crate::runtime::Runtime`] without restructuring it. It knows only
+//! `Runtime` in agent-core-kernel without restructuring it. It knows only
 //! three things:
 //!
 //! 1. a model that speaks in plain turns ([`Model`]),
@@ -24,10 +24,10 @@
 //! Kernel through the `run_id` umbilical cord; the `Runtime -> run_id ->
 //! Kernel` shape is NOT the final V2 Kernel boundary.
 //!
-//! This module is a staging area inside agent-core-kernel. It must stay
-//! import-clean of `crate::` internals so that extracting it into its own
-//! crate is a mechanical file move, not a re-partitioning of governance
-//! dependencies.
+//! This crate must stay import-clean of `agent-core-kernel` internals. The
+//! Kernel (or any host) wires it in only through the narrow
+//! [`InvocationPort`]; it never sees Kernel types. This keeps the physical
+//! crate boundary identical to the logical boundary the Runtime needs.
 
 use serde_json::Value;
 

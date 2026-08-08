@@ -1,6 +1,6 @@
 //! CANARY / LEGACY COMPATIBILITY ONLY.
 //!
-//! Mechanical translation between the production `runtime_v0` module's
+//! Mechanical translation between the standalone `agent-runtime` crate's
 //! narrow invocation port and the shared external-harness execution
 //! mechanism. Everything here is test compatibility debt — the canary
 //! deletes together with this module. This is NOT the V2.1 Kernel boundary.
@@ -14,7 +14,7 @@ use agent_core_kernel::adapters::external_harness::{
 };
 use agent_core_kernel::domain::{InvocationId, ReceiptStatus};
 use agent_core_kernel::harness::manifest::HarnessManifest;
-use agent_core_kernel::runtime_v0::{InvocationPort, InvocationResult, InvocationStatus};
+use agent_runtime::{InvocationPort, InvocationResult, InvocationStatus};
 use super::C17;
 use serde_json::{json, Value};
 use std::time::Duration;

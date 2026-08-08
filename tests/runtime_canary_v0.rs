@@ -1,6 +1,6 @@
 //! Runtime V0 boundary canary.
 //!
-//! Proves that the PRODUCTION `runtime_v0` module (not a test-only loop
+//! Proves that the standalone `agent-runtime` crate (not a test-only loop
 //! copy) can complete a REAL external call through the current V1 Kernel
 //! using only a narrow invocation port
 //! (`submit(invocation_id, capability_ref, args)`), without knowing Run
@@ -8,8 +8,8 @@
 //! semantics.
 //!
 //! The host side of this canary: the integration test instantiates
-//! [`agent_core_kernel::runtime_v0::RuntimeLoop`] with a deterministic
-//! fake model and the existing Invocation compatibility path
+//! [`agent_runtime::RuntimeLoop`] with a deterministic fake model and the
+//! existing Invocation compatibility path
 //! (`legacy_adapter.rs`, which mechanically translates the narrow port to
 //! the shared external-harness execution mechanism). The loop itself knows
 //! nothing about V1 governance — it only sees the model, the port, and the
@@ -17,7 +17,7 @@
 //!
 //! IMPORTANT: the compatibility adapter is Canary-only. This proves the
 //! Runtime can be isolated from V1 governance — it does NOT mean the V2.1
-//! Kernel boundary is implemented. Deleting `src/runtime_v0/` together
+//! Kernel boundary is implemented. Deleting `agent-runtime/` together
 //! with this test and `legacy_adapter.rs` is the complete rollback.
 //!
 //! The Provider is the REAL execution harness (`tools/execution-harness`),
@@ -27,7 +27,7 @@
 #[path = "runtime_canary_v0/legacy_adapter.rs"]
 mod legacy_adapter;
 
-use agent_core_kernel::runtime_v0::{Model, ModelOutput, RuntimeLoop, Tool, Turn};
+use agent_runtime::{Model, ModelOutput, RuntimeLoop, Tool, Turn};
 use serde_json::json;
 use std::net::TcpStream;
 use std::process::{Child, Command, Stdio};
@@ -73,7 +73,7 @@ impl Model for FakeCanaryModel {
             self.round += 1;
             ModelOutput {
                 text: String::new(),
-                action: Some(agent_core_kernel::runtime_v0::Action {
+                action: Some(agent_runtime::Action {
                     tool: C17.into(),
                     arguments: json!({
                         "workspace_id": "canary",
