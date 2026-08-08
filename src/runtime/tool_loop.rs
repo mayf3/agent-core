@@ -26,6 +26,7 @@ const BUDGET_TERMINATED_MSG: &str = "本轮因预算耗尽而终止，任务尚�
 
 /// Single tool-call MVP: only `tool_calls[0]` is parsed and executed per round.
 
+#[derive(Debug)]
 pub(crate) enum ToolCallOutcome {
     ToolResult { text: String },
     Fatal { category: &'static str },
@@ -88,7 +89,7 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
                     let this_tool = tool_index;
                     tool_index += 1;
                     let outcome = self
-                        .handle_malformed_tool_call(journal, run, session, turn_index, this_tool)?;
+                        .invoke_malformed_tool(journal, &run.id, turn_index, this_tool)?;
                     match outcome {
                         ToolCallOutcome::Fatal { category } => {
                             return self.handle_fatal_failure(journal, run, session, category);
@@ -191,15 +192,13 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
                         .as_millis() as u64;
                     let this_tool = tool_index;
                     tool_index += 1;
-                    let outcome = self.handle_inline_tool_call(
+                    let outcome = self.invoke_tool(
                         journal,
                         gateway,
-                        run,
-                        session,
+                        &run.id,
                         &tool_call,
                         turn_index,
                         this_tool,
-                        snapshot,
                         remaining_ms,
                     )?;
                     match outcome {

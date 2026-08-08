@@ -266,6 +266,7 @@ pub(super) fn gateway() -> Gateway {
         harness_artifact_root: std::env::temp_dir().join(format!("ha_root_{}", std::process::id())),
         max_tool_rounds: 12,
         feishu_coding_owner_id: None,
+        force_legacy_runtime: false,
         tool_loop_timeout_ms: 300_000,
         context_prepare_hook: crate::hook::HookConfig::default(),
         budget_hook: crate::hook::HookConfig::default(),

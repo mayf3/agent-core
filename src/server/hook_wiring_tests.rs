@@ -3,6 +3,12 @@
 //! These tests exercise the full KernelConfig → Runtime → HttpHookClient
 //! path via `deliver_event()`, the same function used in production.
 //! They use a real TcpListener fake server to verify HTTP hook calls.
+//!
+//! NOTE: hook wiring is a LEGACY Runtime capability. The standalone
+//! agent-runtime is the default delivery path and does not carry hooks;
+//! these tests therefore run with `force_legacy_runtime = true` to verify
+//! the frozen legacy path (and its hook behavior) still works through the
+//! emergency fallback flag.
 
 use super::*;
 use crate::domain::*;
@@ -49,6 +55,9 @@ fn test_config() -> KernelConfig {
         harness_artifact_root: std::env::temp_dir().join(format!("ha_root_{}", std::process::id())),
         max_tool_rounds: 12,
         feishu_coding_owner_id: None,
+        // Hook wiring lives on the frozen legacy path; force it so these
+        // tests verify the emergency-fallback Runtime keeps working.
+        force_legacy_runtime: true,
         capability_submit_token: None,
         capability_decision_token: None,
         tool_loop_timeout_ms: 300_000,

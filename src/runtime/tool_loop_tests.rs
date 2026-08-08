@@ -40,6 +40,7 @@ pub(super) fn test_config() -> KernelConfig {
         harness_artifact_root: std::env::temp_dir().join(format!("ha_root_{}", std::process::id())),
         max_tool_rounds: 12,
         feishu_coding_owner_id: None,
+        force_legacy_runtime: false,
         capability_submit_token: None,
         capability_decision_token: None,
         tool_loop_timeout_ms: 300_000,
@@ -774,4 +775,128 @@ fn policy_denial_writes_rejected_with_correlation() {
         Some("policy_denied")
     );
     assert!(rejected.correlation_id.is_some());
+}
+
+// ===== Third cut: narrow invocation entry (run_id only) =====
+/// Narrow-entry fixture: journal with the baseline snapshot and a
+/// PERSISTED session/run, so the narrow entry can reload the legacy
+/// governance objects from the journal by run_id.
+fn narrow_fixture() -> (
+    JournalStore,
+    Gateway,
+    Runtime<crate::llm::LocalEchoLlm>,
+    Run,
+) {
+    let config = test_config();
+    let journal = JournalStore::in_memory().unwrap();
+    let gateway = Gateway::new(config.clone());
+    let runtime = Runtime::new(config, crate::llm::LocalEchoLlm);
+    let session = journal
+        .get_or_create_session(&SessionTarget {
+            agent_id: AgentId("main".into()),
+            channel: ChannelKind::Cli,
+            conversation_key: "local".into(),
+        })
+        .unwrap();
+    let snapshot_id = journal.current_registry_snapshot_id().unwrap();
+    let now = chrono::Utc::now();
+    let run = Run {
+        id: RunId::new(),
+        session_id: session.id.clone(),
+        agent_id: AgentId("main".into()),
+        trigger_event_id: EventId::new(),
+        principal: RunPrincipal {
+            principal_id: PrincipalId("cli:local".into()),
+            subject: PrincipalSubject::LocalUser,
+            source: PrincipalSource::Cli,
+            grants: vec![
+                CapabilityGrant {
+                    operation: "system.status".into(),
+                    scope: "current_session".into(),
+                },
+                CapabilityGrant {
+                    operation: "session.recall_recent".into(),
+                    scope: "current_session".into(),
+                },
+            ],
+            requester_id: Some("cli:local".into()),
+        },
+        parent_run_id: None,
+        delegated_by: None,
+        status: RunStatus::Running,
+        created_at: now,
+        updated_at: now,
+        registry_snapshot_id: snapshot_id,
+        mode: RunMode::Default,
+        budget_hook_id: None,
+        budget_hook_version: None,
+        budget_decision_digest: None,
+        budget_max_tool_rounds: None,
+        budget_max_wall_time_ms: None,
+        budget_exhaustion_action: None,
+    };
+    journal.insert_run(&run).unwrap();
+    (journal, gateway, runtime, run)
+}
+
+/// Only `run_id` crosses the seam; the narrow entry reloads the legacy
+/// governance objects internally and produces the same policy + invocation
+/// + receipt behaviour as the original object-passing path.
+#[test]
+fn invoke_tool_by_run_id_only_produces_equivalent_invocation_path() {
+    let (journal, gateway, runtime, run) = narrow_fixture();
+    let tc = ToolCall {
+        id: "tc_narrow".into(),
+        operation: "system.status".into(),
+        arguments: json!({}),
+    };
+    let outcome = runtime
+        .invoke_tool(&journal, &gateway, &run.id, &tc, 0, 0, 10_000)
+        .expect("narrow invocation entry");
+    assert!(
+        matches!(
+            outcome,
+            crate::runtime::tool_loop::ToolCallOutcome::ToolResult { .. }
+        ),
+        "expected tool result: {outcome:?}"
+    );
+    let events = journal.events().unwrap();
+    assert_eq!(count(&events, JournalEventKind::ToolCallIssued), 1);
+    assert_eq!(count(&events, JournalEventKind::InvocationProposed), 1);
+    assert_eq!(count(&events, JournalEventKind::InvocationApproved), 1);
+    assert_eq!(count(&events, JournalEventKind::ReceiptReceived), 1);
+    assert_eq!(count(&events, JournalEventKind::ToolCallRejected), 0);
+    let proposed = events
+        .iter()
+        .find(|e| e.kind == JournalEventKind::InvocationProposed)
+        .unwrap();
+    assert_eq!(
+        proposed
+            .payload
+            .get("operation")
+            .and_then(|v| v.as_str()),
+        Some("system.status")
+    );
+}
+
+/// The malformed tool-call path uses the same run_id-only boundary.
+#[test]
+fn invoke_malformed_tool_by_run_id_only_writes_issued_and_rejected() {
+    let (journal, gateway, runtime, run) = narrow_fixture();
+    let outcome = runtime
+        .invoke_malformed_tool(&journal, &run.id, 0, 0)
+        .expect("narrow malformed entry");
+    assert!(
+        matches!(
+            outcome,
+            crate::runtime::tool_loop::ToolCallOutcome::ToolResult { .. }
+        ),
+        "expected rejection result: {outcome:?}"
+    );
+    let events = journal.events().unwrap();
+    assert_eq!(count(&events, JournalEventKind::ToolCallIssued), 1);
+    assert_eq!(count(&events, JournalEventKind::ToolCallRejected), 1);
+    assert_eq!(count(&events, JournalEventKind::InvocationProposed), 0);
+    assert_eq!(count(&events, JournalEventKind::ReceiptReceived), 0);
+    let _ = gateway;
 }

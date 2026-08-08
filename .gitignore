@@ -38,3 +38,6 @@ runtime.env
 .zcode/plans/
 canary-runtime
 package-lock.json
+
+# Content-addressed release bundles (built artifacts, not source)
+release/

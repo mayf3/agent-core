@@ -99,6 +99,7 @@ fn test_config() -> KernelConfig {
         harness_artifact_root: std::env::temp_dir().join(format!("ha_root_{}", std::process::id())),
         max_tool_rounds: 12,
         feishu_coding_owner_id: None,
+        force_legacy_runtime: false,
         capability_submit_token: None,
         capability_decision_token: None,
         tool_loop_timeout_ms: 300_000,
@@ -188,6 +189,8 @@ fn run_with_budget(
         status: SessionStatus::Active,
         version: 1,
     };
+    journal.persist_snapshot_for_tests(&snapshot).unwrap();
+    journal.insert_session_for_tests(&session).unwrap();
 
     let mut blocks = vec![ContextBlock {
         kind: ContextBlockKind::UserMessage,

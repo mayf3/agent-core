@@ -87,6 +87,15 @@ pub struct KernelConfig {
     /// Default empty (no owner configured → no coding grants granted).
     /// Configured via AGENT_CORE_FEISHU_CODING_OWNER_ID.
     pub feishu_coding_owner_id: Option<String>,
+    /// EMERGENCY escape hatch: when true, every message is delivered
+    /// through the LEGACY `Runtime::deliver` instead of the standalone
+    /// agent-runtime. The new Runtime is the DEFAULT — no special switch
+    /// is needed for production to use it. This flag exists only as a
+    /// short-term emergency fallback and comparison path while the legacy
+    /// Runtime is frozen; it is NOT a routing framework and must not gain
+    /// features. Configured via AGENT_CORE_FORCE_LEGACY_RUNTIME (default
+    /// false → new Runtime).
+    pub force_legacy_runtime: bool,
     /// Maximum wall-clock time for the entire tool-call recall loop, in
     /// milliseconds. When this timeout is exceeded, the loop stops and
     /// emits a `ToolLoopWallClockExceeded` journal event. Default 300,000
@@ -180,6 +189,7 @@ impl KernelConfig {
             harness_artifact_root,
             max_tool_rounds: env_max_tool_rounds("AGENT_CORE_MAX_TOOL_ROUNDS", 12),
             feishu_coding_owner_id: env_optional_string("AGENT_CORE_FEISHU_CODING_OWNER_ID"),
+            force_legacy_runtime: env_bool("AGENT_CORE_FORCE_LEGACY_RUNTIME", false),
             tool_loop_timeout_ms: env_tool_loop_timeout_ms(
                 "AGENT_CORE_TOOL_LOOP_TIMEOUT_MS",
                 300_000,

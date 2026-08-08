@@ -198,6 +198,7 @@ mod tests {
             harness_artifact_root: std::env::temp_dir(),
             max_tool_rounds: 12,
             feishu_coding_owner_id: None,
+            force_legacy_runtime: false,
             capability_submit_token: None,
             capability_decision_token: None,
             tool_loop_timeout_ms: 300_000,

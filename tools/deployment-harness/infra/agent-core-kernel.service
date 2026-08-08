@@ -1,0 +1,27 @@
+[Unit]
+Description=Agent Core Kernel (fixed runtime)
+Documentation=file:///opt/agent-core/docs/ops/deployment-harness.md
+After=network.target
+# The Kernel is the root of the fixed runtime. It must be up and healthy
+# before the Connector (and any Harness that emits to /v1/events) starts.
+
+[Service]
+Type=exec
+ExecStartPre=%h/.agent-core/infra/preflight.sh kernel
+ExecStart=%h/.agent-core/infra/run-svc.sh kernel
+# systemd owns single-instance + crash auto-recovery. `always` (not
+# on-failure) because the Kernel exits cleanly (code 0) on SIGTERM; the
+# unit must still be restarted after any exit so an unattended process
+# death is always recovered.
+Restart=always
+RestartSec=3
+# Kernel flushes via ctrlc (SIGINT+SIGTERM) and exits gracefully.
+KillSignal=SIGTERM
+TimeoutStopSec=10
+# Logs are captured by the journal (never overwritten). The wrapper additionally
+# appends to ~/.agent-core/logs/kernel.log with start-of-run rotation.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

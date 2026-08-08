@@ -45,6 +45,12 @@ It is kept in this repository for Phase 0 delivery speed, but its long-term
 shape is an external plugin or independently developed connector that speaks the
 kernel IPC contract.
 
+## Architecture Status
+
+- **Current implementation/governance baseline (V1)**: [`AGENT_CORE_EXTERNAL_HARNESS_BOUNDARY_V1.md`](docs/architecture/AGENT_CORE_EXTERNAL_HARNESS_BOUNDARY_V1.md) plus the current code. Statements like "kernel owns run/session" above describe the current V1 implementation — not necessarily final V2.1 ownership.
+- **Architecture evolution discussion (V2.1)**: [`AGENT_CORE_V2_1_ARCHITECTURE_DISCUSSION_MAP.md`](docs/architecture/AGENT_CORE_V2_1_ARCHITECTURE_DISCUSSION_MAP.md) — still `WORKING DRAFT`; it has not replaced V1.
+- Do not treat V1 implementation facts as final long-term ownership; do not treat the V2.1 target state as already implemented. Discussion may challenge V1 ownership, but development must not treat the draft as effective architecture until V2.1 is explicitly frozen.
+
 ## Documents
 
 - [Architecture RFC](docs/architecture-rfc.md)
@@ -54,6 +60,7 @@ kernel IPC contract.
 
 Architecture drafts (under `docs/architecture/`):
 
+- [V2.1 Architecture Discussion Map](docs/architecture/AGENT_CORE_V2_1_ARCHITECTURE_DISCUSSION_MAP.md) — WORKING DRAFT: current V2.1 evolution discussion entry (not yet effective architecture)
 - [Kernel Primitive Calculus](docs/architecture/kernel-primitive-calculus.md) — draft candidate primitive model (not a refactor plan)
 - [Primitive Screening Matrix](docs/architecture/primitive-screening-matrix.md) — per-concept code evidence and classification
 - [Generic Self-Evolution V1](docs/architecture/generic-self-evolution-v1.md) — governed DevelopmentRequest, external profile Acceptance Receipts, Proposal/Approval, and historical HCR read compatibility
