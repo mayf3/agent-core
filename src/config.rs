@@ -87,6 +87,14 @@ pub struct KernelConfig {
     /// Default empty (no owner configured → no coding grants granted).
     /// Configured via AGENT_CORE_FEISHU_CODING_OWNER_ID.
     pub feishu_coding_owner_id: Option<String>,
+    /// Global engine switch for the FIRST production Canary: when ON, every
+    /// message is delivered through the standalone agent-runtime; when OFF
+    /// (the default), everyone keeps the legacy `Runtime::deliver`. This is
+    /// a move-in-progress test switch, NOT Kernel policy — no identity
+    /// selection, no percentages, no dynamic routing. Future multi-agent
+    /// routing belongs to an external Router Harness, not this switch.
+    /// Configured via AGENT_CORE_RUNTIME_CANARY_ENABLED.
+    pub runtime_canary_enabled: bool,
     /// Maximum wall-clock time for the entire tool-call recall loop, in
     /// milliseconds. When this timeout is exceeded, the loop stops and
     /// emits a `ToolLoopWallClockExceeded` journal event. Default 300,000
@@ -180,6 +188,7 @@ impl KernelConfig {
             harness_artifact_root,
             max_tool_rounds: env_max_tool_rounds("AGENT_CORE_MAX_TOOL_ROUNDS", 12),
             feishu_coding_owner_id: env_optional_string("AGENT_CORE_FEISHU_CODING_OWNER_ID"),
+            runtime_canary_enabled: env_bool("AGENT_CORE_RUNTIME_CANARY_ENABLED", false),
             tool_loop_timeout_ms: env_tool_loop_timeout_ms(
                 "AGENT_CORE_TOOL_LOOP_TIMEOUT_MS",
                 300_000,

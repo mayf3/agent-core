@@ -213,7 +213,7 @@ fn deliver_continuation_worker_event(
     Ok(())
 }
 
-fn deliver_event(
+pub(crate) fn deliver_event(
     config: KernelConfig,
     journal: &JournalStore,
     gateway: &Gateway,
@@ -241,6 +241,19 @@ fn deliver_event(
     }
     if super::calculator_router::matches(&validated) {
         super::calculator_delivery::deliver(config, journal, gateway, validated)?;
+        return Ok(());
+    }
+    // FIRST production Canary: a global engine switch
+    // (AGENT_CORE_RUNTIME_CANARY_ENABLED). When enabled, every message is
+    // delivered through the standalone agent-runtime; when disabled (the
+    // default), everyone keeps the legacy path below. On failure the canary
+    // path NEVER falls back to the legacy Runtime for the same message (it
+    // may already have executed a real tool) — the worker failure path
+    // records it and the message is done. This is a move-in-progress test
+    // switch, not Kernel policy; future multi-agent routing belongs to an
+    // external Router Harness, not this switch.
+    if config.runtime_canary_enabled {
+        super::canary_runtime_delivery::deliver_via_runtime_v0(&config, journal, gateway, validated)?;
         return Ok(());
     }
     runtime.deliver(journal, gateway, validated)?;
