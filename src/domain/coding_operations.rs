@@ -60,6 +60,7 @@ pub fn coding_operation_risk(name: &str) -> Option<crate::registry::snapshot::Ri
         }
         external::WORKSPACE_WRITE
         | external::WORKSPACE_EXEC
+        | external::WORKSPACE_TASK
         | external::TASK_SUBMIT
         | external::CAPABILITY_PROPOSE => Some(SnapshotRisk::Write),
         _ => None,
@@ -98,6 +99,10 @@ mod tests {
             Some(Risk::Write)
         );
         assert_eq!(
+            coding_operation_risk(external::WORKSPACE_TASK),
+            Some(Risk::Write)
+        );
+        assert_eq!(
             coding_operation_risk(external::TASK_SUBMIT),
             Some(Risk::Write)
         );
@@ -115,5 +120,48 @@ mod tests {
         assert!(coding_operation_risk("external.hotload_probe").is_none());
         // Completely unknown names also return None.
         assert!(coding_operation_risk("does.not.exist").is_none());
+    }
+
+    /// The model tool view (`provider_tools_for_grants`) must include
+    /// WORKSPACE_TASK exactly when the principal holds the grant, and must
+    /// exclude it (and the whole tool) for principals without it.
+    #[test]
+    fn provider_tools_view_reflects_workspace_task_grant() {
+        use crate::domain::operation::external;
+        use crate::registry::snapshot::{BindingKind, OperationSpec, RegistrySnapshot};
+        use serde_json::json;
+
+        let task_spec = OperationSpec {
+            name: external::WORKSPACE_TASK.into(),
+            risk: Risk::Write,
+            description: "workspace coding task".into(),
+            parameters: json!({"type": "object"}),
+            idempotent: false,
+            binding_kind: BindingKind::External,
+            binding_key: format!("binding.{}", external::WORKSPACE_TASK),
+        };
+        let snapshot = RegistrySnapshot {
+            snapshot_id: "snap_view".into(),
+            created_at: chrono::Utc::now(),
+            operations: vec![task_spec],
+            hook_bindings: vec![],
+        };
+
+        // Owner-style principal WITH the grant sees the tool.
+        let granted = vec![external::WORKSPACE_TASK.to_string()];
+        let tools = snapshot.provider_tools_for_grants(&granted);
+        assert_eq!(tools.len(), 1, "granted principal must see the tool");
+        assert_eq!(
+            tools[0].pointer("/function/name").and_then(|v| v.as_str()),
+            Some(external::WORKSPACE_TASK),
+            "tool view must name external.coding_workspace_task"
+        );
+
+        // A principal WITHOUT the grant does not see it.
+        let ungranted: Vec<String> = vec![];
+        assert!(
+            snapshot.provider_tools_for_grants(&ungranted).is_empty(),
+            "ungranted principal must not see the tool"
+        );
     }
 }
