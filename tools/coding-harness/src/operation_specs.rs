@@ -213,7 +213,7 @@ pub fn all_specs(workspace_ids: &[String]) -> Vec<OperationSpec> {
                         "description": "可选。模型标识，格式为 provider/model。缺省使用后端默认模型。",
                     }
                 },
-                "required": ["workspace_id", "objective"],
+                "required": ["workspace_id", "backend", "objective"],
                 "additionalProperties": false
             }),
             output_schema: json!({
