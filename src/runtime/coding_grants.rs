@@ -164,6 +164,7 @@ mod tests {
                 external_spec(external::WORKSPACE_READ, Risk::ReadOnly),
                 external_spec(external::WORKSPACE_WRITE, Risk::Write),
                 external_spec(external::WORKSPACE_EXEC, Risk::Write),
+                external_spec(external::WORKSPACE_TASK, Risk::Write),
                 external_spec(external::TASK_SUBMIT, Risk::Write),
                 external_spec(external::TASK_STATUS, Risk::ReadOnly),
                 external_spec(external::CAPABILITY_PROPOSE, Risk::Write),
@@ -179,7 +180,7 @@ mod tests {
             .iter()
             .map(|g| g.operation.as_str())
             .collect();
-        assert_eq!(granted_ops.len(), 6, "all active development ops granted");
+        assert_eq!(granted_ops.len(), 7, "all active development ops granted");
         for op in external::OWNER_DEVELOPMENT_OPERATIONS {
             assert!(granted_ops.contains(op), "{op} not granted");
         }

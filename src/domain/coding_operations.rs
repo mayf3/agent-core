@@ -10,6 +10,7 @@ pub mod external {
     pub const WORKSPACE_READ: &str = "external.coding_workspace_read";
     pub const WORKSPACE_WRITE: &str = "external.coding_workspace_write";
     pub const WORKSPACE_EXEC: &str = "external.coding_workspace_exec";
+    pub const WORKSPACE_TASK: &str = "external.coding_workspace_task";
     pub const TASK_SUBMIT: &str = "external.coding_task_submit";
     pub const TASK_STATUS: &str = "external.coding_task_status";
     pub const CAPABILITY_PROPOSE: &str = "external.coding_capability_propose";
@@ -20,6 +21,7 @@ pub mod external {
         WORKSPACE_READ,
         WORKSPACE_WRITE,
         WORKSPACE_EXEC,
+        WORKSPACE_TASK,
         TASK_STATUS,
         CAPABILITY_PROPOSE,
     ];
@@ -27,11 +29,15 @@ pub mod external {
     /// The active development surface granted to the authorized owner in a
     /// private chat. Proposal construction is receipt-driven through
     /// TASK_SUBMIT; the historical direct proposal tool is not granted.
+    /// WORKSPACE_TASK is the high-level workspace-scoped Coding Agent
+    /// operation (opencode backend), distinct from the DevelopmentRequest
+    /// pipeline.
     pub const OWNER_DEVELOPMENT_OPERATIONS: &[&str] = &[
         WORKSPACE_LIST,
         WORKSPACE_READ,
         WORKSPACE_WRITE,
         WORKSPACE_EXEC,
+        WORKSPACE_TASK,
         TASK_SUBMIT,
         TASK_STATUS,
     ];

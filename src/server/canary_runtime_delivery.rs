@@ -237,6 +237,19 @@ fn to_runtime_tools(provider_tools: &[Value]) -> Vec<Tool> {
         .collect()
 }
 
+/// Minimal generic coding behaviour guidance injected as the runtime
+/// system block. Deliberately tiny — not a prompt framework, no Route
+/// Harness specifics.
+const CODING_INSTRUCTION: &str = "\
+# Coding 工作说明
+- 完整代码开发任务优先使用高层 Coding Workspace Task（external.coding_workspace_task）；
+- read / exec 用于调查和验证，不要逐文件无休止探索；
+- 搜索优先于逐个文件读取；
+- 同类不可恢复错误重复出现时停止；
+- 开发结果必须检查 git diff；
+- 运行相关测试；
+- 未完成时明确报告 blocker，不机械重试。";
+
 /// Thin adapter wrapping the production LLM as `agent_runtime::Model`.
 ///
 /// Only the minimal conversions: turn -> LlmInput (no full ContextAssembler,
@@ -281,7 +294,11 @@ impl Model for RuntimeV0Model {
             })
             .collect::<Result<_, String>>()?;
         let input = LlmInput {
-            blocks: vec![], // minimal single-round context for the first Canary
+            blocks: vec![crate::domain::ContextBlock {
+                kind: crate::domain::ContextBlockKind::RootSystem,
+                content: CODING_INSTRUCTION.to_string(),
+                source_ref: None,
+            }],
             user_text: turn.user_text.clone(),
             granted_operations: vec![],
             provider_tools: self.tools_json.clone(),

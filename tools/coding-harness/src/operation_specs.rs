@@ -188,6 +188,46 @@ pub fn all_specs(workspace_ids: &[String]) -> Vec<OperationSpec> {
             }),
         },
         OperationSpec {
+            operation_name: "external.coding_workspace_task",
+            description: "在指定 Git workspace 内，让 Coding Agent（opencode 后端）自主完成一个软件开发目标。提交后使用 external.coding_task_status 查询进度和结果。这是长时间运行的任务，不会立即返回完成状态。区别于 external.coding_task_submit（正式 DevelopmentRequest / 组件生成流水线）：本操作是 workspace 开发语义，不经过组件目录、生成器或验收套件选择。",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "workspace_id": ws,
+                    "backend": {
+                        "type": "string",
+                        "enum": ["opencode"],
+                        "description": "任务后端。固定为 opencode。",
+                    },
+                    "objective": {
+                        "type": "string",
+                        "description": "开发目标的详细说明。"
+                    },
+                    "acceptance_criteria": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "验收标准列表。任务完成后将逐项检查。",
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "可选。模型标识，格式为 provider/model。缺省使用后端默认模型。",
+                    }
+                },
+                "required": ["workspace_id", "objective"],
+                "additionalProperties": false
+            }),
+            output_schema: json!({
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string"},
+                    "status": {"type": "string"},
+                    "backend": {"type": "string"},
+                    "created_at": {"type": "integer"}
+                },
+                "required": ["task_id", "status", "backend", "created_at"],
+            }),
+        },
+        OperationSpec {
             operation_name: "external.coding_task_submit",
             description: "提交一个编码任务到后台执行（opencode 后端）。提交后使用 external.coding_task_status 查询进度和结果。这是长时间运行的任务，不会立即返回完成状态。",
             input_schema: json!({
