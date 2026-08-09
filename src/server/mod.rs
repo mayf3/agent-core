@@ -10,7 +10,6 @@ mod capability_host_client;
 mod capability_http;
 pub mod capability_routes;
 mod coding_harness_client;
-pub mod coding_router;
 pub mod coding_task_submit;
 mod component_control;
 mod delivery;
@@ -671,8 +670,5 @@ mod capability_routes_tests;
 #[cfg(test)]
 #[path = "harness_endpoint_tests.rs"]
 mod harness_endpoint_tests;
-#[cfg(test)]
-#[path = "r3a_phase_a_e2e.rs"]
-mod r3a_phase_a_e2e;
 #[cfg(test)]
 mod schema_upgrade_tests;

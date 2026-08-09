@@ -181,13 +181,11 @@ fn dispatch(config: &CodingConfig, operation: &str, args: &Value) -> Value {
     }
 
     let is_task_op = operation == "external.coding_task_status";
-    // Workspace-scoped coding tasks (opencode backend): both the legacy
-    // task_submit alias and the dedicated high-level operation share the
-    // same task queue. external.coding_workspace_task is the workspace
-    // development semantic; coding_task_submit keeps its DevelopmentRequest
-    // path when `development_request` is present.
-    let is_workspace_task =
-        operation == "external.coding_task_submit" || operation == "external.coding_workspace_task";
+    // Workspace-scoped coding tasks (opencode backend) use ONLY the
+    // dedicated high-level operation. external.coding_task_submit is
+    // exclusively the DevelopmentRequest pipeline (handled above when
+    // `development_request` is present) — no workspace alias.
+    let is_workspace_task = operation == "external.coding_workspace_task";
     // workspace_task must REALLY run opencode — never the fake backend.
     // Validated before any workspace resolution so it cannot fake-succeed.
     if operation == "external.coding_workspace_task" {
@@ -265,21 +263,6 @@ fn dispatch(config: &CodingConfig, operation: &str, args: &Value) -> Value {
             let model = args.get("model").and_then(Value::as_str);
             let wr = root.as_ref().map(|r| r.to_string_lossy().to_string());
             tasks::submit_task(ws, objective, &acceptance, "opencode", wr.as_deref(), model)
-        }
-        "external.coding_task_submit" => {
-            let ws = ws_id.as_ref().unwrap();
-            let objective = args.get("objective").and_then(Value::as_str).unwrap_or("");
-            let acceptance = args
-                .get("acceptance_criteria")
-                .cloned()
-                .unwrap_or(Value::Null);
-            let backend = args
-                .get("backend")
-                .and_then(Value::as_str)
-                .unwrap_or("fake");
-            let model = args.get("model").and_then(Value::as_str);
-            let wr = root.as_ref().map(|r| r.to_string_lossy().to_string());
-            tasks::submit_task(ws, objective, &acceptance, backend, wr.as_deref(), model)
         }
         "external.coding_task_status" => {
             let task_id = args.get("task_id").and_then(Value::as_str).unwrap_or("");

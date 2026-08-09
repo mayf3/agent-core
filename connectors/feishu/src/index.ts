@@ -15,12 +15,6 @@ import {
 } from "./approval.js";
 import type { ApprovalConfig } from "./approval.js";
 import { handleProposalCardAction } from "./approval.js";
-import {
-  parseHarnessChangeCommand,
-  isHarnessChangeAuthorised,
-  isUnsupportedCommand,
-  postHarnessChangeRequest,
-} from "./harness-command.js";
 
 const config = loadConfig();
 const baseConfig = {
@@ -88,68 +82,6 @@ async function tryHandleApproval(
   return true;
 }
 
-/**
- * Try to handle a message as a HarnessChangeRequest command BEFORE sending
- * it to the LLM. Returns `true` if handled (reply sent), `false` otherwise.
- */
-async function tryHandleHarnessChangeRequest(
-  text: string,
-  chatType: string,
-  senderOpenId: string,
-  messageId: string,
-  rawEvent: unknown,
-  transport: FeishuTransport,
-  reactions: any,
-): Promise<boolean> {
-  // First check for explicitly unsupported commands (修改/删除 etc).
-  if (isUnsupportedCommand(text)) {
-    await sendTextReply(
-      transport,
-      messageId,
-      "不支持的 Harness 操作。v0 仅支持「创建 Harness <id>：<requirement>」。",
-    );
-    return true;
-  }
-
-  // Try to parse as HCR command.
-  const cmd = parseHarnessChangeCommand(text);
-  if (!cmd) {
-    return false; // Not an HCR command, let LLM handle it.
-  }
-
-  console.log(`HCR command detected: ${cmd.harnessId}`);
-
-  // Pre-filter owner/p2p (convenience, NOT a security boundary).
-  const authError = isHarnessChangeAuthorised(
-    { kernelBaseUrl: config.kernelDecisionApiUrl, ipcToken: config.ipcToken, ownerOpenId: config.feishuOwnerOpenId },
-    chatType,
-    senderOpenId,
-  );
-  if (authError) {
-    await reactions?.markFailed(messageId);
-    await sendTextReply(transport, messageId, authError);
-    return true;
-  }
-
-  // Call the Kernel HCR endpoint. The original Feishu message_id is passed
-  // as source_message_id for idempotent dedup.
-  const result = await postHarnessChangeRequest(
-    { kernelBaseUrl: config.kernelDecisionApiUrl, ipcToken: config.ipcToken, ownerOpenId: config.feishuOwnerOpenId },
-    cmd.harnessId,
-    cmd.requirement,
-    messageId,
-    rawEvent,
-  );
-
-  if (result.ok) {
-    await reactions?.markSucceeded(messageId);
-  } else {
-    await reactions?.markFailed(messageId);
-  }
-  await sendTextReply(transport, messageId, result.replyText);
-  return true;
-}
-
 async function sendTextReply(transport: FeishuTransport, messageId: string, text: string) {
   try {
     await transport.replyToMessage(messageId, "text", { text });
@@ -186,26 +118,6 @@ const eventDispatcher = new Lark.EventDispatcher({}).register({
       });
       if (handled) {
         return; // Approval command handled, skip LLM.
-      }
-    }
-
-    // 1.5. Try HarnessChangeRequest interception (before LLM).
-    if (payload.message_type === "text" && payload.text) {
-      const hcrHandled = await tryHandleHarnessChangeRequest(
-        payload.text,
-        payload.chat_type,
-        payload.sender_open_id,
-        payload.message_id,
-        data,
-        transport,
-        reactions,
-      ).catch((error) => {
-        const message = error instanceof Error ? error.message : String(error);
-        console.error(`HCR handler error: ${message.slice(0, 200)}`);
-        return false;
-      });
-      if (hcrHandled) {
-        return; // HCR command handled, skip LLM.
       }
     }
 
