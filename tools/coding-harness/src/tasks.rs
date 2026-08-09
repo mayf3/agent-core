@@ -250,9 +250,43 @@ fn truncate_str(s: &str, max: usize) -> String {
         s.to_string()
     } else {
         let mut r: String = s.chars().take(max).collect();
-        r.truncate(r.len().saturating_sub(3));
+        // Cut back to a char boundary before truncate() so multi-byte
+        // (e.g. CJK) output never panics on `is_char_boundary`.
+        let mut end = r.len().saturating_sub(3);
+        while !r.is_char_boundary(end) {
+            end -= 1;
+        }
+        r.truncate(end);
         r.push_str("...");
         r
+    }
+}
+
+#[cfg(test)]
+mod truncate_tests {
+    use super::truncate_str;
+
+    #[test]
+    fn truncate_short_string_untouched() {
+        assert_eq!(truncate_str("hello", 100), "hello");
+    }
+
+    #[test]
+    fn truncate_long_ascii_appends_ellipsis() {
+        let out = truncate_str(&"a".repeat(5000), 100);
+        assert!(out.ends_with("..."));
+        assert!(out.len() <= 100);
+    }
+
+    /// Multi-byte CJK output must never panic on truncation and must keep
+    /// valid UTF-8 (the regression that panicked the task thread).
+    #[test]
+    fn truncate_cjk_never_panics_and_stays_valid_utf8() {
+        let long = "中文".repeat(3000); // 18_000 bytes
+        let out = truncate_str(&long, 100);
+        assert!(out.ends_with("..."));
+        assert!(out.is_char_boundary(out.len()));
+        let _ = std::str::from_utf8(out.as_bytes()).expect("must stay valid UTF-8");
     }
 }
 

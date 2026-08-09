@@ -267,6 +267,7 @@ fn coding_manifest_llm_input_receives_complete_tool_definitions() {
         feishu_allowed_open_ids: vec![],
         feishu_allowed_chat_ids: vec![],
         feishu_coding_owner_id: Some("owner".into()),
+        force_legacy_runtime: false,
         feishu_require_group_mention: true,
         openai_base_url: String::new(),
         openai_api_key: String::new(),

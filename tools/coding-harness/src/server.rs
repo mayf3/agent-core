@@ -116,13 +116,23 @@ fn handle(mut stream: TcpStream, config: &CodingConfig) {
     let control_token = std::env::var("CODING_HARNESS_CONTROL_TOKEN")
         .ok()
         .filter(|value| !value.trim().is_empty());
-    if op == "external.coding_task_submit"
-        || op == "external.coding_workspace_task"
-    {
-        if control_token.is_none() || control_token.as_deref() != bearer.as_deref() {
-            let _ = respond_error(&mut stream, 401, "unauthorized");
-            return;
-        }
+    let execution_token = std::env::var("AGENT_CORE_CAPABILITY_HOST_EXECUTION_TOKEN")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    // Two distinct keys, kept separate on purpose:
+    //   - external.coding_task_submit (control surface)      -> CODING_HARNESS_CONTROL_TOKEN
+    //   - external.coding_workspace_task (ordinary execution) -> AGENT_CORE_CAPABILITY_HOST_EXECUTION_TOKEN
+    // The Kernel's generic external dispatch sends the execution token,
+    // so workspace_task authenticates with it. Fail-closed: unset or
+    // mismatched tokens are rejected.
+    if !matches_expected_token(
+        op,
+        execution_token.as_deref(),
+        control_token.as_deref(),
+        bearer.as_deref(),
+    ) {
+        let _ = respond_error(&mut stream, 401, "unauthorized");
+        return;
     }
     let args = parsed.get("arguments").cloned().unwrap_or(json!({}));
 
@@ -178,6 +188,15 @@ fn dispatch(config: &CodingConfig, operation: &str, args: &Value) -> Value {
     // path when `development_request` is present.
     let is_workspace_task =
         operation == "external.coding_task_submit" || operation == "external.coding_workspace_task";
+    // workspace_task must REALLY run opencode — never the fake backend.
+    // Validated before any workspace resolution so it cannot fake-succeed.
+    if operation == "external.coding_workspace_task" {
+        if let Some(backend) = args.get("backend").and_then(Value::as_str) {
+            if backend != "opencode" {
+                return err_value("backend_must_be_opencode");
+            }
+        }
+    }
     let available_ids: Vec<String> = config.workspaces.keys().cloned().collect();
     let ws_id = if is_task_op {
         None
@@ -235,7 +254,19 @@ fn dispatch(config: &CodingConfig, operation: &str, args: &Value) -> Value {
             let perm = config.perm_for(ws_id.as_ref().unwrap()).unwrap();
             workspace::handle_exec(root.as_ref().unwrap(), args, perm)
         }
-        "external.coding_workspace_task" | "external.coding_task_submit" => {
+        "external.coding_workspace_task" => {
+            // Missing backend defaults to opencode (validated above).
+            let ws = ws_id.as_ref().unwrap();
+            let objective = args.get("objective").and_then(Value::as_str).unwrap_or("");
+            let acceptance = args
+                .get("acceptance_criteria")
+                .cloned()
+                .unwrap_or(Value::Null);
+            let model = args.get("model").and_then(Value::as_str);
+            let wr = root.as_ref().map(|r| r.to_string_lossy().to_string());
+            tasks::submit_task(ws, objective, &acceptance, "opencode", wr.as_deref(), model)
+        }
+        "external.coding_task_submit" => {
             let ws = ws_id.as_ref().unwrap();
             let objective = args.get("objective").and_then(Value::as_str).unwrap_or("");
             let acceptance = args
@@ -324,4 +355,125 @@ fn structured_err(code: &str, available_ids: &[String], missing: &[&str]) -> Val
         "retryable": true,
         "details": details,
     })
+}
+
+/// Whether `bearer` satisfies the token required for `op`. Fail-closed:
+/// an unset expected token or a missing/mismatched bearer is rejected.
+/// Only task operations authenticate; everything else passes through.
+fn matches_expected_token(
+    op: &str,
+    execution_token: Option<&str>,
+    control_token: Option<&str>,
+    bearer: Option<&str>,
+) -> bool {
+    let expected = match op {
+        "external.coding_workspace_task" => execution_token,
+        "external.coding_task_submit" => control_token,
+        _ => return true,
+    };
+    match (expected, bearer) {
+        (Some(e), Some(b)) => e == b,
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const EXEC: &str = "exec-token";
+    const CONTROL: &str = "control-token";
+
+    #[test]
+    fn workspace_task_authenticates_with_execution_token() {
+        assert!(matches_expected_token(
+            "external.coding_workspace_task",
+            Some(EXEC),
+            Some(CONTROL),
+            Some(EXEC)
+        ));
+        // wrong token (control) is rejected
+        assert!(!matches_expected_token(
+            "external.coding_workspace_task",
+            Some(EXEC),
+            Some(CONTROL),
+            Some(CONTROL)
+        ));
+        // missing execution token fails closed
+        assert!(!matches_expected_token(
+            "external.coding_workspace_task",
+            None,
+            Some(CONTROL),
+            Some(EXEC)
+        ));
+        // no bearer fails closed
+        assert!(!matches_expected_token(
+            "external.coding_workspace_task",
+            Some(EXEC),
+            Some(CONTROL),
+            None
+        ));
+    }
+
+    #[test]
+    fn task_submit_authenticates_with_control_token_only() {
+        assert!(matches_expected_token(
+            "external.coding_task_submit",
+            Some(EXEC),
+            Some(CONTROL),
+            Some(CONTROL)
+        ));
+        // execution token must NOT satisfy task_submit
+        assert!(!matches_expected_token(
+            "external.coding_task_submit",
+            Some(EXEC),
+            Some(CONTROL),
+            Some(EXEC)
+        ));
+        assert!(!matches_expected_token(
+            "external.coding_task_submit",
+            Some(EXEC),
+            None,
+            Some(EXEC)
+        ));
+    }
+
+    #[test]
+    fn other_operations_do_not_authenticate() {
+        assert!(matches_expected_token(
+            "external.coding_workspace_exec",
+            Some(EXEC),
+            Some(CONTROL),
+            None
+        ));
+    }
+
+    /// workspace_task must never fake-succeed: an explicit non-opencode
+    /// backend is rejected, and a missing backend resolves to opencode.
+    #[test]
+    fn workspace_task_never_uses_fake_backend() {
+        use crate::config::CodingConfig;
+        use serde_json::json;
+
+        std::env::set_var(
+            "CODING_CONFIG",
+            r#"{"workspaces":{"scratch":{"root":"/tmp/ws","read":true,"write":true,"exec":true,"opencode":true,"network":true,"shell":false}}}"#,
+        );
+        let config = CodingConfig::from_env();
+        std::env::remove_var("CODING_CONFIG");
+        // explicit fake backend -> rejected
+        let bad = dispatch(
+            &config,
+            "external.coding_workspace_task",
+            &json!({"workspace_id": "scratch", "backend": "fake", "objective": "x"}),
+        );
+        assert_eq!(bad["error_code"], "backend_must_be_opencode", "got: {bad}");
+        // missing backend -> real opencode task is queued
+        let ok = dispatch(
+            &config,
+            "external.coding_workspace_task",
+            &json!({"workspace_id": "scratch", "objective": "x"}),
+        );
+        assert_eq!(ok["result"]["backend"], "opencode", "got: {ok}");
+    }
 }
