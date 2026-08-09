@@ -117,10 +117,12 @@ fn handle(mut stream: TcpStream, config: &CodingConfig) {
         .ok()
         .filter(|value| !value.trim().is_empty());
     if op == "external.coding_task_submit"
-        && (control_token.is_none() || control_token.as_deref() != bearer.as_deref())
+        || op == "external.coding_workspace_task"
     {
-        let _ = respond_error(&mut stream, 401, "unauthorized");
-        return;
+        if control_token.is_none() || control_token.as_deref() != bearer.as_deref() {
+            let _ = respond_error(&mut stream, 401, "unauthorized");
+            return;
+        }
     }
     let args = parsed.get("arguments").cloned().unwrap_or(json!({}));
 
@@ -169,6 +171,13 @@ fn dispatch(config: &CodingConfig, operation: &str, args: &Value) -> Value {
     }
 
     let is_task_op = operation == "external.coding_task_status";
+    // Workspace-scoped coding tasks (opencode backend): both the legacy
+    // task_submit alias and the dedicated high-level operation share the
+    // same task queue. external.coding_workspace_task is the workspace
+    // development semantic; coding_task_submit keeps its DevelopmentRequest
+    // path when `development_request` is present.
+    let is_workspace_task =
+        operation == "external.coding_task_submit" || operation == "external.coding_workspace_task";
     let available_ids: Vec<String> = config.workspaces.keys().cloned().collect();
     let ws_id = if is_task_op {
         None
@@ -188,13 +197,12 @@ fn dispatch(config: &CodingConfig, operation: &str, args: &Value) -> Value {
         match config.root_for(id) {
             Some(r) => {
                 let perm = config.perm_for(id).unwrap();
-                let needs_exec = operation == "external.coding_workspace_exec"
-                    || operation == "external.coding_task_submit";
+                let needs_exec = operation == "external.coding_workspace_exec" || is_workspace_task;
                 let needs_write = operation == "external.coding_workspace_write";
                 if needs_exec && !perm.exec {
                     return err_value("exec_not_permitted");
                 }
-                if operation == "external.coding_task_submit" {
+                if is_workspace_task {
                     if let Some(backend) = args.get("backend").and_then(Value::as_str) {
                         match backend {
                             "opencode" if !perm.opencode => {
@@ -227,7 +235,7 @@ fn dispatch(config: &CodingConfig, operation: &str, args: &Value) -> Value {
             let perm = config.perm_for(ws_id.as_ref().unwrap()).unwrap();
             workspace::handle_exec(root.as_ref().unwrap(), args, perm)
         }
-        "external.coding_task_submit" => {
+        "external.coding_workspace_task" | "external.coding_task_submit" => {
             let ws = ws_id.as_ref().unwrap();
             let objective = args.get("objective").and_then(Value::as_str).unwrap_or("");
             let acceptance = args

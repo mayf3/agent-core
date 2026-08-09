@@ -376,8 +376,8 @@ fn owner_private_seven_coding_grants_remain_available() {
 
     assert_eq!(
         grants.len(),
-        6,
-        "all 6 coding ops granted to owner (TASK_SUBMIT excluded)"
+        7,
+        "all 7 coding ops granted to owner (CAPABILITY_PROPOSE excluded)"
     );
     for op in external::CODING_OPERATIONS {
         assert!(
