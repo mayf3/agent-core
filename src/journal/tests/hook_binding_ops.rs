@@ -285,3 +285,43 @@ fn active_snapshot_persisted_and_restored_after_reopen() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Content-addressed reuse at the CREATE layer: creating a snapshot with
+/// IDENTICAL operations + hook bindings reuses the canonical snapshot
+/// (same id, same created_at) instead of generating a duplicate. Verified
+/// with a `context.prepare.v0` binding to prove the mechanism is
+/// contract-generic. This is the底层 property that makes `bind_hook`'s
+/// identical-rebind no-op and hot-update rollback cheap.
+#[test]
+fn create_snapshot_with_identical_bindings_reuses_existing_snapshot() {
+    let journal = JournalStore::in_memory().unwrap();
+    let specs = crate::registry::store::builtin_specs();
+    let bindings = vec![
+        HookBinding::builtin_budget(),
+        HookBinding {
+            contract: "context.prepare.v0".to_string(),
+            hook_id: "external:context-provider-alpha".to_string(),
+            hook_version: "v0".to_string(),
+            binding_kind: BindingKind::External,
+            binding_key: "external.context_provider_alpha".to_string(),
+            provider_id: "context-provider-alpha".to_string(),
+            endpoint: "http://127.0.0.1:17400/context.prepare.v0".to_string(),
+        },
+    ];
+
+    let first = journal
+        .create_registry_snapshot_with_hook_bindings(specs.clone(), bindings.clone())
+        .unwrap();
+    let second = journal
+        .create_registry_snapshot_with_hook_bindings(specs.clone(), bindings.clone())
+        .unwrap();
+
+    assert_eq!(
+        second.snapshot_id, first.snapshot_id,
+        "identical content must reuse the canonical snapshot, not create a duplicate"
+    );
+    assert_eq!(
+        second.created_at, first.created_at,
+        "the existing snapshot row is reused, not recreated"
+    );
+}
