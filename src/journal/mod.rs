@@ -13,6 +13,7 @@ pub mod grant_ops;
 pub mod harness_activation_ops;
 pub mod harness_ops;
 pub(crate) mod hash_chain;
+pub mod hook_binding_ops;
 mod legacy_capability_proposal_hcr;
 mod legacy_hcr_read;
 mod model_invocation;
@@ -52,6 +53,10 @@ mod grant_ops_tests;
 #[cfg(test)]
 #[path = "tests/grant_ops_lifecycle.rs"]
 mod grant_ops_lifecycle_tests;
+
+#[cfg(test)]
+#[path = "tests/hook_binding_ops.rs"]
+mod hook_binding_ops_tests;
 
 pub(crate) use coding_task_submissions::CodingTaskSubmissionClaim;
 pub use event_observe::{

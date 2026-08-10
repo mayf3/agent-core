@@ -17,6 +17,7 @@ mod deployment_harness_client;
 mod dispatcher_metrics;
 mod event_observe_http;
 pub mod harness_routes;
+pub mod hook_binding_routes;
 mod legacy_hcr_read;
 mod service_decision;
 use anyhow::{bail, Result};
@@ -271,6 +272,18 @@ fn handle_connection(
         harness_routes::handle_harness_result(
             stream,
             harness_routes::handle_disable(&gateway, &journal, &body),
+        )
+    } else if path == "/v1/hook-bindings/bind" {
+        let body: Value = serde_json::from_slice(&request.body)?;
+        hook_binding_routes::handle_hook_binding_result(
+            stream,
+            hook_binding_routes::handle_bind(&gateway, &journal, &body),
+        )
+    } else if path == "/v1/hook-bindings/unbind" {
+        let body: Value = serde_json::from_slice(&request.body)?;
+        hook_binding_routes::handle_hook_binding_result(
+            stream,
+            hook_binding_routes::handle_unbind(&gateway, &journal, &body),
         )
     } else if path == "/v1/harness-change-requests" {
         write_json(
@@ -670,5 +683,8 @@ mod capability_routes_tests;
 #[cfg(test)]
 #[path = "harness_endpoint_tests.rs"]
 mod harness_endpoint_tests;
+#[cfg(test)]
+#[path = "hook_binding_routes_tests.rs"]
+mod hook_binding_routes_tests;
 #[cfg(test)]
 mod schema_upgrade_tests;
