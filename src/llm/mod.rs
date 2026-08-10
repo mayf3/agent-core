@@ -388,8 +388,15 @@ fn materialized_request_body(endpoint: &ModelEndpoint, input: &LlmInput) -> (Val
     };
     let mut messages: Vec<Value> = vec![
         json!({"role": "system", "content": serialize_system_context(&input.blocks)}),
-        json!({"role": "user", "content": input.user_text}),
     ];
+    // Non-system context (provider material, history, catalogs) rides a
+    // plain user-role message BEFORE the actual user text — it must never
+    // receive system authority. Empty when the input has no such blocks.
+    let non_system_context = serialize_non_system_context(&input.blocks);
+    if !non_system_context.is_empty() {
+        messages.push(json!({"role": "user", "content": non_system_context}));
+    }
+    messages.push(json!({"role": "user", "content": input.user_text}));
     for follow_up in &input.follow_ups {
         let turn = &follow_up.provider_turn;
         let mut assistant = serde_json::Map::new();
@@ -557,16 +564,54 @@ fn mark_fallback(mut output: LlmOutput, primary_model: &str, primary_error: &str
     output
 }
 
-fn serialize_system_context(blocks: &[ContextBlock]) -> String {
+/// The wire role of each block kind.
+///
+/// System authority: Kernel-owned instructions/contracts and provider-added
+/// `SupplementalSystem`. Non-system context: provider material, history,
+/// and catalogs — rendered into a plain user-role message, never promoted
+/// to system authority. `UserMessage` / `ToolResult` ride dedicated wire
+/// channels (`user_text` / tool follow-ups) and never appear in these
+/// context renderers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContextWireRole {
+    SystemAuthority,
+    NonSystemContext,
+    DedicatedChannel,
+}
+
+fn context_wire_role(kind: &crate::domain::ContextBlockKind) -> ContextWireRole {
+    match kind {
+        crate::domain::ContextBlockKind::RootSystem
+        | crate::domain::ContextBlockKind::RuntimeContract
+        | crate::domain::ContextBlockKind::AgentProfile
+        | crate::domain::ContextBlockKind::ActiveSkill
+        | crate::domain::ContextBlockKind::SupplementalSystem => ContextWireRole::SystemAuthority,
+        crate::domain::ContextBlockKind::SupplementalContext
+        | crate::domain::ContextBlockKind::RecentMessages
+        | crate::domain::ContextBlockKind::SkillCatalog
+        | crate::domain::ContextBlockKind::ToolCatalog => ContextWireRole::NonSystemContext,
+        crate::domain::ContextBlockKind::UserMessage
+        | crate::domain::ContextBlockKind::ToolResult => ContextWireRole::DedicatedChannel,
+    }
+}
+
+/// System-authority context — the system message body. pub(crate) so the
+/// host-side test fakes mirror the production wire instead of duplicating
+/// the classification.
+pub(crate) fn serialize_system_context(blocks: &[ContextBlock]) -> String {
     blocks
         .iter()
-        .filter(|block| {
-            !matches!(
-                block.kind,
-                crate::domain::ContextBlockKind::UserMessage
-                    | crate::domain::ContextBlockKind::ToolResult
-            )
-        })
+        .filter(|block| context_wire_role(&block.kind) == ContextWireRole::SystemAuthority)
+        .map(|block| format!("## {:?}\n{}", block.kind, block.content))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// Non-system context material — one plain user-role message, no authority.
+fn serialize_non_system_context(blocks: &[ContextBlock]) -> String {
+    blocks
+        .iter()
+        .filter(|block| context_wire_role(&block.kind) == ContextWireRole::NonSystemContext)
         .map(|block| format!("## {:?}\n{}", block.kind, block.content))
         .collect::<Vec<_>>()
         .join("\n\n")

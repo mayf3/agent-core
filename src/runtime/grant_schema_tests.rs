@@ -465,15 +465,20 @@ fn granted_time_now_completes_real_http_tool_loop() {
         !system2.contains("tool: system.status"),
         "ToolResult must NOT be in system context"
     );
-    let tool_msg = requests[1]
-        .pointer("/messages/3/content")
-        .and_then(Value::as_str)
+    let tool_msg = requests[1]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["role"] == "tool")
+        .and_then(|m| m["content"].as_str())
         .unwrap();
     assert!(
         tool_msg.contains("status: succeeded"),
         "ToolResult must be in role=tool message"
     );
-    // §5: round-2 tools set == round-1; ToolCatalog consistent across rounds.
+    // §5: round-2 tools set == round-1; ToolCatalog consistent across rounds
+    // (the catalog rides the non-system context user message, not the system
+    // message).
     let names2: Vec<&str> = requests[1]["tools"]
         .as_array()
         .unwrap()
@@ -481,8 +486,20 @@ fn granted_time_now_completes_real_http_tool_loop() {
         .filter_map(|t| t.pointer("/function/name").and_then(Value::as_str))
         .collect();
     assert_eq!(names2, names, "round-2 tools set must equal round-1");
-    let cat1 = requests[0]["messages"][0]["content"].as_str().unwrap_or("");
-    let cat2 = requests[1]["messages"][0]["content"].as_str().unwrap_or("");
+    let cat1 = requests[0]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["role"] == "user")
+        .and_then(|m| m["content"].as_str())
+        .unwrap_or("");
+    let cat2 = requests[1]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["role"] == "user")
+        .and_then(|m| m["content"].as_str())
+        .unwrap_or("");
     assert_eq!(
         cat1.contains("system.status"),
         cat2.contains("system.status"),

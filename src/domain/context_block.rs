@@ -23,4 +23,12 @@ pub enum ContextBlockKind {
     ActiveSkill,
     RecentMessages,
     UserMessage,
+    /// Provider-owned system instruction added by a ContextPrepareV0
+    /// provider (e.g. a future AGENTS.md instruction). Deliberately NOT the
+    /// agent profile and carries no AGENTS.md product semantics. Receives
+    /// system authority in the model wire.
+    SupplementalSystem,
+    /// Provider-owned non-system context material — memory / retrieval /
+    /// summary / reference. Never receives system authority.
+    SupplementalContext,
 }
