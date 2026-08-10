@@ -218,6 +218,49 @@ impl Gateway {
             decision_id: format!("decision_{}", Uuid::new_v4().simple()),
         })
     }
+    /// Approve an online HookBinding bind/unbind requested by the operator
+    /// via authenticated IPC. Narrow, authenticated operation — no new
+    /// permission system, no human approval UI.
+    pub fn approve_hook_binding_change(
+        &self,
+        intent: crate::domain::HookBindingChangeIntent,
+    ) -> Result<crate::domain::ApprovedHookBindingChange> {
+        use crate::domain::HookBindingChangeAction;
+        // Only ipc_operator is allowed.
+        if intent.requested_by != "ipc_operator" {
+            bail!("unauthorized: only ipc_operator may request hook binding changes");
+        }
+        if intent.contract.trim().is_empty() {
+            bail!("invalid_hook_binding_change: contract required");
+        }
+        match intent.action {
+            HookBindingChangeAction::Bind => {
+                let binding = intent.binding.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("invalid_hook_binding_change: binding required for bind")
+                })?;
+                if binding.contract != intent.contract {
+                    bail!("invalid_hook_binding_change: binding contract mismatch");
+                }
+                if binding.binding_kind == crate::registry::snapshot::BindingKind::External {
+                    if binding.provider_id.trim().is_empty() {
+                        bail!("invalid_hook_binding_change: external binding requires provider_id");
+                    }
+                    if binding.endpoint.trim().is_empty() {
+                        bail!("invalid_hook_binding_change: external binding requires endpoint");
+                    }
+                }
+            }
+            HookBindingChangeAction::Unbind => {
+                if intent.binding.is_some() {
+                    bail!("invalid_hook_binding_change: binding must be absent for unbind");
+                }
+            }
+        }
+        Ok(crate::domain::ApprovedHookBindingChange {
+            intent,
+            decision_id: format!("decision_{}", Uuid::new_v4().simple()),
+        })
+    }
     pub fn recover_validated_event(&self, event: &JournalEvent) -> Result<ValidatedEvent> {
         let source = string_arg(&event.payload, "source")?;
         let event_id = EventId(string_arg(&event.payload, "event_id")?);
