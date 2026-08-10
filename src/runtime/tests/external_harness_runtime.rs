@@ -129,25 +129,11 @@ pub(super) struct CaptureToolsLlm {
     pub(super) first: AtomicBool,
 }
 
-/// Derive the system-context string from the LlmInput blocks the same way
-/// the production OpenAiCompatibleLlm does (serialize_system_context): drop
-/// UserMessage/ToolResult blocks and render each remaining block as
-/// `## {kind:?}\n{content}`, joined by blank lines. This lets the test
-/// compare the two rounds' system context byte-for-byte.
+/// Derive the system-context string from the LlmInput blocks the exact way
+/// the production OpenAiCompatibleLlm does — delegates to the production
+/// renderer so the mirror can never drift from the wire classification.
 pub(super) fn captured_system(input: &crate::llm::LlmInput) -> String {
-    use crate::domain::ContextBlockKind;
-    input
-        .blocks
-        .iter()
-        .filter(|b| {
-            !matches!(
-                b.kind,
-                ContextBlockKind::UserMessage | ContextBlockKind::ToolResult
-            )
-        })
-        .map(|b| format!("## {:?}\n{}", b.kind, b.content))
-        .collect::<Vec<_>>()
-        .join("\n\n")
+    crate::llm::serialize_system_context(&input.blocks)
 }
 
 /// Serialize the full follow-up transcript (provider turn + result content)

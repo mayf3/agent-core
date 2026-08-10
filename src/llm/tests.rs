@@ -1,7 +1,9 @@
 use super::{
-    parsing::{self},
-    sanitize_usage, tool_call_id_hash, EndpointChoice, ToolCallResult, ToolNameMap, ToolNameMode,
+    materialized_request_body, parsing::{self},
+    sanitize_usage, tool_call_id_hash, EndpointChoice, LlmInput, ModelEndpoint, ToolCallResult,
+    ToolNameMap, ToolNameMode,
 };
+use crate::domain::{ContextBlock, ContextBlockKind};
 use serde_json::json;
 
 fn response(tool_call: serde_json::Value) -> serde_json::Value {
@@ -305,4 +307,128 @@ fn malformed_usage_and_secret_extensions_fail_closed() {
     assert!(!extensions.contains_key("provider_note"));
     assert!(!usage.to_string().contains("sk-test-secret"));
     assert!(!usage.to_string().contains("prompt text"));
+}
+
+// === Context wire roles ===
+
+/// A full-block input: every kind present, so the wire-role classification
+/// is asserted for all of them at once.
+fn full_block_input() -> LlmInput {
+    let content = |kind: ContextBlockKind, tag: &str| ContextBlock {
+        kind,
+        content: format!("content-{tag}"),
+        source_ref: Some(format!("ref-{tag}")),
+    };
+    LlmInput {
+        timeout_override_ms: None,
+        blocks: vec![
+            content(ContextBlockKind::RootSystem, "root"),
+            content(ContextBlockKind::RuntimeContract, "contract"),
+            content(ContextBlockKind::AgentProfile, "profile"),
+            content(ContextBlockKind::ActiveSkill, "skill"),
+            content(ContextBlockKind::SkillCatalog, "catalog"),
+            content(ContextBlockKind::ToolCatalog, "tool-catalog"),
+            content(ContextBlockKind::RecentMessages, "history"),
+            content(ContextBlockKind::UserMessage, "user-block"),
+            content(ContextBlockKind::ToolResult, "tool-result"),
+            content(ContextBlockKind::SupplementalSystem, "supp-sys"),
+            content(ContextBlockKind::SupplementalContext, "supp-ctx"),
+        ],
+        user_text: "the actual user question".into(),
+        granted_operations: vec![],
+        provider_tools: vec![],
+        follow_ups: vec![],
+    }
+}
+
+#[test]
+fn supplemental_system_gets_system_authority_and_context_stays_non_system() {
+    let input = full_block_input();
+    let endpoint = ModelEndpoint::new("http://example.test".into(), "k".into(), "m".into());
+    let (body, _mode) = materialized_request_body(&endpoint, &input);
+    let messages = body["messages"].as_array().unwrap();
+
+    // System message: Kernel instructions + provider SupplementalSystem.
+    let system = messages.first().unwrap();
+    assert_eq!(system["role"], "system");
+    let system_text = system["content"].as_str().unwrap();
+    for marker in [
+        "## RootSystem",
+        "## RuntimeContract",
+        "## AgentProfile",
+        "## ActiveSkill",
+        "## SupplementalSystem",
+    ] {
+        assert!(system_text.contains(marker), "system must contain {marker}");
+    }
+    for marker in [
+        "## SupplementalContext",
+        "## SkillCatalog",
+        "## ToolCatalog",
+        "## RecentMessages",
+        "## UserMessage",
+        "## ToolResult",
+    ] {
+        assert!(
+            !system_text.contains(marker),
+            "system must NOT contain {marker}"
+        );
+    }
+
+    // Non-system context: one plain user-role message carrying provider
+    // material, history, and catalogs — never promoted to system.
+    let context_idx = messages
+        .iter()
+        .position(|m| {
+            m["role"] == "user"
+                && m["content"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("## SupplementalContext")
+        })
+        .expect("non-system context user message");
+    let context_text = messages[context_idx]["content"].as_str().unwrap();
+    for marker in [
+        "## SupplementalContext",
+        "## SkillCatalog",
+        "## ToolCatalog",
+        "## RecentMessages",
+    ] {
+        assert!(
+            context_text.contains(marker),
+            "context message must contain {marker}"
+        );
+    }
+
+    // The actual user text is a separate user message AFTER the context
+    // message, verbatim; UserMessage/ToolResult blocks never appear.
+    let last = messages.last().unwrap();
+    assert_eq!(last["role"], "user");
+    assert_eq!(last["content"], "the actual user question");
+    assert!(
+        context_idx < messages.len() - 1,
+        "context message must precede the primary user message"
+    );
+}
+
+#[test]
+fn empty_non_system_context_keeps_single_user_message() {
+    let input = LlmInput {
+        timeout_override_ms: None,
+        blocks: vec![ContextBlock {
+            kind: ContextBlockKind::RootSystem,
+            content: "root".into(),
+            source_ref: None,
+        }],
+        user_text: "hi".into(),
+        granted_operations: vec![],
+        provider_tools: vec![],
+        follow_ups: vec![],
+    };
+    let endpoint = ModelEndpoint::new("http://example.test".into(), "k".into(), "m".into());
+    let (body, _mode) = materialized_request_body(&endpoint, &input);
+    let messages = body["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 2, "system + user only");
+    assert_eq!(messages[0]["role"], "system");
+    assert_eq!(messages[1]["content"], "hi");
 }

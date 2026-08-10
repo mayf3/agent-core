@@ -225,13 +225,13 @@ fn e2e_multi_round_tool_loop_preserves_complete_http_transcript() -> Result<()> 
     let r1 = rq[0]["messages"].as_array().unwrap();
     let r2 = rq[1]["messages"].as_array().unwrap();
     let r3 = rq[2]["messages"].as_array().unwrap();
-    assert_eq!(r1.len(), 2);
-    assert_eq!(r2.len(), 4);
-    assert_eq!(r3.len(), 6);
-    let aid = r3[2]["tool_calls"][0]["id"].as_str().unwrap();
-    let bid = r3[4]["tool_calls"][0]["id"].as_str().unwrap();
-    assert_eq!(r3[3]["tool_call_id"].as_str(), Some(aid));
-    assert_eq!(r3[5]["tool_call_id"].as_str(), Some(bid));
+    assert_eq!(r1.len(), 3);
+    assert_eq!(r2.len(), 5);
+    assert_eq!(r3.len(), 7);
+    let aid = r3[3]["tool_calls"][0]["id"].as_str().unwrap();
+    let bid = r3[5]["tool_calls"][0]["id"].as_str().unwrap();
+    assert_eq!(r3[4]["tool_call_id"].as_str(), Some(aid));
+    assert_eq!(r3[6]["tool_call_id"].as_str(), Some(bid));
     let s1 = r1[0]["content"].as_str().unwrap();
     let s2 = r2[0]["content"].as_str().unwrap();
     let s3 = r3[0]["content"].as_str().unwrap();
@@ -299,8 +299,8 @@ fn malformed_follow_up_then_valid_tool_call_does_not_reuse_stale_pending_turn() 
     let rq = sv.requests();
     assert_eq!(rq.len(), 3);
     let r3 = rq[2]["messages"].as_array().unwrap();
-    let cid = r3[2]["tool_calls"][0]["id"].as_str().unwrap();
-    assert_eq!(r3[3]["tool_call_id"].as_str(), Some(cid));
+    let cid = r3[3]["tool_calls"][0]["id"].as_str().unwrap();
+    assert_eq!(r3[4]["tool_call_id"].as_str(), Some(cid));
     assert_ne!(cid, "bad");
     Ok(())
 }
@@ -356,15 +356,32 @@ fn second_run_provider_request_contains_prior_delivered_assistant_reply() -> Res
     let rq = sv.requests();
     let msgs = rq[1]["messages"].as_array().unwrap();
     let sys = msgs[0]["content"].as_str().unwrap_or("");
-    let usr = msgs[1]["content"].as_str().unwrap_or("");
+    // The prior conversation rides the NON-SYSTEM context user message
+    // (RecentMessages), never the system message.
+    let ctx = msgs
+        .iter()
+        .find(|m| {
+            m["role"] == "user"
+                && m["content"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("## RecentMessages")
+        })
+        .and_then(|m| m["content"].as_str())
+        .unwrap_or("");
+    let usr = msgs
+        .last()
+        .and_then(|m| m["content"].as_str())
+        .unwrap_or("");
     assert_eq!(usr, "启用");
     assert!(
-        !sys.contains("User: 启用"),
+        !ctx.contains("User: 启用"),
         "current msg not in RecentMessages"
     );
-    assert!(sys.contains("帮我准备候选Harness"));
-    assert!(sys.contains("候选Harness已启动，endpoint=http://127.0.0.1:7101。是否启用？"));
-    assert_eq!(sys.matches("候选Harness已启动").count(), 1);
+    assert!(ctx.contains("帮我准备候选Harness"));
+    assert!(ctx.contains("候选Harness已启动，endpoint=http://127.0.0.1:7101。是否启用？"));
+    assert_eq!(ctx.matches("候选Harness已启动").count(), 1);
+    assert!(!sys.contains("User:"), "history must not be in system");
     Ok(())
 }
 #[test]
