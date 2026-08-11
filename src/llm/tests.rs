@@ -1,7 +1,7 @@
 use super::{
     materialized_request_body, parsing::{self},
-    sanitize_usage, tool_call_id_hash, EndpointChoice, LlmInput, ModelEndpoint, ToolCallResult,
-    ToolNameMap, ToolNameMode,
+    sanitize_usage, tool_call_id_hash, EndpointChoice, LlmInput, ModelEndpoint,
+    OpenAiCompatibleLlm, ToolCallResult, ToolNameMap, ToolNameMode,
 };
 use crate::domain::{ContextBlock, ContextBlockKind};
 use serde_json::json;
@@ -431,4 +431,155 @@ fn empty_non_system_context_keeps_single_user_message() {
     assert_eq!(messages.len(), 2, "system + user only");
     assert_eq!(messages[0]["role"], "system");
     assert_eq!(messages[1]["content"], "hi");
+}
+
+// === Model-call failure recovery (retry-once for transient transport) ===
+
+use std::io::Write;
+use std::net::TcpListener;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
+/// Per-connection behaviour of the scripted fake model server.
+enum Script {
+    /// Accept the connection, then stay silent past the client timeout.
+    Hang,
+    /// 200 with a Content-Length far larger than the bytes actually sent,
+    /// then close — forces an unexpected-EOF while reading the body.
+    TruncatedBody,
+    /// 200 with a valid chat-completion JSON body.
+    OkJson,
+    /// 200 with a complete but non-JSON body.
+    InvalidJson,
+}
+
+/// Start a one-shot scripted model server. Returns the base URL and a
+/// connection counter.
+fn start_scripted_model_server(scripts: Vec<Script>) -> (String, Arc<AtomicUsize>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let count = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&count);
+    std::thread::spawn(move || {
+        for script in scripts {
+            if let Ok((mut stream, _)) = listener.accept() {
+                counter.fetch_add(1, Ordering::SeqCst);
+                // Handle each connection on its own thread so a slow script
+                // (Hang) never delays accepting the retried connection.
+                std::thread::spawn(move || match script {
+                    Script::Hang => {
+                        std::thread::sleep(Duration::from_millis(500));
+                        let _ = stream.shutdown(std::net::Shutdown::Both);
+                    }
+                    Script::TruncatedBody => {
+                        let _ = stream.write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\npartial",
+                        );
+                        // Delay the FIN so the client first completes the
+                        // response head (send_json returns Ok), then hits the
+                        // unexpected EOF while READING the body.
+                        std::thread::sleep(Duration::from_millis(100));
+                        let _ = stream.shutdown(std::net::Shutdown::Both);
+                    }
+                    Script::OkJson => {
+                        let body =
+                            r#"{"choices":[{"message":{"content":"retried ok"}}]}"#;
+                        let _ = write!(
+                            stream,
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        std::thread::sleep(Duration::from_millis(200));
+                    }
+                    Script::InvalidJson => {
+                        let body = "not-json";
+                        let _ = write!(
+                            stream,
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        std::thread::sleep(Duration::from_millis(200));
+                    }
+                });
+            }
+        }
+    });
+    (format!("http://{addr}"), count)
+}
+
+fn empty_input() -> LlmInput {
+    LlmInput {
+        timeout_override_ms: None,
+        blocks: vec![],
+        user_text: "hi".into(),
+        granted_operations: vec![],
+        provider_tools: vec![],
+        follow_ups: vec![],
+    }
+}
+
+#[test]
+fn transient_timeout_is_retried_once_and_succeeds() {
+    let (base_url, count) =
+        start_scripted_model_server(vec![Script::Hang, Script::OkJson]);
+    let llm = OpenAiCompatibleLlm::new(base_url.clone(), "k".into(), "m".into(), 200);
+    let endpoint = ModelEndpoint::new(base_url.clone(), "k".into(), "m".into());
+    let output = match llm
+        .request_endpoint(&endpoint, EndpointChoice::Primary, &empty_input())
+    {
+        Ok(o) => o,
+        Err(e) => panic!("retry must succeed: {e}"),
+    };
+    assert_eq!(output.content, "retried ok");
+    assert_eq!(count.load(Ordering::SeqCst), 2, "exactly two attempts");
+}
+
+#[test]
+fn body_read_io_failure_is_retried_once_and_succeeds() {
+    let (base_url, count) =
+        start_scripted_model_server(vec![Script::TruncatedBody, Script::OkJson]);
+    let llm = OpenAiCompatibleLlm::new(base_url.clone(), "k".into(), "m".into(), 1000);
+    let endpoint = ModelEndpoint::new(base_url.clone(), "k".into(), "m".into());
+    let output = match llm
+        .request_endpoint(&endpoint, EndpointChoice::Primary, &empty_input())
+    {
+        Ok(o) => o,
+        Err(e) => panic!("retry must succeed: {e}"),
+    };
+    assert_eq!(output.content, "retried ok");
+    assert_eq!(count.load(Ordering::SeqCst), 2, "exactly two attempts");
+}
+
+#[test]
+fn second_transient_failure_stops_without_third_attempt() {
+    let (base_url, count) = start_scripted_model_server(vec![Script::Hang, Script::Hang]);
+    let llm = OpenAiCompatibleLlm::new(base_url.clone(), "k".into(), "m".into(), 200);
+    let endpoint = ModelEndpoint::new(base_url.clone(), "k".into(), "m".into());
+    let error = match llm
+        .request_endpoint(&endpoint, EndpointChoice::Primary, &empty_input())
+    {
+        Err(e) => e,
+        Ok(_) => panic!("second failure must propagate"),
+    };
+    assert_eq!(error, "model_timeout");
+    assert_eq!(count.load(Ordering::SeqCst), 2, "retried exactly once, then stopped");
+}
+
+#[test]
+fn genuine_json_parse_failure_is_not_retried() {
+    let (base_url, count) =
+        start_scripted_model_server(vec![Script::InvalidJson]);
+    let llm = OpenAiCompatibleLlm::new(base_url.clone(), "k".into(), "m".into(), 1000);
+    let endpoint = ModelEndpoint::new(base_url.clone(), "k".into(), "m".into());
+    let error = match llm
+        .request_endpoint(&endpoint, EndpointChoice::Primary, &empty_input())
+    {
+        Err(e) => e,
+        Ok(_) => panic!("parse failure must propagate"),
+    };
+    assert_eq!(error, "model_response_parse_failed");
+    assert_eq!(count.load(Ordering::SeqCst), 1, "no retry for a real parse failure");
 }
