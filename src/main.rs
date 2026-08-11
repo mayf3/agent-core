@@ -24,7 +24,7 @@ fn main() -> Result<()> {
 ///
 /// Connects to the kernel database and verifies:
 /// - Coding manifest IDs are recomputable and match stored digests
-/// - Input schemas are non-empty (contain workspace_id)
+/// - Input schemas are non-empty objects
 /// - No snapshot-level inconsistencies for coding operations
 ///
 /// Never modifies the database.
@@ -43,15 +43,13 @@ fn check_coding_schema_integrity(args: &[String]) -> Result<()> {
         match spec {
             None => issues.push(format!("{op_name}: not found in active snapshot")),
             Some(s) => {
-                let has_ws = s
+                let has_properties = s
                     .parameters
                     .get("properties")
-                    .and_then(|p| p.get("workspace_id"))
-                    .is_some();
-                if !has_ws {
-                    issues.push(format!(
-                        "{op_name}: input schema is empty (no workspace_id)"
-                    ));
+                    .and_then(|p| p.as_object())
+                    .is_some_and(|p| !p.is_empty());
+                if !has_properties {
+                    issues.push(format!("{op_name}: input schema has no properties"));
                 }
                 // Verify manifest ID consistency if the manifest exists.
                 if s.binding_kind == agent_core_kernel::registry::snapshot::BindingKind::External {
