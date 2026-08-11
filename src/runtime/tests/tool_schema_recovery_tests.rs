@@ -60,12 +60,12 @@ impl LlmClient for AutoRecoveryLlm {
             0 => Ok(LlmOutput {
                 provider: "t".into(),
                 model: "t".into(),
-                content: "call workspace read".into(),
+                content: "call path read".into(),
                 journal_payload: json!({"r":0}),
                 tool_call: ToolCallResult::Valid(ToolCall {
                     id: "call_0".into(),
-                    operation: "external.coding_workspace_read".into(),
-                    arguments: json!({"artifact_path":"artifact.bin","manifest_path":"manifest.json","evidence_path":"evidence.json"}),
+                    operation: "external.execution_read".into(),
+                    arguments: json!({"max_bytes": 1024}),
                 }),
                 provider_turn: None,
             }),
@@ -87,15 +87,13 @@ impl LlmClient for AutoRecoveryLlm {
                                 .get("details")
                                 .and_then(|d| d.get("missing_fields"))
                                 .and_then(|a| a.as_array())
-                                .map(|a| a.iter().any(|f| f == "workspace_id"))
+                                .map(|a| a.iter().any(|f| f == "path"))
                                 .unwrap_or(false);
-                            let available = v
+                            let has_workspace_inventory = v
                                 .get("details")
                                 .and_then(|d| d.get("available_workspace_ids"))
-                                .and_then(|a| a.as_array())
-                                .map(|a| a.iter().any(|id| id == "agent-dev"))
-                                .unwrap_or(false);
-                            missing && available
+                                .is_some();
+                            missing && !has_workspace_inventory
                         })
                 });
                 if should_retry {
@@ -106,8 +104,8 @@ impl LlmClient for AutoRecoveryLlm {
                         journal_payload: json!({"r":1}),
                         tool_call: ToolCallResult::Valid(ToolCall {
                             id: "call_1".into(),
-                            operation: "external.coding_workspace_read".into(),
-                            arguments: json!({"workspace_id":"agent-dev","artifact_path":"artifact.bin","manifest_path":"manifest.json","evidence_path":"evidence.json"}),
+                            operation: "external.execution_read".into(),
+                            arguments: json!({"path":"/source/agent-core/README.md","max_bytes":1024}),
                         }),
                         provider_turn: None,
                     })
@@ -134,7 +132,7 @@ impl LlmClient for AutoRecoveryLlm {
     }
 }
 #[test]
-fn missing_workspace_id_is_repaired_within_same_run() {
+fn missing_path_is_repaired_without_workspace_inventory() {
     let harness_listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let harness_port = harness_listener.local_addr().unwrap().port();
     let harness_endpoint = format!("http://127.0.0.1:{harness_port}/execute");
@@ -170,18 +168,18 @@ fn missing_workspace_id_is_repaired_within_same_run() {
             round: AtomicUsize::new(0),
         },
     );
-    let cp_schema = json!({
+    let read_schema = json!({
         "type":"object","properties":{
-            "workspace_id":{"type":"string","description":"ws","enum":["agent-dev"]},
-            "artifact_path":{"type":"string"},"manifest_path":{"type":"string"},"evidence_path":{"type":"string"}
-        },"required":["workspace_id","artifact_path","manifest_path","evidence_path"],
+            "path":{"type":"string","description":"absolute path under /source/agent-core"},
+            "max_bytes":{"type":"integer","minimum":1,"maximum":65536}
+        },"required":["path"],
         "additionalProperties":false
     });
     register_external_op_with_endpoint(
         &j,
         &g,
-        "external.coding_workspace_read",
-        cp_schema,
+        "external.execution_read",
+        read_schema,
         json!({"type":"object"}),
         &harness_endpoint,
     );
@@ -338,7 +336,6 @@ fn coding_manifest_schema_reaches_llm_tool_definition_intact() {
             captured_tools: store.clone(),
         },
     );
-    let ws_prop = json!({"type":"string","description":"授权 workspace 的 ID。当前可用 workspace: agent-dev","enum":["agent-dev"]});
     let mut m = HarnessManifest {
         manifest_id: String::new(),
         harness_id: "t".into(),
@@ -346,9 +343,9 @@ fn coding_manifest_schema_reaches_llm_tool_definition_intact() {
             .into(),
         protocol_version: "external-harness-v1".into(),
         endpoint: "http://127.0.0.1:1/execute".into(),
-        operation_name: "external.coding_workspace_read".into(),
-        description: "Workspace Read".into(),
-        input_schema: json!({"type":"object","properties":{"workspace_id":ws_prop,"artifact_path":{"type":"string","description":"artifact path"},"manifest_path":{"type":"string","description":"manifest path"},"evidence_path":{"type":"string","description":"evidence path"}},"required":["workspace_id","artifact_path","manifest_path","evidence_path"],"additionalProperties":false}),
+        operation_name: "external.execution_read".into(),
+        description: "Path Read".into(),
+        input_schema: json!({"type":"object","properties":{"path":{"type":"string","description":"absolute path under /source/agent-core"},"max_bytes":{"type":"integer","minimum":1,"maximum":65536}},"required":["path"],"additionalProperties":false}),
         output_schema: json!({"type":"object"}),
         idempotent: true,
         created_at: chrono::Utc::now(),
@@ -382,9 +379,9 @@ fn coding_manifest_schema_reaches_llm_tool_definition_intact() {
             t.get("function")
                 .and_then(|f| f.get("name"))
                 .and_then(Value::as_str)
-                == Some("external.coding_workspace_read")
+                == Some("external.execution_read")
         })
-        .expect("workspace.read in provider tools");
+        .expect("execution.read in provider tools");
     let func = cp_tool.get("function").expect("function");
     assert!(!func
         .get("description")
@@ -401,18 +398,18 @@ fn coding_manifest_schema_reaches_llm_tool_definition_intact() {
         .iter()
         .filter_map(|v: &Value| v.as_str())
         .collect();
-    assert!(required.contains(&"workspace_id"));
-    assert!(required.contains(&"artifact_path"));
-    assert!(required.contains(&"manifest_path"));
-    assert!(required.contains(&"evidence_path"));
-    assert_eq!(required.len(), 4);
+    assert_eq!(required, ["path"]);
     assert_eq!(
         params.get("additionalProperties").and_then(Value::as_bool),
         Some(false)
     );
-    let ws_id = params.pointer("/properties/workspace_id").unwrap();
-    assert_eq!(ws_id.get("type").and_then(Value::as_str), Some("string"));
-    let ws_enum = ws_id.get("enum").and_then(Value::as_array).unwrap();
-    assert!(ws_enum.contains(&json!("agent-dev")));
+    let path = params.pointer("/properties/path").unwrap();
+    assert_eq!(path.get("type").and_then(Value::as_str), Some("string"));
+    assert!(path
+        .get("description")
+        .and_then(Value::as_str)
+        .unwrap()
+        .contains("/source/agent-core"));
+    assert!(params.pointer("/properties/workspace_id").is_none());
     assert!(j.verify_hash_chain().unwrap());
 }

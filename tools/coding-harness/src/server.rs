@@ -121,9 +121,9 @@ fn handle(mut stream: TcpStream, config: &CodingConfig) {
         .filter(|value| !value.trim().is_empty());
     // Two distinct keys, kept separate on purpose:
     //   - external.coding_task_submit (control surface)      -> CODING_HARNESS_CONTROL_TOKEN
-    //   - external.coding_workspace_task (ordinary execution) -> AGENT_CORE_CAPABILITY_HOST_EXECUTION_TOKEN
+    //   - external.execution_task (ordinary execution)       -> AGENT_CORE_CAPABILITY_HOST_EXECUTION_TOKEN
     // The Kernel's generic external dispatch sends the execution token,
-    // so workspace_task authenticates with it. Fail-closed: unset or
+    // so execution_task authenticates with it. Fail-closed: unset or
     // mismatched tokens are rejected.
     if !matches_expected_token(
         op,
@@ -178,6 +178,21 @@ fn dispatch(config: &CodingConfig, operation: &str, args: &Value) -> Value {
     }
     if operation == "external.coding_hcr_accept" || operation == "external.coding_hcr_exec" {
         return err_value("hcr_active_workflow_retired");
+    }
+    if operation == "external.execution_task" {
+        let canonical_root = match resolve_execution_task_root(
+            config,
+            args.get("root").and_then(Value::as_str),
+        ) {
+            Ok(root) => root,
+            Err(error) => return err_value(error),
+        };
+        let objective = match args.get("objective").and_then(Value::as_str) {
+            Some(objective) if !objective.trim().is_empty() => objective,
+            _ => return err_value("missing_objective"),
+        };
+        let root = canonical_root.to_string_lossy().to_string();
+        return tasks::submit_task("", objective, &Value::Null, "opencode", Some(&root), None);
     }
 
     let is_task_op = operation == "external.coding_task_status";
@@ -275,6 +290,30 @@ fn dispatch(config: &CodingConfig, operation: &str, args: &Value) -> Value {
     }
 }
 
+fn resolve_execution_task_root(
+    config: &CodingConfig,
+    requested_root: Option<&str>,
+) -> Result<std::path::PathBuf, &'static str> {
+    let requested_root = requested_root.ok_or("missing_root")?;
+    if !std::path::Path::new(requested_root).is_absolute() {
+        return Err("root_not_absolute");
+    }
+    let canonical_root = std::fs::canonicalize(requested_root).map_err(|_| "root_not_found")?;
+    if !canonical_root.is_dir() {
+        return Err("root_not_found");
+    }
+    let permission = config
+        .workspaces
+        .values()
+        .find(|entry| entry.root == canonical_root)
+        .map(|entry| &entry.perm)
+        .ok_or("root_not_allowed")?;
+    if !permission.exec || !permission.opencode || !permission.network {
+        return Err("task_not_permitted");
+    }
+    Ok(canonical_root)
+}
+
 fn parse_cl(headers: &str) -> Result<Option<usize>, &'static str> {
     let mut found: Option<usize> = None;
     for line in headers.lines() {
@@ -350,6 +389,7 @@ fn matches_expected_token(
     bearer: Option<&str>,
 ) -> bool {
     let expected = match op {
+        "external.execution_task" => execution_token,
         "external.coding_workspace_task" => execution_token,
         "external.coding_task_submit" => control_token,
         _ => return true,
@@ -369,6 +409,12 @@ mod tests {
 
     #[test]
     fn workspace_task_authenticates_with_execution_token() {
+        assert!(matches_expected_token(
+            "external.execution_task",
+            Some(EXEC),
+            Some(CONTROL),
+            Some(EXEC)
+        ));
         assert!(matches_expected_token(
             "external.coding_workspace_task",
             Some(EXEC),
@@ -458,5 +504,52 @@ mod tests {
             &json!({"workspace_id": "scratch", "objective": "x"}),
         );
         assert_eq!(ok["result"]["backend"], "opencode", "got: {ok}");
+    }
+
+    #[test]
+    fn execution_task_accepts_only_an_authorized_absolute_root() {
+        use crate::config::CodingConfig;
+        use serde_json::json;
+
+        let root = std::env::temp_dir().join(format!(
+            "coding-harness-path-task-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        std::env::set_var(
+            "CODING_CONFIG",
+            json!({
+                "workspaces": {
+                    "legacy-internal-id": {
+                        "root": root,
+                        "read": true,
+                        "write": true,
+                        "exec": true,
+                        "opencode": true,
+                        "network": true,
+                        "shell": false
+                    }
+                }
+            })
+            .to_string(),
+        );
+        let config = CodingConfig::from_env();
+        std::env::remove_var("CODING_CONFIG");
+
+        assert_eq!(
+            resolve_execution_task_root(&config, root.to_str()).unwrap(),
+            root
+        );
+        assert_eq!(
+            resolve_execution_task_root(&config, Some("/tmp")).unwrap_err(),
+            "root_not_allowed"
+        );
+        assert_eq!(
+            resolve_execution_task_root(&config, Some("relative")).unwrap_err(),
+            "root_not_absolute"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 }

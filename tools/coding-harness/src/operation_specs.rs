@@ -188,6 +188,35 @@ pub fn all_specs(workspace_ids: &[String]) -> Vec<OperationSpec> {
             }),
         },
         OperationSpec {
+            operation_name: "external.execution_task",
+            description: "让 Coding Agent 在一个已授权的真实 absolute source root 内异步完成开发目标。提交后使用 external.coding_task_status 查询结果。",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "root": {
+                        "type": "string",
+                        "description": "真实 authoritative source root 的绝对路径；必须与 Execution Harness schema 中公布的 source root 一致。"
+                    },
+                    "objective": {
+                        "type": "string",
+                        "description": "开发目标的详细说明。"
+                    }
+                },
+                "required": ["root", "objective"],
+                "additionalProperties": false
+            }),
+            output_schema: json!({
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string"},
+                    "status": {"type": "string"},
+                    "backend": {"type": "string"},
+                    "created_at": {"type": "integer"}
+                },
+                "required": ["task_id", "status", "backend", "created_at"],
+            }),
+        },
+        OperationSpec {
             operation_name: "external.coding_workspace_task",
             description: "在指定 Git workspace 内，让 Coding Agent（opencode 后端）自主完成一个软件开发目标。提交后使用 external.coding_task_status 查询进度和结果。这是长时间运行的任务，不会立即返回完成状态。区别于 external.coding_task_submit（正式 DevelopmentRequest / 组件生成流水线）：本操作是 workspace 开发语义，不经过组件目录、生成器或验收套件选择。",
             input_schema: json!({
@@ -355,7 +384,7 @@ pub fn build_manifests(
                 description: spec.description.to_string(),
                 input_schema: spec.input_schema.clone(),
                 output_schema: spec.output_schema.clone(),
-                idempotent: true,
+                idempotent: spec.operation_name != "external.execution_task",
                 created_at: chrono::Utc::now(),
             };
             if let Ok(id) = m.compute_manifest_id() {

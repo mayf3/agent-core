@@ -333,12 +333,12 @@ fn unknown_operation_remains_default_deny() {
 // ── 11. Owner-private seven coding grants remain available (P0-A1 preserved) ──
 
 #[test]
-fn owner_private_seven_coding_grants_remain_available() {
+fn owner_private_seven_development_grants_remain_available() {
     let mut ops = vec![];
     for op in external::CODING_OPERATIONS {
         let risk = if matches!(
             *op,
-            external::WORKSPACE_LIST | external::WORKSPACE_READ | external::TASK_STATUS
+            external::EXECUTION_LIST | external::EXECUTION_READ | external::TASK_STATUS
         ) {
             Risk::ReadOnly
         } else {

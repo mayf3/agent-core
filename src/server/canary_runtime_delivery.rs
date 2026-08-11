@@ -256,7 +256,8 @@ fn to_runtime_tools(provider_tools: &[Value]) -> Vec<Tool> {
 /// Harness specifics.
 const CODING_INSTRUCTION: &str = "\
 # Coding 工作说明
-- 完整代码开发任务优先使用高层 Coding Workspace Task（external.coding_workspace_task）；
+- 工具参数使用 schema 中给出的真实绝对路径；不要猜 workspace 名称或修改部署副本；
+- 完整代码开发任务可使用高层任务工具（external.execution_task）；
 - read / exec 用于调查和验证，不要逐文件无休止探索；
 - 搜索优先于逐个文件读取；
 - 同类不可恢复错误重复出现时停止；

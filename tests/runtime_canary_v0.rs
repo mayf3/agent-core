@@ -22,7 +22,7 @@
 //!
 //! The Provider is the REAL execution harness (`tools/execution-harness`),
 //! spawned on a test port with a test token; the whole external dispatch
-//! chain (manifest -> HTTP -> real `echo` execution -> receipt) is real.
+//! chain (manifest -> HTTP -> real shell execution -> receipt) is real.
 
 #[path = "runtime_canary_v0/legacy_adapter.rs"]
 mod legacy_adapter;
@@ -47,16 +47,15 @@ const C17: &str = "C17";
 fn c17_tool() -> Tool {
     Tool {
         name: C17.into(),
-        description: "run a harmless command inside an isolated workspace".into(),
+        description: "run a harmless shell command in an allowed absolute cwd".into(),
         parameters: json!({
             "type": "object",
             "properties": {
-                "workspace_id": {"type": "string"},
-                "command": {"type": "string"},
-                "args": {"type": "array", "items": {"type": "string"}},
-                "timeout_seconds": {"type": "integer"}
+                "cwd": {"type": "string"},
+                "command": {"type": "string"}
             },
-            "required": ["workspace_id", "command"]
+            "required": ["cwd", "command"],
+            "additionalProperties": false
         }),
     }
 }
@@ -65,6 +64,7 @@ fn c17_tool() -> Tool {
 /// round 1 reads the real result from the follow-up and replies.
 struct FakeCanaryModel {
     round: u32,
+    root: String,
 }
 
 impl Model for FakeCanaryModel {
@@ -76,10 +76,8 @@ impl Model for FakeCanaryModel {
                 action: Some(agent_runtime::Action {
                     tool: C17.into(),
                     arguments: json!({
-                        "workspace_id": "canary",
-                        "command": "echo",
-                        "args": ["canary-runtime-v0"],
-                        "timeout_seconds": 10,
+                        "cwd": self.root,
+                        "command": "printf 'canary-runtime-v0\\n'",
                     }),
                 }),
             })
@@ -112,9 +110,12 @@ fn spawn_provider() -> (Child, std::path::PathBuf) {
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
     let child = Command::new(&bin)
-        .env("EXECUTION_HARNESS_LISTEN_ADDR", format!("127.0.0.1:{HARNESS_PORT}"))
+        .env(
+            "EXECUTION_HARNESS_LISTEN_ADDR",
+            format!("127.0.0.1:{HARNESS_PORT}"),
+        )
         .env("EXECUTION_HARNESS_TOKEN", HARNESS_TOKEN)
-        .env("EXECUTION_HARNESS_WORKSPACE_ROOT", &root)
+        .env("EXECUTION_HARNESS_ALLOWED_ROOTS", &root)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -135,10 +136,16 @@ fn canary_runtime_completes_real_invocation() {
         format!("http://127.0.0.1:{HARNESS_PORT}/execute"),
         HARNESS_TOKEN.into(),
     );
-    let model = FakeCanaryModel { round: 0 };
+    let model = FakeCanaryModel {
+        round: 0,
+        root: root.to_string_lossy().into_owned(),
+    };
     let mut runtime = RuntimeLoop::new(adapter, model);
     let reply = runtime
-        .run("run a harmless command through capability C17", &[c17_tool()])
+        .run(
+            "run a harmless command through capability C17",
+            &[c17_tool()],
+        )
         .expect("loop");
     eprintln!("CANARY FINAL REPLY: {reply}");
 

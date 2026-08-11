@@ -9,20 +9,20 @@
 //! only resolves the test capability reference `C17` to an inline test
 //! binding and hands it to the shared execution mechanism.
 
+use super::C17;
 use agent_core_kernel::adapters::external_harness::{
     execute_external_harness_binding_for_tests, ExternalHarnessTransportConfig,
 };
 use agent_core_kernel::domain::{InvocationId, ReceiptStatus};
 use agent_core_kernel::harness::manifest::HarnessManifest;
 use agent_runtime::{InvocationPort, InvocationResult, InvocationStatus};
-use super::C17;
 use serde_json::{json, Value};
 use std::time::Duration;
 
 /// TEST COMPATIBILITY DEBT: the product operation name the test binding
 /// maps C17 to (kept only until the canary has a real capability
 /// directory).
-const BOUND_OPERATION: &str = "external.coding_workspace_exec";
+const BOUND_OPERATION: &str = "external.execution_exec";
 
 pub struct CanaryBindingAdapter {
     /// TEST COMPATIBILITY DEBT: inline test binding (not registered
@@ -45,24 +45,27 @@ impl CanaryBindingAdapter {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "workspace_id": {"type": "string", "minLength": 1},
-                    "command": {"type": "string", "minLength": 1},
-                    "args": {"type": "array", "items": {"type": "string"}},
-                    "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 120}
+                    "cwd": {"type": "string", "minLength": 1},
+                    "command": {"type": "string", "minLength": 1}
                 },
-                "required": ["workspace_id", "command"],
+                "required": ["cwd", "command"],
                 "additionalProperties": false
             }),
             output_schema: json!({
                 "type": "object",
                 "properties": {
-                    "workspace_id": {"type": "string"},
+                    "cwd": {"type": "string"},
                     "exit_code": {"type": "integer"},
                     "stdout": {"type": "string"},
                     "stderr": {"type": "string"},
-                    "timed_out": {"type": "boolean"}
+                    "timed_out": {"type": "boolean"},
+                    "stdout_bytes": {"type": "integer"},
+                    "stderr_bytes": {"type": "integer"},
+                    "stdout_truncated": {"type": "boolean"},
+                    "stderr_truncated": {"type": "boolean"},
+                    "sandboxed": {"type": "boolean"}
                 },
-                "required": ["workspace_id", "exit_code", "stdout", "stderr", "timed_out"]
+                "required": ["cwd", "exit_code", "stdout", "stderr", "timed_out", "stdout_bytes", "stderr_bytes", "stdout_truncated", "stderr_truncated", "sandboxed"]
             }),
             idempotent: false,
             created_at: chrono::Utc::now(),
