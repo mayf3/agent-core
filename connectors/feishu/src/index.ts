@@ -15,6 +15,7 @@ import {
 } from "./approval.js";
 import type { ApprovalConfig } from "./approval.js";
 import { handleProposalCardAction } from "./approval.js";
+import { createRunFailureObserver } from "./run-observer.js";
 
 const config = loadConfig();
 const baseConfig = {
@@ -37,6 +38,12 @@ const approvalConfig: ApprovalConfig = {
   ownerOpenId: config.feishuOwnerOpenId,
 };
 startExecuteServer(config, transport, reactions, executeStore, approvalConfig);
+
+// Run terminal failure observer: polls the Kernel's generic RunFailed fact
+// and performs the channel-specific cleanup (remove processing OK + safe
+// failure hint). Kernel/Runtime are untouched — no Feishu semantics in Core.
+const runObserver = createRunFailureObserver(config, transport, reactions);
+runObserver.start();
 
 /**
  * Try to handle a message as an approval command BEFORE sending it to the LLM.
