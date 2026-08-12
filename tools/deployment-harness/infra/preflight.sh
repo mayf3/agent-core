@@ -15,8 +15,13 @@
 #      it waits for the port to actually be released before returning.
 #
 #   2. Kernel-readiness gate (connector only). The connector is never started
-#      until the Kernel reports status=ok, so a message can never be received
-#      with no Kernel behind it.
+#      until the Kernel's HTTP service is reachable and its /health reports
+#      ok=true with status "ok" OR "degraded" (degraded = the Kernel has
+#      permanent state unknowns, e.g. a terminal-unknown outbox row, while its
+#      core APIs — ingress / chat-control / events / outbox delivery — remain
+#      serviceable, which is all the Connector depends on). Fail closed on
+#      unreachable / malformed / corrupt (ok=false) / unrecognized status, so
+#      a message can never be received with no Kernel behind it.
 #
 # systemd owns single-instance and restart; this script owns only the
 # pre-start cleanup + the readiness ordering gate.
@@ -27,8 +32,6 @@ set -euo pipefail
 
 BASE="${HOME}/.agent-core"
 RUNTIME="${BASE}/runtime"
-
-SVC="${1:?usage: preflight.sh <service>}"
 
 port_for() {
     case "$1" in
@@ -110,6 +113,54 @@ matches_for() {
     fi
 }
 
+# ---- 2. Kernel-readiness gate (connector only) ----
+#
+# The Kernel reports status:"degraded" when its state contains permanent
+# unknowns (e.g. a terminal-unknown outbox row) — its core HTTP APIs
+# (ingress / chat-control / events / outbox delivery) remain serviceable,
+# which is everything the Connector depends on. "ok" AND "degraded" both
+# pass; anything else (unreachable, malformed, corrupt/ok=false, or an
+# unrecognized status) fails closed.
+#
+# `attempts` bounds the wait loop (production default 120 ≈ systemd's start
+# timeout; tests pass a small value to fail fast).
+kernel_health_ready() {
+    local url="${1:-http://127.0.0.1:4130/health}"
+    local attempts="${2:-120}"
+    local i=0
+    while [ "$i" -lt "$attempts" ]; do
+        local body verdict
+        body="$(curl -s --max-time 2 "$url" 2>/dev/null || true)"
+        verdict=""
+        if [ -n "$body" ]; then
+            verdict="$(printf '%s' "$body" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(2)          # malformed body — fail closed
+if d.get("ok") is not True:
+    sys.exit(1)          # corrupt / not ok — fail closed
+status = d.get("status")
+if status not in ("ok", "degraded"):
+    sys.exit(1)          # unrecognized status — fail closed
+print(status)
+' 2>/dev/null)" || verdict=""
+        fi
+        if [ -n "$verdict" ]; then
+            echo "preflight[connector]: Kernel healthy (status=$verdict) — proceeding"
+            return 0
+        fi
+        sleep 1
+        i=$((i + 1))
+    done
+    echo "preflight[connector]: Kernel not ready after ${attempts}s — refusing to start connector" >&2
+    return 1
+}
+
+main() {
+    local SVC="${1:?usage: preflight.sh <service>}"
+
 # ---- 1. Port hygiene ----
 PORT="$(port_for "$SVC")"
 if [ -n "$PORT" ]; then
@@ -151,21 +202,15 @@ if [ -n "$PORT" ]; then
     fi
 fi
 
-# ---- 2. Kernel-readiness gate (connector only) ----
+
 if [ "$SVC" = "connector" ]; then
-    echo "preflight[connector]: waiting for Kernel /health status=ok"
-    i=0
-    while [ "$i" -lt 120 ]; do
-        body="$(curl -s --max-time 2 http://127.0.0.1:4130/health 2>/dev/null || true)"
-        if echo "$body" | grep -q '"status":"ok"'; then
-            echo "preflight[connector]: Kernel healthy — proceeding"
-            exit 0
-        fi
-        sleep 1
-        i=$((i + 1))
-    done
-    echo "preflight[connector]: Kernel not healthy after 120s — refusing to start connector" >&2
-    exit 1
+    kernel_health_ready || return 1
 fi
 
-exit 0
+return 0
+}
+
+# Run as a script only; allow sourcing for tests of the gate function.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    main "$@"
+fi
