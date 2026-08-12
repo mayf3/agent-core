@@ -452,6 +452,8 @@ impl JournalStore {
         let updated_at: String = updated_at;
         let run_status = match status.as_str() {
             "Running" => RunStatus::Running,
+            "CancellationRequested" => RunStatus::CancellationRequested,
+            "Cancelled" => RunStatus::Cancelled,
             "WaitingDispatch" => RunStatus::WaitingDispatch,
             "Completed" => RunStatus::Completed,
             "Failed" => RunStatus::Failed,

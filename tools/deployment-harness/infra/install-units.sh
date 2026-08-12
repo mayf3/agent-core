@@ -27,6 +27,23 @@
 # =============================================================================
 set -euo pipefail
 
+# Serialize every fixed-runtime install/refresh.  This is deliberately an
+# infra lock, not a Kernel primitive.  Keeping the descriptor open for the
+# whole script prevents two deployment writers from replacing units/scripts
+# or starting the production pair concurrently.
+DEPLOY_LOCK_DIR="${HOME}/.agent-core/deployment/locks"
+DEPLOY_LOCK="${DEPLOY_LOCK_DIR}/kernel-connector.lock"
+mkdir -p "$DEPLOY_LOCK_DIR"
+command -v flock >/dev/null 2>&1 || {
+    echo "FATAL: flock is required for the authoritative deployment entrypoint" >&2
+    exit 1
+}
+exec 9>"$DEPLOY_LOCK"
+if ! flock -n 9; then
+    echo "FATAL: another Kernel/Connector deployment holds $DEPLOY_LOCK" >&2
+    exit 75
+fi
+
 # This round supervises ONLY the Kernel and the Feishu Connector — the two
 # services whose lifecycle coupling caused the 2026-07-31 outage (Kernel died
 # unattended while the Connector kept receiving Feishu messages). The three

@@ -5,6 +5,7 @@ use crate::journal::JournalStore;
 mod calculator_delivery;
 mod calculator_router;
 mod canary_runtime_delivery;
+mod chat_control;
 mod capability_decision;
 mod capability_host_client;
 mod capability_http;
@@ -249,6 +250,15 @@ fn handle_connection(
         return write_json(stream, 401, json!({ "ok": false, "error": "unauthorized" }));
     } else if path == "/v1/ingress" {
         handle_ingress(stream, &gateway, &journal, &request)
+    } else if path == "/v1/chat-control" {
+        match chat_control::handle(config, &journal, &request.body) {
+            Ok(body) => write_json(stream, 200, body),
+            Err(error) => write_json(
+                stream,
+                400,
+                json!({ "ok": false, "error": error.to_string() }),
+            ),
+        }
     } else if path == "/v1/session-continuation" {
         handle_session_continuation(stream, &gateway, &journal, &request)
     } else if path == "/v1/approve" {

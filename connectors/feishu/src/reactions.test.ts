@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createMemoryReactionStore } from "./reaction-store.js";
 import { createReactionTracker, extractReactionId, withRetry } from "./reactions.js";
+import { ProductionFeishuTransport } from "./production-transport.js";
 
 test("extractReactionId reads Feishu reaction responses", () => {
   assert.equal(
@@ -23,7 +24,7 @@ test("extractReactionId handles missing response data", () => {
 
 test("reaction tracker adds processing and removes it after success", async () => {
   const client = new FakeReactionClient();
-  const tracker = createReactionTracker(config(), client, createMemoryReactionStore());
+  const tracker = createReactionTracker(config(), new ProductionFeishuTransport(client), createMemoryReactionStore());
 
   await tracker.markProcessing("om_1");
   await tracker.markSucceeded("om_1");
@@ -36,7 +37,7 @@ test("reaction tracker adds processing and removes it after success", async () =
 
 test("reaction tracker replaces processing with failed marker", async () => {
   const client = new FakeReactionClient();
-  const tracker = createReactionTracker(config(), client, createMemoryReactionStore());
+  const tracker = createReactionTracker(config(), new ProductionFeishuTransport(client), createMemoryReactionStore());
 
   await tracker.markProcessing("om_2");
   await tracker.markFailed("om_2");
@@ -53,12 +54,12 @@ test("reaction tracker deletes persisted processing state after restart", async 
   try {
     const statePath = join(dir, "reactions.jsonl");
     const firstClient = new FakeReactionClient();
-    const firstTracker = createReactionTracker(config(statePath), firstClient);
+    const firstTracker = createReactionTracker(config(statePath), new ProductionFeishuTransport(firstClient));
 
     await firstTracker.markProcessing("om_3");
 
     const secondClient = new FakeReactionClient();
-    const secondTracker = createReactionTracker(config(statePath), secondClient);
+    const secondTracker = createReactionTracker(config(statePath), new ProductionFeishuTransport(secondClient));
     await secondTracker.markSucceeded("om_3");
 
     assert.deepEqual(secondClient.operations, [
@@ -114,7 +115,7 @@ test("withRetry does not call the operation when attempts is 0 (floor at 1)", as
 
 test("reaction tracker retries a transient processing-reaction add", async () => {
   const client = new FakeReactionClient({ failAddFor: 2 });
-  const tracker = createReactionTracker(config(), client, createMemoryReactionStore());
+  const tracker = createReactionTracker(config(), new ProductionFeishuTransport(client), createMemoryReactionStore());
 
   await tracker.markProcessing("om_4");
 
@@ -127,7 +128,7 @@ test("reaction tracker retries a transient processing-reaction add", async () =>
 test("reaction tracker gives up after exhausting add retries and does not record state", async () => {
   const store = createMemoryReactionStore();
   const client = new FakeReactionClient({ failAddFor: Infinity });
-  const tracker = createReactionTracker(config(), client, store);
+  const tracker = createReactionTracker(config(), new ProductionFeishuTransport(client), store);
 
   await tracker.markProcessing("om_5");
 
@@ -137,13 +138,29 @@ test("reaction tracker gives up after exhausting add retries and does not record
 
 test("reaction tracker retries remove then succeeds", async () => {
   const client = new FakeReactionClient({ failDeleteFor: 1 });
-  const tracker = createReactionTracker(config(), client, createMemoryReactionStore());
+  const tracker = createReactionTracker(config(), new ProductionFeishuTransport(client), createMemoryReactionStore());
 
   await tracker.markProcessing("om_6");
   await tracker.markSucceeded("om_6");
 
   assert.equal(client.deleteAttempts, 2, "one transient failure then success");
   assert.equal(client.operations.length, 2);
+});
+
+test("strict processing cleanup preserves state and becomes retryable after exhaustion", async () => {
+  const store = createMemoryReactionStore();
+  const client = new FakeReactionClient({ failDeleteFor: 3 });
+  const tracker = createReactionTracker(
+    config(),
+    new ProductionFeishuTransport(client),
+    store,
+  );
+
+  await tracker.markProcessing("om_7");
+  await assert.rejects(tracker.clearProcessing("om_7"));
+  assert.equal(store.load().size, 1, "failed cleanup remains durable for retry");
+  await tracker.clearProcessing("om_7");
+  assert.equal(store.load().size, 0);
 });
 
 function config(reactionStatePath = join(tmpdir(), "agent-core-reactions.jsonl")) {

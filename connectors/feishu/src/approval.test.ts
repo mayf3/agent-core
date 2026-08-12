@@ -13,6 +13,7 @@ import {
   type ApprovalConfig,
 } from "./approval.js";
 import { validateExecute } from "./execute-server.js";
+import { ProductionFeishuTransport } from "./production-transport.js";
 
 const ownerOpenId = "ou_owner123";
 const makeConfig = (overrides?: Partial<ApprovalConfig>): ApprovalConfig => ({
@@ -446,10 +447,10 @@ describe("pending proposal card", () => {
     }));
     const requests: any[] = [];
     await sendPendingProposalCardReply(
-      { request: async (request: any) => {
+      new ProductionFeishuTransport({ request: async (request: any) => {
         requests.push(request);
         return { data: { message_id: "om_service" } };
-      } },
+      } }),
       "om_1",
       { kind: "capability_proposal_pending_v1", proposal_id: "proposal_abc" },
       makeConfig(),
@@ -467,7 +468,7 @@ describe("pending proposal card", () => {
       return { data: { message_id: "om_card" } };
     } };
     const receipt = await sendPendingProposalCardReply(
-      client, "om_source",
+      new ProductionFeishuTransport(client), "om_source",
       { kind: "capability_proposal_pending_v1", proposal_id: "proposal_abc" },
       makeConfig(),
     );

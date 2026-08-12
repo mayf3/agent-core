@@ -1,222 +1,218 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import {
+  CANCELLED_HINT_TEXT,
+  TOOL_LIMIT_HINT_TEXT,
   createRunFailureObserver,
-  FAILURE_HINT_TEXT,
-  type RunFailureObserverDeps,
 } from "./run-observer.js";
 import type { ReactionTracker } from "./reactions.js";
 import type { FeishuTransport } from "./transport.js";
 
-type FakeEvent = {
-  sequence: number;
-  event_kind: string;
-  payload: any;
-};
+type FakeEvent = { sequence: number; event_kind: string; run_id?: string; payload: any };
 
-/** In-memory journal: pages events by kind + cursor, like /v1/events. */
-function fakeJournal() {
-  let nextSeq = 1;
-  const events: FakeEvent[] = [];
-  const push = (event_kind: string, payload: any) => {
-    events.push({ sequence: nextSeq++, event_kind, payload });
-  };
+function fakeJournal(events: FakeEvent[]) {
   return {
     events,
-    push,
     fetcher: async (url: string) => {
-      const parsed = new URL(url);
-      const cursor = Number(parsed.searchParams.get("cursor") ?? 0);
-      const kind = parsed.searchParams.get("event_kind") ?? "";
-      const limit = Number(parsed.searchParams.get("limit") ?? 1000);
-      const matches = events.filter(
-        (e) => (kind === "" || e.event_kind === kind) && e.sequence > cursor,
+      const cursor = Number(new URL(url).searchParams.get("cursor") ?? 0);
+      const matches = events
+        .filter((event) => event.sequence > cursor)
+        .sort((a, b) => a.sequence - b.sequence);
+      const page = matches.slice(0, 1000);
+      return new Response(
+        JSON.stringify({
+          events: page,
+          next_cursor: page.length ? page[page.length - 1].sequence : cursor,
+          has_more: matches.length > page.length,
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
       );
-      const page = matches.slice(0, limit);
-      return {
-        ok: true,
-        async json() {
-          return {
-            events: page,
-            next_cursor: page.length ? page[page.length - 1].sequence : cursor,
-            has_more: matches.length > limit,
-          };
-        },
-      } as Response;
     },
   };
 }
 
-class FakeReactionTracker implements ReactionTracker {
+class FakeReactions implements ReactionTracker {
   cleared: string[] = [];
-  async markProcessing(): Promise<void> {}
-  async markSucceeded(): Promise<void> {}
-  async markFailed(): Promise<void> {}
-  async clearProcessing(messageId: string): Promise<void> {
+  failures = 0;
+  async markProcessing() {}
+  async markSucceeded() {}
+  async markFailed() {}
+  async clearProcessing(messageId: string) {
+    if (this.failures > 0) {
+      this.failures -= 1;
+      throw new Error("temporary reaction removal failure");
+    }
     this.cleared.push(messageId);
   }
 }
 
 class FakeTransport implements FeishuTransport {
-  replies: { messageId: string; text: string }[] = [];
-  async replyToMessage(messageId: string, msgType: string, content: unknown): Promise<any> {
-    this.replies.push({ messageId, text: (content as any)?.text ?? "" });
-    return { message_id: `reply-${messageId}`, status: "ok" };
+  replies: Array<{ messageId: string; text: string }> = [];
+  failures = 0;
+  async replyToMessage(messageId: string, _type: string, content: any) {
+    if (this.failures > 0) {
+      this.failures -= 1;
+      throw new Error("temporary send failure");
+    }
+    this.replies.push({ messageId, text: content.text });
+    return { message_id: `reply-${messageId}`, status: "sent" };
   }
 }
 
-function config(cursorPath: string) {
+function config(cursorPath: string): any {
   return {
-    appId: "app",
-    appSecret: "secret",
     kernelUrl: "http://127.0.0.1:4130/v1/ingress",
-    kernelIngressTimeoutMs: 100,
-    connectorPort: 4131,
-    ipcToken: "token",
-    processingReactionEmoji: "OK",
-    failedReactionEmoji: "ERROR",
-    reactionStatePath: join(tmpdir(), "agent-core-reactions.jsonl"),
-    reactionRetryAttempts: 1,
-    reactionRetryBaseDelayMs: 0,
-    executeStatePath: join(tmpdir(), "agent-core-executes.jsonl"),
+    ipcToken: "ipc",
     runFailureCursorPath: cursorPath,
-    kernelDecisionApiUrl: "http://127.0.0.1:4130",
-    kernelDecisionToken: "decision-token",
-    feishuOwnerOpenId: "ou_owner",
   };
 }
 
-function deps(journal: ReturnType<typeof fakeJournal>, cursorPath: string): RunFailureObserverDeps {
-  return { fetcher: journal.fetcher, cursorPath, pollIntervalMs: 10_000 };
+function ingress(sequence: number, eventId: string, messageId: string): FakeEvent {
+  return {
+    sequence,
+    event_kind: "IngressAccepted",
+    payload: { event_id: eventId, message_id: messageId },
+  };
 }
 
-/** Push an ingress -> runstarted -> runfailed chain for one run. */
-function pushFailedRun(journal: ReturnType<typeof fakeJournal>, runId: string, messageId: string) {
-  const triggerId = `ev_ingress_${runId}`;
-  journal.push("IngressAccepted", { event_id: triggerId, message_id: messageId });
-  journal.push("RunStarted", { run_id: runId, trigger_event_id: triggerId });
-  journal.push("RunFailed", { run_id: runId, error_category: "runtime_v0_failed" });
+function started(sequence: number, runId: string, eventId: string): FakeEvent {
+  return {
+    sequence,
+    event_kind: "RunStarted",
+    run_id: runId,
+    payload: { run_id: runId, trigger_event_id: eventId },
+  };
 }
 
-test("historical RunFailed events are never re-fired (first-run catch-up)", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "agent-core-observer-"));
+test("first installation baselines history, then delivers a new failure", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "terminal-observer-"));
   try {
-    const cursorPath = join(dir, "cursor.json");
-    const journal = fakeJournal();
-    pushFailedRun(journal, "run_old", "om_old");
-    const reactions = new FakeReactionTracker();
+    const path = join(dir, "cursor.json");
+    const journal = fakeJournal([
+      ingress(1, "event_old", "om_old"),
+      started(2, "run_old", "event_old"),
+      { sequence: 3, event_kind: "RunFailed", run_id: "run_old", payload: { run_id: "run_old" } },
+    ]);
     const transport = new FakeTransport();
-    const observer = createRunFailureObserver(config(cursorPath), transport, reactions, deps(journal, cursorPath));
-
-    await observer.tick();
-
-    assert.deepEqual(reactions.cleared, [], "historical failure must not fire");
-    assert.deepEqual(transport.replies, [], "historical failure must not reply");
-    observer.stop();
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("a failure after startup clears the OK and sends the failure hint", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "agent-core-observer-"));
-  try {
-    const cursorPath = join(dir, "cursor.json");
-    const journal = fakeJournal();
-    const reactions = new FakeReactionTracker();
-    const transport = new FakeTransport();
-    const observer = createRunFailureObserver(config(cursorPath), transport, reactions, deps(journal, cursorPath));
-
-    await observer.tick(); // startup (empty journal)
-    pushFailedRun(journal, "run_2", "om_msg_2");
-    await observer.tick();
-
-    assert.deepEqual(reactions.cleared, ["om_msg_2"]);
-    assert.equal(transport.replies.length, 1);
-    assert.equal(transport.replies[0].messageId, "om_msg_2");
-    assert.equal(transport.replies[0].text, FAILURE_HINT_TEXT);
-    observer.stop();
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("the same run failure fires exactly once", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "agent-core-observer-"));
-  try {
-    const cursorPath = join(dir, "cursor.json");
-    const journal = fakeJournal();
-    const reactions = new FakeReactionTracker();
-    const transport = new FakeTransport();
-    const observer = createRunFailureObserver(config(cursorPath), transport, reactions, deps(journal, cursorPath));
-
-    await observer.tick();
-    pushFailedRun(journal, "run_3", "om_msg_3");
-    journal.push("RunFailed", { run_id: "run_3" }); // duplicate
-    await observer.tick();
-
-    assert.deepEqual(reactions.cleared, ["om_msg_3"]);
-    assert.equal(transport.replies.length, 1);
-    observer.stop();
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("failure without a correlated ingress is skipped", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "agent-core-observer-"));
-  try {
-    const cursorPath = join(dir, "cursor.json");
-    const journal = fakeJournal();
-    const reactions = new FakeReactionTracker();
-    const transport = new FakeTransport();
-    const observer = createRunFailureObserver(config(cursorPath), transport, reactions, deps(journal, cursorPath));
-
-    await observer.tick();
-    journal.push("RunStarted", { run_id: "run_4", trigger_event_id: "ev_unknown" });
-    journal.push("RunFailed", { run_id: "run_4" });
-    await observer.tick();
-
-    assert.deepEqual(reactions.cleared, []);
-    assert.deepEqual(transport.replies, []);
-    observer.stop();
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("cursor is persisted and a restarted observer resumes without re-firing", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "agent-core-observer-"));
-  try {
-    const cursorPath = join(dir, "cursor.json");
-    const journal = fakeJournal();
-    pushFailedRun(journal, "run_5", "om_msg_5");
-
-    const first = createRunFailureObserver(
-      config(cursorPath),
-      new FakeTransport(),
-      new FakeReactionTracker(),
-      deps(journal, cursorPath),
+    const reactions = new FakeReactions();
+    const observer = createRunFailureObserver(
+      config(path),
+      transport,
+      reactions,
+      undefined,
+      { fetcher: journal.fetcher, cursorPath: path },
     );
-    await first.tick(); // first run: absorbs run_5, persists cursor
-    first.stop();
+    await observer.tick();
+    assert.equal(transport.replies.length, 0, "historical failure is not replayed on install");
+    journal.events.push(ingress(4, "event_new", "om_new"));
+    journal.events.push(started(5, "run_new", "event_new"));
+    journal.events.push({
+      sequence: 6,
+      event_kind: "RunFailed",
+      run_id: "run_new",
+      payload: { run_id: "run_new", reason: "tool_call_limit_reached: exec" },
+    });
+    await observer.tick();
+    assert.deepEqual(reactions.cleared, ["om_new"]);
+    assert.equal(transport.replies[0].text, TOOL_LIMIT_HINT_TEXT);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
-    // Connector was down; a new failure arrives while it is away.
-    pushFailedRun(journal, "run_6", "om_msg_6");
-
-    const reactions = new FakeReactionTracker();
+test("restart replays a terminal event that arrived after the durable cursor", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "terminal-observer-"));
+  try {
+    const path = join(dir, "cursor.json");
+    const journal = fakeJournal([ingress(1, "event_1", "om_1"), started(2, "run_1", "event_1")]);
+    const first = createRunFailureObserver(
+      config(path),
+      new FakeTransport(),
+      new FakeReactions(),
+      undefined,
+      { fetcher: journal.fetcher, cursorPath: path },
+    );
+    await first.tick();
+    journal.events.push({
+      sequence: 3,
+      event_kind: "RunCancelled",
+      run_id: "run_1",
+      payload: { run_id: "run_1", reason: "user_requested" },
+    });
     const transport = new FakeTransport();
-    const second = createRunFailureObserver(config(cursorPath), transport, reactions, deps(journal, cursorPath));
-    await second.tick();
+    const restarted = createRunFailureObserver(
+      config(path),
+      transport,
+      new FakeReactions(),
+      undefined,
+      { fetcher: journal.fetcher, cursorPath: path },
+    );
+    await restarted.tick();
+    assert.equal(transport.replies[0].text, CANCELLED_HINT_TEXT);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
-    // Only run_6 fires (run_5 was absorbed before the persisted cursor).
-    assert.deepEqual(reactions.cleared, ["om_msg_6"]);
+test("failed terminal delivery does not advance the cursor past the event", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "terminal-observer-"));
+  try {
+    const path = join(dir, "cursor.json");
+    const journal = fakeJournal([ingress(1, "event_1", "om_1"), started(2, "run_1", "event_1")]);
+    const transport = new FakeTransport();
+    const observer = createRunFailureObserver(
+      config(path),
+      transport,
+      new FakeReactions(),
+      undefined,
+      { fetcher: journal.fetcher, cursorPath: path },
+    );
+    await observer.tick();
+    journal.events.push({
+      sequence: 3,
+      event_kind: "RunFailed",
+      run_id: "run_1",
+      payload: { run_id: "run_1" },
+    });
+    transport.failures = 1;
+    await assert.rejects(observer.tick(), /temporary send failure/);
+    await observer.tick();
+    assert.equal(transport.replies.length, 1, "the same terminal fact is retried");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("failed processing-reaction removal does not advance past the terminal fact", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "terminal-observer-"));
+  try {
+    const path = join(dir, "cursor.json");
+    const journal = fakeJournal([ingress(1, "event_1", "om_1"), started(2, "run_1", "event_1")]);
+    const transport = new FakeTransport();
+    const reactions = new FakeReactions();
+    const observer = createRunFailureObserver(
+      config(path),
+      transport,
+      reactions,
+      undefined,
+      { fetcher: journal.fetcher, cursorPath: path },
+    );
+    await observer.tick();
+    journal.events.push({
+      sequence: 3,
+      event_kind: "RunFailed",
+      run_id: "run_1",
+      payload: { run_id: "run_1" },
+    });
+    reactions.failures = 1;
+    await assert.rejects(observer.tick(), /temporary reaction removal failure/);
+    assert.equal(transport.replies.length, 0, "terminal reply waits until OK removal succeeds");
+    await observer.tick();
+    assert.deepEqual(reactions.cleared, ["om_1"]);
     assert.equal(transport.replies.length, 1);
-    assert.equal(transport.replies[0].messageId, "om_msg_6");
-    second.stop();
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

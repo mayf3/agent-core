@@ -133,6 +133,7 @@ test("execute dedup contract: persistence survives a new store object (restart)"
 import http from "node:http";
 import { startExecuteServer } from "./execute-server.js";
 import type { ConnectorConfig } from "./config.js";
+import { ProductionFeishuTransport } from "./production-transport.js";
 
 /** Helper: POST JSON to a URL and return the parsed body. */
 async function postJson(
@@ -200,7 +201,7 @@ test("HTTP: first execute calls sendReply, persists sent, returns ok", async () 
 
     const server = startExecuteServer(
       makeConfig({ executeStatePath: storePath }),
-      fakeClient,
+      new ProductionFeishuTransport(fakeClient),
       undefined,
       store,
     );
@@ -243,7 +244,7 @@ test("HTTP: same idempotency_key after restart returns replayed:true, no sendRep
 
     const server1 = startExecuteServer(
       makeConfig({ executeStatePath: storePath }),
-      fakeClient1,
+      new ProductionFeishuTransport(fakeClient1),
       undefined,
       store1,
     );
@@ -268,7 +269,7 @@ test("HTTP: same idempotency_key after restart returns replayed:true, no sendRep
 
     const server2 = startExecuteServer(
       makeConfig({ executeStatePath: storePath }),
-      fakeClient2,
+      new ProductionFeishuTransport(fakeClient2),
       undefined,
       store2,
     );
@@ -310,7 +311,7 @@ test("HTTP: sendReply failure does NOT persist as sent, retry allowed", async ()
 
     const server = startExecuteServer(
       makeConfig({ executeStatePath: storePath }),
-      failingClient,
+      new ProductionFeishuTransport(failingClient),
       undefined,
       store,
     );
@@ -361,7 +362,7 @@ test("HTTP: same key on same server (not restart) uses persisted dedup after suc
 
     const server = startExecuteServer(
       makeConfig({ executeStatePath: storePath }),
-      fakeClient,
+      new ProductionFeishuTransport(fakeClient),
       undefined,
       store,
     );
@@ -416,7 +417,7 @@ test("HTTP: replay response and log do not leak full idempotency_key or Authoriz
 
     const server = startExecuteServer(
       makeConfig({ executeStatePath: storePath }),
-      fakeClient,
+      new ProductionFeishuTransport(fakeClient),
       undefined,
       store,
     );
