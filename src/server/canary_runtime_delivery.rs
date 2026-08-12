@@ -27,8 +27,10 @@
 //! failed and the message is done.
 
 use crate::config::KernelConfig;
+use crate::context::ContextAssembler;
 use crate::domain::{
-    JournalEventKind, Run, RunId, RunPrincipal, RuntimeEventPayload, Session, ValidatedEvent,
+    ContextBlock, ContextBlockKind, JournalEventKind, Run, RunId, RuntimeEventPayload, Session,
+    ValidatedEvent,
 };
 use crate::gateway::Gateway;
 use crate::hook::{HookClient, HookConfig, HookEndpoint, HookKind};
@@ -117,6 +119,35 @@ pub(crate) fn deliver_via_runtime_v0(
         } => (text, message_id, chat_id),
     };
 
+    // Host-side context construction: reuse the existing Session/Journal
+    // facts. An explicit user "继续" additionally receives a bounded verbatim
+    // projection of the preceding unfinished Run (goal + recent tool/results).
+    // This is not compression and never creates or advances a summary fact.
+    let mut context_blocks = ContextAssembler::from_config(config).build(
+        journal,
+        &session,
+        &validated,
+        &text,
+        &granted_operations,
+        &snapshot,
+    )?;
+    context_blocks.push(ContextBlock {
+        kind: ContextBlockKind::SupplementalSystem,
+        content: CODING_INSTRUCTION.to_string(),
+        source_ref: Some("host/coding-instruction-v0".to_string()),
+    });
+    if text.trim() == "继续" {
+        if let Some(previous) =
+            journal.previous_unfinished_run_context(&session.id, &validated.event_id.0)?
+        {
+            context_blocks.push(ContextBlock {
+                kind: ContextBlockKind::SupplementalContext,
+                content: previous,
+                source_ref: Some("journal/previous-unfinished-run".to_string()),
+            });
+        }
+    }
+
     // ContextPrepareV0: when configured, the external Context Harness can
     // add the Agent workspace's AGENTS.md instruction to every model round.
     let hook_client: Option<Box<dyn HookClient>> = if config.context_prepare_hook.enabled {
@@ -133,6 +164,7 @@ pub(crate) fn deliver_via_runtime_v0(
         journal,
         run.clone(),
         session.clone(),
+        context_blocks,
     );
     let port = RuntimeV0InvocationAdapter {
         runtime: &runtime,
@@ -147,9 +179,17 @@ pub(crate) fn deliver_via_runtime_v0(
     // receives this plain integer — no budget, no deadline, no yield.
     let mut loop_runtime =
         RuntimeLoop::with_max_tool_calls(port, model, config.max_tool_rounds);
-    let reply = match loop_runtime.run(&text, &tool_view) {
+    let reply = match loop_runtime.run_with_control(&text, &tool_view, || {
+        journal
+            .run_cancellation_requested(&run.id)
+            .map_err(|error| format!("cancellation_check_failed:{error}"))
+    }) {
         Ok(reply) => reply,
         Err(error) => {
+            if error == "run_cancelled" || journal.run_cancellation_requested(&run.id)? {
+                journal.finish_run_cancelled(&run.id, "user_requested")?;
+                return Ok(());
+            }
             // Fail the Run; NEVER re-run the legacy Runtime for this message
             // (the new Runtime may already have executed a real tool).
             journal.fail_run(&run.id)?;
@@ -167,6 +207,13 @@ pub(crate) fn deliver_via_runtime_v0(
             bail!("runtime_v0_failed: {error}");
         }
     };
+
+    // Close the narrow boundary between the loop returning a final model
+    // answer and creating a reply Invocation.
+    if journal.run_cancellation_requested(&run.id)? {
+        journal.finish_run_cancelled(&run.id, "user_requested")?;
+        return Ok(());
+    }
 
     // Reuse the legacy reply mechanism: propose -> approve -> enqueue. No
     // new Reply framework. Any failure here also fails the Run — never a
@@ -293,6 +340,7 @@ struct RuntimeV0Model<'a> {
     journal: &'a JournalStore,
     run: Run,
     session: Session,
+    context_blocks: Vec<ContextBlock>,
     round_counter: std::cell::Cell<usize>,
 }
 
@@ -307,6 +355,7 @@ impl<'a> RuntimeV0Model<'a> {
         journal: &'a JournalStore,
         run: Run,
         session: Session,
+        context_blocks: Vec<ContextBlock>,
     ) -> Self {
         Self {
             llm,
@@ -318,6 +367,7 @@ impl<'a> RuntimeV0Model<'a> {
             journal,
             run,
             session,
+            context_blocks,
             round_counter: std::cell::Cell::new(0),
         }
     }
@@ -449,11 +499,7 @@ impl Model for RuntimeV0Model<'_> {
             })
             .collect::<Result<_, String>>()?;
         let input = LlmInput {
-            blocks: vec![crate::domain::ContextBlock {
-                kind: crate::domain::ContextBlockKind::RootSystem,
-                content: CODING_INSTRUCTION.to_string(),
-                source_ref: None,
-            }],
+            blocks: self.context_blocks.clone(),
             user_text: turn.user_text.clone(),
             granted_operations: vec![],
             provider_tools: self.tools_json.clone(),
@@ -539,7 +585,9 @@ impl InvocationPort for RuntimeV0InvocationAdapter<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{AgentId, ChannelKind, EventId, EventSource, SessionTarget};
+    use crate::domain::{
+        AgentId, ChannelKind, EventId, EventSource, RunPrincipal, SessionTarget,
+    };
     use crate::journal::JournalStore;
     use chrono::Utc;
     use uuid::Uuid;
@@ -809,6 +857,7 @@ mod tests {
             &journal,
             run,
             session,
+            vec![],
         );
         struct OkPort;
         impl InvocationPort for OkPort {

@@ -16,6 +16,7 @@ import {
 import type { ApprovalConfig } from "./approval.js";
 import { handleProposalCardAction } from "./approval.js";
 import { createRunFailureObserver } from "./run-observer.js";
+import { tryHandleChatControl } from "./control.js";
 
 const config = loadConfig();
 const baseConfig = {
@@ -39,10 +40,9 @@ const approvalConfig: ApprovalConfig = {
 };
 startExecuteServer(config, transport, reactions, executeStore, approvalConfig);
 
-// Run terminal failure observer: polls the Kernel's generic RunFailed fact
-// and performs the channel-specific cleanup (remove processing OK + safe
-// failure hint). Kernel/Runtime are untouched — no Feishu semantics in Core.
-const runObserver = createRunFailureObserver(config, transport, reactions);
+// Generic terminal facts are delivered by the Host event stream; Feishu owns
+// reaction cleanup, wording, and connector-local delivery idempotency.
+const runObserver = createRunFailureObserver(config, transport, reactions, executeStore);
 runObserver.start();
 
 /**
@@ -108,6 +108,17 @@ const eventDispatcher = new Lark.EventDispatcher({}).register({
       return;
     }
     const payload = normalized.payload;
+
+    // Rescue control plane: handled over authenticated Host IPC and replied
+    // immediately. It never creates a normal Run or enters the model loop.
+    const controlHandled = await tryHandleChatControl(config, payload, transport).catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`chat control handler error: ${message.slice(0, 200)}`);
+      return false;
+    });
+    if (controlHandled) {
+      return;
+    }
 
     // 1. Try approval interception (before LLM).
     if (payload.message_type === "text" && payload.text) {

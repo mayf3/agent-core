@@ -125,10 +125,28 @@ impl<P: InvocationPort, M: Model> RuntimeLoop<P, M> {
     }
 
     pub fn run(&mut self, user_text: &str, tool_view: &[Tool]) -> Result<String, String> {
+        self.run_with_control(user_text, tool_view, || Ok(false))
+    }
+
+    /// Run with a generic cooperative cancellation probe supplied by the
+    /// Host. The Runtime knows no Run id, connector, command syntax, or
+    /// storage model; it only checks at safe model/tool round boundaries.
+    pub fn run_with_control<F>(
+        &mut self,
+        user_text: &str,
+        tool_view: &[Tool],
+        mut cancellation_requested: F,
+    ) -> Result<String, String>
+    where
+        F: FnMut() -> Result<bool, String>,
+    {
         // Accumulated tool results: every executed tool's outcome stays
         // visible to every later model turn.
         let mut follow_ups: Vec<ToolResult> = vec![];
         loop {
+            if cancellation_requested()? {
+                return Err("run_cancelled".to_string());
+            }
             let turn = Turn {
                 user_text: user_text.to_string(),
                 tool_view: tool_view.to_vec(),
@@ -136,6 +154,9 @@ impl<P: InvocationPort, M: Model> RuntimeLoop<P, M> {
             };
             // Model failure propagates; no fake output, no fallback.
             let out = self.model.complete(&turn)?;
+            if cancellation_requested()? {
+                return Err("run_cancelled".to_string());
+            }
             let Some(action) = out.action else {
                 // The model answered directly — this is the final reply.
                 return Ok(out.text);
@@ -158,6 +179,9 @@ impl<P: InvocationPort, M: Model> RuntimeLoop<P, M> {
                 tool: action.tool,
                 text: render(&result),
             });
+            if cancellation_requested()? {
+                return Err("run_cancelled".to_string());
+            }
             // Continue asking the model with the accumulated results.
         }
     }
@@ -516,6 +540,33 @@ mod tests {
             runtime.port.submissions.get(),
             2,
             "already-executed tools are never re-executed"
+        );
+    }
+
+    #[test]
+    fn cooperative_cancellation_stops_before_the_next_model_round() {
+        let port = RecordingPort {
+            submissions: std::cell::Cell::new(0),
+            invocation_ids: std::cell::RefCell::new(vec![]),
+        };
+        let model = SequenceModel {
+            steps: vec![Step::Action("tool_a"), Step::Action("tool_b")],
+            seen: vec![],
+        };
+        let mut runtime = RuntimeLoop::with_max_tool_calls(port, model, 8);
+        let checks = std::cell::Cell::new(0_u32);
+        let error = runtime
+            .run_with_control("work", &[test_tool()], || {
+                let next = checks.get() + 1;
+                checks.set(next);
+                Ok(next >= 3)
+            })
+            .expect_err("cancellation must terminate the loop");
+        assert_eq!(error, "run_cancelled");
+        assert_eq!(
+            runtime.port.submissions.get(),
+            1,
+            "one completed tool, no next model round"
         );
     }
 }

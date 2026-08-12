@@ -482,7 +482,9 @@ where
             let started = journal.run_has_started(next_run_id)?;
             match (&existing.status, started) {
                 // Already reached a genuine terminal state — return it as-is.
-                (RunStatus::Completed, _) | (RunStatus::Failed, _) => {
+                (RunStatus::Completed, _)
+                | (RunStatus::Failed, _)
+                | (RunStatus::Cancelled, _) => {
                     return Ok(RuntimeOutcome {
                         run_id: existing.id,
                         session_id: session.id.clone(),
@@ -511,6 +513,7 @@ where
                 // crash window, or a corrupted DB). Fail closed — do NOT
                 // auto-recover, do NOT re-execute. Report the anomaly.
                 (RunStatus::Running, false)
+                | (RunStatus::CancellationRequested, false)
                 | (RunStatus::WaitingDispatch, false)
                 | (RunStatus::Unknown, false)
                 | (RunStatus::AwaitingApproval, false) => {

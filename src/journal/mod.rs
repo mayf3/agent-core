@@ -22,6 +22,7 @@ mod outbox_queue;
 mod queue;
 mod queue_health;
 mod recovery;
+mod run_control;
 mod registry_control_upgrade;
 mod registry_ops;
 mod sqlite;
@@ -64,3 +65,4 @@ pub use event_observe::{
     MAX_OBSERVE_LIMIT, OBSERVE_SCHEMA_VERSION,
 };
 pub use sqlite::JournalStore;
+pub use run_control::CancellationRequestOutcome;

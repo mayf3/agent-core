@@ -104,7 +104,20 @@ export function createReactionTracker(
       }
     },
     async clearProcessing(messageId: string) {
-      await removeTrackedReaction(transport, states, store, messageId, "cleared", retryAttempts, retryBaseDelayMs);
+      // Terminal delivery treats removal as part of the durable hand-off. If
+      // bounded retries are exhausted, surface the failure so the Journal
+      // observer does not advance its cursor and can retry the same terminal
+      // fact later.
+      await removeTrackedReaction(
+        transport,
+        states,
+        store,
+        messageId,
+        "cleared",
+        retryAttempts,
+        retryBaseDelayMs,
+        true,
+      );
     },
   };
 }
@@ -121,6 +134,7 @@ async function removeTrackedReaction(
   reason: string,
   retryAttempts: number,
   retryBaseDelayMs: number,
+  propagateFailure = false,
 ) {
   const state = states.get(messageId);
   if (!state || state.status === "remove_pending") {
@@ -145,6 +159,9 @@ async function removeTrackedReaction(
   } catch (error) {
     state.status = reason === "failed" ? "failed" : "processing";
     console.warn(`reaction remove failed msg=${shortId(messageId)} category=${errorLabel(error)} attempts=${retryAttempts}`);
+    if (propagateFailure) {
+      throw error;
+    }
   }
 }
 
