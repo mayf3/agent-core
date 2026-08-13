@@ -1,3 +1,4 @@
+pub mod component_deploy_adapter;
 pub mod config;
 pub mod manager;
 mod process;

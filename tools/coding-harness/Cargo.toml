@@ -35,3 +35,5 @@ path = "tests/generator/generic_generator_live.rs"
 
 [dev-dependencies]
 capability-host = { path = "../capability-host" }
+deployment-harness = { path = "../deployment-harness" }
+tempfile = "3"

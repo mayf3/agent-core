@@ -179,6 +179,9 @@ fn dispatch(config: &CodingConfig, operation: &str, args: &Value) -> Value {
     if operation == "external.coding_hcr_accept" || operation == "external.coding_hcr_exec" {
         return err_value("hcr_active_workflow_retired");
     }
+    if operation == "external.component_build" {
+        return crate::component_build::handle(args, config);
+    }
     if operation == "external.execution_task" {
         let canonical_root = match resolve_execution_task_root(
             config,
@@ -392,6 +395,7 @@ fn matches_expected_token(
         "external.execution_task" => execution_token,
         "external.coding_workspace_task" => execution_token,
         "external.coding_task_submit" => control_token,
+        "external.component_build" => execution_token,
         _ => return true,
     };
     match (expected, bearer) {
