@@ -88,6 +88,25 @@ no commit→digest resolver map connects the two steps.
   never silently changes Registry/HookBinding state.
 - The Connector is a deployed edge process and has **no** activation requirement.
 
+## Stop / status / rollback reuse boundary (PR #234 scope)
+
+- Component `status` / `disable` / `rollback` all **reuse the Deployment Harness
+  existing lifecycle**: `GET /v1/components/{id}` (status), `POST
+  /v1/components/{id}/disable` (stop the deployed process), `POST
+  /v1/components/{id}/rollback`. These routes live in the Deployment Harness
+  frozen core and are unchanged by this milestone.
+- PR #234 adds **only** the Agent-facing `external.component_build` +
+  `external.component_deploy` operations. It does **not** re-wrap or duplicate
+  stop/status; there is no Agent-facing `component_stop` / `component_status`
+  operation in this milestone.
+- `disable` means stopping a **deployed external component process** (the
+  Deployment Harness disable effect) — it is **not** the Feishu `/stop` Run
+  control (run-session termination stays with ChatControl and is unrelated to
+  this lifecycle).
+- Deployment `status` likewise means the component deployment state
+  (`healthy` / `disabled` / `rolled_back` + `health_status`) — it is **not** the
+  Feishu `/status` agent-state query.
+
 ## Registration + grant (production, zero Kernel change)
 
 1. Register both operations as ordinary `HarnessManifest`s
