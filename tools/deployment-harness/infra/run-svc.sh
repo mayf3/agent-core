@@ -114,8 +114,13 @@ case "$SVC" in
         rotate_log "${LOGS}/deployment-harness.log"
         exec "$DH_BIN"
         ;;
+    component-deploy-adapter)
+        cd "${RUNTIME}/component-deploy-adapter"
+        rotate_log "${LOGS}/component-deploy-adapter.log"
+        exec "./component-deploy-adapter"
+        ;;
     *)
-        echo "usage: $0 <kernel|connector|coding-harness|capability-host|deployment-harness>" >&2
+        echo "usage: $0 <kernel|connector|coding-harness|capability-host|deployment-harness|component-deploy-adapter>" >&2
         exit 64
         ;;
 esac
