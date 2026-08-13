@@ -1,4 +1,5 @@
 pub mod capability;
+pub mod component_build;
 pub mod config;
 pub mod fixtures;
 pub mod hcr;

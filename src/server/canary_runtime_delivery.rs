@@ -27,10 +27,13 @@
 //! failed and the message is done.
 
 use crate::config::KernelConfig;
+use crate::context::ContextAssembler;
 use crate::domain::{
-    JournalEventKind, RunId, RunPrincipal, RuntimeEventPayload, ValidatedEvent,
+    ContextBlock, ContextBlockKind, JournalEventKind, Run, RunId, RuntimeEventPayload, Session,
+    ValidatedEvent,
 };
 use crate::gateway::Gateway;
+use crate::hook::{HookClient, HookConfig, HookEndpoint, HookKind};
 use crate::journal::JournalStore;
 use crate::llm::{
     LlmClient, LlmFollowUp, LlmInput, ProviderToolTurn, ToolCall, ToolCallResult,
@@ -116,9 +119,52 @@ pub(crate) fn deliver_via_runtime_v0(
         } => (text, message_id, chat_id),
     };
 
+    // Host-side context construction: reuse the existing Session/Journal
+    // facts. An explicit user "继续" additionally receives a bounded verbatim
+    // projection of the preceding unfinished Run (goal + recent tool/results).
+    // This is not compression and never creates or advances a summary fact.
+    let mut context_blocks = ContextAssembler::from_config(config).build(
+        journal,
+        &session,
+        &validated,
+        &text,
+        &granted_operations,
+        &snapshot,
+    )?;
+    context_blocks.push(ContextBlock {
+        kind: ContextBlockKind::SupplementalSystem,
+        content: CODING_INSTRUCTION.to_string(),
+        source_ref: Some("host/coding-instruction-v0".to_string()),
+    });
+    if text.trim() == "继续" {
+        if let Some(previous) =
+            journal.previous_unfinished_run_context(&session.id, &validated.event_id.0)?
+        {
+            context_blocks.push(ContextBlock {
+                kind: ContextBlockKind::SupplementalContext,
+                content: previous,
+                source_ref: Some("journal/previous-unfinished-run".to_string()),
+            });
+        }
+    }
+
+    // ContextPrepareV0: when configured, the external Context Harness can
+    // add the Agent workspace's AGENTS.md instruction to every model round.
+    let hook_client: Option<Box<dyn HookClient>> = if config.context_prepare_hook.enabled {
+        Some(Box::new(crate::hook::HttpHookClient::new()))
+    } else {
+        None
+    };
     let model = RuntimeV0Model::new(
         Box::new(super::delivery::build_llm_from_config(config)),
         provider_tools,
+        snapshot.clone(),
+        hook_client,
+        Some(config.context_prepare_hook.clone()),
+        journal,
+        run.clone(),
+        session.clone(),
+        context_blocks,
     );
     let port = RuntimeV0InvocationAdapter {
         runtime: &runtime,
@@ -133,9 +179,17 @@ pub(crate) fn deliver_via_runtime_v0(
     // receives this plain integer — no budget, no deadline, no yield.
     let mut loop_runtime =
         RuntimeLoop::with_max_tool_calls(port, model, config.max_tool_rounds);
-    let reply = match loop_runtime.run(&text, &tool_view) {
+    let reply = match loop_runtime.run_with_control(&text, &tool_view, || {
+        journal
+            .run_cancellation_requested(&run.id)
+            .map_err(|error| format!("cancellation_check_failed:{error}"))
+    }) {
         Ok(reply) => reply,
         Err(error) => {
+            if error == "run_cancelled" || journal.run_cancellation_requested(&run.id)? {
+                journal.finish_run_cancelled(&run.id, "user_requested")?;
+                return Ok(());
+            }
             // Fail the Run; NEVER re-run the legacy Runtime for this message
             // (the new Runtime may already have executed a real tool).
             journal.fail_run(&run.id)?;
@@ -153,6 +207,13 @@ pub(crate) fn deliver_via_runtime_v0(
             bail!("runtime_v0_failed: {error}");
         }
     };
+
+    // Close the narrow boundary between the loop returning a final model
+    // answer and creating a reply Invocation.
+    if journal.run_cancellation_requested(&run.id)? {
+        journal.finish_run_cancelled(&run.id, "user_requested")?;
+        return Ok(());
+    }
 
     // Reuse the legacy reply mechanism: propose -> approve -> enqueue. No
     // new Reply framework. Any failure here also fails the Run — never a
@@ -237,6 +298,20 @@ fn to_runtime_tools(provider_tools: &[Value]) -> Vec<Tool> {
         .collect()
 }
 
+/// Minimal generic coding behaviour guidance injected as the runtime
+/// system block. Deliberately tiny — not a prompt framework, no Route
+/// Harness specifics.
+const CODING_INSTRUCTION: &str = "\
+# Coding 工作说明
+- 工具参数使用 schema 中给出的真实绝对路径；不要猜 workspace 名称或修改部署副本；
+- 完整代码开发任务可使用高层任务工具（external.execution_task）；
+- read / exec 用于调查和验证，不要逐文件无休止探索；
+- 搜索优先于逐个文件读取；
+- 同类不可恢复错误重复出现时停止；
+- 开发结果必须检查 git diff；
+- 运行相关测试；
+- 未完成时明确报告 blocker，不机械重试。";
+
 /// Thin adapter wrapping the production LLM as `agent_runtime::Model`.
 ///
 /// Only the minimal conversions: turn -> LlmInput (no full ContextAssembler,
@@ -244,25 +319,168 @@ fn to_runtime_tools(provider_tools: &[Value]) -> Vec<Tool> {
 /// provider transcripts of EVERY prior tool round are remembered here,
 /// host-side, so a later model turn can replay all accumulated tool results
 /// as proper provider tool turns.
-struct RuntimeV0Model {
+///
+/// When a ContextPrepareV0 hook is configured, every model round runs
+/// through the existing stage -> hook -> materialize -> complete chain so
+/// the external Context Harness can add the Agent workspace's AGENTS.md
+/// instruction. Hook failure degrades to the candidate (fail-open); the
+/// built-in CODING_INSTRUCTION stays as the fallback.
+struct RuntimeV0Model<'a> {
     llm: Box<dyn LlmClient>,
     tools_json: Vec<Value>,
+    /// The Run's PINNED registry snapshot — the ONLY authority for the
+    /// context.prepare.v0 hook binding (provider / endpoint). Env never
+    /// picks the provider.
+    snapshot: std::sync::Arc<crate::registry::snapshot::RegistrySnapshot>,
     /// Provider transcript of each executed tool round, in execution order.
     /// Index `i` pairs with `turn.follow_ups[i]`.
     provider_turn_history: Vec<ProviderToolTurn>,
+    hook_client: Option<Box<dyn HookClient>>,
+    hook_config: Option<HookConfig>,
+    journal: &'a JournalStore,
+    run: Run,
+    session: Session,
+    context_blocks: Vec<ContextBlock>,
+    round_counter: std::cell::Cell<usize>,
 }
 
-impl RuntimeV0Model {
-    fn new(llm: Box<dyn LlmClient>, tools_json: Vec<Value>) -> Self {
+impl<'a> RuntimeV0Model<'a> {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        llm: Box<dyn LlmClient>,
+        tools_json: Vec<Value>,
+        snapshot: std::sync::Arc<crate::registry::snapshot::RegistrySnapshot>,
+        hook_client: Option<Box<dyn HookClient>>,
+        hook_config: Option<HookConfig>,
+        journal: &'a JournalStore,
+        run: Run,
+        session: Session,
+        context_blocks: Vec<ContextBlock>,
+    ) -> Self {
         Self {
             llm,
             tools_json,
+            snapshot,
             provider_turn_history: vec![],
+            hook_client,
+            hook_config,
+            journal,
+            run,
+            session,
+            context_blocks,
+            round_counter: std::cell::Cell::new(0),
+        }
+    }
+}
+/// The Run's pinned snapshot is the ONLY authority for the
+/// context.prepare.v0 hook binding. A missing/ambiguous binding or a
+/// Builtin binding (no builtin context provider exists) yields None — the
+/// hook does NOT run, and env is never consulted for a provider.
+fn context_hook_binding(
+    snapshot: &crate::registry::snapshot::RegistrySnapshot,
+) -> Option<&crate::registry::snapshot::HookBinding> {
+    let binding = snapshot.hook_binding(crate::registry::snapshot::CONTEXT_PREPARE_HOOK_CONTRACT)?;
+    if binding.binding_kind != crate::registry::snapshot::BindingKind::External {
+        return None;
+    }
+    Some(binding)
+}
+
+/// The local credential's provider identity must match the binding's
+/// provider (fail closed on mismatch, mirroring the budget hook path).
+fn validate_context_credential(
+    binding: &crate::registry::snapshot::HookBinding,
+    local: &HookConfig,
+) -> Result<(), String> {
+    if local.provider_id != binding.provider_id {
+        return Err(format!(
+            "context_hook_credential_mismatch: binding provider {} != local credential provider {}",
+            binding.provider_id, local.provider_id
+        ));
+    }
+    Ok(())
+}
+
+/// Provider/endpoint come from the binding; env keeps only the LOCAL call
+/// mechanics (credential, timeout, request limits, failure policy).
+fn build_context_hook_config(
+    binding: &crate::registry::snapshot::HookBinding,
+    local: &HookConfig,
+) -> HookConfig {
+    HookConfig {
+        enabled: true,
+        kind: HookKind::ContextPrepareV0,
+        endpoint: HookEndpoint {
+            url: binding.endpoint.clone(),
+        },
+        timeout_ms: local.timeout_ms,
+        max_request_bytes: local.max_request_bytes,
+        max_response_bytes: local.max_response_bytes,
+        failure_mode: local.failure_mode,
+        provider_id: binding.provider_id.clone(),
+        shared_secret: local.shared_secret.clone(),
+        ..Default::default()
+    }
+}
+
+impl<'a> RuntimeV0Model<'a> {
+    /// Run the base input through the existing ContextPrepareV0 chain:
+    /// stage_candidate -> context hook -> materialize. The provider may ADD
+    /// Agent instruction blocks (e.g. AGENTS.md via the Context Harness);
+    /// user_text, tools and original blocks stay as the provider returned
+    /// them. Hook absence/failure degrades to the unmodified candidate
+    /// (fail-open); fail-closed configuration terminates.
+    fn prepare_input(&mut self, input: LlmInput) -> Result<LlmInput, String> {
+        let candidate = self
+            .llm
+            .stage_candidate(input.clone())
+            .map_err(|e| format!("context_stage_failed: {e}"))?;
+        let round_index = self.round_counter.get();
+        self.round_counter.set(round_index + 1);
+        // The Run's pinned snapshot is the ONLY authority for the
+        // context.prepare.v0 binding; env never picks the provider.
+        let Some(binding) = context_hook_binding(&self.snapshot) else {
+            return Ok(input);
+        };
+        let Some(local) = self.hook_config.as_ref() else {
+            return Ok(input);
+        };
+        validate_context_credential(binding, local)?;
+        let hook_config = build_context_hook_config(binding, local);
+        let outcome = crate::runtime::hook_call::call_context_artifact_hook(
+            &candidate,
+            self.hook_client.as_deref(),
+            Some(&hook_config),
+            self.journal,
+            &self.run,
+            &self.session,
+            round_index,
+        )
+        .map_err(|e| format!("context_hook_failed: {e}"))?;
+        match outcome {
+            crate::runtime::hook_call::ContextArtifactOutcome::Provider { artifacts, .. } => {
+                match self
+                    .llm
+                    .materialize_context(&candidate, &artifacts)
+                    .map_err(|e| format!("context_materialize_failed: {e}"))?
+                {
+                    crate::llm::ModelMaterialization::Ready { input, .. } => Ok(input),
+                    crate::llm::ModelMaterialization::OverBudget { .. } => {
+                        Err("context_over_budget".to_string())
+                    }
+                }
+            }
+            // Not configured / disabled / provider failed (fail-open):
+            // use the unmodified candidate.
+            crate::runtime::hook_call::ContextArtifactOutcome::Candidate { .. } => Ok(input),
+            crate::runtime::hook_call::ContextArtifactOutcome::Terminate { error_code } => {
+                Err(format!("context_hook_terminated:{error_code}"))
+            }
         }
     }
 }
 
-impl Model for RuntimeV0Model {
+impl Model for RuntimeV0Model<'_> {
     fn complete(&mut self, turn: &Turn) -> Result<ModelOutput, String> {
         // Every accumulated tool result is replayed to the model with its
         // OWN provider transcript, so round N sees all prior results A..N-1.
@@ -281,14 +499,15 @@ impl Model for RuntimeV0Model {
             })
             .collect::<Result<_, String>>()?;
         let input = LlmInput {
-            blocks: vec![], // minimal single-round context for the first Canary
+            blocks: self.context_blocks.clone(),
             user_text: turn.user_text.clone(),
             granted_operations: vec![],
             provider_tools: self.tools_json.clone(),
             follow_ups,
             timeout_override_ms: None,
         };
-        let output = self.llm.complete(input).map_err(|e| e.to_string())?;
+        let prepared = self.prepare_input(input)?;
+        let output = self.llm.complete(prepared).map_err(|e| e.to_string())?;
         if let Some(provider_turn) = output.provider_turn.clone() {
             self.provider_turn_history.push(provider_turn);
         }
@@ -366,7 +585,9 @@ impl InvocationPort for RuntimeV0InvocationAdapter<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{AgentId, ChannelKind, EventId, EventSource, SessionTarget};
+    use crate::domain::{
+        AgentId, ChannelKind, EventId, EventSource, RunPrincipal, SessionTarget,
+    };
     use crate::journal::JournalStore;
     use chrono::Utc;
     use uuid::Uuid;
@@ -596,7 +817,48 @@ mod tests {
             seen: seen.clone(),
             rounds: std::cell::Cell::new(0),
         });
-        let model = RuntimeV0Model::new(llm, vec![]);
+        let journal = JournalStore::in_memory().unwrap();
+        let session = journal
+            .get_or_create_session(&SessionTarget {
+                agent_id: AgentId("main".into()),
+                channel: ChannelKind::Cli,
+                conversation_key: "ctx-test".into(),
+            })
+            .unwrap();
+        let run = Run {
+            id: crate::domain::RunId::new(),
+            session_id: session.id.clone(),
+            agent_id: AgentId("main".into()),
+            trigger_event_id: EventId::new(),
+            principal: principal_with_id("cli:local"),
+            parent_run_id: None,
+            delegated_by: None,
+            status: crate::domain::RunStatus::Running,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            registry_snapshot_id: String::new(),
+            mode: crate::domain::RunMode::Default,
+            budget_hook_id: None,
+            budget_hook_version: None,
+            budget_decision_digest: None,
+            budget_max_tool_rounds: None,
+            budget_max_wall_time_ms: None,
+            budget_exhaustion_action: None,
+        };
+        let snapshot = journal
+            .load_registry_snapshot(&journal.current_registry_snapshot_id().unwrap())
+            .unwrap();
+        let model = RuntimeV0Model::new(
+            llm,
+            vec![],
+            snapshot,
+            None,
+            None,
+            &journal,
+            run,
+            session,
+            vec![],
+        );
         struct OkPort;
         impl InvocationPort for OkPort {
             fn submit(
@@ -632,5 +894,99 @@ mod tests {
             *seen
         );
         Ok(())
+    }
+
+    /// A snapshot carrying an External context.prepare.v0 binding.
+    fn snapshot_with_context_binding(endpoint: &str, provider: &str) -> crate::registry::snapshot::RegistrySnapshot {
+        use crate::registry::snapshot::{BindingKind, HookBinding, RegistrySnapshot};
+        let mut snapshot = RegistrySnapshot {
+            snapshot_id: format!("snap_ctx_{}", endpoint.len()),
+            created_at: Utc::now(),
+            operations: vec![],
+            hook_bindings: vec![],
+        };
+        snapshot.hook_bindings.push(HookBinding {
+            contract: crate::registry::snapshot::CONTEXT_PREPARE_HOOK_CONTRACT.to_string(),
+            hook_id: "external:context-harness-v0".into(),
+            hook_version: "v0".into(),
+            binding_kind: BindingKind::External,
+            binding_key: "external.context_harness".into(),
+            provider_id: provider.into(),
+            endpoint: endpoint.into(),
+        });
+        snapshot
+    }
+
+    #[test]
+    fn pinned_snapshot_binding_provides_provider_and_endpoint() {
+        let snap_a = snapshot_with_context_binding("http://127.0.0.1:7401/context", "agent-context-harness-v0");
+        let binding = context_hook_binding(&snap_a).expect("external binding present");
+        assert_eq!(binding.endpoint, "http://127.0.0.1:7401/context");
+        assert_eq!(binding.provider_id, "agent-context-harness-v0");
+    }
+
+    #[test]
+    fn missing_binding_never_falls_back_to_env_provider() {
+        // Snapshot without any context.prepare.v0 binding: no hook, and no
+        // env provider is consulted (the helper returns None).
+        let snap = crate::registry::snapshot::RegistrySnapshot {
+            snapshot_id: "snap_no_binding".into(),
+            created_at: Utc::now(),
+            operations: vec![],
+            hook_bindings: vec![crate::registry::snapshot::HookBinding::builtin_budget()],
+        };
+        assert!(context_hook_binding(&snap).is_none());
+        // A Builtin context binding also yields None (no builtin provider).
+        let mut snap_builtin = crate::registry::snapshot::RegistrySnapshot {
+            snapshot_id: "snap_builtin".into(),
+            created_at: Utc::now(),
+            operations: vec![],
+            hook_bindings: vec![],
+        };
+        snap_builtin.hook_bindings.push(crate::registry::snapshot::HookBinding {
+            contract: crate::registry::snapshot::CONTEXT_PREPARE_HOOK_CONTRACT.to_string(),
+            hook_id: "builtin:context-default-v0".into(),
+            hook_version: "v0".into(),
+            binding_kind: crate::registry::snapshot::BindingKind::Builtin,
+            binding_key: "builtin.context_default".into(),
+            provider_id: String::new(),
+            endpoint: String::new(),
+        });
+        assert!(context_hook_binding(&snap_builtin).is_none());
+    }
+
+    #[test]
+    fn credential_mismatch_fails_closed_and_env_mechanics_are_preserved() {
+        let snap_a = snapshot_with_context_binding("http://127.0.0.1:7401/context", "agent-context-harness-v0");
+        let binding = context_hook_binding(&snap_a).unwrap();
+
+        // Local credential provider must match the binding.
+        let wrong = HookConfig {
+            provider_id: "other-provider".into(),
+            ..Default::default()
+        };
+        assert!(validate_context_credential(binding, &wrong).is_err());
+
+        // Env keeps the local call mechanics; provider/endpoint come from the
+        // binding.
+        let local = HookConfig {
+            provider_id: "agent-context-harness-v0".into(),
+            shared_secret: "local-secret".into(),
+            timeout_ms: 1234,
+            max_request_bytes: 2048,
+            max_response_bytes: 4096,
+            failure_mode: crate::hook::HookFailureMode::FailOpen,
+            ..Default::default()
+        };
+        validate_context_credential(binding, &local).expect("matching credential");
+        let config = build_context_hook_config(binding, &local);
+        assert_eq!(config.endpoint.url, "http://127.0.0.1:7401/context");
+        assert_eq!(config.provider_id, "agent-context-harness-v0");
+        assert_eq!(config.shared_secret, "local-secret");
+        assert_eq!(config.timeout_ms, 1234);
+        assert_eq!(config.max_request_bytes, 2048);
+        assert_eq!(config.max_response_bytes, 4096);
+        assert_eq!(config.failure_mode, crate::hook::HookFailureMode::FailOpen);
+        assert!(config.enabled);
     }
 }

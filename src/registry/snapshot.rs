@@ -74,6 +74,9 @@ impl OperationSpec {
 /// `contract` — the Kernel resolves the exact binding for a lifecycle point
 /// and fails closed when the contract is missing or duplicated.
 pub const BUDGET_HOOK_CONTRACT: &str = "run.budget.resolve.v0";
+/// The context.prepare.v0 hook contract resolved from a Run's pinned
+/// Registry Snapshot hook bindings.
+pub const CONTEXT_PREPARE_HOOK_CONTRACT: &str = "context.prepare.v0";
 
 /// A generic hook binding frozen into a Registry Snapshot. One binding per
 /// `contract` (enforced at creation); a snapshot without the binding a

@@ -17,6 +17,7 @@ pub mod external_receipt_envelope;
 pub use acceptance_receipt::*;
 pub use external_receipt_envelope::*;
 pub mod harness_change_request;
+pub mod hook_binding_change;
 pub mod operation;
 pub mod retry;
 pub mod self_evolution;
@@ -28,6 +29,7 @@ pub use component_registry::*;
 pub use context_block::*;
 pub use deployment::*;
 pub use harness_change_request::*;
+pub use hook_binding_change::*;
 pub use operation::*;
 pub use retry::*;
 pub use self_evolution::*;
@@ -200,6 +202,13 @@ pub struct Run {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RunStatus {
     Running,
+    /// A generic cooperative cancellation has been requested. The Runtime
+    /// observes this durable state only at model/tool round boundaries; it
+    /// does not know which connector or user command requested it.
+    CancellationRequested,
+    /// The Runtime observed a cancellation request and stopped scheduling
+    /// further model/tool work.
+    Cancelled,
     WaitingDispatch,
     Completed,
     Failed,
@@ -490,6 +499,12 @@ pub enum JournalEventKind {
     WorkerJobDead,
     RunCompleted,
     RunFailed,
+    /// A generic cooperative cancellation request for a Run. Product and
+    /// connector command syntax never enter this fact.
+    RunCancellationRequested,
+    /// Terminal fact emitted once the Runtime observes the request at a safe
+    /// model/tool round boundary.
+    RunCancelled,
     // Phase 2 M2d: durable approval state. Appended when a `risk: Write`
     // operation is held for a human decision, and when that decision lands.
     ApprovalRequested,

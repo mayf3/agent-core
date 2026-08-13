@@ -32,10 +32,7 @@ fn append_or_fatal(
             category: "journal_unwritable",
         })
 }
-fn rejected_result(
-    rejection: ToolRejection,
-    parameters: Option<&serde_json::Value>,
-) -> ToolCallOutcome {
+fn rejected_result(rejection: ToolRejection) -> ToolCallOutcome {
     let text = match &rejection {
         ToolRejection::InvalidArgumentsWithDetails(issue) => {
             use crate::registry::schema::SchemaValidationIssue;
@@ -44,24 +41,6 @@ fn rejected_result(
                 SchemaValidationIssue::MissingRequired { fields } => {
                     details["error_category"] = serde_json::json!("invalid_arguments");
                     details["missing_fields"] = serde_json::json!(fields);
-                    // If workspace_id is missing, extract available IDs from pinned schema.
-                    if fields.contains(&"workspace_id".to_string()) {
-                        if let Some(params) = parameters {
-                            if let Some(ws_enum) = params
-                                .pointer("/properties/workspace_id/enum")
-                                .and_then(|v| v.as_array())
-                            {
-                                let ids: Vec<String> = ws_enum
-                                    .iter()
-                                    .filter_map(|v| v.as_str())
-                                    .map(String::from)
-                                    .collect();
-                                if !ids.is_empty() {
-                                    details["available_workspace_ids"] = serde_json::json!(ids);
-                                }
-                            }
-                        }
-                    }
                 }
                 SchemaValidationIssue::EnumMismatch { property, allowed } => {
                     details["error_category"] = serde_json::json!("invalid_arguments");
@@ -305,7 +284,7 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
                 return Ok(fatal);
             }
         }
-        Ok(rejected_result(ToolRejection::MalformedToolCall, None))
+        Ok(rejected_result(ToolRejection::MalformedToolCall))
     }
     /// LEGACY COMPATIBILITY DEBT: reload the V1 governance objects the
     /// legacy tool path requires from the journal by `run_id`. The Runtime
@@ -431,8 +410,7 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
             }
         };
         if let Err(rejection) = validate_model_arguments(spec, &intent.arguments) {
-            // Use rejected_result directly with spec parameters so
-            // available_workspace_ids can be extracted from the pinned schema.
+            // Use the pinned schema for generic validation diagnostics only.
             if let Some(fatal) = append_or_fatal(
                 journal,
                 JournalEventKind::ToolCallRejected,
@@ -443,7 +421,7 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
             ) {
                 return Ok(fatal);
             }
-            return Ok(rejected_result(rejection, Some(&spec.parameters)));
+            return Ok(rejected_result(rejection));
         }
         // Inject session_id for policy session-scope check. External harness
         // dispatch strips it before sending to the harness.
@@ -482,7 +460,7 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
                 ) {
                     return Ok(fatal);
                 }
-                return Ok(rejected_result(ToolRejection::PolicyDenied, None));
+                return Ok(rejected_result(ToolRejection::PolicyDenied));
             }
         };
         if let Some(fatal) = append_or_fatal(
@@ -550,6 +528,6 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
         ) {
             return Ok(fatal);
         }
-        Ok(rejected_result(rejection, None))
+        Ok(rejected_result(rejection))
     }
 }

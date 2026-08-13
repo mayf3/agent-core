@@ -47,6 +47,12 @@ pub struct CodingConfig {
     /// HCR authentication token. Must be included in HCR exec requests.
     /// Read from HCR_TOKEN environment variable, or empty (profile disabled).
     pub hcr_token: String,
+    /// Controlled component-build allowlist for `external.component_build`:
+    /// a JSON object map of `component_id -> {source_root, allowed_ref,
+    /// template_relpath, projection_relpath, version}`. An id absent from this
+    /// map is rejected fail-closed by the build handler. The Kernel never sees
+    /// or enforces this list.
+    pub component_builds: serde_json::Value,
 }
 
 impl CodingConfig {
@@ -99,6 +105,10 @@ impl CodingConfig {
                 .unwrap_or_else(|_| std::env::temp_dir().join("coding-harness-artifacts")),
             hcr_profiles,
             hcr_token: std::env::var("HCR_TOKEN").unwrap_or_default(),
+            component_builds: parsed
+                .get("component_builds")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
         }
     }
 

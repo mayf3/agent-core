@@ -13,6 +13,7 @@ pub mod grant_ops;
 pub mod harness_activation_ops;
 pub mod harness_ops;
 pub(crate) mod hash_chain;
+pub mod hook_binding_ops;
 mod legacy_capability_proposal_hcr;
 mod legacy_hcr_read;
 mod model_invocation;
@@ -21,6 +22,7 @@ mod outbox_queue;
 mod queue;
 mod queue_health;
 mod recovery;
+mod run_control;
 mod registry_control_upgrade;
 mod registry_ops;
 mod sqlite;
@@ -53,9 +55,14 @@ mod grant_ops_tests;
 #[path = "tests/grant_ops_lifecycle.rs"]
 mod grant_ops_lifecycle_tests;
 
+#[cfg(test)]
+#[path = "tests/hook_binding_ops.rs"]
+mod hook_binding_ops_tests;
+
 pub(crate) use coding_task_submissions::CodingTaskSubmissionClaim;
 pub use event_observe::{
     redact_payload, EventObserveQuery, EventObserveResponse, ObservedEvent, DEFAULT_OBSERVE_LIMIT,
     MAX_OBSERVE_LIMIT, OBSERVE_SCHEMA_VERSION,
 };
 pub use sqlite::JournalStore;
+pub use run_control::CancellationRequestOutcome;

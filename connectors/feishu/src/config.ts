@@ -16,6 +16,8 @@ export interface ConnectorConfig {
   reactionRetryBaseDelayMs: number;
   /** Path to JSONL file for execute idempotency persistence (Plan B). */
   executeStatePath: string;
+  /** Path to JSON file for the run-failure observer cursor (resume point). */
+  runFailureCursorPath: string;
   /** Kernel Decision API base URL for Feishu text approval. */
   kernelDecisionApiUrl: string;
   /** Bearer token for the Kernel Decision API (NEVER share with LLM/harness). */
@@ -41,6 +43,7 @@ export function loadConfig(): ConnectorConfig {
     reactionRetryAttempts: positiveInt("AGENT_CORE_FEISHU_REACTION_RETRY_ATTEMPTS", 3),
     reactionRetryBaseDelayMs: positiveInt("AGENT_CORE_FEISHU_REACTION_RETRY_BASE_DELAY_MS", 500),
     executeStatePath: executeStatePath(),
+    runFailureCursorPath: runFailureCursorPath(),
     kernelDecisionApiUrl: envString("AGENT_CORE_KERNEL_DECISION_API_URL", `http://127.0.0.1:${kernelPortStr}`),
     kernelDecisionToken: process.env.AGENT_CORE_KERNEL_DECISION_TOKEN
       ? String(process.env.AGENT_CORE_KERNEL_DECISION_TOKEN).trim()
@@ -90,6 +93,13 @@ function executeStatePath(): string {
   return expandHome(
     process.env.AGENT_CORE_FEISHU_EXECUTE_STATE_PATH ||
       join(defaultDataDir(), "feishu-executes.jsonl"),
+  );
+}
+
+function runFailureCursorPath(): string {
+  return expandHome(
+    process.env.AGENT_CORE_FEISHU_FAILURE_CURSOR_PATH ||
+      join(defaultDataDir(), "feishu-failure-cursor.json"),
   );
 }
 

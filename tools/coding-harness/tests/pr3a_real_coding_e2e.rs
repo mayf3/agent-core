@@ -8,7 +8,7 @@ use agent_core_kernel::domain::capability_change::ProposalStatus;
 use agent_core_kernel::domain::*;
 use agent_core_kernel::gateway::Gateway;
 use agent_core_kernel::journal::JournalStore;
-use agent_core_kernel::server::{coding_router, coding_task_submit};
+use agent_core_kernel::server::coding_task_submit;
 use anyhow::Result;
 use chrono::Utc;
 use coding_harness::config::CodingConfig;
@@ -87,12 +87,7 @@ fn authenticated_sentence_creates_real_pending_proposal() -> Result<()> {
     };
     journal.insert_run(&run)?;
 
-    let request = development_request(
-        "开发一个 external.calculator，支持加减乘除",
-        &run,
-        &session,
-        "om_pr3a_real_message",
-    )?;
+    let request = development_request(&run, &session, "om_pr3a_real_message")?;
     let result = coding_task_submit::handle_coding_task_submit(
         &journal,
         &gateway,
@@ -212,12 +207,7 @@ fn same_message_twenty_way_is_exactly_once(
         budget_exhaustion_action: None,
     });
     journal.insert_run(&run)?;
-    let request = Arc::new(development_request(
-        "开发一个 external.calculator，支持加减乘除",
-        &run,
-        &session,
-        "om_pr3a_twenty_way",
-    )?);
+    let request = Arc::new(development_request(&run, &session, "om_pr3a_twenty_way")?);
     let config = Arc::new(config);
     let barrier = Arc::new(Barrier::new(20));
     let mut workers = Vec::new();
@@ -329,12 +319,7 @@ fn missing_submit_grant_fails_before_hcr_creation() -> Result<()> {
         budget_exhaustion_action: None,
     };
     journal.insert_run(&run)?;
-    let request = development_request(
-        "开发计算器，实现四则运算",
-        &run,
-        &session,
-        "om_pr3a_intruder",
-    )?;
+    let request = development_request(&run, &session, "om_pr3a_intruder")?;
     let error = coding_task_submit::handle_coding_task_submit(
         &journal,
         &gateway,
@@ -376,14 +361,31 @@ fn submission_event_count(journal: &JournalStore, kind: JournalEventKind) -> Res
 }
 
 fn development_request(
-    text: &str,
     run: &Run,
     session: &Session,
     source_message_id: &str,
 ) -> Result<DevelopmentRequest> {
-    let intent = coding_router::parse_coding_intent(text)?;
+    // Build the formal DevelopmentRequest directly (the retired natural
+    // language parser is gone). This mirrors the calculator-fixture draft
+    // the parser used to produce: an InvocableCapability named
+    // external.calculator bound to the component.invoke.v0 contract.
+    let mut draft = agent_core_kernel::domain::self_evolution::DevelopmentRequestDraft::new(
+        agent_core_kernel::domain::self_evolution::TargetKind::InvocableCapability,
+        "external.calculator".to_string(),
+    );
+    draft.requirements = vec![
+        "provide add, subtract, multiply, and divide operations".to_string(),
+        "implement the component.invoke.v0 process contract".to_string(),
+    ];
+    draft.required_contracts = vec!["component.invoke.v0".to_string()];
+    draft.requested_permissions = vec!["component.invoke".to_string()];
+    draft.acceptance_criteria = vec![
+        "trusted calculator fixture tests pass".to_string(),
+        "multiply 6 by 7 returns 42".to_string(),
+        "divide by zero returns a structured error".to_string(),
+    ];
     Ok(DevelopmentRequest::from_draft(
-        intent.development_request,
+        draft,
         run.principal.principal_id.0.clone(),
         session.id.0.clone(),
         source_message_id.to_string(),

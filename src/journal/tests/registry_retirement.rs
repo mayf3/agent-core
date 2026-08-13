@@ -17,6 +17,25 @@ fn legacy_s1_specs() -> Vec<OperationSpec> {
     specs
 }
 
+
+// =========================================================================
+// §2: Baseline registry contents (regression from the retired coding router)
+// =========================================================================
+
+/// The active coding control stays in the baseline registry snapshot while
+/// the retired HCR accept path and the retired calculator fixture do not.
+/// This regression is independent of the deleted natural-language parser.
+#[test]
+fn baseline_contains_active_coding_control_but_not_retired_hcr_or_calculator() {
+    let journal = JournalStore::in_memory().unwrap();
+    let snapshot = journal
+        .load_registry_snapshot(&journal.current_registry_snapshot_id().unwrap())
+        .unwrap();
+    assert!(snapshot.lookup("external.coding_task_submit").is_some());
+    assert!(snapshot.lookup("external.coding_hcr_accept").is_none());
+    assert!(snapshot.lookup("external.calculator").is_none());
+}
+
 // =========================================================================
 // §1: Real stale CAS — Store B uses real transactional activation
 // =========================================================================

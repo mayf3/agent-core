@@ -24,6 +24,12 @@ fn coding_manifest_registration_chain_preserves_schema() {
         assert!(!req.is_empty());
         if spec.operation_name == "external.coding_task_status" {
             assert!(req.contains(&"task_id") && !req.contains(&"workspace_id"));
+        } else if spec.operation_name == "external.execution_task" {
+            assert_eq!(req, ["root", "objective"]);
+            assert!(spec
+                .input_schema
+                .pointer("/properties/workspace_id")
+                .is_none());
         } else {
             assert!(req.contains(&"workspace_id"));
             let ev = spec
@@ -69,6 +75,9 @@ fn coding_manifest_registration_chain_preserves_schema() {
         "http://127.0.0.1:7200",
         "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     ) {
+        if m.operation_name == "external.execution_task" {
+            assert!(!m.idempotent);
+        }
         let mid = m.compute_manifest_id().unwrap();
         m.manifest_id = mid.clone();
         j.register_harness_manifest(&m).unwrap();
@@ -92,13 +101,14 @@ fn coding_manifest_registration_chain_preserves_schema() {
             "external.coding_workspace_read",
             "external.coding_workspace_write",
             "external.coding_workspace_exec",
+            "external.execution_task",
             "external.coding_task_submit",
             "external.coding_task_status",
             "external.coding_capability_propose",
         ]
         .map(String::from),
     );
-    assert_eq!(tools.len(), 7);
+    assert_eq!(tools.len(), 8);
     let fn_tool = |name: &str| {
         tools
             .iter()
@@ -267,6 +277,7 @@ fn coding_manifest_llm_input_receives_complete_tool_definitions() {
         feishu_allowed_open_ids: vec![],
         feishu_allowed_chat_ids: vec![],
         feishu_coding_owner_id: Some("owner".into()),
+        force_legacy_runtime: false,
         feishu_require_group_mention: true,
         openai_base_url: String::new(),
         openai_api_key: String::new(),
@@ -278,10 +289,7 @@ fn coding_manifest_llm_input_receives_complete_tool_definitions() {
         outbox_dispatcher_enabled: false,
         outbox_dispatcher_poll_interval_ms: 1000,
         extra_allowed_operations: vec![
-            "external.coding_workspace_list".to_string(),
-            "external.coding_workspace_read".to_string(),
-            "external.coding_workspace_write".to_string(),
-            "external.coding_workspace_exec".to_string(),
+            "external.execution_task".to_string(),
             "external.coding_task_submit".to_string(),
             "external.coding_task_status".to_string(),
             "external.coding_capability_propose".to_string(),
@@ -414,27 +422,28 @@ fn coding_manifest_llm_input_receives_complete_tool_definitions() {
         .filter_map(|v| v.as_str())
         .collect();
     assert_eq!(cp_req, ["development_request"]);
-    let write_params = fn_tool("external.coding_workspace_write")
+    let task_params = fn_tool("external.execution_task")
         .get("function")
         .unwrap()
         .get("parameters")
         .unwrap();
     assert_eq!(
-        write_params
+        task_params
             .get("additionalProperties")
             .and_then(|v| v.as_bool()),
         Some(false)
     );
-    let wmode = write_params
-        .pointer("/properties/mode")
-        .unwrap()
-        .get("enum")
+    let task_required = task_params
+        .get("required")
         .unwrap()
         .as_array()
         .unwrap();
     assert_eq!(
-        wmode.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>(),
-        vec!["replace", "append"]
+        task_required
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect::<Vec<_>>(),
+        vec!["root", "objective"]
     );
     let submit_params = fn_tool("external.coding_task_submit")
         .get("function")

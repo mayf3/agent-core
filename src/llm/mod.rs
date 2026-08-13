@@ -332,12 +332,22 @@ impl OpenAiCompatibleLlm {
     /// The single HTTP request site. `choice` is the authoritative endpoint
     /// identity — it is recorded into the `ProviderToolTurn` if a tool call is
     /// parsed, so the follow-up round is sticky to this exact endpoint.
+    ///
+    /// A clearly transient transport failure (request timeout, or an IO
+    /// failure while READING the response body) is retried ONCE with the
+    /// identical request body. The retry happens before any tool is
+    /// submitted — a tool only executes after a successful response is
+    /// parsed — so a retried model request can never re-execute a tool.
+    /// Permanent failures (HTTP status codes, genuine JSON/schema parse
+    /// failures) are never retried.
     fn request_endpoint(
         &self,
         endpoint: &ModelEndpoint,
         choice: EndpointChoice,
         input: &LlmInput,
     ) -> std::result::Result<LlmOutput, String> {
+        // The request body is derived from the input and identical on both
+        // attempts; the tool-name mode must match the wire the model saw.
         let (body, tool_name_mode) = materialized_request_body(endpoint, input);
         // Effective timeout = min(client fixed timeout, Run-deadline override).
         // The override is set by the Runtime to the remaining Run budget so an
@@ -346,6 +356,40 @@ impl OpenAiCompatibleLlm {
             .timeout_override_ms
             .map(|override_ms| self.timeout.min(Duration::from_millis(override_ms)))
             .unwrap_or(self.timeout);
+
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            match self.request_endpoint_once(
+                endpoint,
+                choice,
+                &body,
+                &tool_name_mode,
+                effective_timeout,
+                input,
+            ) {
+                Ok(output) => return Ok(output),
+                Err(ModelCallFailure::Transient(category)) if attempt < 2 => {
+                    // Retry once; a second failure propagates as-is.
+                }
+                Err(ModelCallFailure::Transient(category) | ModelCallFailure::Permanent(category)) => {
+                    return Err(category);
+                }
+            }
+        }
+    }
+
+    /// One HTTP attempt for [`Self::request_endpoint`]. Returns a structured
+    /// failure so the caller can decide whether the attempt is retryable.
+    fn request_endpoint_once(
+        &self,
+        endpoint: &ModelEndpoint,
+        choice: EndpointChoice,
+        body: &Value,
+        tool_name_mode: &ToolNameMode,
+        effective_timeout: Duration,
+        input: &LlmInput,
+    ) -> std::result::Result<LlmOutput, ModelCallFailure> {
         let agent = ureq::Agent::config_builder()
             .timeout_global(Some(effective_timeout))
             .build()
@@ -354,20 +398,92 @@ impl OpenAiCompatibleLlm {
             .post(&endpoint.chat_completions_url())
             .header("authorization", &format!("Bearer {}", endpoint.api_key))
             .header("content-type", "application/json")
-            .send_json(body);
+            .send_json(body.clone());
         let value = match response {
-            Ok(mut response) => response
-                .body_mut()
-                .read_json::<Value>()
-                .map_err(|_| "model_response_parse_failed".to_string())?,
-            Err(ureq::Error::StatusCode(code)) => return Err(format!("model_http_{code}")),
-            Err(ureq::Error::Timeout(_)) => return Err("model_timeout".to_string()),
-            Err(_) => return Err("model_request_failed".to_string()),
+            Ok(mut response) => {
+                // Read the body EXPLICITLY instead of `read_json`: a body
+                // truncated by a transport interruption (graceful FIN before
+                // Content-Length) would otherwise be indistinguishable from a
+                // genuine JSON parse failure (serde_json sees plain EOF and
+                // reports a syntax error). Comparing the received bytes
+                // against Content-Length keeps "truncated transport" and
+                // "complete body, unparseable JSON" as separate classes.
+                let expected = response.body().content_length();
+                let bytes = response
+                    .body_mut()
+                    .read_to_vec()
+                    .map_err(|read_err| match read_err {
+                        ureq::Error::Timeout(_) => ModelCallFailure::Transient(
+                            "model_body_read_failed: timeout".to_string(),
+                        ),
+                        ureq::Error::Io(io_err) if is_transient_io_kind(io_err.kind()) => {
+                            ModelCallFailure::Transient(
+                                "model_body_read_failed".to_string(),
+                            )
+                        }
+                        _ => ModelCallFailure::Permanent("model_request_failed".to_string()),
+                    })?;
+                if let Some(expected) = expected {
+                    if (bytes.len() as u64) < expected {
+                        return Err(ModelCallFailure::Transient(
+                            "model_body_read_failed: truncated".to_string(),
+                        ));
+                    }
+                }
+                match serde_json::from_slice::<Value>(&bytes) {
+                    Ok(value) => value,
+                    // A complete body that is not valid JSON is a permanent
+                    // response-parse failure — the model answered, unreadably.
+                    Err(_) => {
+                        return Err(ModelCallFailure::Permanent(
+                            "model_response_parse_failed".to_string(),
+                        ));
+                    }
+                }
+            }
+            Err(ureq::Error::StatusCode(code)) => {
+                return Err(ModelCallFailure::Permanent(format!("model_http_{code}")));
+            }
+            Err(ureq::Error::Timeout(_)) => {
+                return Err(ModelCallFailure::Transient("model_timeout".to_string()));
+            }
+            // A connection that dies while the response head is being read
+            // (EOF, reset, interruption, timeout) also surfaces here as an
+            // IO error — the same transient transport class as body-read
+            // IO failures, not a permanent request error.
+            Err(ureq::Error::Io(io_err)) if is_transient_io_kind(io_err.kind()) => {
+                return Err(ModelCallFailure::Transient("model_transport_failed".to_string()));
+            }
+            Err(_) => {
+                return Err(ModelCallFailure::Permanent("model_request_failed".to_string()));
+            }
         };
         let mode = tool_name_mode;
         let output = success_output(&endpoint.model, input.blocks.len(), value, &mode, choice);
         Ok(output)
     }
+}
+
+/// Structured model-call failure: `Transient` may be retried once by
+/// [`OpenAiCompatibleLlm::request_endpoint`]; `Permanent` never is.
+enum ModelCallFailure {
+    Transient(String),
+    Permanent(String),
+}
+
+/// The IO error kinds that mean "the transport died mid-request" — the only
+/// IO failures worth retrying once. Anything else (protocol misuse, invalid
+/// data) is permanent.
+fn is_transient_io_kind(kind: std::io::ErrorKind) -> bool {
+    matches!(
+        kind,
+        std::io::ErrorKind::TimedOut
+            | std::io::ErrorKind::WouldBlock
+            | std::io::ErrorKind::UnexpectedEof
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::Interrupted
+    )
 }
 
 fn materialized_request_body(endpoint: &ModelEndpoint, input: &LlmInput) -> (Value, ToolNameMode) {
@@ -388,8 +504,15 @@ fn materialized_request_body(endpoint: &ModelEndpoint, input: &LlmInput) -> (Val
     };
     let mut messages: Vec<Value> = vec![
         json!({"role": "system", "content": serialize_system_context(&input.blocks)}),
-        json!({"role": "user", "content": input.user_text}),
     ];
+    // Non-system context (provider material, history, catalogs) rides a
+    // plain user-role message BEFORE the actual user text — it must never
+    // receive system authority. Empty when the input has no such blocks.
+    let non_system_context = serialize_non_system_context(&input.blocks);
+    if !non_system_context.is_empty() {
+        messages.push(json!({"role": "user", "content": non_system_context}));
+    }
+    messages.push(json!({"role": "user", "content": input.user_text}));
     for follow_up in &input.follow_ups {
         let turn = &follow_up.provider_turn;
         let mut assistant = serde_json::Map::new();
@@ -557,16 +680,54 @@ fn mark_fallback(mut output: LlmOutput, primary_model: &str, primary_error: &str
     output
 }
 
-fn serialize_system_context(blocks: &[ContextBlock]) -> String {
+/// The wire role of each block kind.
+///
+/// System authority: Kernel-owned instructions/contracts and provider-added
+/// `SupplementalSystem`. Non-system context: provider material, history,
+/// and catalogs — rendered into a plain user-role message, never promoted
+/// to system authority. `UserMessage` / `ToolResult` ride dedicated wire
+/// channels (`user_text` / tool follow-ups) and never appear in these
+/// context renderers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContextWireRole {
+    SystemAuthority,
+    NonSystemContext,
+    DedicatedChannel,
+}
+
+fn context_wire_role(kind: &crate::domain::ContextBlockKind) -> ContextWireRole {
+    match kind {
+        crate::domain::ContextBlockKind::RootSystem
+        | crate::domain::ContextBlockKind::RuntimeContract
+        | crate::domain::ContextBlockKind::AgentProfile
+        | crate::domain::ContextBlockKind::ActiveSkill
+        | crate::domain::ContextBlockKind::SupplementalSystem => ContextWireRole::SystemAuthority,
+        crate::domain::ContextBlockKind::SupplementalContext
+        | crate::domain::ContextBlockKind::RecentMessages
+        | crate::domain::ContextBlockKind::SkillCatalog
+        | crate::domain::ContextBlockKind::ToolCatalog => ContextWireRole::NonSystemContext,
+        crate::domain::ContextBlockKind::UserMessage
+        | crate::domain::ContextBlockKind::ToolResult => ContextWireRole::DedicatedChannel,
+    }
+}
+
+/// System-authority context — the system message body. pub(crate) so the
+/// host-side test fakes mirror the production wire instead of duplicating
+/// the classification.
+pub(crate) fn serialize_system_context(blocks: &[ContextBlock]) -> String {
     blocks
         .iter()
-        .filter(|block| {
-            !matches!(
-                block.kind,
-                crate::domain::ContextBlockKind::UserMessage
-                    | crate::domain::ContextBlockKind::ToolResult
-            )
-        })
+        .filter(|block| context_wire_role(&block.kind) == ContextWireRole::SystemAuthority)
+        .map(|block| format!("## {:?}\n{}", block.kind, block.content))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// Non-system context material — one plain user-role message, no authority.
+fn serialize_non_system_context(blocks: &[ContextBlock]) -> String {
+    blocks
+        .iter()
+        .filter(|block| context_wire_role(&block.kind) == ContextWireRole::NonSystemContext)
         .map(|block| format!("## {:?}\n{}", block.kind, block.content))
         .collect::<Vec<_>>()
         .join("\n\n")

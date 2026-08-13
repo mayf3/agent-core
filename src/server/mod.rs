@@ -5,12 +5,12 @@ use crate::journal::JournalStore;
 mod calculator_delivery;
 mod calculator_router;
 mod canary_runtime_delivery;
+mod chat_control;
 mod capability_decision;
 mod capability_host_client;
 mod capability_http;
 pub mod capability_routes;
 mod coding_harness_client;
-pub mod coding_router;
 pub mod coding_task_submit;
 mod component_control;
 mod delivery;
@@ -18,6 +18,7 @@ mod deployment_harness_client;
 mod dispatcher_metrics;
 mod event_observe_http;
 pub mod harness_routes;
+pub mod hook_binding_routes;
 mod legacy_hcr_read;
 mod service_decision;
 use anyhow::{bail, Result};
@@ -249,6 +250,15 @@ fn handle_connection(
         return write_json(stream, 401, json!({ "ok": false, "error": "unauthorized" }));
     } else if path == "/v1/ingress" {
         handle_ingress(stream, &gateway, &journal, &request)
+    } else if path == "/v1/chat-control" {
+        match chat_control::handle(config, &journal, &request.body) {
+            Ok(body) => write_json(stream, 200, body),
+            Err(error) => write_json(
+                stream,
+                400,
+                json!({ "ok": false, "error": error.to_string() }),
+            ),
+        }
     } else if path == "/v1/session-continuation" {
         handle_session_continuation(stream, &gateway, &journal, &request)
     } else if path == "/v1/approve" {
@@ -272,6 +282,18 @@ fn handle_connection(
         harness_routes::handle_harness_result(
             stream,
             harness_routes::handle_disable(&gateway, &journal, &body),
+        )
+    } else if path == "/v1/hook-bindings/bind" {
+        let body: Value = serde_json::from_slice(&request.body)?;
+        hook_binding_routes::handle_hook_binding_result(
+            stream,
+            hook_binding_routes::handle_bind(&gateway, &journal, &body),
+        )
+    } else if path == "/v1/hook-bindings/unbind" {
+        let body: Value = serde_json::from_slice(&request.body)?;
+        hook_binding_routes::handle_hook_binding_result(
+            stream,
+            hook_binding_routes::handle_unbind(&gateway, &journal, &body),
         )
     } else if path == "/v1/harness-change-requests" {
         write_json(
@@ -672,7 +694,7 @@ mod capability_routes_tests;
 #[path = "harness_endpoint_tests.rs"]
 mod harness_endpoint_tests;
 #[cfg(test)]
-#[path = "r3a_phase_a_e2e.rs"]
-mod r3a_phase_a_e2e;
+#[path = "hook_binding_routes_tests.rs"]
+mod hook_binding_routes_tests;
 #[cfg(test)]
 mod schema_upgrade_tests;

@@ -25,6 +25,13 @@ path = "src/bin/fixture_service.rs"
 name = "deployment-fixture-service-v2"
 path = "src/bin/fixture_service.rs"
 
+# Independent userspace adapter (NOT part of the Deployment Harness frozen
+# core). Exposes `external.component_deploy` on the external-harness-v1 protocol
+# and translates to the Deployment Harness's unchanged /v1/deployments route.
+[[bin]]
+name = "component-deploy-adapter"
+path = "src/bin/component_deploy_adapter.rs"
+
 [profile.dev]
 debug = 0
 strip = "symbols"

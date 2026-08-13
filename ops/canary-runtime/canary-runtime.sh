@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# canary-runtime — Agent Core Unified Runtime Entry Point
+# canary-runtime — retired production writer; verification utility only
 # =============================================================================
 #
 # Usage:
@@ -9,8 +9,13 @@
 #   ./canary-runtime.sh stop                 # Stop all services
 #   ./canary-runtime.sh status               # Show current runtime status
 #
-# This script is the SINGLE authoritative entry point for managing the
-# Agent Core runtime inside the Lima VM (agent-core-hcr).
+# This script is NOT a production deployment entry point.  The fixed-runtime
+# systemd units installed by tools/deployment-harness/infra/install-units.sh
+# are the only supported production process-writer target for Kernel + Feishu
+# Connector.
+# Historical start/build/stop commands are retained for reproducibility, but
+# fail closed unless an operator deliberately supplies the break-glass value
+# documented by require_legacy_writer_break_glass below.
 #
 # Prerequisites:
 #   - Lima VM "agent-core-hcr" (created via ops/hcr-linux-vm/start.sh)
@@ -23,6 +28,15 @@
 # =============================================================================
 
 set -euo pipefail
+
+require_legacy_writer_break_glass() {
+    if [ "${AGENT_CORE_LEGACY_CANARY_BREAK_GLASS:-}" != \
+        "I_UNDERSTAND_THIS_MUTATES_PRODUCTION" ]; then
+        echo "RETIRED_PRODUCTION_WRITER: canary-runtime $1 is disabled" >&2
+        echo "Use tools/deployment-harness/infra/install-units.sh and systemd --user for production lifecycle changes." >&2
+        exit 75
+    fi
+}
 
 # Resolve script location (handles symlinks like root-level canary-runtime)
 resolve_script_dir() {
@@ -1282,16 +1296,19 @@ cmd_shadow_e2e() {
 # =============================================================================
 case "${1:-help}" in
     start)
+        require_legacy_writer_break_glass start
         shift
         cmd_start "${@:-}"
         ;;
     build)
+        require_legacy_writer_break_glass build
         cmd_build
         ;;
     doctor)
         cmd_doctor
         ;;
     stop)
+        require_legacy_writer_break_glass stop
         cmd_stop
         ;;
     status)

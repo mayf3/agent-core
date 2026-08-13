@@ -142,7 +142,14 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
                 ToolCallResult::Valid(tool_call) => {
                     // ----- Duplicate tool-call detection -----
                     let canonicalized = canonicalize_args_json(&tool_call.arguments);
-                    let is_dup = is_mutating_coding_op(&tool_call.operation)
+                    let is_mutating = snapshot
+                        .lookup(&tool_call.operation)
+                        .is_some_and(|spec| {
+                            spec.risk == crate::registry::snapshot::Risk::Write
+                                && spec.name
+                                    != crate::domain::operation::external::TASK_SUBMIT
+                        });
+                    let is_dup = is_mutating
                         && prev_tool_key
                             .as_ref()
                             .map(|(op, args)| op == &tool_call.operation && args == &canonicalized)
@@ -535,21 +542,6 @@ impl<L: LlmClient + 'static> super::Runtime<L> {
 // ---------------------------------------------------------------------------
 // Free-standing helpers (no Runtime receiver)
 // ---------------------------------------------------------------------------
-
-/// Returns true when `operation` is in the coding-harness mutating set for
-/// which duplicate detection applies. Polling operations like
-/// `external.coding_task_status` are excluded. DevelopmentRequest submission
-/// is also excluded because its durable attempt state machine, not argument
-/// equality, decides whether a call is a replay or a safely authorized next
-/// attempt after definitive rejection.
-fn is_mutating_coding_op(operation: &str) -> bool {
-    matches!(
-        operation,
-        "external.coding_workspace_write"
-            | "external.coding_workspace_exec"
-            | "external.coding_capability_propose"
-    )
-}
 
 /// Produce a deterministic, JSON-key-sorted string from a `serde_json::Value`.
 /// Used to canonicalize tool-call arguments so that semantically identical

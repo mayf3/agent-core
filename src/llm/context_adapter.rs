@@ -7,8 +7,13 @@ use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// v2 of the LlmInput artifact schema: adds the provider-owned
+/// `SupplementalSystem` / `SupplementalContext` block kinds. v1 artifacts
+/// are rejected by [`decode_artifacts`] with
+/// `model_adapter_artifact_media_type_mismatch` (fail closed) — no v1
+/// decode path exists because v1 could never carry provider-owned kinds.
 pub const LLM_INPUT_ARTIFACT_MEDIA_TYPE: &str =
-    "application/vnd.agent-core.llm-input+json;version=1";
+    "application/vnd.agent-core.llm-input+json;version=2";
 pub const DEFAULT_CONTEXT_WINDOW_TOKENS: usize = 128_000;
 pub const DEFAULT_RESERVED_OUTPUT_TOKENS: usize = 4_096;
 
@@ -120,6 +125,28 @@ pub fn default_materialize(
     )
 }
 
+/// Base-only block kinds: the Kernel's own trusted required instruction
+/// blocks, present in the STAGED candidate. The refs protect the exact
+/// staged instances (position + bytes), not the kinds in general — but
+/// these are exactly the kinds a ContextPrepareV0 provider must never
+/// introduce, modify, remove, or reorder.
+fn is_base_only_kind(kind: &ContextBlockKind) -> bool {
+    matches!(
+        kind,
+        ContextBlockKind::RootSystem
+            | ContextBlockKind::RuntimeContract
+            | ContextBlockKind::AgentProfile
+    )
+}
+
+/// The immutable refs protect the exact trusted-required instances of the
+/// STAGED candidate: user input, grants, tool schemas, the base-only block
+/// instances (position-indexed), and the follow-up protocol wires.
+///
+/// Provider-owned kinds (`SupplementalSystem` / `SupplementalContext`)
+/// produce NO refs — a provider may add, replace, or delete them freely.
+/// Any materialized input whose refs differ from the candidate's (added,
+/// modified, removed, or reordered base instances) is rejected.
 fn immutable_refs_for(input: &LlmInput) -> Result<Vec<ImmutableArtifactRef>> {
     let mut refs = vec![
         ImmutableArtifactRef::new("model:user-input", input.user_text.as_bytes()),
@@ -133,12 +160,7 @@ fn immutable_refs_for(input: &LlmInput) -> Result<Vec<ImmutableArtifactRef>> {
         ),
     ];
     for (index, block) in input.blocks.iter().enumerate() {
-        if matches!(
-            block.kind,
-            ContextBlockKind::RootSystem
-                | ContextBlockKind::RuntimeContract
-                | ContextBlockKind::AgentProfile
-        ) {
+        if is_base_only_kind(&block.kind) {
             refs.push(ImmutableArtifactRef::new(
                 format!("model:required-block:{index}"),
                 &serde_json::to_vec(block)?,
@@ -230,6 +252,243 @@ mod tests {
             &serde_json::to_vec(&changed).unwrap(),
         );
         assert!(decode_artifacts(&candidate, &[artifact]).is_err());
+    }
+
+    /// A candidate shaped like the real ContextAssembler output: the Kernel's
+    /// required instruction blocks (RootSystem/RuntimeContract/AgentProfile)
+    /// plus mutable data blocks. Proves the immutable contract as it applies
+    /// to ContextPrepareV0 providers — by execution, not by name.
+    fn assembled_input() -> LlmInput {
+        let kinds = [
+            ContextBlockKind::RootSystem,
+            ContextBlockKind::RuntimeContract,
+            ContextBlockKind::AgentProfile,
+            ContextBlockKind::SkillCatalog,
+            ContextBlockKind::ToolCatalog,
+            ContextBlockKind::ActiveSkill,
+            ContextBlockKind::UserMessage,
+        ];
+        LlmInput {
+            timeout_override_ms: None,
+            blocks: kinds
+                .into_iter()
+                .enumerate()
+                .map(|(i, kind)| ContextBlock {
+                    kind,
+                    content: format!("block-{i}"),
+                    source_ref: Some(format!("ref-{i}")),
+                })
+                .collect(),
+            user_text: "hello".into(),
+            granted_operations: vec![],
+            provider_tools: vec![],
+            follow_ups: vec![],
+        }
+    }
+
+    #[test]
+    fn provider_may_not_append_required_instruction_blocks() {
+        // RootSystem is Kernel-required input: a ContextPrepareV0 provider
+        // appending one MUST be rejected — the check that the Context Harness
+        // would trip if AGENTS.md were injected as RootSystem.
+        let candidate = stage_candidate(assembled_input()).unwrap();
+        let mut changed = assembled_input();
+        changed.blocks.push(ContextBlock {
+            kind: ContextBlockKind::RootSystem,
+            content: "AGENTS.md as RootSystem".into(),
+            source_ref: Some("agent-workspace/AGENTS.md".into()),
+        });
+        let artifact = OpaqueArtifactRef::new(
+            LLM_INPUT_ARTIFACT_MEDIA_TYPE,
+            &serde_json::to_vec(&changed).unwrap(),
+        );
+        let error = decode_artifacts(&candidate, &[artifact]).unwrap_err();
+        assert!(
+            error.to_string().contains("model_adapter_immutable_input_changed"),
+            "got: {error}"
+        );
+    }
+
+    #[test]
+    fn provider_may_not_append_agent_profile_blocks() {
+        // AgentProfile is Kernel-required input for the same reason — this is
+        // exactly the violation the current Context Harness performs (it adds
+        // AGENTS.md as an AgentProfile block), and exactly why every real hook
+        // round fails at materialization.
+        let candidate = stage_candidate(assembled_input()).unwrap();
+        let mut changed = assembled_input();
+        changed.blocks.push(ContextBlock {
+            kind: ContextBlockKind::AgentProfile,
+            content: "AGENTS.md as AgentProfile".into(),
+            source_ref: Some("agent-workspace/AGENTS.md".into()),
+        });
+        let artifact = OpaqueArtifactRef::new(
+            LLM_INPUT_ARTIFACT_MEDIA_TYPE,
+            &serde_json::to_vec(&changed).unwrap(),
+        );
+        let error = decode_artifacts(&candidate, &[artifact]).unwrap_err();
+        assert!(
+            error.to_string().contains("model_adapter_immutable_input_changed"),
+            "got: {error}"
+        );
+    }
+
+    #[test]
+    fn provider_may_still_append_mutable_catalog_blocks() {
+        // Positive control: the immutable contract is NOT blanket-relaxed and
+        // NOT removed — mutable kinds remain injectable.
+        let candidate = stage_candidate(assembled_input()).unwrap();
+        let mut changed = assembled_input();
+        changed.blocks.push(ContextBlock {
+            kind: ContextBlockKind::SkillCatalog,
+            content: "provider-added catalog".into(),
+            source_ref: Some("provider".into()),
+        });
+        let artifact = OpaqueArtifactRef::new(
+            LLM_INPUT_ARTIFACT_MEDIA_TYPE,
+            &serde_json::to_vec(&changed).unwrap(),
+        );
+        assert!(decode_artifacts(&candidate, &[artifact]).is_ok());
+    }
+
+    fn artifact_for(input: &LlmInput) -> OpaqueArtifactRef {
+        OpaqueArtifactRef::new(
+            LLM_INPUT_ARTIFACT_MEDIA_TYPE,
+            &serde_json::to_vec(input).unwrap(),
+        )
+    }
+
+    #[test]
+    fn provider_may_add_supplemental_system_blocks() {
+        // SupplementalSystem is provider-owned: appending it must materialize
+        // successfully (system instruction injected by the provider).
+        let candidate = stage_candidate(assembled_input()).unwrap();
+        let mut changed = assembled_input();
+        changed.blocks.push(ContextBlock {
+            kind: ContextBlockKind::SupplementalSystem,
+            content: "provider system instruction".into(),
+            source_ref: Some("provider".into()),
+        });
+        assert!(decode_artifacts(&candidate, &[artifact_for(&changed)]).is_ok());
+    }
+
+    #[test]
+    fn provider_may_add_supplemental_context_blocks() {
+        // SupplementalContext is provider-owned non-system material.
+        let candidate = stage_candidate(assembled_input()).unwrap();
+        let mut changed = assembled_input();
+        changed.blocks.push(ContextBlock {
+            kind: ContextBlockKind::SupplementalContext,
+            content: "retrieved memory material".into(),
+            source_ref: Some("provider".into()),
+        });
+        assert!(decode_artifacts(&candidate, &[artifact_for(&changed)]).is_ok());
+    }
+
+    #[test]
+    fn provider_may_replace_or_delete_own_supplemental_blocks() {
+        // One staged candidate; the provider may emit different supplemental
+        // content per round (replace) or none at all (delete) — the refs only
+        // protect the candidate's own instances, never provider-owned blocks.
+        let candidate = stage_candidate(assembled_input()).unwrap();
+
+        let mut round_a = assembled_input();
+        round_a.blocks.push(ContextBlock {
+            kind: ContextBlockKind::SupplementalSystem,
+            content: "round A instruction".into(),
+            source_ref: Some("provider".into()),
+        });
+        assert!(decode_artifacts(&candidate, &[artifact_for(&round_a)]).is_ok());
+
+        let mut round_b = assembled_input();
+        round_b.blocks.push(ContextBlock {
+            kind: ContextBlockKind::SupplementalSystem,
+            content: "round B replacement".into(),
+            source_ref: Some("provider".into()),
+        });
+        round_b.blocks.push(ContextBlock {
+            kind: ContextBlockKind::SupplementalContext,
+            content: "round B retrieval".into(),
+            source_ref: Some("provider".into()),
+        });
+        assert!(decode_artifacts(&candidate, &[artifact_for(&round_b)]).is_ok());
+
+        // Deleted: identical to the candidate.
+        assert!(decode_artifacts(&candidate, &[artifact_for(&assembled_input())]).is_ok());
+    }
+
+    #[test]
+    fn provider_may_not_modify_required_input_instances() {
+        // The candidate's exact trusted instances are protected: modifying,
+        // removing, or reordering ANY of them is rejected — including the
+        // non-block fields (user text, grants, tool schemas).
+        let candidate = stage_candidate(assembled_input()).unwrap();
+
+        // Modify a RootSystem instance in place.
+        let mut tampered = assembled_input();
+        tampered.blocks[0].content = "tampered root".into();
+        let error = decode_artifacts(&candidate, &[artifact_for(&tampered)]).unwrap_err();
+        assert!(
+            error.to_string().contains("model_adapter_immutable_input_changed"),
+            "got: {error}"
+        );
+
+        // Delete the RuntimeContract instance.
+        let mut removed = assembled_input();
+        removed.blocks.remove(1);
+        let error = decode_artifacts(&candidate, &[artifact_for(&removed)]).unwrap_err();
+        assert!(
+            error.to_string().contains("model_adapter_immutable_input_changed"),
+            "got: {error}"
+        );
+
+        // Change user_text.
+        let mut user_tampered = assembled_input();
+        user_tampered.user_text = "substituted user".into();
+        let error = decode_artifacts(&candidate, &[artifact_for(&user_tampered)]).unwrap_err();
+        assert!(
+            error.to_string().contains("model_adapter_immutable_input_changed"),
+            "got: {error}"
+        );
+
+        // Change granted operations.
+        let mut grants_tampered = assembled_input();
+        grants_tampered.granted_operations = vec!["external.forged".into()];
+        let error = decode_artifacts(&candidate, &[artifact_for(&grants_tampered)]).unwrap_err();
+        assert!(
+            error.to_string().contains("model_adapter_immutable_input_changed"),
+            "got: {error}"
+        );
+
+        // Change the provider tool schemas (still schema-valid, so the check
+        // reached is the refs comparison, not wire validation).
+        let mut tools_tampered = assembled_input();
+        tools_tampered.provider_tools = vec![serde_json::json!({
+            "type": "function",
+            "function": {"name": "forged_tool", "parameters": {"type": "object"}}
+        })];
+        let error = decode_artifacts(&candidate, &[artifact_for(&tools_tampered)]).unwrap_err();
+        assert!(
+            error.to_string().contains("model_adapter_immutable_input_changed"),
+            "got: {error}"
+        );
+    }
+
+    #[test]
+    fn legacy_v1_artifact_media_type_is_rejected() {
+        // The artifact schema version is explicit: a v1 artifact (no
+        // provider-owned kinds possible) is rejected fail-closed with the
+        // media-type mismatch, never silently decoded as v2.
+        let candidate = stage_candidate(assembled_input()).unwrap();
+        let artifact = OpaqueArtifactRef::new(
+            "application/vnd.agent-core.llm-input+json;version=1",
+            &serde_json::to_vec(&assembled_input()).unwrap(),
+        );
+        let error = decode_artifacts(&candidate, &[artifact]).unwrap_err();
+        assert!(
+            error.to_string().contains("model_adapter_artifact_media_type_mismatch"),
+            "got: {error}"
+        );
     }
 
     #[test]
